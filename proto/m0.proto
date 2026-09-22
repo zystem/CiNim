@@ -1,0 +1,43 @@
+syntax = "proto3";
+package m0;
+
+// Spike-2 contract: same shape as the descriptors in tools/m0/gen_pb_vectors.py.
+message Scalars {
+  int32 i32 = 1;
+  int64 i64 = 2;
+  uint32 u32 = 3;
+  uint64 u64 = 4;
+  sint32 s32 = 5;
+  sint64 s64 = 6;
+  bool b = 7;
+  fixed32 f32 = 8;
+  fixed64 f64 = 9;
+  float fl = 10;
+  double db = 11;
+  string str = 12;
+  bytes by = 13;
+}
+
+message Inner {
+  string name = 1;
+  int32 n = 2;
+}
+
+enum Kind {
+  KIND_UNSET = 0;
+  KIND_STEP = 1;
+  KIND_APPROVAL = 2;
+}
+
+message Outer {
+  Inner inner = 1;
+  repeated int32 packed = 2;
+  repeated string names = 3;
+  repeated Inner items = 4;
+  Kind kind = 5;
+  oneof choice {
+    string text = 6;
+    int32 num = 7;
+  }
+  map<string, int32> counts = 8;
+}

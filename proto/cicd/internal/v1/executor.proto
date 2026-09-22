@@ -1,0 +1,62 @@
+// ExecutorChannel (9.2, RUN-008, PIP-003/004): executor <-> scheduler. The only channel of the sandbox.
+// Pattern proposal (ADR 0012): the executor is the REQ side; each host call is one request and the reply completes it.
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+
+// One record of the append-only run journal (PIP-003, SEC-008).
+message JournalEntry {
+  uint64 seq = 1;
+  string kind = 2;                   // now | random | sleep | job | sh | use | env | parallel | spawn | wait | input | run | ...
+  bytes payload = 3;                 // canonical JSON of the call arguments (sorted keys); part of the fingerprint
+  bytes result = 4;                  // canonical JSON of the result
+  bytes hash = 5;                    // SHA-256(prev_hash || seq || kind || payload || result), length-prefixed fields
+}
+
+message LeaseRequest {
+  string run_id = 1;
+  string executor_id = 2;
+  string lease_token = 3;            // proves ownership after a scheduler restart (RUN-008)
+}
+
+message HostCall {
+  string run_id = 1;
+  string lease_token = 2;
+  uint64 seq = 3;                    // the journal position this call would occupy
+  string kind = 4;
+  bytes payload = 5;
+}
+
+message HostResult {
+  uint64 seq = 1;
+  bytes result = 2;                  // empty while suspended
+  bool suspended = 3;                // waiting for a step, approval or timer: the executor releases the run
+  Failure failure = 4;               // limit exceeded, script_nondeterminism, ...
+}
+
+message ExecutorRequest {
+  Header header = 1;
+  oneof body {
+    LeaseRequest lease = 2;
+    HostCall call = 3;
+    string finish_run_id = 4;
+  }
+}
+
+message ExecutorResponse {
+  Header header = 1;
+  oneof body {
+    LeaseGranted lease = 2;
+    HostResult result = 3;
+    Failure failure = 4;
+  }
+}
+
+message LeaseGranted {
+  string lease_token = 1;
+  uint32 ttl_seconds = 2;
+  repeated JournalEntry journal = 3;  // to replay; paged for long journals
+  bool more = 4;
+}

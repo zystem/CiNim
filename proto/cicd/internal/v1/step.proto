@@ -1,0 +1,23 @@
+// StepReport (9.2, RUN-010): shim -> scheduler, unary REQ/REP. Duplicates the Pod termination message.
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+
+message StepReport {
+  Header header = 1;
+  StepRef step = 2;
+  string job_token = 3;              // SEC-010; the Pod name inside must match the expected attempt (fencing)
+  int32 exit_code = 4;
+  string reason = 5;                 // ok | failed | env_rejected | secret_in_output | shim_error
+  map<string, string> outputs = 6;   // validated by the shim (STO-003), at most 256 keys and 8 KiB per value
+  bytes outputs_digest = 7;          // SHA-256 over the canonical outputs
+  Failure failure = 8;
+}
+
+message StepReportAck {
+  Header header = 1;
+  bool accepted = 2;
+  Failure failure = 3;               // stale attempt, unknown Pod, bad token
+}

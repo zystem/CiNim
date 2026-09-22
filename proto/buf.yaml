@@ -1,0 +1,15 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_VERSION_SUFFIX   # m0.proto (spike 2 fixture) has no version suffix
+  ignore:
+    - m0.proto
+breaking:
+  use:
+    - FILE
+  ignore:
+    - m0.proto

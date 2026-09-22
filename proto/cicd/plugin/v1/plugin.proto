@@ -1,0 +1,26 @@
+// Plugin file contract (PLG-008), package cicd.plugin.v1: length-prefixed (varint) messages in files under /cicd/run/plugin/.
+syntax = "proto3";
+
+package cicd.plugin.v1;
+
+import "google/protobuf/struct.proto";
+
+message Hello {
+  uint32 protocol = 1;
+  string plugin = 2;
+  string version = 3;
+}
+
+message ExecuteStep {
+  uint32 protocol = 5;                       // contract version (N or N-1)
+  string step_id = 1;
+  google.protobuf.Struct inputs = 2;         // validated against the plugin JSON Schema
+  map<string, string> secret_handles = 3;    // names, not values
+  string workspace = 4;                      // /cicd/workspace
+}
+
+message StepResult {
+  string step_id = 1;
+  int32 exit_code = 2;
+  google.protobuf.Struct outputs = 3;
+}

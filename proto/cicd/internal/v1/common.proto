@@ -1,0 +1,58 @@
+// Shared types of the internal channels (package cicd.internal.v1). Draft v0, spike 7.
+// Transport: NNG messages over tls+tcp with mTLS (ADR 0010). One NNG message = one Protobuf message.
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Identifiers are UUIDv7 strings. Every identifier carries its shard as a prefix "<shard>_<uuidv7>" (SHD-004).
+message StepRef {
+  string run_id = 1;
+  uint32 seq = 2;      // ordinal of the step in the run journal
+  uint32 attempt = 3;  // starts at 1; the Pod name is ci-<run>-<seq>-<attempt> (RUN-002)
+}
+
+// RUN-001 run states.
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_CREATED = 1;
+  RUN_STATE_COMPILING = 2;
+  RUN_STATE_QUEUED = 3;
+  RUN_STATE_RUNNING = 4;
+  RUN_STATE_WAITING = 5;
+  RUN_STATE_SUCCEEDED = 6;
+  RUN_STATE_FAILED = 7;
+  RUN_STATE_CANCELED = 8;
+  RUN_STATE_SKIPPED = 9;
+  RUN_STATE_TIMED_OUT = 10;
+  RUN_STATE_INFRASTRUCTURE_ERROR = 11;
+}
+
+// RUN-001 step states. QUEUED and DISPATCHED are the states of the queue example in 7.2;
+// the mapping to RUN-001 is decided in ADR 0012 (PENDING = QUEUED, STARTING = DISPATCHED).
+enum StepState {
+  STEP_STATE_UNSPECIFIED = 0;
+  STEP_STATE_PENDING = 1;
+  STEP_STATE_STARTING = 2;
+  STEP_STATE_RUNNING = 3;
+  STEP_STATE_SUCCEEDED = 4;
+  STEP_STATE_FAILED = 5;
+  STEP_STATE_CANCELED = 6;
+  STEP_STATE_TIMED_OUT = 7;
+  STEP_STATE_LOST = 8;
+}
+
+// Stable machine-readable failure codes (Problem Details "code", termination message "reason").
+message Failure {
+  string code = 1;    // env_rejected, secret_in_output, script_nondeterminism, journal_corrupt, logs_unavailable, ...
+  string detail = 2;  // human-readable, never contains secret values
+}
+
+// Envelope for every message on a channel: version negotiation and tracing (N/N-1, 7.1).
+message Header {
+  uint32 protocol = 1;                      // channel protocol version of the sender
+  string request_id = 2;
+  string correlation_id = 3;
+  google.protobuf.Timestamp sent_at = 4;
+}

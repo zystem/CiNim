@@ -1,0 +1,108 @@
+{
+ "outer_full": {
+  "hex": "0a0e0a016110fbffffffffffffffff01120e01ac02feffffffffffffffff01001a01781a001a02797a22060a026931100122060a02693210022802320568656c6c6f42050a0161100142050a01621002",
+  "json": {
+   "counts": {
+    "a": 1,
+    "b": 2
+   },
+   "inner": {
+    "n": -5,
+    "name": "a"
+   },
+   "items": [
+    {
+     "n": 1,
+     "name": "i1"
+    },
+    {
+     "n": 2,
+     "name": "i2"
+    }
+   ],
+   "kind": 2,
+   "names": [
+    "x",
+    "",
+    "yz"
+   ],
+   "packed": [
+    1,
+    300,
+    -2,
+    0
+   ],
+   "text": "hello"
+  }
+ },
+ "outer_future_fields": {
+  "hex": "0a0e0a016110fbffffffffffffffff01120e01ac02feffffffffffffffff01001a01781a001a02797a22060a026931100122060a02693210022802320568656c6c6f42050a0161100142050a01621002a00607aa0603616263",
+  "json": {
+   "counts": {
+    "a": 1,
+    "b": 2
+   },
+   "inner": {
+    "n": -5,
+    "name": "a"
+   },
+   "items": [
+    {
+     "n": 1,
+     "name": "i1"
+    },
+    {
+     "n": 2,
+     "name": "i2"
+    }
+   ],
+   "kind": 2,
+   "names": [
+    "x",
+    "",
+    "yz"
+   ],
+   "packed": [
+    1,
+    300,
+    -2,
+    0
+   ],
+   "text": "hello"
+  }
+ },
+ "outer_oneof_num": {
+  "hex": "382a",
+  "json": {
+   "num": 42
+  }
+ },
+ "scalars_basic": {
+  "hex": "08960110ffffffffffffffffff0118ffffffff0f20ffffffffffffffffff012803300538014507000000490800000000000000550000c03f5900000000000002c0620d68c3a96c6c6f20d0bcd0b8d1806a0300ff10",
+  "json": {
+   "b": true,
+   "by": "00ff10",
+   "db": -2.25,
+   "f32": 7,
+   "f64": 8,
+   "fl": 1.5,
+   "i32": 150,
+   "i64": -1,
+   "s32": -2,
+   "s64": -3,
+   "str": "h\u00e9llo \u043c\u0438\u0440",
+   "u32": 4294967295,
+   "u64": 18446744073709551615
+  }
+ },
+ "scalars_defaults_omitted": {
+  "hex": "",
+  "json": {}
+ },
+ "scalars_negative_i32": {
+  "hex": "08ffffffffffffffffff01",
+  "json": {
+   "i32": -1
+  }
+ }
+}

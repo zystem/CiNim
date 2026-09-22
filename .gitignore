@@ -1,0 +1,5 @@
+build/
+nimcache/
+*.exe
+/tests/**/t[!.]*[!.nim]
+tests/certs/*.key

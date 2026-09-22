@@ -1,0 +1,36 @@
+// LogIngest (9.2, RUN-007, DAT-001): shim -> log collector. REQ/REP of batches; the reply is sent after vlagent acknowledged receipt (D-07, ADR 0017).
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+enum LogStream {
+  LOG_STREAM_UNSPECIFIED = 0;
+  LOG_STREAM_STDOUT = 1;
+  LOG_STREAM_STDERR = 2;
+  LOG_STREAM_SYSTEM = 3;
+}
+
+message LogChunk {
+  uint64 seq = 1;                    // per step, gap-free; the collector rejects gaps
+  LogStream stream = 2;
+  google.protobuf.Timestamp time = 3;
+  bytes data = 4;                    // at most 64 KiB
+  fixed32 crc32c = 5;                // of data
+}
+
+message LogBatch {
+  Header header = 1;
+  StepRef step = 2;
+  string job_token = 3;              // projected ServiceAccount token (SEC-010), checked by the collector
+  repeated LogChunk chunks = 4;      // at most 64 chunks and 1 MiB per batch
+}
+
+message LogAck {
+  Header header = 1;
+  StepRef step = 2;
+  uint64 acked_seq = 3;              // everything up to and including this sequence is durable
+  Failure failure = 4;               // e.g. logs_unavailable: the shim keeps its file buffer and retries
+}

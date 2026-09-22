@@ -1,0 +1,80 @@
+// ControllerAttach (9.2, RUN-002, RUN-015, IAM-003): the job controller dials the scheduler (outbound only).
+// Pattern proposal (ADR 0012): the controller is the REQ side and polls; every poll carries acknowledgements and events,
+// the answer carries commands. This gives back-pressure and idempotent redelivery without a bidirectional stream.
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+message RegisterRequest {
+  Header header = 1;
+  string bootstrap_token = 2;        // one-time token, exchanged for the mTLS identity (IAM-003)
+  string profile = 3;                // execution profile served by this controller (RUN-004)
+  uint32 max_pods = 4;
+}
+
+message RegisterResponse {
+  Header header = 1;
+  string controller_id = 2;
+  string session_id = 3;
+  uint32 poll_interval_ms = 4;
+  Failure failure = 5;               // set when registration is refused
+}
+
+// A transition observed on a Pod (watch), reported to the scheduler (RUN-002: only transitions, no heartbeat per step).
+message PodTransition {
+  StepRef step = 1;
+  StepState state = 2;
+  string pod_name = 3;
+  string node = 4;
+  int32 exit_code = 5;
+  string termination_reason = 6;     // "ok", "failed", "env_rejected", ...
+  google.protobuf.Timestamp observed_at = 7;
+}
+
+message PollRequest {
+  Header header = 1;
+  string session_id = 2;
+  uint64 ack_command_seq = 3;        // all commands up to this sequence were applied
+  repeated PodTransition transitions = 4;
+  uint32 free_pod_slots = 5;
+}
+
+message StartStep {
+  StepRef step = 1;
+  string image = 2;
+  repeated string command = 3;
+  map<string, string> env = 4;       // non-secret environment
+  repeated string secret_handles = 5;  // names only; the controller creates the ephemeral Secret (6.7)
+  bool workspace_isolated = 6;
+  uint32 timeout_seconds = 7;
+}
+
+message CancelStep {
+  StepRef step = 1;
+  uint32 grace_seconds = 2;          // RUN-006
+}
+
+message GateState {
+  bool open = 1;                     // RUN-015: false means "do not create new Pods"
+  string reason = 2;                 // "logs_unavailable" when closed
+}
+
+message Command {
+  uint64 seq = 1;
+  oneof body {
+    StartStep start = 2;
+    CancelStep cancel = 3;
+    GateState gate = 4;
+  }
+}
+
+message PollResponse {
+  Header header = 1;
+  repeated Command commands = 2;
+  GateState gate = 3;
+  uint32 poll_after_ms = 4;
+  Failure failure = 5;
+}

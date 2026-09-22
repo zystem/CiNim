@@ -1,0 +1,9 @@
+ingest: 5000000 lines 459 MiB text in 53 s = 94767 lines/s (8.7 MiB/s)
+searchable after +2 s (count 5000000)
+disk: 178 MiB = 0.39x text; memory idle 427 MiB, peak during ingest 426 MiB
+window 200: p50 6.0 ms, p95 11.0 ms
+window 500: p50 6.6 ms, p95 11.5 ms
+search frequent word 'timeout' first 200 hits in job: 8 ms cold / 15 ms repeat (result 200)
+search rare token 'hit=88696' in job: 47 ms cold / 42 ms repeat (result 2)
+count of frequent word 'timeout' in job (1M lines): 117 ms cold / 164 ms repeat (result 204327)
+memory after queries 402 MiB

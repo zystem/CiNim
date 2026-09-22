@@ -1,0 +1,25 @@
+repositories:
+  - name: rqlite
+    url: https://rqlite.github.io/helm-charts
+
+---
+releases:
+  - name: rqlite
+    namespace: rqlite
+    chart: rqlite/rqlite
+    version:
+    values:
+      - image:
+          tag: latest
+        replicaCount: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        persistence:
+          enabled: true
+          storageClassName: directpv-min-io
+          size: 10Gi
