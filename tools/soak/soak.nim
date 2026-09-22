@@ -18,9 +18,24 @@ let port = parseInt(getEnv("SOAK_PORT", "19700"))
 let certs = getEnv("SOAK_CERTS", getCurrentDir() / "tests" / "certs")
 var stop: Atomic[bool]
 var serverReady: Atomic[bool]
+var joined: Atomic[bool]     # set once every worker thread has been joined; see the watchdog below
 var nngOk, nngFail, luaOk, luaFail, rqOk, rqFail: Atomic[int]
 
-proc pem(name: string): string = readFile(certs / name)
+var pemCache: array[5, (string, string)]
+  ## Read once at startup (below) instead of on every connection: a soak run is meant to survive
+  ## for days, and the churn client used to call readFile() per connection, so anything that makes
+  ## the cert files briefly unavailable (another process touching the working directory, an editor
+  ## save, a `git checkout`) crashed the whole run instead of just failing one connection attempt
+  ## (found 2026-09-23: a `git checkout` on this same working tree killed a 25h-old run this way).
+  ## A plain array of pairs, not a Table, to match this file's existing rule that only simple,
+  ## write-once-before-threads-start data crosses threads (ADR 0011, T-26).
+proc pem(name: string): string =
+  for (k, v) in pemCache:
+    if k == name: return v
+  raise newException(IOError, "pem not cached: " & name)
+proc loadPemCache() =
+  let names = ["ca.pem", "client.pem", "client.key", "server.pem", "server.key"]
+  for i, f in names: pemCache[i] = (f, readFile(certs / f))
 
 proc tlsConfig(server: bool; cert, ca: string; hostname = ""): ptr nng_tls_config =
   var c: ptr nng_tls_config
@@ -112,9 +127,15 @@ proc nngClientBody(churn: bool) =
     while not s.dial():
       if stop.load: return
       sleep 500
-    while not stop.load:      # one long connection
-      if roundTrip(s.s, n): nngOk.atomicInc
-      elif not stop.load: nngFail.atomicInc
+    while not stop.load:      # one long connection, but redial on any failure: a socket that
+      if roundTrip(s.s, n):   # goes bad must not spin (or block) forever on the same handle,
+        nngOk.atomicInc       # which is what left a soak run stuck for 18+ hours (found 2026-09-22)
+      else:
+        if not stop.load: nngFail.atomicInc
+        s = Sock()
+        while not s.dial():
+          if stop.load: return
+          sleep 500
       inc n
       sleep 2
 
@@ -165,6 +186,24 @@ proc rqWorker(url: string) {.thread.} =
 when defined(sanitize):
   proc lsanCheck(): cint {.importc: "__lsan_do_recoverable_leak_check".}
 
+proc exitProc(code: cint) {.importc: "_exit", header: "<unistd.h>".}
+  ## Bypasses Nim's normal teardown (which would itself wait on threads); only for the watchdog.
+
+proc watchdogBody(graceSeconds: int) {.thread.} =
+  ## Safety net for shutdown: `stop.store(true)` should make every worker thread exit its loop
+  ## within a couple of seconds, but a wedged NNG socket or a stuck join must not be able to hang
+  ## the whole run silently for hours the way one did on 2026-09-22 (an 18h-stuck client thread
+  ## blocked the hourly LSan loop from ever reaching hour 9). If the joins in main() have not all
+  ## completed within `graceSeconds` of stop being requested, force-exit so the caller (run72.sh)
+  ## sees a clear non-zero exit and moves on instead of hanging indefinitely.
+  for _ in 0 ..< graceSeconds:
+    if joined.load: return
+    sleep 1000
+  if not joined.load:
+    stderr.writeLine "SOAK WATCHDOG: shutdown did not finish within " & $graceSeconds & "s, forcing exit"
+    stderr.flushFile()
+    exitProc(4)
+
 proc main() =
   let seconds = parseInt(getEnv("SOAK_SECONDS", "60"))
   let sampleEvery = parseInt(getEnv("SOAK_SAMPLE_SECONDS", "10"))
@@ -172,6 +211,7 @@ proc main() =
   let maxGrowth = parseFloat(getEnv("SOAK_MAX_GROWTH_PCT", "2"))
   let csv = getEnv("SOAK_CSV", "soak.csv")
   let rq = getEnv("SOAK_RQLITE_URL")
+  loadPemCache()
   var srv: Thread[void]
   var clients: array[8, Thread[bool]]
   var lw: Thread[void]
@@ -205,10 +245,14 @@ proc main() =
                  $luaFail.load, $rqOk.load, $rqFail.load].join(",")
     f.flushFile()
   stop.store(true)
+  var watchdog: Thread[int]
+  createThread(watchdog, watchdogBody, parseInt(getEnv("SOAK_SHUTDOWN_GRACE_SECONDS", "120")))
   joinThread(srv)
   for i in 0 ..< nc: joinThread(clients[i])
   if luaOn: joinThread(lw)
   if rq.len > 0: joinThread(rw)
+  joined.store(true)         # tell the watchdog the joins above finished cleanly
+  joinThread(watchdog)
   f.close()
   let growth = if warmRss > 0: (lastRss - warmRss).float * 100 / warmRss.float else: 0.0
   echo "SOAK warm_rss=", warmRss, " last_rss=", lastRss, " max_rss=", maxRss,
