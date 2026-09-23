@@ -3,7 +3,7 @@
 version       = "0.0.1"
 author        = "CiNim"
 description   = "Self-hosted Kubernetes-only CI/CD platform in Nim (spec v1.7)"
-license       = "Apache-2.0"  # Q-01 default, pending owner decision
+license       = "MIT"
 srcDir        = "src"
 
 # Dependencies
