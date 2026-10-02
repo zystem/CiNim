@@ -4,3 +4,4 @@ nimcache/
 /tests/**/t[!.]*[!.nim]
 tests/certs/*.key
 tests/certs/curve/*.key
+/docs-tr/
