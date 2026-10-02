@@ -1,0 +1,13 @@
+[Unit]
+Description=CiNim: kubectl port-forward rqlite/rqlite -> 127.0.0.1:24001 (rqlite, core's state store)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=KUBECONFIG=/root/.kube/config
+ExecStart=/usr/local/bin/kubectl -n rqlite port-forward svc/rqlite 24001:80
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=CiNim: kubectl port-forward victorialogs/vlagent -> 127.0.0.1:19429 (vlagent insert endpoint, core's LogIngest target)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=KUBECONFIG=/root/.kube/config
+ExecStart=/usr/local/bin/kubectl -n victorialogs port-forward svc/vlagent 19429:9429
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

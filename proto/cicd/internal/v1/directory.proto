@@ -1,0 +1,47 @@
+// Directory and cluster state (9.2, SHD-001, DAT-011).
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+
+message ResolveTenantRequest {
+  Header header = 1;
+  string tenant_id = 2;
+}
+
+message ResolveTenantResponse {
+  Header header = 1;
+  string shard_id = 2;
+  string shard_endpoint = 3;
+  uint32 ttl_seconds = 4;            // the caller may cache the answer this long (60 s, SHD-001)
+  Failure failure = 5;               // wrong_shard is answered by the shard itself with the same code
+}
+
+enum NodeRole {
+  NODE_ROLE_UNSPECIFIED = 0;
+  NODE_ROLE_MASTER = 1;
+  NODE_ROLE_REPLICA = 2;
+}
+
+enum NodeHealth {
+  NODE_HEALTH_UNSPECIFIED = 0;
+  NODE_HEALTH_UP = 1;
+  NODE_HEALTH_DOWN = 2;
+  NODE_HEALTH_RESTORING = 3;
+}
+
+message LogNode {
+  string node_id = 1;
+  string address = 2;
+  NodeRole role = 3;
+  NodeHealth health = 4;
+  uint64 lag = 5;
+}
+
+message ClusterState {
+  Header header = 1;
+  repeated LogNode nodes = 2;
+  bool launch_gate_open = 3;         // RUN-015
+  string gate_reason = 4;
+}

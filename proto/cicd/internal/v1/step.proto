@@ -1,0 +1,29 @@
+// StepReport (9.2, RUN-010): shim -> scheduler, unary REQ/REP. The primary source of a step's result (D-29); the Pod
+// termination message and status are the fallback when core is unreachable.
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+
+message StepReport {
+  Header header = 1;
+  StepRef step = 2;
+  string job_token = 3;              // SEC-010; the Pod name inside must match the expected attempt (fencing)
+  int32 exit_code = 4;
+  string reason = 5;                 // ok | failed | env_rejected | secret_in_output | shim_error
+  map<string, string> outputs = 6;   // validated by the shim (STO-003), at most 256 keys and 8 KiB per value
+  bytes outputs_digest = 7;          // SHA-256 over the canonical outputs
+  Failure failure = 8;
+  string state_json = 9;             // the shim's final state, the same JSON as its last Pod-log line (D-29)
+}
+
+message StepReportAck {
+  Header header = 1;
+  bool accepted = 2;
+  Failure failure = 3;               // stale attempt, unknown Pod, bad token
+  // Completion handshake (D-29): the shim does not exit until core has recorded the result. The Pod status and the
+  // termination message are only the fallback for a core that cannot be reached.
+  bool may_exit = 4;                 // the result is recorded (or the attempt is superseded): the shim may now exit
+  string disposition = 5;            // recorded | superseded | retry_later
+}

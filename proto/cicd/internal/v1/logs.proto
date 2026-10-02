@@ -1,0 +1,57 @@
+// LogIngest (9.2, RUN-007, DAT-001): shim -> log collector. REQ/REP of batches; the reply is sent after vlagent acknowledged receipt (D-07, A.7).
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+enum LogStream {
+  LOG_STREAM_UNSPECIFIED = 0;
+  LOG_STREAM_STDOUT = 1;
+  LOG_STREAM_STDERR = 2;
+  LOG_STREAM_SYSTEM = 3;
+}
+
+message LogChunk {
+  uint64 seq = 1;                    // per step, gap-free
+  LogStream stream = 2;              // unused since D-27 (stdout and stderr share one stream)
+  google.protobuf.Timestamp time = 3;// unused since D-27
+  bytes data = 4;                    // D-27: one independently compressed block of VictoriaLogs jsonline records
+                                     // (<= 64 KiB uncompressed); core forwards it to vlagent untouched
+  fixed32 crc32c = 5;                // of data (the compressed bytes), checked by core without decompressing
+  string encoding = 6;               // Content-Encoding of data: "gzip" (level 1); "" = plain jsonline
+  uint64 first_ln = 7;               // `ln` of the first record in the block; a retried block reuses it (DAT-001)
+  uint32 lines = 8;                  // number of records in the block
+}
+
+// The shim's own account of itself, sent with every batch (D-29). A batch with no chunks is a pure heartbeat.
+message ShimMetric {
+  string name = 1;                   // Prometheus-style, base units (cinim_step_cpu_seconds_total, ...)
+  double value = 2;
+}
+
+message ShimStatus {
+  // The shim's state exactly as written to the Pod log (the JSON after "CICD-SHIM "): D-29 keeps one definition
+  // (common/shimstate.nim) for the Pod log, ZeroMQ and rqlite, numbered by event (`n`), so the sources reconcile by n.
+  string state_json = 1;
+  // operational, not part of the Pod-log line
+  uint64 spool_bytes = 2;            // queued, undelivered compressed bytes
+  uint32 hold_seconds_left = 3;      // while draining: time left until logs_undelivered
+  repeated ShimMetric metrics = 4;   // the step container's resource use (CPU, memory, I/O, ...), sampled by the shim
+}
+
+message LogBatch {
+  Header header = 1;
+  StepRef step = 2;
+  string job_token = 3;              // projected ServiceAccount token (SEC-010), checked by the collector
+  repeated LogChunk chunks = 4;      // at most 64 chunks and 1 MiB per batch
+  ShimStatus status = 5;
+}
+
+message LogAck {  // failure.code: logs_unavailable = retry the same batch; rejected = vlagent refused it for good, drop it
+  Header header = 1;
+  StepRef step = 2;
+  uint64 acked_seq = 3;              // everything up to and including this sequence is durable
+  Failure failure = 4;               // e.g. logs_unavailable: the shim keeps its file buffer and retries
+}

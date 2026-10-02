@@ -1,0 +1,17 @@
+[Unit]
+Description=CiNim core (scheduler + log collector + REST API), TESTING host
+After=network-online.target cinim-pf-rqlite.service cinim-pf-vlagent.service cinim-pf-victorialogs.service
+Wants=cinim-pf-rqlite.service cinim-pf-vlagent.service cinim-pf-victorialogs.service
+
+[Service]
+Environment=CINIM_RQLITE_URL=http://127.0.0.1:24001
+Environment=CINIM_NAMESPACE=cinim-test
+Environment=CINIM_CERTS=/opt/cinim/certs
+Environment=CINIM_VLAGENT_URL=http://127.0.0.1:19429/insert/jsonline
+Environment=CINIM_VICTORIALOGS_URL=http://127.0.0.1:19428
+ExecStart=/opt/cinim/core
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

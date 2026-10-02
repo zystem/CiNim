@@ -1,0 +1,15 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_VERSION_SUFFIX   # vectors.proto (codec test fixture) has no version suffix
+  ignore:
+    - vectors.proto
+breaking:
+  use:
+    - FILE
+  ignore:
+    - vectors.proto

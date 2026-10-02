@@ -1,0 +1,13 @@
+[Unit]
+Description=CiNim: kubectl port-forward victorialogs/victorialogs -> 127.0.0.1:19428 (VictoriaLogs query endpoint, core's log-window read)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=KUBECONFIG=/root/.kube/config
+ExecStart=/usr/local/bin/kubectl -n victorialogs port-forward svc/victorialogs 19428:9428
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

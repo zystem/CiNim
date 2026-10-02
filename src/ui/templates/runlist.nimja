@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Runs</title></head>
+<body><h1>Runs</h1>
+<table>
+{% for r in rows %}<tr id="run-{{ h(r.id) }}"><td><a href="/runs/{{ h(r.id) }}">{{ h(r.name) }}</a></td><td class="{{ h(r.state) }}">{{ h(r.state) }}</td></tr>
+{% endfor %}</table>
+</body></html>

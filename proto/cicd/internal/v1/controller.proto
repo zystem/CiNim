@@ -1,0 +1,100 @@
+// ControllerAttach (9.2, RUN-002, RUN-015, IAM-003): the job controller dials the scheduler (outbound only).
+// Pattern proposal (A.3): the controller is the REQ side and polls; every poll carries acknowledgements and events,
+// the answer carries commands. This gives back-pressure and idempotent redelivery without a bidirectional stream.
+syntax = "proto3";
+
+package cicd.internal.v1;
+
+import "cicd/internal/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+message RegisterRequest {
+  Header header = 1;
+  string bootstrap_token = 2;        // one-time token, exchanged for the mTLS identity (IAM-003)
+  string profile = 3;                // execution profile served by this controller (RUN-004)
+  uint32 max_pods = 4;
+}
+
+message RegisterResponse {
+  Header header = 1;
+  string controller_id = 2;
+  string session_id = 3;
+  uint32 poll_interval_ms = 4;
+  Failure failure = 5;               // set when registration is refused
+}
+
+// A transition observed on a Pod (watch), reported to the scheduler (RUN-002: only transitions, no heartbeat per step).
+message PodTransition {
+  StepRef step = 1;
+  StepState state = 2;
+  string pod_name = 3;
+  string node = 4;
+  int32 exit_code = 5;
+  string termination_reason = 6;     // "ok", "failed", "env_rejected", ...
+  google.protobuf.Timestamp observed_at = 7;
+  string shim_state_json = 8;        // the newest CICD-SHIM state found in the Pod's log (D-29); "" = none seen
+}
+
+// What the controller found in the cluster for one step Pod (D-29): read from the Kubernetes API by label, not
+// from the controller's own memory, so it stays true across controller restarts and missed events.
+message PodInfo {
+  StepRef step = 1;
+  string pod_name = 2;
+  string phase = 3;                  // Pending | Running | Succeeded | Failed | Unknown
+  bool command_started = 4;
+  string node = 5;
+  string shim_state_json = 6;        // the newest CICD-SHIM state in the Pod's log tail (read every few seconds)
+}
+
+message PollRequest {
+  Header header = 1;
+  string session_id = 2;
+  uint64 ack_command_seq = 3;        // all commands up to this sequence were applied
+  repeated PodTransition transitions = 4;
+  uint32 free_pod_slots = 5;
+  ComponentStatus status = 6;        // D-29: who the controller is and how it is (every poll is also its heartbeat)
+  repeated PodInfo inventory = 7;    // every step Pod the controller can see (sent every few seconds, see inventory_complete)
+  bool inventory_complete = 8;       // true: `inventory` is the whole list (an empty list then means "no Pods at all");
+                                     // false: no inventory this time, or the list call failed - core must conclude nothing
+}
+
+message StartStep {
+  StepRef step = 1;
+  string image = 2;
+  repeated string command = 3;
+  map<string, string> env = 4;       // non-secret environment
+  repeated string secret_handles = 5;  // names only; the controller creates the ephemeral Secret (6.7)
+  bool workspace_isolated = 6;
+  uint32 timeout_seconds = 7;
+  uint64 log_max_bytes = 9;          // the profile's per-step log limit (0 = unlimited): the shim cuts the log there, with a marker
+  uint64 log_spool_bytes = 10;       // the profile's spool size on the Pod (0 = the controller's default)
+  uint32 log_hold_timeout_seconds = 11;  // the profile's wait for log delivery / core after the command ends (0 = default)
+  string opts_json = 8;              // the Lua step options as one canonical JSON object: mask, metrics, timeout (docs/metrics.md, docs/secrets-masking.md); "" = none
+}
+
+message CancelStep {
+  StepRef step = 1;
+  uint32 grace_seconds = 2;          // RUN-006
+}
+
+message GateState {
+  bool open = 1;                     // RUN-015: false means "do not create new Pods"
+  string reason = 2;                 // "logs_unavailable" when closed
+}
+
+message Command {
+  uint64 seq = 1;
+  oneof body {
+    StartStep start = 2;
+    CancelStep cancel = 3;
+    GateState gate = 4;
+  }
+}
+
+message PollResponse {
+  Header header = 1;
+  repeated Command commands = 2;
+  GateState gate = 3;
+  uint32 poll_after_ms = 4;
+  Failure failure = 5;
+}

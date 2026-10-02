@@ -1,0 +1,47 @@
+diff -u a/guildenstern/dispatcher.nim b/guildenstern/dispatcher.nim
+--- a/guildenstern/dispatcher.nim
++++ b/guildenstern/dispatcher.nim
+@@ -214,6 +214,12 @@
+         if unlikely(fd.int in [0, INVALID_SOCKET.int]):
+           server.log(lvlDebug, "invalid new socket")
+           return
++        # CiNim patch: startListening() sets OptNoDelay on the LISTENING socket only, which accept()
++        # does not inherit - every accepted connection defaults to Nagle's algorithm on, which combined
++        # with the peer's delayed ACK adds ~200ms per response on small chunked writes. Set it on the accepted socket itself.
++        block:
++          var nodelay = 1.cint
++          discard setsockopt(fd, cint(IPPROTO_TCP), TCP_NODELAY, addr nodelay, SockLen(sizeof(cint)))
+         workerdatas[server.id].gsselector.registerHandle(fd.int, {Event.Read}, SocketData(isserversocket: false, socket: fd))
+         server.log(lvlDebug, "socket " & $fd & " connected to thread " & $getThreadId())
+       except:
+diff -u a/guildenstern/httpresponse.nim b/guildenstern/httpresponse.nim
+--- a/guildenstern/httpresponse.nim
++++ b/guildenstern/httpresponse.nim
+@@ -219,7 +219,12 @@
+       closeSocket()
+       return false
+     let (state , len) = tryWriteToSocket(addr chunk, delivered, chunk.len - delivered)
+-    delivered += len
++    # CiNim patch: `len` is tryWriteToSocket's raw send() return value, which is a negative
++    # errno-shaped sentinel (not a byte count) whenever state is TryAgain/Fail - unconditionally adding
++    # it to `delivered` silently corrupts the offset on every EAGAIN retry (observed as "Malformed
++    # encoding found in chunked-encoding" on a rate-limited/slow-reader client: exactly the backpressure
++    # path DAT-009/UI-009 depend on). Only a real Progress/Complete write advances `delivered`.
++    if state in [Progress, Complete]: delivered += len
+     if state == Fail: return false
+     elif state == TryAgain:
+       server.suspend(backoff)
+@@ -238,6 +243,12 @@
+ proc replyFinishChunked*(): bool {.gcsafe, discardable.} =
+   {.gcsafe.}:
+     let delimiter = "0" & longdivider
+-  if writeToSocket(addr delimiter, delimiter.len) == Fail: return false
++  # CiNim patch: this terminator carries real bytes and is genuinely the last thing sent, but was sent
++  # with the default (MSG_MORE/corked) flags. replyFinish()'s own send is a zero-length lastflags call,
++  # which cannot uncork anything (nothing to piggyback the flush onto) - so the whole corked response
++  # (this segment and every prior MSG_MORE'd chunk) sat until Linux's own cork timeout (~200ms) released
++  # it. Sending this last real segment with lastflags (no MSG_MORE) uncorks it immediately. This removes a consistent ~200ms stall before any byte of
++  # a chunked response reached the client, on every request.
++  if writeToSocket(addr delimiter, delimiter.len, lastflags) == Fail: return false
+   return replyFinish() != Fail
+ 
