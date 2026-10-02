@@ -80,7 +80,7 @@ Each decision has a rationale and a condition under which it is revisited. Measu
 | **ID** | **Decision** | **Rationale** | **Revisit when** |
 |:---|:---|:---|:---|
 | D-01 | Nim 2.x, ORC, for all services, the shim and the CLI | Low memory use and no leaks | The soak test does not meet NFR-013, or there is no working secured transport |
-| D-02 | State lives in rqlite (Raft, SQLite); capacity grows by sharding | Compared with Percona XtraDB Cluster on the same workload rqlite is 4--10x faster at claiming a step and an order of magnitude lighter in memory (A.2) | The benchmark does not reach the single-shard targets (NFR-006): shrink the shard, reduce writes |
+| D-02 | State lives in rqlite (Raft, SQLite); capacity grows by sharding | Compared with Percona XtraDB Cluster on the same workload rqlite is 4--10x faster at claiming a step and an order of magnitude lighter in memory; compared with a PostgreSQL cluster it recovers from a leader loss in a fraction of a second instead of about half a minute, uses a quarter of the memory and is one binary with built-in S3 backup, while PostgreSQL claims steps about 2.5x faster under contention (A.2) | The benchmark does not reach the single-shard targets (NFR-006): shrink the shard, reduce writes; then PostgreSQL is the alternative |
 | D-03 | No message broker. Platform events (webhooks, statuses, notifications about available work) go only through an outbox in rqlite that a worker drains | A broker is not needed for logs (D-07) and is not worth a component of its own for notifications; when load grows the shard is made smaller (SHD-003), no component is added | The outbox systematically fails NFR-003 even after the shard is made smaller |
 | D-04 | Protobuf (proto3) between services and for plugins | Compact, versioned contracts with N/N-1 compatibility checks | None |
 | D-05 | Imperative pipeline script in Lua 5.4 with runtime execution and a replay journal; no YAML | Full flexibility of an imperative script with deterministic replay | None |
@@ -1392,7 +1392,24 @@ Findings that became rules: (1) rqlite answers HTTP 200 with `{"error":"leadersh
 | Memory of the process, three nodes at idle | about 90 MiB in total | about 1.7 GiB in total |
 | Disk, same data | 108 MiB | 400 MiB |
 
-rqlite is 4--10× faster on the dominant write pattern (frequent claims of single steps), recovers four times faster and is an order of magnitude lighter; the strength of PXC (batch inserts) is not the scheduler's pattern. The single-shard scaling ladder of section 7.3 (batching, then a smaller shard) stands.
+Against PXC rqlite is 4--10× faster on the dominant write pattern (frequent claims of single steps), recovers four times faster and is an order of magnitude lighter; the strength of PXC (batch inserts) is not the scheduler's pattern. The single-shard scaling ladder of section 7.3 (batching, then a smaller shard) stands.
+
+**Comparison with PostgreSQL** (CloudNativePG 1.30, PostgreSQL 16.15, three instances with 200m CPU and 900 MiB each, `shared_buffers` 128 MB, quorum synchronous replication `ANY 1` with required data durability, writes through the `-rw` service; rqlite as above through its ClusterIP service). Measured later, in the same session and from the same client Pod, in interleaved runs; the test cluster is shared and noisy, so the table gives the median of three runs and, in brackets, the range. PostgreSQL, like rqlite, can claim a step in one statement (`UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED) RETURNING id`); the three-step form is measured too.
+
+| Check | rqlite | PostgreSQL |
+|:---|:---|:---|
+| Claim of 300 steps, 8 clients, one statement | 46/s (28--52) | 118/s (57--119) |
+| The same, `SELECT … FOR UPDATE SKIP LOCKED` + `UPDATE` in a transaction | — | 98/s (57--98) |
+| Single write p50 / p95 | 21.8 / 82.7 ms (16.9--26.1 / 81.0--84.8) | 47.9 / 128.6 ms (10.7--78.2 / 16.0--131.1) |
+| Batch insert of 500 rows in one statement | 5 022 rows/s (2 808--24 262) | 22 349 rows/s (2 185--26 549) |
+| 500 rows inserted one by one | 32/s (32--33) | 84/s (28--86) |
+| Exactly one winner in 100 CAS races | yes | yes |
+| Primary/leader killed during writes: acknowledged writes lost | 0 (five runs) | 0 (six runs) |
+| The same: writes unavailable | 0.17--0.21 s (three runs) | 27.6, 31.7 and 33.1 s (default operator settings) |
+| Memory of the processes, three nodes | about 33 MiB in total | about 130 MiB in total |
+| Disk per node | about 108 MiB | about 255 MiB (preallocated WAL included) |
+
+PostgreSQL claims steps faster than rqlite when the clients contend (about 2.5×), and inserts batches about four times faster; its single-write latency is no better and noisier. The decisive differences are elsewhere: after the primary is killed, writes were unavailable for about half a minute with the operator's default failover settings (rqlite: a fifth of a second), the three processes take about four times the memory, and a PostgreSQL shard needs an operator and its own backup tooling where rqlite is one binary with built-in S3 backup (A.11). A tuned failover would shorten the gap but is not shown here. The conclusion of D-02 stands; PostgreSQL is the named alternative if rqlite fails the single-shard targets of NFR-006.
 
 ## A.3 Lua executor, journal and contracts
 

@@ -58,7 +58,7 @@ tools/shim/build_static.sh build/cicd-shim-logging-static src/shim/shim.nim -d:s
 tools/shim/build_static.sh build/core-static src/core/main.nim "" 0
 ```
 
-Long runs (the soak test of NFR-013) use `tools/soak/run72.sh`. `tools/bench/pxc_vs_rqlite.py` is the benchmark behind A.2.
+Long runs (the soak test of NFR-013) use `tools/soak/run72.sh`. `tools/bench/state_store_bench.py` is the state-store benchmark behind A.2 (rqlite, PXC, PostgreSQL); `tools/bench/postgres.helmfile.yaml` deploys the PostgreSQL cluster it uses.
 
 ## License
 
