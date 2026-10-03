@@ -11,7 +11,7 @@ This document defines the product, functional and architectural requirements for
 
 The document is written as a working specification: every requirement has a stable ID and a verifiable criterion, and the order of work is given as vertical slices with exit criteria (section 17). The same text serves product owners, architects, SRE and security engineers as the basis for design review.
 
-The platform is a set of independent microservices written in Nim and grouped into shards (cells), which scale by adding shards. Execution is agentless: every pipeline step runs in its own Pod, which a job controller creates and watches, and data moves between steps through shared storage and an env file. Pipelines are imperative Lua 5.4 scripts with a replay journal, state is kept in rqlite, the protocol between services is Protobuf, and extensions are isolated. The first version solves CI and managed CD; it does not try to also build a Git host, an artifact repository and a full secret manager.
+The platform is a set of independent microservices written in Nim and grouped into shards (cells), which scale by adding shards. Execution uses no permanent agents: every pipeline step runs in its own Pod, which a job controller creates and watches, and data moves between steps through shared storage and an env file. Pipelines are imperative Lua 5.4 scripts with a replay journal, state is kept in rqlite, the protocol between services is Protobuf, and extensions are isolated. The first version solves CI and managed CD; it does not try to also build a Git host, an artifact repository and a full secret manager.
 
 # Solution summary
 
@@ -20,7 +20,7 @@ The platform is a set of independent microservices written in Nim and grouped in
 | Deployment | Kubernetes only, installed with Helm. Docker Compose, VMs, bare metal and shell agents are out of scope |
 | Implementation language | Nim 2.x (ORC), static binaries; low memory and no leaks are the priority |
 | Architecture | Microservices from the first release; a shard (cell) is a set of services with its own rqlite and log circuit (two independent VictoriaLogs nodes fed by a vlagent); capacity grows by adding shards, tenants are pinned to a shard through the directory |
-| Execution | Agentless: there are no permanent agents; the job controller creates a Pod for every step, a Pod can be started many times over a persistent run volume, every step of a run mounts the shared storage, data moves through the env file and files |
+| Execution | No permanent agents (the disposable shim in each step's Pod does an agent's work for that step); the job controller creates a Pod for every step, a Pod can be started many times over a persistent run volume, every step of a run mounts the shared storage, data moves through the env file and files |
 | Pipeline | Imperative Lua 5.4 script in a sandbox; runtime execution with a replay journal; no YAML |
 | Protocols | Protobuf (proto3) between services and for plugins over ZeroMQ with CURVE; the external API is REST/JSON; HTTP is served by GuildenStern |
 | Extensions | Step plugins are OCI images with a file-based Protobuf contract, service plugins are separate services; capability permissions; signing; no code is loaded into server processes; UI contributions go through extension points and isolated iframes |
@@ -93,7 +93,7 @@ Each decision has a rationale and a condition under which it is revisited. Measu
 | D-12 | The analysis covers 20 systems | Breadth of the comparison | None |
 | D-13 | The first-party set is 10 extensions in the MVP and the other 10 in stage 3 | Keeps the MVP deliverable | Q-05 in section 21 |
 | D-14 | Microservice architecture from the first release; Kubernetes only | One deployment model to test and support | None |
-| D-15 | Agentless: no permanent agents or agent pools; the job controller creates a Pod per step and is connected to the shard by an outbound connection; a Pod can be started many times over a persistent run volume (RUN-014) and a volume can be reused across runs (STO-008) | No agent fleet to operate; start latency stays within RUN-013 | Measurements show that starting a Pod per step is unacceptable even with volume reuse |
+| D-15 | No permanent agents or agent pools: the work of an agent for one step is done by the disposable runner shim in the step's Pod (RUN-010); the job controller creates a Pod per step and is connected to the shard by an outbound connection; a Pod can be started many times over a persistent run volume (RUN-014) and a volume can be reused across runs (STO-008) | No agent fleet to operate; start latency stays within RUN-013 | Measurements show that starting a Pod per step is unacceptable even with volume reuse |
 | D-16 | Storage is attached to every step of a run; data moves between steps through the env file and files | One workspace model for all steps | Q-11 in section 21 |
 | D-17 | Capacity grows by sharding: a shard is a set of services with its own rqlite and log circuit (two VictoriaLogs nodes and vlagent) | No cross-shard coordination on the hot path | Q-12 in section 21 |
 | D-18 | Logs: a window (offset/limit) in the UI; the full log is a streamed download on request | Bounded browser memory | None |
@@ -355,7 +355,7 @@ A plugin below means a signed extension package with a manifest, a configuration
 
 - Imperative Lua pipeline scripts (6.2): sequential and parallel execution, matrix, conditions and loops by means of the language, retries, timeouts, services, artifacts, caches and approvals that suspend without holding an agent.
 
-- Agentless execution on Kubernetes: a Pod per step, shared storage for all steps of a run (6.8), execution profiles (namespace, node selector, RuntimeClass, quotas), Linux nodes only, an in-cluster job controller.
+- Execution on Kubernetes without permanent agents: a Pod per step, shared storage for all steps of a run (6.8), execution profiles (namespace, node selector, RuntimeClass, quotas), Linux nodes only, an in-cluster job controller.
 
 - OIDC login, a local bootstrap admin, RBAC, an audit log, masked/protected variables and an external secret provider.
 
@@ -544,7 +544,7 @@ end
 
 ## 6.4 Runs, queue and execution
 
-The platform works only inside Kubernetes and uses no agents: there are no permanent executor processes on nodes, no agent registration and no agent heartbeat. Every step runs in its own Pod (container), which the job controller creates and watches. The job controller is the only component of a shard that holds rights in the cluster (SEC-010).
+The platform works only inside Kubernetes and uses no permanent agents: there are no long-lived executor processes on nodes, no agent registration and no agent pools. The agent's duties for one step are carried out by the runner shim (RUN-010), a disposable wrapper that lives only as long as its step and reports its state to the core (RUN-016); it neither registers, nor asks for work, nor holds rights in the cluster. Every step runs in its own Pod (container), which the job controller creates and watches. The job controller is the only component of a shard that holds rights in the cluster (SEC-010).
 
 **RUN-001 Run state.** Run states: created, compiling, queued, running, waiting, succeeded, failed, canceled, skipped, timed_out, infrastructure_error. The state `compiling` means the metadata phase and preflight. Transitions are compare-and-swap writes (`UPDATE ... WHERE id=? AND version=?`); all writes to rqlite are serialised by the leader of the shard's cluster. Step states: pending, starting, running, succeeded, failed, canceled, timed_out, lost. The state machines are generated from `src/common/states.nim` into `docs/state-machines.md`.
 
@@ -568,7 +568,7 @@ The platform works only inside Kubernetes and uses no agents: there are no perma
 
 **RUN-011 Services.** Service containers (`services` in `ci.job`) are started as a separate Pod of the job with a headless Service and a DNS name inside the run; a NetworkPolicy allows access only to Pods of the same run. A service Pod is created on first use and removed when the job ends; it is not part of the log of the steps but has its own log stream.
 
-**RUN-012 Limits of the agentless model.** Privileged containers and Docker-in-Docker are not supported. Images are built by the BuildKit plugin through a rootless buildkitd as a service Pod of the profile. Tasks that need a long-lived container for the whole job (for example interactive debugging or heavy cache warm-up) use session mode, which is reserved for stage 3 (7.4) (open question Q-14).
+**RUN-012 Limits of the model without permanent agents.** Privileged containers and Docker-in-Docker are not supported. Images are built by the BuildKit plugin through a rootless buildkitd as a service Pod of the profile. Tasks that need a long-lived container for the whole job (for example interactive debugging or heavy cache warm-up) use session mode, which is reserved for stage 3 (7.4) (open question Q-14).
 
 **RUN-013 Start latency.** Target: from placing a step in the queue to the start of the user process, p95 ≤ 10 s with warm images. Measured on a shared, noisy test environment of two worker nodes (A.6): p50 0.9--1.7 s, p95 up to 7.0 s (creating a Pod is not the bottleneck at about 0.2 s; the time is spent in the kubelet, with a tail up to 7 s), which meets the target; a batch of 50 Pods takes 8.4--11.8 s, still above the target if starting several steps in a batch becomes an ordinary scenario; a cold shim image takes about 8 s. Measures 1--3 of section 7.4 (volume, persistent volumes, image preloading) do not shorten the kubelet time in that environment and are verified again on the target cluster. To reduce latency the shim image is preloaded onto nodes by a DaemonSet (which runs no jobs); repeated starts of Pods over one volume (RUN-014) and persistent volumes between runs (STO-008) remove repeated data preparation from a step.
 
