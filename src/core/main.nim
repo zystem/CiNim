@@ -5,7 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/rqlite
-import schema, scheduler, api, logcollector, logcircuit, loggate
+import schema, scheduler, api, logcollector, logcircuit, loggate, routerclient, orgrules
 
 let
   rqliteUrl = getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001")
@@ -24,6 +24,12 @@ let
   # RUN-015 launch gate. "off" exists only for test setups that run no log circuit at all (the open question Q-16
   # - an emergency bypass in production - is the owner's call and is not decided here); it is announced loudly.
   launchGateOff = getEnv("CINIM_LAUNCH_GATE", "on") == "off"
+  # SHD-006: the router of the `multi` mode. Without CINIM_ROUTER_URL there is no router (the `single` mode).
+  shardName = getEnv("CINIM_SHARD", "001")
+  routerUrl = getEnv("CINIM_ROUTER_URL").strip(chars = {'/', ' '})
+  routerKey = getEnv("CINIM_ROUTER_KEY")
+  publicUrl = getEnv("CINIM_PUBLIC_URL").strip(chars = {'/', ' '})   ## https://<domain><basePath>: the URL of an organisation is <publicUrl>/<slug>/
+  routerInterval = parseInt(getEnv("CINIM_ROUTER_INTERVAL", "60"))
 
 type
   Args = tuple[co: Core, port: int]
@@ -48,6 +54,16 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
         sleep 100
 proc runLogGate(a: tuple[w: Watch, stop: ptr Atomic[bool]]) {.thread.} = serveLogGate(a.w, a.stop)
 
+proc runRouterClient(a: tuple[rqliteUrl: string]) {.thread.} =
+  {.cast(gcsafe).}:
+    let url = a.rqliteUrl
+    proc readOrgs(): seq[OwnOrg] {.gcsafe.} =
+      {.cast(gcsafe).}:
+        var c = newRq(url)
+        for o in c.listOrganizationRows():
+          if o.state == "active": result.add OwnOrg(slug: o.slug, name: o.name)
+    serveRouterClient(readOrgs, addr stopServers)
+
 proc main() =
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   var c = newRq(rqliteUrl)
@@ -61,6 +77,20 @@ proc main() =
   let watch = Watch(nodes: victoriaLogsUrls, agentUrl: agent.scheme & "://" & agent.hostname & (if agent.port.len > 0: ":" & agent.port else: ""),
                     cfg: defaultConfig(), disabled: launchGateOff)
   initGate(watch)
+  if not validShardName(shardName):
+    stderr.writeLine "core: CINIM_SHARD must be made of digits only (SHD-001), got '" & shardName & "'"
+    quit 2
+  configure(RouterConfig(url: routerUrl, key: routerKey, coreId: getEnv("CINIM_CORE_ID", shardName), publicBase: publicUrl,
+                         intervalSec: routerInterval))
+  var routerThread: Thread[tuple[rqliteUrl: string]]
+  if routerUrl.len > 0:
+    let unsupported = urlSupported(routerUrl)
+    if unsupported.len > 0 or routerKey.len == 0:
+      stderr.writeLine "core: router: " & (if unsupported.len > 0: unsupported else: "CINIM_ROUTER_KEY is required")
+      quit 2
+    if publicUrl.len == 0: echo "core: WARNING - CINIM_PUBLIC_URL is not set: organisations are registered without a URL"
+    createThread(routerThread, runRouterClient, (rqliteUrl,))
+    echo "core: registering with the router ", routerUrl, " as ", getEnv("CINIM_CORE_ID", shardName), " every ", routerInterval, " s"
   if launchGateOff: echo "core: WARNING - launch gate DISABLED (CINIM_LAUNCH_GATE=off): steps start whatever the log circuit does"
   var gateThread: Thread[tuple[w: Watch, stop: ptr Atomic[bool]]]
   if not launchGateOff:
@@ -93,5 +123,6 @@ proc main() =
   joinThread(logIngestThread)
   joinThread(watchdogThread)
   if not launchGateOff: joinThread(gateThread)
+  if routerUrl.len > 0: joinThread(routerThread)
 
 main()

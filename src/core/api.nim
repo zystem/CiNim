@@ -6,9 +6,10 @@
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
-import std/[json, os, strutils]
+import std/[json, os, strutils, uri, times]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient
+import ../common/rqlite
 
 const base = "/api/v1/runs"
 
@@ -19,7 +20,10 @@ proc problem(status: HttpCode; code, detail: string) =
 proc jsonOk(status: HttpCode; body: JsonNode) =
   reply(status, $body, ["Content-Type: application/json"])
 
-let metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
+let
+  orgShard = getEnv("CINIM_SHARD", "001")                  ## the name of this shard: digits only (SHD-001)
+  orgPrefix = getEnv("CINIM_NAMESPACE_PREFIX", "cinim")    ## the namespace prefix (SHD-001)
+  metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
 
 var coreRef: Core   ## set once at startup (main.nim); read-only after that, one HTTP thread pool
 
@@ -78,6 +82,76 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem(Http405, "method_not_allowed", "GET or PUT")
         return
+      if path == "/api/v1/organizations:check":
+        # SHD-007: what the UI asks while a slug is typed - the rules, and how many characters the namespace name still allows
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        var slug = ""
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            if k == "slug": slug = v
+        let reason = checkSlug(slug, orgPrefix, orgShard)
+        jsonOk(Http200, %*{"ok": reason.len == 0, "reason": reason, "chars_left": charsLeft(orgPrefix, orgShard, slug),
+                           "namespace": namespaceName(orgPrefix, orgShard, slug), "max_slug_length": maxSlugLen(orgPrefix, orgShard)})
+        return
+      if path == "/api/v1/organizations":
+        var c = newRq(coreRef.rqliteUrl)
+        let cfg = currentConfig()
+        if getMethod() == "GET":
+          var arr = newJArray()
+          for o in c.listOrganizationRows():
+            arr.add %*{"id": o.id, "slug": o.slug, "name": o.name, "state": o.state, "url": orgUrl(cfg.publicBase, o.slug),
+                       "namespace": namespaceName(orgPrefix, orgShard, o.slug)}
+          jsonOk(Http200, %*{"organizations": arr})
+        elif getMethod() == "POST":
+          # SHD-007 steps (1) and (6): the rules, the router's list, the record. The namespace, the controller and the Ingress are not
+          # created by the core yet.
+          let j = try: parseJson(getBody()) except JsonParsingError: nil
+          if j == nil or j.kind != JObject or not j.hasKey("slug") or j["slug"].kind != JString:
+            problem(Http400, "invalid_request", "a JSON object with a string `slug` (and optionally `name`) is required")
+            return
+          let slug = j["slug"].getStr
+          let reason = checkSlug(slug, orgPrefix, orgShard)
+          if reason.len > 0:
+            problem(Http400, "invalid_slug", reason)
+            return
+          let view = currentView()
+          let other = conflictWith(view.items, cfg.coreId, slug)
+          if other.len > 0:
+            problem(Http409, "slug_taken", "the slug is already held by the core " & other & " (the list of the router)")
+            return
+          let id = try: c.addOrganization(slug, j{"name"}.getStr)
+                   except RqError:
+                     problem(Http409, "slug_exists", "this shard already has an organisation with that slug")
+                     return
+          jsonOk(Http201, %*{"id": id, "slug": slug, "name": j{"name"}.getStr, "namespace": namespaceName(orgPrefix, orgShard, slug),
+                             "url": orgUrl(cfg.publicBase, slug),
+                             "checked_against_router": view.configured and view.fetchedAt > 0})
+        else:
+          problem(Http405, "method_not_allowed", "GET or POST")
+        return
+      if path == "/api/v1/router":
+        # the data of the organisation switcher and its alerts (SHD-006); without a router it holds this core's own organisations
+        var c = newRq(coreRef.rqliteUrl)
+        let cfg = currentConfig()
+        let view = currentView()
+        var own: seq[OwnOrg]
+        for o in c.listOrganizationRows():
+          if o.state == "active": own.add OwnOrg(slug: o.slug, name: o.name)
+        var slugs: seq[string]
+        for o in own: slugs.add o.slug
+        var items = newJArray()
+        for i in view.switcher(own, cfg.publicBase):
+          items.add %*{"slug": i.slug, "name": i.name, "url": i.url, "core": i.core}
+        var al = newJArray()
+        for a in alerts(view.items, cfg.coreId, slugs):
+          al.add %*{"code": a.code, "slug": a.slug, "other_core": a.otherCore}
+        jsonOk(Http200, %*{"mode": (if view.configured: "multi" else: "single"), "core": cfg.coreId, "shard": orgShard,
+                           "router": {"reachable": view.reachable, "registered_at": view.registeredAt, "fetched_at": view.fetchedAt,
+                                      "error": view.lastError},
+                           "organizations": items, "alerts": al})
+        return
       if not path.startsWith(base):
         problem(Http404, "not_found", "no such route")
         return
@@ -109,7 +183,8 @@ proc onRequest() {.raises: [], gcsafe.} =
         jsonOk(Http200, run)
       else:
         problem(Http404, "not_found", "no such route")
-    except CatchableError as e:
+    except Exception as e:
+      # not only CatchableError: with -d:ssl std/net lets a plain Exception through the raises inference
       problem(Http500, "internal", e.msg)
 
 proc serveApi*(co: Core; port: int) =

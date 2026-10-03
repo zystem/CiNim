@@ -1,7 +1,8 @@
 ## Shard rqlite schema, the implemented subset (spec 8.2): `runs`, `run_journal`, `jobs`, `steps` (with the attempt, the Lua options
 ## and the shim's last state: shim_*, D-29), `job_controllers`, `leases`, `execution_profiles` (the settings of docs/settings.md)
 ## plus `log_streams` (DAT-001 - per-attempt VictoriaLogs stream bookkeeping, not log content). `backups`, `artifacts`,
-## `environments`, `deployments`, `credentials`, `outbox`, `audit_events` are not created yet. Identifiers are UUIDv7 with a shard prefix (SHD-004); one shard is hardcoded, no
+## `environments`, `deployments`, `credentials`, `outbox`, `audit_events` are not created yet; `organizations` is the record only (the namespace,
+## controller and Ingress of SHD-007 are not created by the core yet). Identifiers are UUIDv7 with a shard prefix (SHD-004); one shard is hardcoded, no
 ## directory yet.
 
 import std/[json, times]
@@ -13,6 +14,12 @@ const shardId* = "s1"  ## single shard, no directory yet (stage M5 of the roadma
 proc newId*(): string = shardId & "_" & $uuid7()
 
 const ddl = [
+  # the organisations of this shard (SHD-001, SHD-007); id doubles as tenant_id everywhere else
+  """CREATE TABLE IF NOT EXISTS organizations (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+       state TEXT NOT NULL DEFAULT 'active', settings TEXT NOT NULL DEFAULT '{}', plan TEXT NOT NULL DEFAULT '',
+       created_at TEXT NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
   """CREATE TABLE IF NOT EXISTS runs (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, bundle_id TEXT,
        trigger_id TEXT, parent_run_id TEXT, state TEXT NOT NULL, actor_id TEXT,
@@ -129,3 +136,18 @@ proc streamIndexName*(c: var RqClient; jobId, stepId: string): string =
   let r = c.query(%*[["SELECT index_name FROM log_streams WHERE job_id = ? AND step_id = ? ORDER BY attempt DESC LIMIT 1", jobId, stepId]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0: vals[0][0].getStr else: ""
+
+# ------------------------------------------------------------------ organizations (SHD-001, SHD-007)
+
+proc listOrganizationRows*(c: var RqClient): seq[tuple[id, slug, name, state: string]] =
+  let r = c.query(%*[["SELECT id, slug, name, state FROM organizations ORDER BY slug"]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil:
+    for v in vals: result.add (v[0].getStr, v[1].getStr, v[2].getStr, v[3].getStr)
+
+proc addOrganization*(c: var RqClient; slug, name: string): string =
+  ## the record only; raises RqError when the slug exists (the unique index)
+  let id = newId()
+  discard c.execute(%*[["INSERT INTO organizations (id, tenant_id, slug, name, created_at) VALUES (?, ?, ?, ?, ?)",
+    id, id, slug, name, $getTime().toUnix()]])
+  id

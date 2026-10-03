@@ -25,6 +25,26 @@ did not pass the profile's setting; normally the profile applies.
   wait longer than that, which is exactly why a shim that lost the core reconnects and keeps working: five minutes are enough for it in
   most cases.
 
+## Core environment for the `multi` mode
+
+The shard's identity and its link to the organisation router (SHD-006). Without `CINIM_ROUTER_URL` the core works alone (`single` mode):
+the organisation drop-down holds the organisations of this shard and the slug is checked against them only.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CINIM_SHARD` | `001` | the name of the shard: digits only, up to 16, immutable; part of the namespace name `<prefix>-<shard>-<slug>` |
+| `CINIM_NAMESPACE_PREFIX` | `cinim` | the prefix of the namespaces of the organisations |
+| `CINIM_ROUTER_URL` | empty | the router's base URL with its base path, `http://` or `https://`, no trailing slash. `https` needs a core built with `-d:ssl` (the core image carries OpenSSL); a core without it refuses to start with an https URL |
+| `CINIM_ROUTER_KEY` | empty | the key shared with the router (`ROUTER_KEY`); required when `CINIM_ROUTER_URL` is set |
+| `CINIM_PUBLIC_URL` | empty | `https://<domain><basePath>`, the base of the organisation URLs that the core registers and shows |
+| `CINIM_ROUTER_INTERVAL` | 60 | seconds between two rounds: the core posts its organisations and reads the router's list |
+| `CINIM_CORE_ID` | the shard name | the name under which the core registers at the router; it must differ between cores |
+| `CINIM_METRICS` | `true` | `false` makes `/metrics` answer 404 (the Helm value `metrics.enabled`) |
+
+When the router does not answer, the core keeps the last list and records the error (`GET /api/v1/router`); a slug is then checked against
+the last list, and `checked_against_router` in the answer of `POST /api/v1/organizations` is false if no list was ever received. A slug that
+two cores hold gives the alert `duplicate_slug` in `GET /api/v1/router`.
+
 ## Cluster requirements
 
 The job controller assumes that **the namespace for steps is dedicated and holds nothing but step Pods** (by default the organisation's namespace `<prefix>-<shard>-<org>`, for example `cinim-001-acme`; the objects the core creates there, a RoleBinding, a ResourceQuota, a LimitRange and a NetworkPolicy, are left alone). It decides itself which Pods in

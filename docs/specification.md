@@ -18,7 +18,7 @@ The platform is a set of independent microservices written in Nim and grouped in
 | **Topic** | **Choice** |
 |:---|:---|
 | Deployment | Kubernetes only, installed with Helm. Docker Compose, VMs, bare metal and shell agents are out of scope |
-| Implementation language | Nim 2.x (ORC), static binaries; low memory and no leaks are the priority |
+| Implementation language | Nim 2.x (ORC); the shim and the CLI are static binaries, the other services may link libraries into their images, which are no larger than Alpine; low memory and no leaks are the priority |
 | Architecture | Microservices from the first release; a shard (cell) is a set of services with its own rqlite and log circuit (two independent VictoriaLogs nodes fed by a vlagent); capacity grows by adding shards; an organization is pinned to a shard by the path prefix of its URL at the ingress, there is no global directory |
 | Execution | No permanent agents (the disposable shim in each step's Pod does an agent's work for that step); the job controller creates a Pod for every step, a Pod can be started many times over a persistent run volume, every step of a run mounts the shared storage, data moves through the env file and files |
 | Pipeline | Imperative Lua 5.4 script in a sandbox; runtime execution with a replay journal; no YAML |
@@ -747,7 +747,7 @@ The modules of the shard core work in one process (D-23), so the scheduler knows
 
 | **Area** | **Recommendation** | **Reason** |
 |:---|:---|:---|
-| Language | Nim 2.x, `--mm:orc`, `--threads:on`, static linking (musl) | Low memory, deterministic freeing, static binaries of the shim and the CLI |
+| Language | Nim 2.x, `--mm:orc`, `--threads:on`, musl; static linking for the shim and the CLI, the other services may link libraries (OpenSSL for TLS clients) into an image no larger than Alpine | Low memory, deterministic freeing, static binaries of the shim and the CLI |
 | Transport | ZeroMQ (libzmq with libsodium), REQ/REP with CURVE; the server key is pinned by clients; Protobuf messages; a static build links libzmq and libsodium in (`tools/shim/build_static.sh`) | Lean, leak-free in the measured path (A.4, A.12), no second certificate hierarchy |
 | HTTP | GuildenStern (pure Nim) with two vendored patches | A.5 |
 | Kubernetes API | The official C client `kubernetes-client/c` (Apache-2.0), generic JSON API, a thin Nim binding, a shared connection cache; creation, status polling, Lease fencing and exec verified on Pods, PVCs, Secrets and Leases | There is no mature Nim client; a narrow set of resources simplifies the client and minimises the controller's rights (A.6) |
@@ -759,7 +759,7 @@ The modules of the shard core work in one process (D-23), so the scheduler knows
 | UI | HTML on the server, HTMX, SSE, small custom elements for dynamic components, charts as server-side SVG; templates escape output by default (`h()` is mandatory, checked by `tests/unit/ttemplates.nim`) | Not an SPA: permanent links, minimal client code and browser memory (UI-008) |
 | API | External REST/JSON; Protobuf for the shim, plugins and internal services | Available to clients; efficient streams |
 | Schemas | OpenAPI 3.1, JSON Schema 2020-12, Protobuf; a backward-compatibility check of `.proto` (buf breaking or equivalent) in CI | Client generation and strict compatibility |
-| Packaging | Helm chart of the global services and a chart of the shard; OCI images from scratch/distroless with static binaries | Managed installation; small images |
+| Packaging | Helm chart of the global services and a chart of the shard; OCI images: the shim and the CLI are static and need no base (scratch), every other service may carry the libraries it needs, but its image is no larger than Alpine (Alpine itself, or scratch/distroless with the libraries copied in; Debian, Ubuntu and the like are not used) | Managed installation; small images |
 
 ## 7.2 Reliability and consistency
 
@@ -911,6 +911,8 @@ The table `log_streams` holds only the metadata of a stream (tenant, the job's s
 | GET | /api/v1/audit-events | Cursor pagination and filters; asynchronous export |
 | GET | /api/v1/audit-chain | The audit store, the newest anchor, the last verification and its result (AUD-004) |
 | GET, POST, DELETE | /api/v1/organizations | The organisations of this shard, their state and load; POST creates an organisation and DELETE removes one (SHD-007) |
+| GET | /api/v1/organizations:check | `?slug=` The slug rules and how many characters of the namespace name are left (SHD-007); what the UI asks while a slug is typed |
+| GET | /api/v1/router | The data of the organisation drop-down (the router's list, or this shard's own organisations without a router), the router's reachability and the alerts for a slug held by two cores (SHD-006) |
 | GET | /api/v1/shards/{id}/backups | One list of rqlite and log backups, statuses and recovery progress (BKP-002) |
 | POST | /api/v1/shards/{id}/backups | Start a backup manually (`target`: state or logs), audited |
 | PUT | /api/v1/shards/{id}/backup-policy | Change the schedule, retention and verification (BKP-001), with confirmation and audit |

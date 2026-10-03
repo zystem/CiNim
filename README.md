@@ -52,7 +52,7 @@ Integration tests run against a real cluster and are described in the header of 
 cluster is brought up with `deploy/cluster/helmfile.yaml` (rqlite, VictoriaLogs and vlagent from their official charts). Core can run on a
 separate host that the Pods can reach (`CINIM_CORE_HOST`, systemd units in `deploy/host`); `tools/dev/` has port-forward helpers.
 
-Static binaries for Pods and for that host (ZeroMQ and libsodium linked in, UPX for the shim) are built in an Alpine container:
+Only the shim and the CLI are required to be static; the other services may carry libraries in images no larger than Alpine (the core needs OpenSSL, `-d:ssl`, to reach a router over https). Static binaries for Pods and for the test host (ZeroMQ and libsodium linked in, UPX for the shim) are built in an Alpine container:
 
 ```bash
 tools/shim/build_static.sh build/cicd-shim-logging-static src/shim/shim.nim -d:shimLogging 1
