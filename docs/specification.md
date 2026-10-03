@@ -115,6 +115,7 @@ Each decision has a rationale and a condition under which it is revisited. Measu
 | D-34 | Execution-profile settings edited in the UI: `infra_retries`, `log_max_bytes` (default 1 GiB), `log_spool_bytes` (10 MiB), `log_hold_timeout` (600 s) and `liveness_timeout` (300 s) | Each limit is explicit and bounded | None |
 | D-35 | Variables set in the UI (organization, group, project, pipeline) and launch parameters reach every step as ordinary environment variables of the container, with the current values at the moment the step's Pod is created; only the launch parameters are stored with the run. There is no snapshot of the variables for the run | A retry after fixing a variable sees the fix; nothing is added to rqlite; the script does not read the live variables, so replay stays deterministic (VAR-002). Other CI systems also read such variables when a job starts | Reproducing exactly what a past run used becomes a requirement that the log header (VAR-005) and the audit (VAR-006) cannot meet |
 | D-36 | `$CICD_ENV` is a file on the run volume in `state/`, outside the workspace and outside rqlite; the user writes it, nothing captures a step's environment automatically; `$CICD_OUTPUT` returns at most 4 KiB per step to the script and is journaled | A process cannot change its parent's environment, an explicit file works in any language; outside the workspace the checkout, `git clean`, artifacts, caches and tools that read `.env` files do not touch it; the journal stays small (STO-003) | Users routinely lose variables they expected to pass: automatic capture is reconsidered |
+| D-37 | The audit log can be stored in a separate pair of VictoriaLogs nodes (the setting `audit_store`, rqlite by default): events are chained and anchored in rqlite, the nodes have no delete API and their own retention | Keeps the growth of the audit out of rqlite; searchable with LogsQL; retention in VictoriaLogs is per node and the log circuit uses deletion by filter, so the audit needs a pair of its own to be append-only at the store level (A.7) | The audit volume stays so small that rqlite suffices, or running the audit circuit proves too costly |
 
 # 1 Analysis method and criteria
 
@@ -672,7 +673,7 @@ and `export A=1 && echo "A=$A" | tee -a "$CICD_ENV" >> "$CICD_OUTPUT"` also retu
 
 ## 6.9 Shard backup
 
-**BKP-001 Planning in the scheduler.** Backup is a system task of the shard core process: the schedule is managed by the scheduler, execution by the log-circuit module of the same process. Backups are not pipeline runs, do not create step Pods and are not subject to the launch gate RUN-015. Targets: `state` (the shard's rqlite) and `logs` (VictoriaLogs). The policy of each target: `enabled`, `interval` (for `state` 5 minutes by default, which follows from the RPO in NFR-007; for `logs` 1 h), `retention` (the last 3 good backups plus the newest verified one), `verify_interval` (24 h by default). At most one backup per target runs at a time; ownership is ensured by the lease `shard-core`.
+**BKP-001 Planning in the scheduler.** Backup is a system task of the shard core process: the schedule is managed by the scheduler, execution by the log-circuit module of the same process. Backups are not pipeline runs, do not create step Pods and are not subject to the launch gate RUN-015. Targets: `state` (the shard's rqlite), `logs` (VictoriaLogs) and, when the audit store is VictoriaLogs, `audit` (AUD-006). The policy of each target: `enabled`, `interval` (for `state` 5 minutes by default, which follows from the RPO in NFR-007; for `logs` 1 h), `retention` (the last 3 good backups plus the newest verified one), `verify_interval` (24 h by default). At most one backup per target runs at a time; ownership is ensured by the lease `shard-core`.
 
 **BKP-002 One UI section and API.** The "Backups" section (role Platform admin) is common to `state` and `logs`: the policy (schedule, retention, verification), a manual "back up now" action, history and statuses (`running`, `uploaded`, `verified`, `bad`, `failed`), size, the size and number of snapshots (for `logs`), time, the verification result, the state of the VictoriaLogs nodes and vlagent queues, the progress of automatic recovery and the log of losses during it. The same actions are available through REST (`GET` and `POST /api/v1/shards/{id}/backups`, `PUT /api/v1/shards/{id}/backup-policy`) and the CLI (`cicd admin backup`). Manual runs, policy changes and automatic decisions (node recovery, closing the gate) are written to the audit (SEC-005); a policy change requires confirmation.
 
@@ -682,7 +683,7 @@ and `export A=1 && echo "A=$A" | tee -a "$CICD_ENV" >> "$CICD_OUTPUT"` also retu
 
 **BKP-005 Backup and restore of rqlite.** Backup and restore of `state` use the built-in rqlite flags `-auto-backup`/`-auto-restore` with a JSON config (`type: s3`, interval, keys, `bucket`, `path`); no tool of our own and no `cicd admin restore-state` command are needed (A.11). Only the leader backs up and only when data has changed; measured: an upload takes 6--17 ms, the RPO on the test interval is exact (exactly the records after the last backup were lost, not one more), no effect on writes. Restore happens at node start, before it joins the cluster; the UI section lists the backups and their statuses. `-auto-restore` has been verified on a single node; the behaviour on a multi-node cluster (according to the rqlite documentation only the node that becomes leader actually applies the data, the others receive it through Raft) is still to be verified, as is a repeatable restore drill.
 
-**BKP-006 Verification and alerts.** Once per `verify_interval` the newest backup is verified: for `logs`, the snapshot is restored into a temporary VictoriaLogs instance and the record count and a control sample are compared with the manifest; for `state`, it is restored into a temporary rqlite instance and its integrity is checked. Alerts: no successful backup for more than two intervals, no verified backup for more than two verification periods, no node for a lag-free snapshot, recovery in progress, records lost during recovery (section 15).
+**BKP-006 Verification and alerts.** Once per `verify_interval` the newest backup is verified: for `logs` and `audit`, the snapshot is restored into a temporary VictoriaLogs instance and the record count and a control sample are compared with the manifest; for `state`, it is restored into a temporary rqlite instance and its integrity is checked. Alerts: no successful backup for more than two intervals, no verified backup for more than two verification periods, no node for a lag-free snapshot, recovery in progress, records lost during recovery (section 15).
 
 ## 6.10 Variables and parameters
 
@@ -700,6 +701,22 @@ Variables are set in the UI or the API, not in the pipeline script, at four leve
 
 **VAR-006 Audit.** Changes of plain variables and parameters are not audited by default. A setting of the organization turns the audit on in one of two modes: `full` (the old and the new value are written in full to `audit_events`) or `digest` (for a value longer than 256 characters only its digest is written, and the value itself is found in the log header of a step that used it, VAR-005). Changes of secret variables are always audited, without values (SEC-005).
 
+## 6.11 Audit storage
+
+The audit log (SEC-005) is stored in one of two places, chosen per shard by the setting `audit_store`: `rqlite` (the default) or `victorialogs`. The format of an event, the hash chain and the API (`/api/v1/audit-events`) are the same in both.
+
+**AUD-001 Stores.** `rqlite`: the table `audit_events` (8.2) in the shard's rqlite, rotated by month and exported to WORM/SIEM; it needs nothing beyond the shard's own components and suits small installations. `victorialogs`: events are JSON lines in a separate **audit circuit**, a pair of independent VictoriaLogs nodes fed by a vlagent of their own, built like the log circuit (DAT-008, DAT-010) and operated by the same log-circuit module; nothing is kept in rqlite except the anchors (AUD-003). This mode takes the growth of the audit out of rqlite and suits large installations and long retention.
+
+**AUD-002 Record.** A record carries `_time` (the time of the event, to the millisecond), `seq` (a number growing by one within the chain), `tenant` (also the `AccountID` header; platform-level events use tenant 0), `actor`, `action`, `resource`, `before`, `after`, `ip`, `prev_hash` and `hash`, with `_stream_fields=kind` and `kind=audit`. `hash` is SHA-256 over `prev_hash`, `seq` and the canonical JSON of the other fields (as for the run journal, SEC-008). Secret values never enter a record (SEC-005); for variables the record holds the value, its digest or nothing, as VAR-006 sets.
+
+**AUD-003 One writer and anchors.** One chain per shard is written by the shard core under the lease `shard-core` (D-23), which assigns `seq` and `hash`. About every 1 000 events or 10 s the core writes an anchor to rqlite (`audit_anchors`: chain, `from_seq`, `to_seq`, `head_hash`, time) and, if object-lock storage is configured, a copy of it there (WORM). A new owner of the lease continues the chain from the newest anchor plus the tail read from the audit nodes; if the tail cannot be read it writes nothing (AUD-005).
+
+**AUD-004 Integrity and verification.** The audit nodes run with the delete API off (without `-delete.enable`) and with credentials of their own: the core may only write and the gateway only read; retention is the nodes' `-retentionPeriod` (`audit.retention`, 400 days by default). A record may arrive twice (VictoriaLogs does not deduplicate, A.7), so a reader drops duplicates by `seq`. Every `verify_interval` the log-circuit module recomputes the chain between anchors from the nodes and compares the heads with the anchors; a gap in `seq` or a different hash raises the alert `audit_chain_broken` and is shown in the Audit screen (`GET /api/v1/audit-chain`).
+
+**AUD-005 When the audit store is unavailable.** A write is acknowledged only after vlagent accepted the record. While the audit circuit is unavailable the setting `audit.on_unavailable` decides: `deny` (the default) refuses the operations that must be audited (changes of configuration, variables, credentials and permissions, approvals, deployments, backup and restore actions) with the code `audit_unavailable`, while running steps, reads and the creation of runs go on; `buffer` accepts them and keeps the records in the vlagent queue and in a bounded disk queue of the core, at the risk of losing them if that queue is lost.
+
+**AUD-006 Reading, export and switching.** The Audit screen and the API search records by actor, action, resource and time (LogsQL on the node chosen as in DAT-011); pagination is by `(time, seq)`; export is a streamed response, and live forwarding to a SIEM follows `/select/logsql/tail`. When `audit_store` is changed, new events go to the new store, the first of them is a link record that carries the head hash of the old chain, and reads cover both stores until the old one is past its retention. The audit circuit is backed up like the logs, as the target `audit` (BKP-001): snapshots, upload, verification and automatic node recovery (BKP-003, BKP-004, BKP-006). A restored node continues from its own data; events lost between the backup and the loss show as a gap in `seq` and are reported (AUD-004).
+
 # 7 Architecture
 
 The platform is a set of microservices, each of which is a separate process with its own Deployment or StatefulSet and independent scaling; shared code lives in `src/common`. Merging services into one process is not foreseen (except the shard core, D-23). A single-node installation (one replica of each service, one shard) is a Helm configuration, not a different architecture. Operation outside Kubernetes is not supported. The components fall into two levels: global (serving all shards, holding no tenant data) and shard components (7.3).
@@ -715,6 +732,7 @@ The platform is a set of microservices, each of which is a separate process with
 | Log gateway | Shard | Window reads, search, live tail, streamed download from the chosen VictoriaLogs node; issuing and checking iframe tokens | VictoriaLogs (two nodes); node state from the shard core (ClusterState); IAM-004 tokens |
 | Log store (VictoriaLogs) | Shard | Two independent VictoriaLogs nodes: storage and search of logs; a user reads one node (without lag), the other is the reserve and the source of snapshots | Each node receives data from vlagent; `/health`, metrics |
 | vlagent | Shard | Receives records from the log collector, keeps a disk buffer and a separate delivery queue for each VictoriaLogs node, retries while a node is unavailable | The queue size metric per node; `-remoteWrite.maxDiskUsagePerURL` |
+| Audit circuit (optional) | Shard | With `audit_store = victorialogs`: a separate pair of VictoriaLogs nodes without the delete API and a vlagent of their own; keeps the audit events (AUD-001) | Written only by the shard core, read by the gateway; snapshots as the target `audit` |
 | Event service | Shard | Webhooks, validation, deduplication, routing, schedules | rqlite outbox |
 | Policy service | Shard | Admission rules for pipelines, plugins and deployments | Lua policies in the sandbox; versioned bundles; OPA as an optional adapter |
 | Worker | Shard | GC, notifications, reports, imports, retention | Idempotent handlers; rqlite outbox |
@@ -848,7 +866,7 @@ Data is divided into global data (the directory) and shard data. Every table of 
 | run_storage | run_id, pvc_name, size, storage_class, state, retention_until | run_id |
 | log_streams | job_id, step_id, attempt, index_name, line_count, state (open, closed, abandoned), closed_at | job_id, step_id, attempt |
 | log_nodes | id, url, state (up, catching_up, down, needs_restore), version | id |
-| backups | id, target (state, logs), node_id, object_key, stream_offset, sha256, size, state (running, uploaded, verified, bad, failed), verified_at, created_at | target, created_at |
+| backups | id, target (state, logs, audit), node_id, object_key, stream_offset, sha256, size, state (running, uploaded, verified, bad, failed), verified_at, created_at | target, created_at |
 | backup_policies | target, enabled, interval, retention, verify_interval, updated_by, updated_at | target |
 | leases | scope, owner, token, expires_at | scope |
 | artifacts | id, run_id, job_id, object_key, digest, size, retention | object_key |
@@ -858,8 +876,9 @@ Data is divided into global data (the directory) and shard data. Every table of 
 | variables | id, scope (organization, group, project, pipeline), scope_id, name, kind (plain, secret), value (plain only), credential_id (secret only), declaration (type, required, choices, pattern, max_length), version, updated_by, updated_at | scope, scope_id, name |
 | outbox | id, topic, payload, created_at, delivered_at | delivered_at, id |
 | audit_events | id, tenant_id, actor, action, resource, before, after, ip, time, prev_hash, hash | tenant_id, time, id |
+| audit_anchors | id, chain, from_seq, to_seq, head_hash, created_at, exported_at | chain, to_seq |
 
-The table `log_streams` holds only the metadata of a stream (tenant, the job's stream in VictoriaLogs, the number of lines, the state); the contents of logs never reach rqlite, and the line counter is updated when the stream is closed. Every attempt of a step has its own stream; the stream of an attempt that was lost is marked `abandoned`. SQLite does not support partitioning, so hot tables are kept small: finished runs together with their journal move to an S3 archive (Protobuf) after `hot_retention` (14 days by default) and a pointer row stays in rqlite; `audit_events` is rotated by tables per month and exported to WORM/SIEM. UUIDv7 identifiers are stored as BLOB(16). Secret material is not stored in these tables: credentials contains only envelope-encrypted ciphertext or an external reference; the `outputs` of steps (at most 4 KiB per step) are not meant for secrets (STO-004). The environment of a step and the env file are not stored in these tables (VAR-002, STO-003).
+The table `log_streams` holds only the metadata of a stream (tenant, the job's stream in VictoriaLogs, the number of lines, the state); the contents of logs never reach rqlite, and the line counter is updated when the stream is closed. Every attempt of a step has its own stream; the stream of an attempt that was lost is marked `abandoned`. SQLite does not support partitioning, so hot tables are kept small: finished runs together with their journal move to an S3 archive (Protobuf) after `hot_retention` (14 days by default) and a pointer row stays in rqlite; `audit_events` (the store `rqlite`, AUD-001) is rotated by tables per month and exported to WORM/SIEM; with the store `victorialogs` only `audit_anchors` stays in rqlite. UUIDv7 identifiers are stored as BLOB(16). Secret material is not stored in these tables: credentials contains only envelope-encrypted ciphertext or an external reference; the `outputs` of steps (at most 4 KiB per step) are not meant for secrets (STO-004). The environment of a step and the env file are not stored in these tables (VAR-002, STO-003).
 
 # 9 API and events
 
@@ -880,6 +899,7 @@ The table `log_streams` holds only the metadata of a stream (tenant, the job's s
 | POST | /api/v1/pipelines:check | Preflight and static check of a script (PIP-016) |
 | POST | /api/v1/environments/{id}/approvals | Approve/reject with a comment and the expected policy digest |
 | GET | /api/v1/audit-events | Cursor pagination and filters; asynchronous export |
+| GET | /api/v1/audit-chain | The audit store, the newest anchor, the last verification and its result (AUD-004) |
 | GET | /api/v1/shards | Administrative: shards, load, tenants (SHD-001) |
 | GET | /api/v1/shards/{id}/backups | One list of rqlite and log backups, statuses and recovery progress (BKP-002) |
 | POST | /api/v1/shards/{id}/backups | Start a backup manually (`target`: state or logs), audited |
@@ -1015,7 +1035,7 @@ The inputs of a step go through the path Lua table -> canonical JSON -> validati
 
 **SEC-004 Privileged.** A privileged container, the Docker socket, hostNetwork, hostPID and hostPath are not supported in the MVP (RUN-012); Pod Security `restricted` on the profile's namespace blocks them independently of the platform.
 
-**SEC-005 Audit.** Audit is append-only, hash-chained per partition and exported to WORM/SIEM; reading or changing credentials is also logged, without values; changes of plain variables are logged only when the organization turns that on (VAR-006).
+**SEC-005 Audit.** Audit is append-only, hash-chained and exported to WORM/SIEM, and is stored in rqlite or, as an option, in a separate VictoriaLogs circuit (AUD-001); reading or changing credentials is also logged, without values; changes of plain variables are logged only when the organization turns that on (VAR-006).
 
 **SEC-006 Compliance.** Provide a controls mapping to SOC 2/ISO 27001, data retention, a DPA, tenant export/delete; certification is not an MVP feature.
 
@@ -1086,7 +1106,7 @@ The UI is built as an MPA, not an SPA: the HTML is produced entirely on the serv
 | Profiles and shards | Execution profiles and their settings (D-34), clusters and the state of job controllers, shards and tenants, quotas, storage use, the queue, the state of the log circuit (VictoriaLogs nodes and vlagent queues) and the reason a launch is suspended, drain (the Platform admin role) |
 | Backups | One section for rqlite and logs: the policy (schedule, retention, verification), manual start, history and statuses, the state of VictoriaLogs nodes and vlagent queues, the progress of automatic recovery and the loss journal (the Platform admin role, BKP-002) |
 | Plugin catalog | Publisher, version, digest, permissions, compatibility, security status, approved UI contributions |
-| Audit | Actor/action/resource/time filters, a details diff, export |
+| Audit | Actor/action/resource/time filters, a details diff, export; the store and the chain verification status (AUD-004) |
 
 # 14 CLI and local development
 
@@ -1148,7 +1168,7 @@ Delivery is a sequence of vertical slices with verifiable exit criteria rather t
 | M1 CI MVP | A GitHub/GitLab webhook, run creation, a Lua script with `job`, `sh`, `use`, `parallel`, `matrix`, `input`; the job controller and a Pod per step, shared storage and exchange through .env; logs in VictoriaLogs (two nodes, vlagent, the log-circuit module in the shard core process) with a window in an iframe and download; repeated Pod starts over a volume (RUN-014); artifacts, JUnit, OIDC/RBAC; a server-rendered UI with permanent links and the MVP extension points; one shard with a directory | Acceptance criteria 1--9, 11--12, 16--24 and 26--29 within the MVP scope; 500 concurrent steps |
 | M2 Managed CD | Environments, approvals, Helm/Kubernetes, Vault/OpenBao, OIDC cloud federation, deployment history and rollback; persistent volumes between runs (STO-008) | Criteria 10, 14 and 25 |
 | M3 Ecosystem | The plugin registry and SDK, the conformance container, the remaining 10 first-party extensions, a registry of Lua libraries, the full set of extension points, signing and provenance; session mode (7.4) if SES-001 is met | Criterion 15 for all 20 extensions; N/N-1 verified for `plugin.v1` |
-| M4 Enterprise scale | SAML, audit export, HA hardening, quotas and fairness, several shards and tenant transfer (SHD-003), a benchmark of 10 shards | NFR-006 for 10 shards; criteria 13 and 22 |
+| M4 Enterprise scale | SAML, audit export, HA hardening, quotas and fairness, several shards and tenant transfer (SHD-003), a benchmark of 10 shards | NFR-006 for 10 shards; criteria 13, 22 and 30 |
 | M5 Migration | Importers (they generate Lua), shadow runs, admin tooling, compatibility guides | MIG-001--MIG-003 on real projects |
 
 "Stage N" elsewhere in this document means the stage MN of this table.
@@ -1236,6 +1256,8 @@ Delivery is a sequence of vertical slices with verifiable exit criteria rather t
 28. The loss of one VictoriaLogs node volume leads to automatic recovery by copying a snapshot from the second node (a write pause of the order of seconds), the loss of both nodes to recovery from the newest verified backup, with no administrator action; when records are lost the range is written to the audit and shown in the UI; a backup with the status `bad` is not used (BKP-004).
 
 29. Variables of the four levels and the launch parameters reach a step as ordinary environment variables in the precedence of VAR-004; an invalid variable or parameter is rejected by the UI and the API before the run starts; a retry after a variable was corrected uses the new value; the header of the first step shows the effective values and the digest without secrets (VAR-002--VAR-005).
+
+30. With `audit_store=victorialogs` an audited action appears in the Audit screen and its chain verifies against the anchors; the audit nodes have no delete API; with `audit.on_unavailable=deny` an operation that must be audited is refused with `audit_unavailable` while the audit circuit is down and succeeds after it returns; the loss of an audit node is recovered automatically (AUD-001--AUD-006).
 
 # 20 Main risks and mitigations
 
