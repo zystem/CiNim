@@ -113,6 +113,8 @@ Each decision has a rationale and a condition under which it is revisited. Measu
 | D-32 | Metrics are scraped only from core. Pods are short-lived: the shim reports resource use, JVM counters and the application's own endpoints to core, which exposes aggregates | One scrape target, no series per Pod | None |
 | D-33 | The job controller keeps its own state in sqlite (adoption after a restart, retention of finished Pods, orphan sweep) and requires a namespace dedicated to it. Kubernetes access sits behind one seam so that decisions are tested without a cluster | Restarts must not lose Pods; the namespace is the controller's | None |
 | D-34 | Execution-profile settings edited in the UI: `infra_retries`, `log_max_bytes` (default 1 GiB), `log_spool_bytes` (10 MiB), `log_hold_timeout` (600 s) and `liveness_timeout` (300 s) | Each limit is explicit and bounded | None |
+| D-35 | Variables set in the UI (organization, group, project, pipeline) and launch parameters reach every step as ordinary environment variables of the container, with the current values at the moment the step's Pod is created; only the launch parameters are stored with the run. There is no snapshot of the variables for the run | A retry after fixing a variable sees the fix; nothing is added to rqlite; the script does not read the live variables, so replay stays deterministic (VAR-002). Other CI systems also read such variables when a job starts | Reproducing exactly what a past run used becomes a requirement that the log header (VAR-005) and the audit (VAR-006) cannot meet |
+| D-36 | `$CICD_ENV` is a file on the run volume in `state/`, outside the workspace and outside rqlite; the user writes it, nothing captures a step's environment automatically; `$CICD_OUTPUT` returns at most 4 KiB per step to the script and is journaled | A process cannot change its parent's environment, an explicit file works in any language; outside the workspace the checkout, `git clean`, artifacts, caches and tools that read `.env` files do not touch it; the journal stays small (STO-003) | Users routinely lose variables they expected to pass: automatic capture is reconsidered |
 
 # 1 Analysis method and criteria
 
@@ -499,7 +501,7 @@ return ci.pipeline {
 }
 ```
 
-The example shows the imperative capabilities (error handling, a manual decision, parallel branches) and passing data between steps through `.env` files.
+The example shows the imperative capabilities (error handling, a manual decision, parallel branches) and passing data between steps through the `$CICD_ENV` file.
 
 ```lua
 main = function(run)
@@ -517,9 +519,8 @@ main = function(run)
   end
 
   ci.job({ image = "alpine:3.21" }, function(j)
-    -- the step writes a KEY=VALUE pair to the files $CICD_OUTPUT and $CICD_ENV (STO-003)
-    local r = j.sh([[echo "VERSION=1.$(date +%Y%m%d)" >> "$CICD_OUTPUT"
-                     echo "VERSION=1.$(date +%Y%m%d)" >> "$CICD_ENV"]])
+    -- one line: export in this shell, pass on to the following steps ($CICD_ENV) and return to the script ($CICD_OUTPUT), STO-003
+    local r = j.sh([[export VERSION="1.$(date +%Y%m%d)" && echo "VERSION=$VERSION" | tee -a "$CICD_ENV" >> "$CICD_OUTPUT"]])
     ci.log("info", "version: " .. r.outputs.VERSION)
     j.sh('echo "building $VERSION"')     -- VERSION is already in the step environment
   end)
@@ -564,7 +565,7 @@ The platform works only inside Kubernetes and uses no permanent agents: there ar
 
 **RUN-009 Density.** One executor worker leads many runs (one Lua state per run) within the worker's memory limit and a configurable number of runs (200 by default).
 
-**RUN-010 Runner shim.** The shim is a static Nim binary (≤ 1 MiB packed), not a daemon: it reaches the Pod through a ConfigMap mount and is the entrypoint wrapper of the user's command (on the model of the Tekton entrypoint). The shim: prepares the environment (loads the env file, STO-003), starts the command as a child process in its own process group, at a lower CPU priority and a higher OOM score than its own so that it outlives trouble in the build, reads stdout/stderr, masks secrets (SEC-011, D-31), spools and delivers the log (RUN-007), samples the container's resources and the application's metrics (docs/metrics.md), enforces the step timeout (RUN-017), collects `$CICD_ENV` and `$CICD_OUTPUT` after the command ends, writes the result into the termination message (≤ 4 KiB: exit code, reason, digest of outputs) and into its own events in the Pod log (D-30), reports the result to core and waits for core's permission to exit (D-29), and exits with the command's code. The user's image is not modified and may be any Linux image. The shim uses the task token (SEC-010) only to talk to the collector and the scheduler. The build's output never goes to the Pod's own log: it holds only the shim's events.
+**RUN-010 Runner shim.** The shim is a static Nim binary (≤ 1 MiB packed), not a daemon: it reaches the Pod through a ConfigMap mount and is the entrypoint wrapper of the user's command (on the model of the Tekton entrypoint). The shim: prepares the environment (loads the env file, STO-003; prints the variables header of a run's first step, VAR-005), starts the command as a child process in its own process group, at a lower CPU priority and a higher OOM score than its own so that it outlives trouble in the build, reads stdout/stderr, masks secrets (SEC-011, D-31), spools and delivers the log (RUN-007), samples the container's resources and the application's metrics (docs/metrics.md), enforces the step timeout (RUN-017), collects `$CICD_ENV` and `$CICD_OUTPUT` after the command ends, writes the result into the termination message (≤ 4 KiB: exit code, reason, digest of outputs) and into its own events in the Pod log (D-30), reports the result to core and waits for core's permission to exit (D-29), and exits with the command's code. The user's image is not modified and may be any Linux image. The shim uses the task token (SEC-010) only to talk to the collector and the scheduler. The build's output never goes to the Pod's own log: it holds only the shim's events.
 
 **RUN-011 Services.** Service containers (`services` in `ci.job`) are started as a separate Pod of the job with a headless Service and a DNS name inside the run; a NetworkPolicy allows access only to Pods of the same run. A service Pod is created on first use and removed when the job ends; it is not part of the log of the steps but has its own log stream.
 
@@ -631,7 +632,7 @@ Names, semantics and journaling rules are normative; the signatures are fixed in
 | `j.checkout(opts)` | Inside `job` | Yes | Step: fetch the sources through an SCM plugin into `/cicd/workspace/src` |
 | `j.sh(cmd, opts)` | Inside `job` | Yes | Step: a shell command in a Pod with the job's image (or `opts.image`); options `timeout`, `metrics`, `mask`, `capture`, `ignore_failure`; result: `code`, `outputs`, optionally stdout |
 | `j.use(ref, inputs)` | Inside `job` | Yes | A plugin step by a pinned reference; inputs are validated against the plugin's JSON Schema; result: `code`, `outputs` |
-| `j.env(tbl)` | Inside `job` | Yes | Environment variables for the following steps of the job (without starting a Pod) |
+| `j.env(tbl)` | Inside `job` | Yes | Environment variables for the following steps of the job (without starting a Pod); the `env` level of VAR-004 |
 | `j.artifact`, `j.cache` | Inside `job` | Yes | Upload, download, save/restore |
 | `ci.parallel(tbl, opts)` | `main` | Yes | Parallel branches, `fail_fast` |
 | `ci.spawn(fn)`, `h:wait()`, `h:cancel()` | `main` | Yes | Asynchronous branches; the DAG is given by the order of spawn/wait |
@@ -647,13 +648,19 @@ Secret values never enter the Lua state: the script works with opaque handles (`
 
 ## 6.8 Storage and data exchange between steps
 
-**STO-001 Run storage.** One volume (PersistentVolumeClaim) is created for a run; the job controller creates it at the first step, mounts it at `/cicd/workspace` in the Pod of every step and deletes it on completion (STO-006). The size is given by `ci.pipeline{storage={size=...}}` within the project quota, the StorageClass by the execution profile. `ReadWriteMany` is preferred (parallel jobs on different nodes); with `ReadWriteOnce` the controller pins all Pods of the run to one node through pod affinity, which limits parallelism to the resources of that node (open question Q-11). A step Pod is disposable while the volume is persistent for the run, so a Pod can be created again and again (RUN-014). Storage is available only to Pods of the same run; between runs the volume is not reused by default (the exception is persistent volumes, STO-008).
+**STO-001 Run storage.** One volume (PersistentVolumeClaim) is created for a run; the job controller creates it at the first step, mounts it in the Pod of every step (`workspace/` at `/cicd/workspace`, `state/` at `/cicd/state`, STO-002) and deletes it on completion (STO-006). The size is given by `ci.pipeline{storage={size=...}}` within the project quota, the StorageClass by the execution profile. `ReadWriteMany` is preferred (parallel jobs on different nodes); with `ReadWriteOnce` the controller pins all Pods of the run to one node through pod affinity, which limits parallelism to the resources of that node (open question Q-11). A step Pod is disposable while the volume is persistent for the run, so a Pod can be created again and again (RUN-014). Storage is available only to Pods of the same run; between runs the volume is not reused by default (the exception is persistent volumes, STO-008).
 
-**STO-002 Layout.** `/cicd/workspace` is the common directory of all steps; `j.checkout()` places the sources in `/cicd/workspace/src`; the variable `CICD_WORKSPACE` points to the root. For a job with `workspace="isolated"` the controller mounts the subdirectory `.jobs/<job-id>` of the volume (`subPath`) as `/cicd/workspace` so that parallel branches do not disturb each other. Outside the volume the following are available: `/cicd/tmp` (an `emptyDir` per step) and `/cicd/run` (service files of the shim: `CICD_ENV`, `CICD_OUTPUT`, `CICD_MASK` and the directory `plugin/` of the plugin file contract, PLG-008).
+**STO-002 Layout.** `/cicd/workspace` is the common directory of all steps; `j.checkout()` places the sources in `/cicd/workspace/src`; the variable `CICD_WORKSPACE` points to the root. For a job with `workspace="isolated"` the controller mounts the subdirectory `.jobs/<job-id>` of the volume (`subPath`) as `/cicd/workspace` so that parallel branches do not disturb each other. `/cicd/state` is the `state/` subdirectory of the same volume, mounted separately and not part of the workspace; it holds the env file `env` (STO-003). It lies outside the workspace so that the checkout, `git clean`, uploads of artifacts and caches, the reuse of persistent volumes (STO-008) and tools that read `.env` files never touch it, and it is shared by all jobs of the run even when the workspace is isolated. Outside the volume the following are available: `/cicd/tmp` (an `emptyDir` per step) and `/cicd/run` (service files of the shim: `CICD_OUTPUT`, `CICD_MASK` and the directory `plugin/` of the plugin file contract, PLG-008).
 
-**STO-003 Passing data through .env.** Two files in a dotenv subset format are available to every step: `$CICD_ENV` --- variables that all following steps of the same job will receive (and that go to the journal as `j.env`) --- and `$CICD_OUTPUT` --- values that return to the script in `r.outputs` (journaled, reproducible on replay). Format: lines `NAME=VALUE`; a quoted value allows escape sequences; a multi-line value is `NAME<<DELIM` ... `DELIM`. The file is parsed by the shim with a parser (not `source` by a shell). Limits: the name matches `[A-Z_][A-Z0-9_]*`, a value is ≤ 8 KiB, at most 256 keys and 64 KiB per step. Between jobs, data is passed by Lua code (the `outputs` values in the options of the next `ci.job`) or by files in the shared workspace.
+**STO-003 Passing data between steps.** Two files in a dotenv-subset format are available to every step. `$CICD_ENV` (the file `/cicd/state/env`) carries variables from a step to all following steps of the run: the step writes it, and the shim loads it into the environment of every following step (precedence in VAR-004). It is stored neither in rqlite nor in the journal. `$CICD_OUTPUT` returns values to the script as `r.outputs` (journaled, reproducible on replay); it is for values the script itself needs, not for passing data between steps. Nothing captures the environment of a step automatically: a variable that a step exports reaches the following steps only when the step writes it to `$CICD_ENV`. In a shell one line does both:
 
-**STO-004 Exchange security.** A deny-list of names (SEC-011): `LD_*`, `PATH`, `IFS`, `BASH_ENV`, `ENV`, `SHELL`, `HOME`, `CICD_*`, `NODE_OPTIONS`, `PYTHONPATH` and the like; a value containing a known secret is rejected with the error `secret_in_output`. Outputs and env are not meant for secrets and are stored in rqlite; secrets are passed only as handles (6.7).
+```sh
+export A=1 && echo "A=$A" >> "$CICD_ENV"
+```
+
+and `export A=1 && echo "A=$A" | tee -a "$CICD_ENV" >> "$CICD_OUTPUT"` also returns it to the script; in other languages `$CICD_ENV` is opened in append mode (Python: `open(os.environ["CICD_ENV"], "a").write("A=1\n")`). Format: lines `NAME=VALUE`; a quoted value allows escape sequences; a multi-line value is `NAME<<DELIM` ... `DELIM`. The shim parses the files with a parser (not `source` by a shell). Limits: the name matches `[A-Z_][A-Z0-9_]*`; `$CICD_ENV` has values of at most 8 KiB, at most 256 keys and 64 KiB; `$CICD_OUTPUT` is at most 4 KiB per step in total (names and values) and 32 keys. Parallel branches write the same file, and resolving conflicts (the last write wins, nothing is merged) is the responsibility of the pipeline author. Between jobs, data passes through the env file, through Lua code (the `outputs` values in the options of the next `ci.job`) or through files in the workspace.
+
+**STO-004 Exchange security.** A deny-list of names (SEC-011): `LD_*`, `PATH`, `IFS`, `BASH_ENV`, `ENV`, `SHELL`, `HOME`, `CICD_*`, `NODE_OPTIONS`, `PYTHONPATH` and the like; a value containing a known secret is rejected with the error `secret_in_output`. Outputs, the env file and variables of kind plain are not meant for secrets; `outputs` are stored in rqlite (4 KiB per step), the env file only on the volume; secrets are passed only as handles (6.7) or as variables of kind secret (VAR-001).
 
 **STO-005 Storage and artifacts.** Storage lives until the end of the run and is not long-term storage. Results needed after the run are saved as artifacts (DAT-003); dependencies between runs are the cache (DAT-004).
 
@@ -676,6 +683,22 @@ Secret values never enter the Lua state: the script works with opaque handles (`
 **BKP-005 Backup and restore of rqlite.** Backup and restore of `state` use the built-in rqlite flags `-auto-backup`/`-auto-restore` with a JSON config (`type: s3`, interval, keys, `bucket`, `path`); no tool of our own and no `cicd admin restore-state` command are needed (A.11). Only the leader backs up and only when data has changed; measured: an upload takes 6--17 ms, the RPO on the test interval is exact (exactly the records after the last backup were lost, not one more), no effect on writes. Restore happens at node start, before it joins the cluster; the UI section lists the backups and their statuses. `-auto-restore` has been verified on a single node; the behaviour on a multi-node cluster (according to the rqlite documentation only the node that becomes leader actually applies the data, the others receive it through Raft) is still to be verified, as is a repeatable restore drill.
 
 **BKP-006 Verification and alerts.** Once per `verify_interval` the newest backup is verified: for `logs`, the snapshot is restored into a temporary VictoriaLogs instance and the record count and a control sample are compared with the manifest; for `state`, it is restored into a temporary rqlite instance and its integrity is checked. Alerts: no successful backup for more than two intervals, no verified backup for more than two verification periods, no node for a lag-free snapshot, recovery in progress, records lost during recovery (section 15).
+
+## 6.10 Variables and parameters
+
+Variables are set in the UI or the API, not in the pipeline script, at four levels: organization, group (a node of the project hierarchy, PRJ-001), project and pipeline (the build). A launch parameter (`params`, PIP-012) is given for one run.
+
+**VAR-001 Levels and kinds.** A variable has a name, a kind and a value. Kinds: plain (an ordinary string, number, boolean or choice) and secret (the value is kept in the credential store and is never shown again, 6.7). Variables are inherited down the hierarchy and an override at a lower level is shown explicitly (PRJ-001).
+
+**VAR-002 Delivery to steps.** Every plain variable and every launch parameter is available to every step as an ordinary environment variable (`$URL` in a shell, `os.environ["URL"]` in Python); no special syntax is needed. The job controller puts them into the `env` of the step's container when it creates the Pod, using the **current** values at that moment; secret variables go through the step's ephemeral Secret (6.7) at their current version. There is no snapshot of the variables for the whole run: a change takes effect for the steps that start after it, running steps are not affected, and a retry of a step after a variable was corrected gets the corrected value. Launch parameters are the exception: they are fixed when the run is created and stored with it (`runs.params`, at most 4 KiB). The script does not see the live variables: `run.params` and `run.env` hold only the launch parameters and the `env` declared in the pipeline itself, so that replay stays deterministic (PIP-004). The variables and the environment of a step are stored neither in rqlite nor on the volume.
+
+**VAR-003 Validation.** The UI and the API validate variables when they are saved and launch parameters when a run is created: the name matches `[A-Z_][A-Z0-9_]*` and is not in the deny-list of STO-004; the type, the required flag, the allowed choices, the pattern and the length (a value of at most 8 KiB) match the declaration; and the total of the variables stays within the limits of a step's environment. An error is reported before the run starts, not in the middle of the pipeline.
+
+**VAR-004 Precedence.** From the lowest to the highest: variables of the organization, the group, the project and the pipeline; launch parameters; the `env` of the pipeline and of the job; values written to `$CICD_ENV`; the `env` of the step. A step that writes `$CICD_ENV` thus deliberately overrides a variable from the UI.
+
+**VAR-005 Values in the log.** The header of the first step of a run prints in its log the effective values of the launch parameters and variables and a short digest (the first 12 hex digits of SHA-256 over the sorted `NAME=value` list). Secret variables are not printed (only their names are listed, with `***`) and do not enter the digest. The header goes through the ordinary log pipeline (DAT-001, masking included), so it is stored in VictoriaLogs and answers the question which values a run used.
+
+**VAR-006 Audit.** Changes of plain variables and parameters are not audited by default. A setting of the organization turns the audit on in one of two modes: `full` (the old and the new value are written in full to `audit_events`) or `digest` (for a value longer than 256 characters only its digest is written, and the value itself is found in the log header of a step that used it, VAR-005). Changes of secret variables are always audited, without values (SEC-005).
 
 # 7 Architecture
 
@@ -816,7 +839,7 @@ Data is divided into global data (the directory) and shard data. Every table of 
 | repositories | id, project_id, provider, external_id, url, default_branch | provider, external_id |
 | pipeline_definitions | id, project_id, repository_id, path, enabled | repository_id, path |
 | pipeline_bundles | id, definition_id, commit_sha, source, module_digests, api_version, runtime_version, digest | definition_id, digest |
-| runs | id, project_id, bundle_id, trigger_id, parent_run_id, state, actor_id, version, timestamps | project_id, created_at |
+| runs | id, project_id, bundle_id, trigger_id, parent_run_id, state, actor_id, params (launch parameters, at most 4 KiB), version, timestamps | project_id, created_at |
 | run_journal | run_id, seq, kind, fingerprint, payload, result, created_at | run_id, seq |
 | jobs | id, run_id, key, state, profile_id, attempt, version | run_id, key, attempt |
 | steps | id, run_id, job_id, ordinal, type, state, wait_reason, priority, profile_id, image, command, opts (the canonical JSON of the Lua step options), controller_id, pod_name, exit_code, termination (the reason the attempt ended), attempt, not_before, claimed_at, shim_n, shim_phase, shim_json, shim_seen_at, shim_source (the shim's last known state, D-30), version, timestamps | run_id, ordinal; state, profile_id, priority |
@@ -832,10 +855,11 @@ Data is divided into global data (the directory) and shard data. Every table of 
 | environments | id, project_id, name, tier, protection, lock_version | project_id, name |
 | deployments | id, environment_id, run_id, artifact_digest, state | environment_id, created_at |
 | credentials | id, scope, provider, encrypted_ref, metadata, version | scope, name |
+| variables | id, scope (organization, group, project, pipeline), scope_id, name, kind (plain, secret), value (plain only), credential_id (secret only), declaration (type, required, choices, pattern, max_length), version, updated_by, updated_at | scope, scope_id, name |
 | outbox | id, topic, payload, created_at, delivered_at | delivered_at, id |
 | audit_events | id, tenant_id, actor, action, resource, before, after, ip, time, prev_hash, hash | tenant_id, time, id |
 
-The table `log_streams` holds only the metadata of a stream (tenant, the job's stream in VictoriaLogs, the number of lines, the state); the contents of logs never reach rqlite, and the line counter is updated when the stream is closed. Every attempt of a step has its own stream; the stream of an attempt that was lost is marked `abandoned`. SQLite does not support partitioning, so hot tables are kept small: finished runs together with their journal move to an S3 archive (Protobuf) after `hot_retention` (14 days by default) and a pointer row stays in rqlite; `audit_events` is rotated by tables per month and exported to WORM/SIEM. UUIDv7 identifiers are stored as BLOB(16). Secret material is not stored in these tables: credentials contains only envelope-encrypted ciphertext or an external reference; the `outputs` of steps are not meant for secrets (STO-004).
+The table `log_streams` holds only the metadata of a stream (tenant, the job's stream in VictoriaLogs, the number of lines, the state); the contents of logs never reach rqlite, and the line counter is updated when the stream is closed. Every attempt of a step has its own stream; the stream of an attempt that was lost is marked `abandoned`. SQLite does not support partitioning, so hot tables are kept small: finished runs together with their journal move to an S3 archive (Protobuf) after `hot_retention` (14 days by default) and a pointer row stays in rqlite; `audit_events` is rotated by tables per month and exported to WORM/SIEM. UUIDv7 identifiers are stored as BLOB(16). Secret material is not stored in these tables: credentials contains only envelope-encrypted ciphertext or an external reference; the `outputs` of steps (at most 4 KiB per step) are not meant for secrets (STO-004). The environment of a step and the env file are not stored in these tables (VAR-002, STO-003).
 
 # 9 API and events
 
@@ -861,6 +885,7 @@ The table `log_streams` holds only the metadata of a stream (tenant, the job's s
 | POST | /api/v1/shards/{id}/backups | Start a backup manually (`target`: state or logs), audited |
 | PUT | /api/v1/shards/{id}/backup-policy | Change the schedule, retention and verification (BKP-001), with confirmation and audit |
 | GET, PUT | /api/v1/profile | The execution profile's settings (D-34); PUT takes any subset of `infra_retries`, `log_max_bytes`, `log_spool_bytes`, `log_hold_timeout`, `liveness_timeout`, each validated against its range |
+| GET, PUT | /api/v1/{scope}/{id}/variables | Variables of an organization, group, project or pipeline (VAR-001); PUT validates every variable (VAR-003) and answers with Problem Details naming the failing fields |
 | GET | /api/v1/launch-gate | The state of the launch gate and the reason (RUN-015) |
 | GET | /api/v1/components | Every component the core knows, its state and the time since its last sign of life (RUN-016) |
 | GET | /metrics | Prometheus text: component liveness, steps and runs by state, the gate, in-flight resource use and the application metrics aggregated over the steps in flight (docs/metrics.md) |
@@ -990,7 +1015,7 @@ The inputs of a step go through the path Lua table -> canonical JSON -> validati
 
 **SEC-004 Privileged.** A privileged container, the Docker socket, hostNetwork, hostPID and hostPath are not supported in the MVP (RUN-012); Pod Security `restricted` on the profile's namespace blocks them independently of the platform.
 
-**SEC-005 Audit.** Audit is append-only, hash-chained per partition and exported to WORM/SIEM; reading or changing credentials is also logged, without values.
+**SEC-005 Audit.** Audit is append-only, hash-chained per partition and exported to WORM/SIEM; reading or changing credentials is also logged, without values; changes of plain variables are logged only when the organization turns that on (VAR-006).
 
 **SEC-006 Compliance.** Provide a controls mapping to SOC 2/ISO 27001, data retention, a DPA, tenant export/delete; certification is not an MVP feature.
 
@@ -1002,7 +1027,7 @@ The inputs of a step go through the path Lua table -> canonical JSON -> validati
 
 **SEC-010 Job token and controller rights.** A step Pod gets only a projected ServiceAccount token (audience `cicd-shard`, TTL 10 minutes, bound to the Pod), mounted in the shim's service directory; `automountServiceAccountToken` is off for the step's ServiceAccount and it has no rights in the Kubernetes API. The collector and the scheduler verify the token's signature against the cluster's published keys and match the Pod's name with the expected attempt of the step (fencing). The job controller uses a Role only in the profile's namespace (pods, persistentvolumeclaims, secrets, services, leases, events), without cluster-wide rights; the bootstrap token is exchanged for a key pair (IAM-003), and all its actions are audited. `pods/exec` is granted only for collecting a spool that was not delivered (DAT-001).
 
-**SEC-011 Env file.** The files `CICD_ENV` and `CICD_OUTPUT` are parsed by a dotenv-subset parser, not by a shell; names are checked against the deny-list (STO-004), sizes are limited, values with control sequences are rejected; a violation ends the step with the code `env_rejected`.
+**SEC-011 Env file.** The files `CICD_ENV` and `CICD_OUTPUT` are parsed by a dotenv-subset parser, not by a shell; names are checked against the deny-list (STO-004), sizes are limited (STO-003), values with control sequences are rejected; a violation ends the step with the code `env_rejected`.
 
 **SEC-012 Tenant isolation in the cluster.** Pods of different tenants do not share a namespace `[recommendation]`: a namespace per tenant or a profile with ResourceQuota, LimitRange and NetworkPolicy; for untrusted pipelines (forks) the profile uses a RuntimeClass with a kernel sandbox (gVisor or Kata) and separate nodes.
 
@@ -1052,7 +1077,7 @@ The UI is built as an MPA, not an SPA: the HTML is produced entirely on the serv
 | **Screen** | **Required content** |
 |:---|:---|
 | Dashboard | Pinned projects, failing default branches, running/queued, deployments, the state of shards and execution profiles; extension-point widgets |
-| Project | Pipelines, recent runs, repository status, environments, schedules, settings; saved views |
+| Project | Pipelines, variables with their levels and effective values, recent runs, repository status, environments, schedules, settings; saved views |
 | Pipeline | The script with highlighting, the `check` result, parameters, triggers, library versions, the call journal of the last run |
 | Run graph | DAG, critical path, duration, retries, approvals; a table alternative for accessibility |
 | Job | Steps (Pods), a log window with search and live tail (iframe, DAT-007) and a "download" button (DAT-009), timestamps, profile, namespace and Pod name, resources, storage, artifacts, tests, retry/cancel |
@@ -1120,7 +1145,7 @@ Delivery is a sequence of vertical slices with verifiable exit criteria rather t
 
 | **Stage** | **Slice (what works end to end)** | **Exit criteria** |
 |:---|:---|:---|
-| M1 CI MVP | A GitHub/GitLab webhook, run creation, a Lua script with `job`, `sh`, `use`, `parallel`, `matrix`, `input`; the job controller and a Pod per step, shared storage and exchange through .env; logs in VictoriaLogs (two nodes, vlagent, the log-circuit module in the shard core process) with a window in an iframe and download; repeated Pod starts over a volume (RUN-014); artifacts, JUnit, OIDC/RBAC; a server-rendered UI with permanent links and the MVP extension points; one shard with a directory | Acceptance criteria 1--9, 11--12, 16--24 and 26--28 within the MVP scope; 500 concurrent steps |
+| M1 CI MVP | A GitHub/GitLab webhook, run creation, a Lua script with `job`, `sh`, `use`, `parallel`, `matrix`, `input`; the job controller and a Pod per step, shared storage and exchange through .env; logs in VictoriaLogs (two nodes, vlagent, the log-circuit module in the shard core process) with a window in an iframe and download; repeated Pod starts over a volume (RUN-014); artifacts, JUnit, OIDC/RBAC; a server-rendered UI with permanent links and the MVP extension points; one shard with a directory | Acceptance criteria 1--9, 11--12, 16--24 and 26--29 within the MVP scope; 500 concurrent steps |
 | M2 Managed CD | Environments, approvals, Helm/Kubernetes, Vault/OpenBao, OIDC cloud federation, deployment history and rollback; persistent volumes between runs (STO-008) | Criteria 10, 14 and 25 |
 | M3 Ecosystem | The plugin registry and SDK, the conformance container, the remaining 10 first-party extensions, a registry of Lua libraries, the full set of extension points, signing and provenance; session mode (7.4) if SES-001 is met | Criterion 15 for all 20 extensions; N/N-1 verified for `plugin.v1` |
 | M4 Enterprise scale | SAML, audit export, HA hardening, quotas and fairness, several shards and tenant transfer (SHD-003), a benchmark of 10 shards | NFR-006 for 10 shards; criteria 13 and 22 |
@@ -1209,6 +1234,8 @@ Delivery is a sequence of vertical slices with verifiable exit criteria rather t
 27. The rqlite and log backups run on schedule from the scheduler and manually from the single UI section; the log snapshot is taken on a node with no delivery lag and stops neither ingest nor job launching; without a suitable node the backup is postponed with an alert; the policy, history and statuses are visible in the UI and the actions are written to the audit (BKP-001--BKP-003, BKP-006).
 
 28. The loss of one VictoriaLogs node volume leads to automatic recovery by copying a snapshot from the second node (a write pause of the order of seconds), the loss of both nodes to recovery from the newest verified backup, with no administrator action; when records are lost the range is written to the audit and shown in the UI; a backup with the status `bad` is not used (BKP-004).
+
+29. Variables of the four levels and the launch parameters reach a step as ordinary environment variables in the precedence of VAR-004; an invalid variable or parameter is rejected by the UI and the API before the run starts; a retry after a variable was corrected uses the new value; the header of the first step shows the effective values and the digest without secrets (VAR-002--VAR-005).
 
 # 20 Main risks and mitigations
 
@@ -1355,7 +1382,7 @@ The sources for systems 11--20 and for the choice of the stack were checked on t
 
 # Appendix A. Design rationale and measurements
 
-This appendix holds the evidence behind the decision log (D-01 – D-34). Every number was measured on the stack described in the decision; where a measurement was taken on a different setup, that is said.
+This appendix holds the evidence behind the decision log (the decisions that rest on measurements). Every number was measured on the stack described in the decision; where a measurement was taken on a different setup, that is said.
 
 ## A.1 Method and environment
 
