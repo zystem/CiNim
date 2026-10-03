@@ -1,0 +1,136 @@
+# One release per shard, installed into the namespace <namespacePrefix>-<shard> (helm install cinim-001 ./cinim-shard -n cinim-001 --create-namespace),
+# with the subcharts rqlite and the log circuit (two VictoriaLogs nodes and vlagent) in the same release.
+# Required: image.repository, domain, curve.secretName, and in the multi mode routerUrl and routerKey.
+
+# The name of the shard: digits only, up to 16, immutable (SHD-001). Another cluster always means another shard name.
+shard: "001"
+
+# single: one shard in the cluster, its Ingress covers every organisation. multi: many shards, the router lists the organisations (SHD-006).
+mode: single
+
+# The host name and the path in front of <org>: https://<domain><basePath>
+domain: ""
+basePath: "/"
+
+# The prefix of the namespaces: the shard lives in <namespacePrefix>-<shard>, an organisation in <namespacePrefix>-<shard>-<slug>.
+namespacePrefix: cinim
+
+# What the core registers at the router as the base of the organisation URLs. Empty: https://<domain><basePath>.
+publicUrl: ""
+
+# multi mode: the base URL of the router (with its base path, no trailing slash), the shared key (at least 16 characters, the same as the
+# router's routerKey) and the seconds between two registrations.
+routerUrl: ""
+routerKey: ""
+routerInterval: 60
+
+image:
+  repository: ""
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# The Secret that holds the CURVE keys of the transport (D-24): core.pub, core.key, client.pub, client.key. The core gets the first two,
+# the executor the other two and core.pub.
+curve:
+  secretName: ""
+
+# Where the core finds rqlite and the log circuit. Empty: the services of the subcharts below. Set these (and turn the subcharts off with
+# rqlite.enabled / logs.enabled) to use a database and VictoriaLogs nodes that you run yourself.
+rqliteUrl: ""
+logs:
+  enabled: true
+  # the nodes in the order of vlagent's remoteWrite list
+  victoriaLogsUrls: []
+  vlagentUrl: ""
+
+# false turns /metrics of the core off (CINIM_METRICS). monitor.enabled creates the scrape objects of the monitoring operator: for the core
+# (ServiceMonitor or VMServiceScrape, it has a Service) and for rqlite (PodMonitor or VMPodScrape, its chart has no monitor). operator is
+# `prometheus` (the Prometheus operator CRDs) or `victoriametrics` (the VictoriaMetrics operator's own objects); the CRDs must exist, so
+# it is off by default. The log circuit has its own switches below.
+metrics:
+  enabled: true
+  monitor:
+    enabled: false
+    operator: prometheus
+    interval: 30s
+    labels: {}
+
+# The ValidatingAdmissionPolicy that keeps the core's cluster-wide rights inside <namespacePrefix>-<shard>-* (SHD-007, T-45).
+# Stable since Kubernetes 1.30; on an older cluster turn it off at your own risk.
+admissionPolicy:
+  enabled: true
+
+ingress:
+  className: ""
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
+core:
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+executor:
+  enabled: true
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+# The subcharts (official charts). The names are fixed so that the core finds them.
+rqlite:
+  enabled: true
+  fullnameOverride: rqlite
+  replicaCount: 3
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 128Mi}
+  persistence:
+    enabled: true
+    size: 10Gi
+    # storageClassName: the cluster's default class when empty/unset (the same key exists below for the other subcharts)
+
+# Two independent nodes on persistent volumes (DAT-010); a single node is not supported in production.
+victorialogs-0:
+  server:
+    fullnameOverride: victorialogs-0
+    retentionPeriod: "1"
+    persistentVolume:
+      enabled: true
+      size: 5Gi
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 512Mi}
+    serviceMonitor:
+      enabled: false
+victorialogs-1:
+  server:
+    fullnameOverride: victorialogs-1
+    retentionPeriod: "1"
+    persistentVolume:
+      enabled: true
+      size: 5Gi
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 512Mi}
+    serviceMonitor:
+      enabled: false
+
+# vlagent: the core posts NDJSON to it, it replicates to both nodes with its own disk buffer per destination.
+vlagent:
+  fullnameOverride: vlagent
+  remoteWrite:
+    - url: http://victorialogs-0:9428
+    - url: http://victorialogs-1:9428
+  maxDiskUsagePerURL: 1GiB
+  persistentVolume:
+    enabled: true
+    size: 2Gi
+  service:
+    enabled: true
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 128Mi}
+  serviceMonitor:
+    enabled: false

@@ -1,0 +1,15 @@
+dependencies:
+- name: rqlite
+  repository: https://rqlite.github.io/helm-charts
+  version: 2.0.0
+- name: victoria-logs-single
+  repository: https://victoriametrics.github.io/helm-charts
+  version: 0.13.10
+- name: victoria-logs-single
+  repository: https://victoriametrics.github.io/helm-charts
+  version: 0.13.10
+- name: victoria-logs-agent
+  repository: https://victoriametrics.github.io/helm-charts
+  version: 0.2.10
+digest: sha256:3367d14a574079621a07ce4c47a6ea6e07efaa3143a9cdfbc066c81b3bf19b3b
+generated: "2026-10-04T01:51:35.093430188+03:00"

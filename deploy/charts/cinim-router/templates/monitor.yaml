@@ -1,0 +1,21 @@
+{{- if and .Values.metrics.enabled .Values.metrics.monitor.enabled }}
+# /metrics of the router (cinim_router_core_up{core}); the router has a Service, so a ServiceMonitor, as for the core of a shard.
+apiVersion: {{ if eq .Values.metrics.monitor.operator "victoriametrics" }}operator.victoriametrics.com/v1beta1{{ else }}monitoring.coreos.com/v1{{ end }}
+kind: {{ if eq .Values.metrics.monitor.operator "victoriametrics" }}VMServiceScrape{{ else }}ServiceMonitor{{ end }}
+metadata:
+  name: cinim-router
+  namespace: {{ .Values.sharedNamespace }}
+  labels:
+    app.kubernetes.io/name: cinim-router
+    {{- with .Values.metrics.monitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cinim-router
+  endpoints:
+    - port: http
+      path: {{ include "cinim-router.base" . }}/metrics
+      interval: {{ .Values.metrics.monitor.interval }}
+{{- end }}

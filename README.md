@@ -49,7 +49,7 @@ Dependencies that are not plain nimble packages:
 
 Integration tests run against a real cluster and are described in the header of `tests/integration/tm1skeleton.nim`. They need rqlite
 (`CINIM_RQLITE_URL`), a Kubernetes client (`K8S_PREFIX`), VictoriaLogs and vlagent (`CINIM_VICTORIALOGS_URL`, `CINIM_VLAGENT_URL`). A test
-cluster is brought up with `deploy/cluster/helmfile.yaml` (rqlite, VictoriaLogs and vlagent from their official charts). Core can run on a
+cluster is brought up with the chart `deploy/charts/cinim-shard`, which brings rqlite, VictoriaLogs and vlagent as subcharts (docs/deployment.md). Core can run on a
 separate host that the Pods can reach (`CINIM_CORE_HOST`, systemd units in `deploy/host`); `tools/dev/` has port-forward helpers.
 
 Only the shim and the CLI are required to be static; the other services may carry libraries in images no larger than Alpine (the core needs OpenSSL, `-d:ssl`, to reach a router over https). Static binaries for Pods and for the test host (ZeroMQ and libsodium linked in, UPX for the shim) are built in an Alpine container:

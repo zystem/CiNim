@@ -1,0 +1,106 @@
+# One replica: the core holds the queue, the leases and the log circuit of the shard in one process (D-23).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cinim-core
+  namespace: {{ include "cinim-shard.ns" . }}
+  labels:
+    app.kubernetes.io/name: cinim-core
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cinim-core
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cinim-core
+        {{- include "cinim-shard.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: cinim-core
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: core
+          image: {{ include "cinim-shard.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/core"]
+          ports:
+            - {name: http, containerPort: 18081}
+            - {name: controller, containerPort: 19740}
+            - {name: executor, containerPort: 19741}
+            - {name: stepreport, containerPort: 19742}
+            - {name: logingest, containerPort: 19743}
+          env:
+            - {name: CINIM_SHARD, value: {{ .Values.shard | quote }}}
+            - {name: CINIM_NAMESPACE_PREFIX, value: {{ .Values.namespacePrefix | quote }}}
+            - {name: CINIM_PUBLIC_URL, value: {{ include "cinim-shard.publicUrl" . | quote }}}
+            - {name: CINIM_RQLITE_URL, value: {{ include "cinim-shard.rqliteUrl" . | quote }}}
+            - {name: CINIM_VICTORIALOGS_URL, value: {{ include "cinim-shard.victoriaLogsUrls" . | quote }}}
+            - {name: CINIM_VLAGENT_URL, value: {{ include "cinim-shard.vlagentUrl" . | quote }}}
+            - {name: CINIM_METRICS, value: {{ .Values.metrics.enabled | quote }}}
+            - {name: CINIM_CERTS, value: /etc/cinim}
+            {{- if eq .Values.mode "multi" }}
+            - {name: CINIM_ROUTER_URL, value: {{ required "routerUrl is required in the multi mode" .Values.routerUrl | quote }}}
+            - {name: CINIM_ROUTER_INTERVAL, value: {{ .Values.routerInterval | quote }}}
+            - name: CINIM_ROUTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cinim-router-key
+                  key: CINIM_ROUTER_KEY
+            {{- end }}
+          volumeMounts:
+            - {name: curve, mountPath: /etc/cinim/curve, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+          readinessProbe:
+            httpGet:
+              path: /api/v1/components
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /api/v1/components
+              port: http
+            periodSeconds: 20
+            failureThreshold: 6
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.core.resources | nindent 12 }}
+      volumes:
+        - name: curve
+          secret:
+            secretName: {{ required "curve.secretName is required" .Values.curve.secretName }}
+            defaultMode: 0440
+            # the core's own key pair only (D-24); the client key stays out of its Pod
+            items:
+              - {key: core.pub, path: core.pub}
+              - {key: core.key, path: core.key}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cinim-core
+  namespace: {{ include "cinim-shard.ns" . }}
+  labels:
+    app.kubernetes.io/name: cinim-core
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: cinim-core
+  ports:
+    - {name: http, port: 80, targetPort: http}
+    - {name: controller, port: 19740, targetPort: controller}
+    - {name: executor, port: 19741, targetPort: executor}
+    - {name: stepreport, port: 19742, targetPort: stepreport}
+    - {name: logingest, port: 19743, targetPort: logingest}

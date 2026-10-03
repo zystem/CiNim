@@ -1,0 +1,48 @@
+{{- if and .Values.metrics.enabled .Values.metrics.monitor.enabled }}
+# The core's /metrics (docs/metrics.md) through its Service. A ServiceMonitor (VMServiceScrape) rather than a PodMonitor: the core has a
+# Service with the port already, and a Service lists only ready Pods. `metrics.monitor.operator` picks the operator's objects.
+apiVersion: {{ include "cinim-shard.monitorApi" . }}
+kind: {{ include "cinim-shard.serviceMonitorKind" . }}
+metadata:
+  name: cinim-core
+  namespace: {{ include "cinim-shard.ns" . }}
+  labels:
+    app.kubernetes.io/name: cinim-core
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+    {{- with .Values.metrics.monitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cinim-core
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.monitor.interval }}
+  targetLabels: [cinim.io/shard]
+{{- end }}
+{{- if and .Values.rqlite.enabled .Values.metrics.monitor.enabled }}
+---
+# rqlite's own chart has no monitor and two Services over the same Pods (a Service scrape would read every Pod twice), so its Pods are
+# scraped directly (PodMonitor, VMPodScrape): /debug/prometheus on the HTTP port.
+apiVersion: {{ include "cinim-shard.monitorApi" . }}
+kind: {{ include "cinim-shard.podMonitorKind" . }}
+metadata:
+  name: cinim-rqlite
+  namespace: {{ include "cinim-shard.ns" . }}
+  labels:
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+    {{- with .Values.metrics.monitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: voter
+  podMetricsEndpoints:
+    - port: http
+      path: /debug/prometheus
+      interval: {{ .Values.metrics.monitor.interval }}
+{{- end }}

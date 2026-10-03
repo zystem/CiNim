@@ -1,0 +1,64 @@
+# The pages of the shard itself: sign-in, the choice of an organisation, administration (SHD-006), under <basePath>/<shard>/.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cinim-shard
+  namespace: {{ include "cinim-shard.ns" . }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.domain | quote }}]
+      secretName: {{ required "ingress.tls.secretName is required when tls is enabled" .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ required "domain is required" .Values.domain | quote }}
+      http:
+        paths:
+          - path: {{ include "cinim-shard.base" . }}/{{ .Values.shard }}
+            pathType: Prefix
+            backend:
+              service:
+                name: cinim-core
+                port:
+                  name: http
+{{- if eq .Values.mode "single" }}
+---
+# single mode: one Ingress for the whole domain and path that goes straight to the core and covers every organisation (SHD-006).
+# A second shard release asks for the same host and path and is refused.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cinim-organizations
+  namespace: {{ include "cinim-shard.ns" . }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.domain | quote }}]
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.domain | quote }}
+      http:
+        paths:
+          - path: {{ if eq (include "cinim-shard.base" .) "" }}/{{ else }}{{ include "cinim-shard.base" . }}{{ end }}
+            pathType: Prefix
+            backend:
+              service:
+                name: cinim-core
+                port:
+                  name: http
+{{- end }}

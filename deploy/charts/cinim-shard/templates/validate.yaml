@@ -1,0 +1,9 @@
+{{- /*
+The release lives in the namespace <namespacePrefix>-<shard>: install with `-n <prefix>-<shard> --create-namespace`. The subcharts (rqlite,
+VictoriaLogs) put their objects into the namespace of the release, so the namespace cannot be made by this chart, and everything here
+(the rights, the admission policy that keeps the core in <prefix>-<shard>-*) is built on that name.
+Two releases of one shard collide on the cluster-scoped objects (the ClusterRoles, the policy, in `single` mode the marker) and the second fails.
+*/ -}}
+{{- if ne .Release.Namespace (include "cinim-shard.expectedNs" .) }}
+{{- fail (printf "install this release into the namespace %q (helm install ... -n %s --create-namespace): the namespace is <namespacePrefix>-<shard>, got %q" (include "cinim-shard.expectedNs" .) (include "cinim-shard.expectedNs" .) .Release.Namespace) }}
+{{- end }}

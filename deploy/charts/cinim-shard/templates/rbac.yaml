@@ -1,0 +1,104 @@
+# The only cluster-wide right of the core (SHD-007, T-45): namespaces and the objects of an organisation. It may create and delete
+# these objects and nothing else; the ValidatingAdmissionPolicy (admissionpolicy.yaml) keeps every such request inside
+# {{ include "cinim-shard.ns" . }}-*. Reading Secrets and the like is not granted, so the reconciliation (SHD-008) creates and
+# treats "already exists" as done.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "cinim-shard.ns" . }}-core
+  labels:
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, create, delete]
+  - apiGroups: [""]
+    resources: [serviceaccounts, secrets, resourcequotas, limitranges]
+    verbs: [create, delete]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [create, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [create, delete]
+  # giving the step role away is allowed for that role only
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [{{ include "cinim-shard.stepRunner" . | quote }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "cinim-shard.ns" . }}-core
+  labels:
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "cinim-shard.ns" . }}-core
+subjects:
+  - kind: ServiceAccount
+    name: cinim-core
+    namespace: {{ include "cinim-shard.ns" . }}
+---
+# What the job controller of an organisation may do in the namespace of that organisation (the core binds it with a RoleBinding there).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "cinim-shard.stepRunner" . }}
+  labels:
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, get, list, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  # only to pull an undelivered spool out of a Pod (D-29); without it that fallback does not run
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [configmaps, secrets]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims, services]
+    verbs: [create, get, list, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create, get, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+{{- if eq .Values.mode "multi" }}
+---
+# multi mode: the core creates and deletes the Ingress <basePath>/<slug>/ of an organisation in the namespace of the shard.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cinim-core-ingress
+  namespace: {{ include "cinim-shard.ns" . }}
+rules:
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, create, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cinim-core-ingress
+  namespace: {{ include "cinim-shard.ns" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cinim-core-ingress
+subjects:
+  - kind: ServiceAccount
+    name: cinim-core
+    namespace: {{ include "cinim-shard.ns" . }}
+{{- end }}

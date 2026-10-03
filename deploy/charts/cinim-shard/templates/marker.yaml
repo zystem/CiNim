@@ -1,0 +1,12 @@
+{{- if eq .Values.mode "single" }}
+# single mode: a second shard release in the cluster must fail (SHD-006). Its Ingress for the same host and path may be rejected by
+# the ingress controller; independently of that this cluster-scoped object has a fixed name, so a second release that creates it
+# fails with a conflict of ownership.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cinim-single-mode-marker
+  labels:
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+rules: []
+{{- end }}

@@ -20,9 +20,15 @@ ttl: 300
 # false turns the page and the chart off; /list stays for the cores (router.listOrganizations).
 listOrganizations: true
 
-# false turns /metrics off (router.metrics).
+# false turns /metrics off (router.metrics). monitor.enabled creates a ServiceMonitor (operator: prometheus) or a VMServiceScrape
+# (operator: victoriametrics) for it; the CRD must exist, so it is off by default.
 metrics:
   enabled: true
+  monitor:
+    enabled: false
+    operator: prometheus
+    interval: 30s
+    labels: {}
 
 ingress:
   className: ""

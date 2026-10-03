@@ -84,7 +84,7 @@ are injected into foreign processes: this keeps the shim at about 0.5 MiB and cr
 Prometheus polls **only the core**: `GET /metrics` (Prometheus format 0.0.4). Step Pods are short-lived and are not polled, so there are
 no per-Pod series, only aggregates. The shim sends its numbers to the core with its heartbeat (every 5 s and on every event).
 
-The endpoint can be turned off in Helm (`metrics.enabled: false`, on by default; it sets `CINIM_METRICS=false` for the core): the route is then a 404. The router has the same switch (`ROUTER_METRICS`).
+The endpoint can be turned off in Helm (`metrics.enabled: false`, on by default; it sets `CINIM_METRICS=false` for the core): the route is then a 404. The router has the same switch (`ROUTER_METRICS`). The charts create the scrape objects of the Prometheus or the VictoriaMetrics operator with `metrics.monitor.enabled` (docs/deployment.md).
 
 | Metric | What |
 |---|---|

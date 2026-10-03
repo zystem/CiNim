@@ -14,6 +14,6 @@
     "routerKey": {"type": "string", "minLength": 16},
     "ttl": {"type": "integer", "minimum": 30},
     "listOrganizations": {"type": "boolean"},
-    "metrics": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
+    "metrics": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "monitor": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "operator": {"enum": ["prometheus", "victoriametrics"]}, "interval": {"type": "string"}}}}}
   }
 }

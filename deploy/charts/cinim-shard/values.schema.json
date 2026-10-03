@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["shard", "mode", "domain", "basePath", "namespacePrefix", "image", "curve"],
+  "properties": {
+    "shard": {"type": "string", "pattern": "^[0-9]{1,16}$"},
+    "mode": {"enum": ["single", "multi"]},
+    "domain": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"},
+    "basePath": {"type": "string", "pattern": "^/([-a-zA-Z0-9._~/]*)$"},
+    "namespacePrefix": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,28}[a-z0-9])?$"},
+    "publicUrl": {"type": "string", "pattern": "^(https?://.+)?$"},
+    "routerUrl": {"type": "string", "pattern": "^(https?://.+)?$"},
+    "routerKey": {"type": "string"},
+    "routerInterval": {"type": "integer", "minimum": 10},
+    "image": {"type": "object", "required": ["repository"], "properties": {"repository": {"type": "string", "minLength": 1}}},
+    "curve": {"type": "object", "required": ["secretName"], "properties": {"secretName": {"type": "string", "minLength": 1}}},
+    "rqliteUrl": {"type": "string", "pattern": "^(https?://.+)?$"},
+    "logs": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "victoriaLogsUrls": {"type": "array", "items": {"type": "string"}}, "vlagentUrl": {"type": "string"}}},
+    "metrics": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "monitor": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "operator": {"enum": ["prometheus", "victoriametrics"]}, "interval": {"type": "string"}}}}},
+    "admissionPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
+  },
+  "if": {"properties": {"mode": {"const": "multi"}}},
+  "then": {
+    "required": ["routerUrl", "routerKey"],
+    "properties": {"routerUrl": {"minLength": 1}, "routerKey": {"minLength": 16}}
+  }
+}

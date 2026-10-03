@@ -1,0 +1,50 @@
+{{- if .Values.admissionPolicy.enabled }}
+# Keeps the cluster-wide right of the core inside its own namespaces (SHD-007, T-45): whatever the core creates or deletes must be
+# in a namespace named {{ include "cinim-shard.ns" . }}-<slug> (or be that namespace itself), and the only role it may bind is the step role.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "cinim-shard.ns" . }}-core
+  labels:
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [namespaces, serviceaccounts, secrets, resourcequotas, limitranges]
+      - apiGroups: [apps]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [deployments]
+      - apiGroups: [networking.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [networkpolicies]
+      - apiGroups: [rbac.authorization.k8s.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [rolebindings]
+  matchConditions:
+    - name: from-the-core-of-this-shard
+      expression: 'request.userInfo.username == {{ include "cinim-shard.coreUser" . | quote }}'
+  validations:
+    - expression: >-
+        (request.resource.resource == "namespaces" ? request.name : request.namespace).startsWith({{ printf "%s-" (include "cinim-shard.ns" .) | quote }})
+      message: 'the core of shard {{ .Values.shard }} may only touch namespaces named {{ include "cinim-shard.ns" . }}-*'
+    - expression: >-
+        request.resource.resource != "rolebindings" || request.operation == "DELETE" || object.roleRef.name == {{ include "cinim-shard.stepRunner" . | quote }}
+      message: 'the core may only bind the role {{ include "cinim-shard.stepRunner" . }}'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "cinim-shard.ns" . }}-core
+  labels:
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "cinim-shard.ns" . }}-core
+  validationActions: [Deny]
+{{- end }}

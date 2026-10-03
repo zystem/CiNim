@@ -6,3 +6,4 @@ tests/certs/*.key
 tests/certs/curve/*.key
 /docs-tr/
 /state/
+deploy/charts/*/charts/*.tgz
