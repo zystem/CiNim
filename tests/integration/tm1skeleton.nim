@@ -302,6 +302,7 @@ suite "walking skeleton end to end":
       var jcEnv = @[("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
         ("CINIM_CORE_ADDR", "tcp://" & host & ":" & $controllerPort),
         ("CINIM_SHIM_BIN", buildDir / (if staticShim.len > 0: "cicd-shim-logging" else: "cicd-shim")),
+        ("CINIM_STATE_DIR", buildDir / "ctrl-state"),   # the controller's sqlite state stays under build/, not in the working directory
         ("CINIM_LOG_HOLD_TIMEOUT", "20")]   # short, so the logs_undelivered scenario below does not take 10 minutes
       if remoteCore:   # the Pod's shim dials these (cluster-reachable), see the remoteCore comment above
         jcEnv.add ("CINIM_COLLECTOR_ADDR", "tcp://" & host & ":" & $logIngestPort)

@@ -5,3 +5,4 @@ nimcache/
 tests/certs/*.key
 tests/certs/curve/*.key
 /docs-tr/
+/state/
