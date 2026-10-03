@@ -27,7 +27,7 @@ did not pass the profile's setting; normally the profile applies.
 
 ## Cluster requirements
 
-The job controller assumes that **the namespace for steps is dedicated and holds nothing but step Pods**. It decides itself which Pods in
+The job controller assumes that **the namespace for steps is dedicated and holds nothing but step Pods** (by default the organisation's namespace `cinim-<org>`; the objects the chart puts there for routing, an Ingress and its Service, are left alone). It decides itself which Pods in
 it belong to it: a Pod that is not in its state is considered orphaned and is deleted. Do not put foreign Pods there. The rights needed are
 `pods` (create, get, list, delete), `pods/log` (get), `pods/exec` (create; only to pull out an undelivered spool, if it is withheld that fallback
 simply does not run), and `configmaps` and `secrets` (create, get) for delivering the shim and the CURVE keys.
