@@ -6,7 +6,7 @@
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
-import std/[json, strutils]
+import std/[json, os, strutils]
 import guildenstern/[dispatcher, httpserver]
 import scheduler, loggate, logcircuit, retrypolicy
 
@@ -18,6 +18,8 @@ proc problem(status: HttpCode; code, detail: string) =
 
 proc jsonOk(status: HttpCode; body: JsonNode) =
   reply(status, $body, ["Content-Type: application/json"])
+
+let metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
 
 var coreRef: Core   ## set once at startup (main.nim); read-only after that, one HTTP thread pool
 
@@ -32,6 +34,9 @@ proc onRequest() {.raises: [], gcsafe.} =
       let qpos = uri.find('?')
       let path = if qpos >= 0: uri[0 ..< qpos] else: uri
       if path == "/metrics":
+        if not metricsOn:
+          problem(Http404, "not_found", "metrics are turned off")
+          return
         reply(Http200, coreRef.renderCoreMetrics(), ["Content-Type: text/plain; version=0.0.4; charset=utf-8"])
         return
       if path == "/api/v1/components":

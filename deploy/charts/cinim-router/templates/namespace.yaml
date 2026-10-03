@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.sharedNamespace }}
+  labels:
+    app.kubernetes.io/part-of: cinim
+    pod-security.kubernetes.io/enforce: restricted

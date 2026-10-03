@@ -1,0 +1,65 @@
+# One replica: the registry lives in the memory of the process, a second replica would hold a different half of the lists.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cinim-router
+  namespace: {{ .Values.sharedNamespace }}
+  labels:
+    app.kubernetes.io/name: cinim-router
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cinim-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cinim-router
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: router
+          image: "{{ required "image.repository is required" .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ROUTER_PORT
+              value: "8080"
+            - name: ROUTER_BASE_PATH
+              value: {{ .Values.basePath | quote }}
+            - name: ROUTER_TTL
+              value: {{ .Values.ttl | quote }}
+            - name: ROUTER_LIST_PAGE
+              value: {{ .Values.listOrganizations | quote }}
+            - name: ROUTER_METRICS
+              value: {{ .Values.metrics.enabled | quote }}
+            - name: ROUTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cinim-router
+                  key: ROUTER_KEY
+          readinessProbe:
+            httpGet:
+              path: {{ include "cinim-router.base" . }}/healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: {{ include "cinim-router.base" . }}/healthz
+              port: http
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

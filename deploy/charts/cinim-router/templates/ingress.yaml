@@ -1,0 +1,30 @@
+# The router proxies nothing: this Ingress is only the way to its page and to /list (SHD-006). With basePath "/" it also owns the bare domain.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cinim-router
+  namespace: {{ .Values.sharedNamespace }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.domain | quote }}]
+      secretName: {{ required "ingress.tls.secretName is required when tls is enabled" .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ required "domain is required" .Values.domain | quote }}
+      http:
+        paths:
+          - path: {{ if eq (include "cinim-router.base" .) "" }}/{{ else }}{{ include "cinim-router.base" . }}{{ end }}
+            pathType: Prefix
+            backend:
+              service:
+                name: cinim-router
+                port:
+                  name: http

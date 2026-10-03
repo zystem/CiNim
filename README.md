@@ -14,6 +14,7 @@ section 17 of the specification).
 | job controller | `src/jobcontroller` | creates and tracks step Pods (logic is separate from Kubernetes: `logic.nim` and `backend.nim`), state in sqlite |
 | executor | `src/executorsvc`, `src/executor` | Lua sandbox, journal, replay |
 | shim | `src/shim` | runs the step's command in the Pod: secret masking, log spool, metrics, timeout, events in the Pod log |
+| router | `src/router`, `deploy/charts/cinim-router` | the `multi` mode (SHD-006): a registry of organisations that the cores register with, a page with their availability and a JSON list; proxies nothing |
 | contracts | `proto/` | Protobuf, `buf lint`, compatibility tests |
 
 Transport between services: ZeroMQ with CURVE (D-24). HTTP layer: GuildenStern (D-25). Kubernetes client: the official C client (D-26).

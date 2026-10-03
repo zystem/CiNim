@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cinim-router
+description: The router of the multi mode (SHD-006) - a registry of organisations that the cores register with, a page and a JSON list. Install once per cluster.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

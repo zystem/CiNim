@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "sharedNamespace", "domain", "basePath", "routerKey"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {"repository": {"type": "string", "minLength": 1}}
+    },
+    "sharedNamespace": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"},
+    "domain": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"},
+    "basePath": {"type": "string", "pattern": "^/([-a-zA-Z0-9._~/]*)$"},
+    "routerKey": {"type": "string", "minLength": 16},
+    "ttl": {"type": "integer", "minimum": 30},
+    "listOrganizations": {"type": "boolean"},
+    "metrics": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
+  }
+}

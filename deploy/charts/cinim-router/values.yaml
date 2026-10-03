@@ -1,0 +1,36 @@
+# Required: image.repository, domain, routerKey.
+image:
+  repository: ""
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# The shared namespace the chart creates (SHD-006); by default it is the namespace prefix the shards use.
+sharedNamespace: cinim
+
+# The host name and the path in front of <org>: https://<domain><basePath>
+domain: ""
+basePath: "/"
+
+# The shared key of the router and every core (at least 16 characters).
+routerKey: ""
+
+# How long a registration stays valid, seconds (router.ttl).
+ttl: 300
+
+# false turns the page and the chart off; /list stays for the cores (router.listOrganizations).
+listOrganizations: true
+
+# false turns /metrics off (router.metrics).
+metrics:
+  enabled: true
+
+ingress:
+  className: ""
+  annotations: {}
+  tls:
+    enabled: false
+    secretName: ""
+
+resources:
+  requests: {cpu: 10m, memory: 16Mi}
+  limits: {memory: 64Mi}
