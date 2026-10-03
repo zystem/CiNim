@@ -1,0 +1,23 @@
+# The registry of the MVP stand: the plain Docker registry (distribution, image `registry`) from the community chart twuni/docker-registry,
+# until the images are released to ghcr by Woodpecker.
+#   helm repo add twuni https://twuni.github.io/docker-registry.helm
+#   helm install registry twuni/docker-registry -n registry --create-namespace -f deploy/registry/values.yaml \
+#     --set 'ingress.hosts[0]=registry.<your-domain>'
+# The Ingress host is yours (an A record to the ingress controller); the value below is a placeholder. No authentication: LAN test cluster only.
+# Plain HTTP through the Ingress: a node's containerd and a workstation's Docker must be told to accept it for that host (insecure registry).
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - registry.example.com
+  annotations:
+    # image layers are large
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: directpv-min-io
+resources:
+  requests: {cpu: 20m, memory: 32Mi}
+  limits: {memory: 256Mi}

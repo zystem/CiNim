@@ -81,6 +81,23 @@ VMPodScrape). A ServiceMonitor is used wherever there is a Service with the port
 Pods; rqlite's chart has two Services over the same Pods, so its Pods are scraped directly. The VictoriaLogs and vlagent subcharts have their
 own switches (`victorialogs-0.server.serviceMonitor.enabled`, `vlagent.serviceMonitor.enabled`, ...), which create Prometheus ServiceMonitors only.
 
+## The registry of the MVP stand
+
+Until the images are released to ghcr by the CI, the stand uses the plain Docker registry (the image `registry`) from the chart
+`twuni/docker-registry`, with the values in `deploy/registry/values.yaml`: a release in the namespace `registry` and an Ingress for
+a host of your own (an A record to the ingress controller; `registry.example.com` below). It has no authentication and speaks plain HTTP, so it is for the LAN test
+cluster only, and the node's containerd and the workstation's Docker must accept it as an insecure registry.
+
+```bash
+helm repo add twuni https://twuni.github.io/docker-registry.helm
+helm install registry twuni/docker-registry -n registry --create-namespace -f deploy/registry/values.yaml \
+  --set 'ingress.hosts[0]=registry.example.com'
+tools/image/build_core.sh registry.example.com/cinim:dev && docker push registry.example.com/cinim:dev
+```
+
+The image is built by `tools/image/build_core.sh`: the core (with TLS) and the executor are static binaries in a `scratch` image of about 8 MB
+with the CA certificates, so the image needs no libraries (`deploy/core/Dockerfile`).
+
 ## What is not in the chart yet
 
 The core does not create the namespaces, controllers and Ingress objects of the organisations yet (SHD-007 steps 2 to 5, SHD-008): the chart

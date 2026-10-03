@@ -3,8 +3,8 @@
 # libzmq + libsodium linked in, so it runs in any step image with no libzmq present (A.6's
 # dependency-free-shim property, kept; D-24's CURVE transport, kept). Usage:
 #   tools/shim/build_static.sh [OUT=build/cicd-shim-logging-static] [SRC=src/shim/shim.nim] [NIM_FLAGS=-d:shimLogging] [PACK=1]
-# Any other ZeroMQ-linked service builds the same way, e.g. core (no UPX needed, no ConfigMap limit):
-#   tools/shim/build_static.sh build/core-static src/core/main.nim "" 0
+# Any other ZeroMQ-linked service builds the same way, e.g. core (no UPX needed, no ConfigMap limit; -d:ssl links OpenSSL in):
+#   tools/shim/build_static.sh build/core-static src/core/main.nim "-d:ssl" 0
 #
 # Why a container: libzmq is C++, and the host's musl-gcc has no musl-built libstdc++. Alpine is musl
 # end to end (g++, libstdc++.a), so libsodium, libzmq and the final link all happen there. The Nim side
@@ -27,6 +27,12 @@ docker run --rm -v "$PWD:/src" -v "$HOME/.nimble/pkgs2:/root/.nimble/pkgs2:ro" -
   -e PREFIX=/src/build/zmq-static -e OUT="/src/$OUT" -e SRC="$SRC" -e NIMFLAGS="$NIMFLAGS" -e PACK="$PACK" -e HOSTUID="$(id -u)" -e HOSTGID="$(id -g)" \
   "$IMAGE" sh -euc '
   apk add --no-cache upx g++ make cmake git autoconf automake libtool linux-headers >/dev/null
+  # -d:ssl (TLS clients such as the core calling a router over https): a static OpenSSL 3, linked in instead of dlopen()ed
+  SSL_LIBS=""; SSL_NIM=""
+  case "$NIMFLAGS" in *-d:ssl*)
+    apk add --no-cache openssl-dev openssl-libs-static >/dev/null
+    SSL_LIBS="-lssl -lcrypto"; SSL_NIM="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto";;
+  esac
   if [ ! -f "$PREFIX/lib/libzmq.a" ]; then
     W=$(mktemp -d); cd "$W"
     git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium
@@ -39,9 +45,9 @@ docker run --rm -v "$PWD:/src" -v "$HOME/.nimble/pkgs2:/root/.nimble/pkgs2:ro" -
     cmake --build zmq/b -j"$(nproc)" --target install >/dev/null
     cd /src
   fi
-  nim c -d:release $NIMFLAGS --opt:size --hints:off --warnings:off --dynlibOverride:zmq \
+  nim c -d:release $NIMFLAGS --opt:size --hints:off --warnings:off --dynlibOverride:zmq $SSL_NIM \
     --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections \
-    --passL:-static --passL:"-L$PREFIX/lib -lzmq -lsodium -lstdc++ -lm" -o:"$OUT" "$SRC"
+    --passL:-static --passL:"-L$PREFIX/lib -lzmq -lsodium $SSL_LIBS -lstdc++ -lm" -o:"$OUT" "$SRC"
   strip "$OUT"
   # 1.4 MiB unpacked does not fit a ConfigMap (1 MiB limit, the A.6 delivery mechanism); UPX --lzma: ~0.5 MiB
   [ "$PACK" = 1 ] && upx --best --lzma -q "$OUT" >/dev/null
