@@ -18,10 +18,9 @@ requires "db_connector >= 0.1.0"  # sqlite state of the job-controller (adoption
 # the fixes are sent upstream as olliNiinivaara/GuildenStern#35 and #36).
 requires "guildenstern >= 9.0.0"
 # ZeroMQ+CURVE transport (D-24): our fork, not upstream, while
-# nim-lang/nim-zmq#57 (high-level CURVE: connect/listen configure callback) and #59 (`=destroy` frees the connection
-# address string: a 30-byte leak per connection) are open. Branch `cinim` of the fork is upstream
-# master (which already has #58, the setsockopt value-width fix) plus #57 plus #59; switch back to upstream once
-# they are released.
+# nim-lang/nim-zmq#57 (high-level CURVE: connect/listen configure callback) is open. Branch `cinim` of the fork is
+# upstream master (which already has #58, the setsockopt value-width fix, and #59, the `=destroy` leak fix) plus #57;
+# switch back to upstream once #57 is released.
 requires "https://github.com/zystem/nim-zmq#cinim"
 
 import std/os
