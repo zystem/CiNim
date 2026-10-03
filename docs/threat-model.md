@@ -21,8 +21,8 @@ Status values: **verified** (automated test exists), **partial**, **designed** (
 | Zone | Contents | Trust |
 |:---|:---|:---|
 | Z0 Internet | browsers, SCM webhooks, API clients | none |
-| Z1 Global services | UI/API, directory, plugin registry | authenticated users, no tenant data at rest |
-| Z2 Shard core | core (scheduler, collector, log-circuit module), executor workers, event service, log gateway, rqlite, vlagent, VictoriaLogs (two nodes) | platform-trusted |
+| Z1 Edge and shared services | ingress, OCI plugin registry | authenticated users or none, no tenant data at rest |
+| Z2 Shard core | core (scheduler, collector, log-circuit module), executor workers, UI/API service, event service, log gateway, rqlite, vlagent, VictoriaLogs (two nodes) | platform-trusted |
 | Z3 Executor sandbox | Lua state per run inside a separate unprivileged process | **untrusted code**, deterministic host API only |
 | Z4 Profile namespace | job-controller, step Pods, shim | job-controller privileged in the namespace; step Pods untrusted |
 | Z5 Plugin containers | step plugins in step Pods | untrusted, capability-limited |
