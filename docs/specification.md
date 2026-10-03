@@ -19,7 +19,7 @@ The platform is a set of independent microservices written in Nim and grouped in
 |:---|:---|
 | Deployment | Kubernetes only, installed with Helm. Docker Compose, VMs, bare metal and shell agents are out of scope |
 | Implementation language | Nim 2.x (ORC), static binaries; low memory and no leaks are the priority |
-| Architecture | Microservices from the first release; a shard (cell) is a set of services with its own rqlite and log circuit (two independent VictoriaLogs nodes fed by a vlagent); capacity grows by adding shards, tenants are pinned to a shard through the directory |
+| Architecture | Microservices from the first release; a shard (cell) is a set of services with its own rqlite and log circuit (two independent VictoriaLogs nodes fed by a vlagent); capacity grows by adding shards; a top-level group with all its projects is pinned to one shard through the directory, an organization may span shards |
 | Execution | No permanent agents (the disposable shim in each step's Pod does an agent's work for that step); the job controller creates a Pod for every step, a Pod can be started many times over a persistent run volume, every step of a run mounts the shared storage, data moves through the env file and files |
 | Pipeline | Imperative Lua 5.4 script in a sandbox; runtime execution with a replay journal; no YAML |
 | Protocols | Protobuf (proto3) between services and for plugins over ZeroMQ with CURVE; the external API is REST/JSON; HTTP is served by GuildenStern |
@@ -116,6 +116,7 @@ Each decision has a rationale and a condition under which it is revisited. Measu
 | D-35 | Variables set in the UI (organization, group, project, pipeline) and launch parameters reach every step as ordinary environment variables of the container, with the current values at the moment the step's Pod is created; only the launch parameters are stored with the run. There is no snapshot of the variables for the run | A retry after fixing a variable sees the fix; nothing is added to rqlite; the script does not read the live variables, so replay stays deterministic (VAR-002). Other CI systems also read such variables when a job starts | Reproducing exactly what a past run used becomes a requirement that the log header (VAR-005) and the audit (VAR-006) cannot meet |
 | D-36 | `$CICD_ENV` is a file on the run volume in `state/`, outside the workspace and outside rqlite; the user writes it, nothing captures a step's environment automatically; `$CICD_OUTPUT` returns at most 4 KiB per step to the script and is journaled | A process cannot change its parent's environment, an explicit file works in any language; outside the workspace the checkout, `git clean`, artifacts, caches and tools that read `.env` files do not touch it; the journal stays small (STO-003) | Users routinely lose variables they expected to pass: automatic capture is reconsidered |
 | D-37 | The audit log can be stored in a separate pair of VictoriaLogs nodes (the setting `audit_store`, rqlite by default): events are chained and anchored in rqlite, the nodes have no delete API and their own retention | Keeps the growth of the audit out of rqlite; searchable with LogsQL; retention in VictoriaLogs is per node and the log circuit uses deletion by filter, so the audit needs a pair of its own to be append-only at the store level (A.7) | The audit volume stays so small that rqlite suffices, or running the audit circuit proves too costly |
+| D-38 | Sharding is by placement of top-level groups: all projects of a group are always on one shard and an organisation may span shards, the shards forming a federation; the directory owns the organisation, its members, organisation-level variables and policies, and the placements | A placement unit smaller than the organisation: a large organisation does not outgrow a shard and moving a group is cheaper than moving an organisation; the price is that organisation-level data is global and cross-group runs between shards are impossible | A run across groups on different shards becomes a common need: groups of such an organisation are then placed together |
 
 # 1 Analysis method and criteria
 
@@ -352,7 +353,7 @@ A plugin below means a signed extension package with a manifest, a configuration
 
 ## 4.1 In the MVP
 
-- Organisations, projects, repositories, pipeline definitions, runs, jobs, artifacts, environments, execution profiles and credentials.
+- Organisations, groups, projects, repositories, pipeline definitions, runs, jobs, artifacts, environments, execution profiles and credentials.
 
 - Webhook, push, pull/merge request, tag, schedule, API and manual triggers; deduplication and cancellation of outdated runs.
 
@@ -366,7 +367,7 @@ A plugin below means a signed extension package with a manifest, a configuration
 
 - Permanent links to every UI element, dynamic lists, server-side charts, a client memory budget (UI-008) and three UI extension points: a run/job tab, a dashboard widget and a parameter form element (13).
 
-- Sharding: a tenant is pinned to a shard through the directory; the MVP runs one shard, but the data model and routing are shard-oriented from the first slice (7.3).
+- Sharding: a top-level group (with all its projects) is pinned to a shard through the directory and an organization may span shards; the MVP runs one shard, but the data model and routing are shard-oriented from the first slice (7.3).
 
 - Ten first-tier first-party extensions: Git, GitHub, GitLab, Docker BuildKit, Kubernetes, Helm, Vault/OpenBao, JUnit, SMTP, Prometheus/OTel.
 
@@ -380,7 +381,7 @@ A plugin below means a signed extension package with a manifest, a configuration
 
 - Operation outside Kubernetes: Docker Compose, VM and bare-metal executors, a shell executor, permanent agents, Windows and macOS nodes; an own VM hypervisor; billing SaaS; absolute compatibility with all Jenkins plugins.
 
-- Global full-text search across the logs of all projects (the MVP searches within a job and a run); online transfer of tenants between shards (the MVP has only offline transfer by an administrative tool) (open question Q-12).
+- Global full-text search across the logs of all projects (the MVP searches within a job and a run); online transfer of groups between shards (the MVP has only offline transfer by an administrative tool) (open question Q-12).
 
 - Continuous GitOps reconciliation at the level of Argo CD/Flux: the platform starts and observes a deployment but does not replace a GitOps controller.
 
@@ -408,7 +409,7 @@ A plugin below means a signed extension package with a manifest, a configuration
 
 ## 6.1 Projects and repositories
 
-**PRJ-001 Hierarchy.** An organisation contains projects; a project may inherit policy, variables, execution profiles (RUN-004) and libraries, but an override is shown explicitly.
+**PRJ-001 Hierarchy.** An organisation contains groups, which may be nested, and a group contains projects (a project created directly under an organisation lives in the organisation's root group). A group or a project may inherit policy, variables, execution profiles (RUN-004) and libraries from the level above, but an override is shown explicitly.
 
 **PRJ-002 SCM neutrality.** One project connects several GitHub, GitLab, Bitbucket or generic Git repositories; an SCM adapter must not require changes to the scheduler core.
 
@@ -438,7 +439,7 @@ A pipeline is a Lua 5.4 script executed in the sandbox of the pipeline executor.
 
 **PIP-009 Matrix.** `ci.matrix` builds the Cartesian product of axes with include/exclude, `max_parallel` and `fail_fast`; the result is executed through `ci.parallel`. The expansion limit is checked at the call and, where the size is computed statically, at preflight (PIP-016).
 
-**PIP-010 Child pipelines.** `ci.run(ref, params, opts)` creates a child run (in the same or another project of the same shard if policy allows; cross-shard calls are not supported, SHD-002) and with `wait=true` suspends the parent until the result. A child run passes policy like an ordinary one, gets its own storage (STO-001) and keeps a reference to the parent.
+**PIP-010 Child pipelines.** `ci.run(ref, params, opts)` creates a child run (in the same or another project of the same shard if policy allows; a project on another shard cannot be called, SHD-002) and with `wait=true` suspends the parent until the result. A child run passes policy like an ordinary one, gets its own storage (STO-001) and keeps a reference to the parent.
 
 **PIP-011 Libraries.** A Lua module is published to the registry with SemVer, a digest and a declaration of inputs and outputs. `require("lib/go@1.4.0")` is resolved through the lockfile `.ci/lock.json` (name, version, digest); a production policy may forbid mutable refs. A module is loaded only by digest and runs in the same sandbox.
 
@@ -586,7 +587,7 @@ The platform works only inside Kubernetes and uses no permanent agents: there ar
 
 ## 6.5 Logs, tests, artifacts and cache
 
-**DAT-001 Logs: the source of truth is VictoriaLogs.** The shim turns the step's output into jsonline records (fields `_msg`, `_time`, `ln`, `ts`, `job`, `run`), masks secrets (DAT-002), numbers the lines with `ln` within the job attempt, and compresses them in independent gzip blocks (about 64 KiB of text each, gzip level 1, one CRC32C per block over the compressed bytes). The blocks are queued in the spool on the Pod (RUN-007) and sent to the shard's log collector in order. The collector checks the checksum, forwards the blocks without decompressing or recompressing them to vlagent (`/insert/jsonline`, with the matching `Content-Encoding`; vlagent accepts independently compressed blocks glued into one body; the stream is `_stream_fields=job`; the tenant is passed in the `AccountID`/`ProjectID` headers) and acknowledges to the shim the sequence number of the last block vlagent accepted. A block that vlagent refuses for good (a 4xx other than 408/429) is reported as rejected and dropped by the shim; a refusal that is worth retrying (408, 429, 5xx, no answer) is reported as `logs_unavailable` and the shim retries. The collector takes each block once: a block that was already forwarded and is sent again after a lost acknowledgement is acknowledged but not stored twice. vlagent delivers the data to both VictoriaLogs nodes (DAT-008) and keeps a queue on disk for each node separately. The window key is the service time `_time` = the base time of the job plus `ln` milliseconds (monotonic and unique within the job, A.7); the real time of the line is stored in the field `ts` and shown to the user; the field `ln` is stored for anchors and sorting by `(_time, ln)`. Every attempt of a step has its own stream (the `job` label contains the attempt number), so the log of a lost attempt is never mixed into its retry. The collector has no read path of its own: all viewing goes through the gateway (DAT-011). VictoriaLogs does not deduplicate records, so every line is sent once and the window excludes duplicates by `ln`. The unavailability of vlagent leads to back-pressure on the shim (RUN-007). There is no copy of the log in S3 as a source of truth: the browser, the API and the download read only VictoriaLogs. ANSI is allowed after sanitisation. Lines longer than the limit (32 KiB) are split between characters, never inside one, with a continuation mark. Invalid UTF-8 is replaced byte by byte with U+FFFD so that every record is valid JSON.
+**DAT-001 Logs: the source of truth is VictoriaLogs.** The shim turns the step's output into jsonline records (fields `_msg`, `_time`, `ln`, `ts`, `job`, `run`), masks secrets (DAT-002), numbers the lines with `ln` within the job attempt, and compresses them in independent gzip blocks (about 64 KiB of text each, gzip level 1, one CRC32C per block over the compressed bytes). The blocks are queued in the spool on the Pod (RUN-007) and sent to the shard's log collector in order. The collector checks the checksum, forwards the blocks without decompressing or recompressing them to vlagent (`/insert/jsonline`, with the matching `Content-Encoding`; vlagent accepts independently compressed blocks glued into one body; the stream is `_stream_fields=job`; the organisation and the top-level group are passed in the `AccountID`/`ProjectID` headers) and acknowledges to the shim the sequence number of the last block vlagent accepted. A block that vlagent refuses for good (a 4xx other than 408/429) is reported as rejected and dropped by the shim; a refusal that is worth retrying (408, 429, 5xx, no answer) is reported as `logs_unavailable` and the shim retries. The collector takes each block once: a block that was already forwarded and is sent again after a lost acknowledgement is acknowledged but not stored twice. vlagent delivers the data to both VictoriaLogs nodes (DAT-008) and keeps a queue on disk for each node separately. The window key is the service time `_time` = the base time of the job plus `ln` milliseconds (monotonic and unique within the job, A.7); the real time of the line is stored in the field `ts` and shown to the user; the field `ln` is stored for anchors and sorting by `(_time, ln)`. Every attempt of a step has its own stream (the `job` label contains the attempt number), so the log of a lost attempt is never mixed into its retry. The collector has no read path of its own: all viewing goes through the gateway (DAT-011). VictoriaLogs does not deduplicate records, so every line is sent once and the window excludes duplicates by `ln`. The unavailability of vlagent leads to back-pressure on the shim (RUN-007). There is no copy of the log in S3 as a source of truth: the browser, the API and the download read only VictoriaLogs. ANSI is allowed after sanitisation. Lines longer than the limit (32 KiB) are split between characters, never inside one, with a continuation mark. Invalid UTF-8 is replaced byte by byte with U+FFFD so that every record is valid JSON.
 
 **DAT-002 Redaction.** Secrets are masked in the shim, before anything leaves the Pod: the log collector, the spool, the Pod's own log and VictoriaLogs never hold a plain value (D-31, docs/secrets-masking.md). A value is masked as is, as base64 (at each of the three alignments it can take inside a longer base64 string, in the standard and the URL-safe alphabet), URL-encoded (both cases of hex, and a space as `%20` and `+`) and JSON-escaped. A build may register more values at run time by appending them to the file `$CICD_MASK`; they protect the lines that follow. Values shorter than a configurable minimum (4 characters by default) are not masked because they would mangle ordinary output. Limits: a value split by a line break is masked line by line, other encodings (hex, compressed) are not recognised, and at most 256 masks apply to a step. Direct writes of steps and plugins to VictoriaLogs are forbidden: the network policy (SEC-003) opens vlagent only to the log collector, the management interface of the nodes (snapshots, deletion) only to the log-circuit module, and reads only to the read gateway.
 
@@ -687,7 +688,7 @@ and `export A=1 && echo "A=$A" | tee -a "$CICD_ENV" >> "$CICD_OUTPUT"` also retu
 
 ## 6.10 Variables and parameters
 
-Variables are set in the UI or the API, not in the pipeline script, at four levels: organization, group (a node of the project hierarchy, PRJ-001), project and pipeline (the build). A launch parameter (`params`, PIP-012) is given for one run.
+Variables are set in the UI or the API, not in the pipeline script, at four levels: organization, group (PRJ-001), project and pipeline (the build). A launch parameter (`params`, PIP-012) is given for one run.
 
 **VAR-001 Levels and kinds.** A variable has a name, a kind and a value. Kinds: plain (an ordinary string, number, boolean or choice) and secret (the value is kept in the credential store and is never shown again, 6.7). Variables are inherited down the hierarchy and an override at a lower level is shown explicitly (PRJ-001).
 
@@ -724,7 +725,7 @@ The platform is a set of microservices, each of which is a separate process with
 | **Component** | **Level** | **Responsibility** | **State/protocol** |
 |:---|:---|:---|:---|
 | Web UI and API service | Global | Server-side HTML rendering, forms, fragments (HTMX), SSE, permanent URLs, extension points, REST v1, auth; routing of a request to a shard by the directory | Stateless; HTTPS; no direct access to a shard's database |
-| Directory | Global | The catalogue: tenant → shard, shards and their state, user identities and membership | Its own small rqlite (3 nodes); a 60 s cache in the API |
+| Directory | Global | The catalogue: organisations (settings, members and roles, organisation-level variables and policies), the placement of top-level groups on shards, shards and their state, user identities and membership | Its own small rqlite (3 nodes); a 60 s cache in the API |
 | Plugin registry | Global | Manifest, signature, OCI digest, compatibility, trust | OCI registry + a catalogue in the directory's rqlite |
 | Shard core (one process) | Shard | Modules: the scheduler (step queue, quotas, priorities, leases of executors and job controllers, launch admission by RUN-015, backup schedule, watchdog of `liveness_timeout`); the log collector (receives log blocks from the shim, forwards them to vlagent); the log-circuit module (polls the VictoriaLogs nodes and the vlagent queues, snapshots and their upload, automatic node recovery, retention by deletion, BKP-001--BKP-006); the component registry, `/api/v1/components` and `/metrics` | The shard's rqlite is authoritative; Protobuf channels over ZeroMQ with CURVE; vlagent; the VictoriaLogs node API; lease timers in memory |
 | Pipeline executor | Shard | Lua sandbox, run journal, replay, limits | Separate processes, seccomp, no network; the only channel is Protobuf to the scheduler over ZeroMQ with CURVE (ExecutorChannel, 9.2) |
@@ -794,21 +795,21 @@ The atomicity of this statement through the Raft log, including `RETURNING`, has
 
 ## 7.3 Sharding and operating rqlite
 
-Capacity grows by sharding. A shard (cell) is a self-contained set of services and stores: its own rqlite, the core (scheduler, log collector and log-circuit module in one process), executors, the event service, the log gateway, the log circuit (two VictoriaLogs nodes and vlagent) and one or more job controllers in target clusters. A tenant (an organisation with all its projects, runs and logs) belongs entirely to one shard (open question Q-12).
+Capacity grows by sharding. A shard (cell) is a self-contained set of services and stores: its own rqlite, the core (scheduler, log collector and log-circuit module in one process), executors, the event service, the log gateway, the log circuit (two VictoriaLogs nodes and vlagent) and one or more job controllers in target clusters. A **top-level group** (with its subgroups, projects, runs and logs) belongs entirely to one shard: all projects of a group are always on the same shard. An organisation is not pinned to a shard: its groups may sit on different shards, so the shards form a federation held together by the global directory, which also owns the organisation itself (settings, members, roles, organisation-level variables and policies). In this document a tenant is an organisation: `tenant_id` and the `AccountID` header carry the organisation's id on every shard that holds one of its groups (open question Q-12).
 
-**SHD-001 Directory.** The directory holds the mapping tenant → shard, the state of the shards and user identities with membership in organisations. API calls and events are routed to a shard by the directory; the result is cached for 60 s and flushed when a tenant is moved. A request that reaches the wrong shard gets Problem Details with the code `wrong_shard` and is retried by the client.
+**SHD-001 Directory.** The directory holds the organisations (settings, members and roles, organisation-level variables and policies), the placement of every top-level group (organisation, group → shard), the state of the shards and user identities with membership in organisations. API calls and events are routed to a shard by the directory from the group of the addressed project; the result is cached for 60 s and flushed when a group is moved. Shards read the organisation-level data through the same cache; while the directory is unavailable they go on working with the cached copy and organisation-level data cannot be changed. A request that reaches the wrong shard gets Problem Details with the code `wrong_shard` and is retried by the client.
 
-**SHD-002 Failure isolation.** A failure or degradation of a shard affects only its tenants. Between shards there are no distributed transactions, shared queues or shared data except the directory and S3; therefore a cross-shard `ci.run` is not supported in the MVP (PIP-010).
+**SHD-002 Failure isolation.** A failure or degradation of a shard affects only the groups placed on it; the same organisation keeps working through its groups on other shards. Between shards there are no distributed transactions, shared queues or shared data except the directory and S3; therefore a `ci.run` into a project on another shard is not supported in the MVP (PIP-010). Quotas that span an organisation are divided by the directory among the shards that hold its groups, and each shard enforces its share (RUN-003).
 
-**SHD-003 Placement and growth.** A new tenant gets a shard by a placement policy (lowest load by weight, or an explicit choice). The capacity of a shard is determined by the benchmark against NFR-006 with a 2× margin; at 70 % of capacity a new shard is created and the next tenants are directed to it. Moving an existing tenant in the MVP is an offline operation of an administrative tool: stop intake, export the tenant's rows from rqlite, move the tenant's logs through export (DAT-008, the tenant is selected by the `AccountID` header) and ingest them again in the target shard, switch the directory record; an online move is outside the MVP (open question Q-12).
+**SHD-003 Placement and growth.** A new top-level group gets a shard by a placement policy (lowest load by weight, an explicit choice, or the shard of the organisation's other groups on request). The capacity of a shard is determined by the benchmark against NFR-006 with a 2× margin; at 70 % of capacity a new shard is created and the next groups are directed to it. Moving an existing group in the MVP is an offline operation of an administrative tool: stop intake for the group, export the group's rows from rqlite, move the group's logs through export (DAT-008; they are selected by the `AccountID` of the organisation and the `ProjectID` of the group) and ingest them again in the target shard, switch the placement record; an online move is outside the MVP (open question Q-12).
 
-**SHD-004 Shard orientation from the first slice.** Every table of a shard contains `tenant_id`; all identifiers contain a shard prefix or are resolved through the directory; configuration and metrics are labelled `shard`. The MVP deploys one shard, but the code must not assume there is only one.
+**SHD-004 Shard orientation from the first slice.** Every table of a shard contains `tenant_id` (the organisation's id), and the data of a group carries the id of its top-level group; organisation-level data is not stored on shards but read from the directory; all identifiers contain a shard prefix or are resolved through the directory; configuration and metrics are labelled `shard`. The MVP deploys one shard, but the code must not assume there is only one.
 
 **SHD-005 The log circuit is part of the shard core.** The shard core (scheduler, log collector, log-circuit module), vlagent, the log gateway and the VictoriaLogs nodes form the shard core. While no VictoriaLogs node is available or vlagent does not accept writes, starting new steps is forbidden and the queue waits (RUN-015); when the core is unavailable the shard is unavailable as a whole (there are no new logs, nobody to view them, the shard's interface is down). There is no mode of operation without logs and no requirement for independent availability of log intake and viewing; fault tolerance is provided by the two nodes, the vlagent queues and backups (DAT-010).
 
 **rqlite limits the project accounts for.** Writes go through the leader and Raft; single writes manage, according to the documentation, from 10 to hundreds of requests per second, and batching (the bulk API, transactions) raises throughput by about two orders of magnitude; writes block while a snapshot is created and during VACUUM. Consequences: heartbeats, logs and queue offers are not written to rqlite (RUN-002, DAT-001); writes are grouped in batches; snapshots and VACUUM are configured and scheduled outside peaks. Measured (A.2): a batch of 500 rows gives about 4 000 rows/s against 10--60 single writes/s (a difference of about 100×), a pause during VACUUM on about 20 MB is 1.1--2.6 s.
 
-**The ladder when writes to a shard's rqlite are insufficient.** (1) Reduce and enlarge writes: batches, moving ephemeral data out of the database. (2) Make the shard smaller: move some tenants to a new shard (SHD-003). Replacing rqlite with another database is not foreseen; the `StateStore` interface with a set of conformance tests remains an internal boundary of the core for test substitution.
+**The ladder when writes to a shard's rqlite are insufficient.** (1) Reduce and enlarge writes: batches, moving ephemeral data out of the database. (2) Make the shard smaller: move some groups to a new shard (SHD-003). Replacing rqlite with another database is not foreseen; the `StateStore` interface with a set of conformance tests remains an internal boundary of the core for test substitution.
 
 **Platform events go only through the outbox in rqlite.** Webhook events, delivery of notifications about available work and fan-out of statuses go through an outbox table (consumers with an idempotency key and an inbox table, 7.2); there is no separate bus and state stays in rqlite. If delivery systematically fails NFR-003 even after the shard is made smaller (SHD-003) and writes are enlarged, the question of which broker to add is raised again (D-03).
 
@@ -843,17 +844,19 @@ Data is divided into global data (the directory) and shard data. Every table of 
 | **Table** | **Key fields** | **Key/index** |
 |:---|:---|:---|
 | shards | id, name, api_endpoint, state, weight, created_at | name |
-| tenants | id, slug, shard_id, state (active, frozen, moving), moved_at | slug |
+| organizations | id, slug, state, settings, plan, created_at | slug |
+| placements | organization_id, group_id (a top-level group), shard_id, state (active, frozen, moving), moved_at | organization_id, group_id |
 | identities | id, provider, subject, email, state | provider, subject |
-| memberships | identity_id, tenant_id, role_bindings | identity_id, tenant_id |
+| memberships | identity_id, organization_id, role_bindings | identity_id, organization_id |
 | plugin_catalog | id, name, version, digest, signature, trust, created_at | name, version |
+| variables | the organisation-level variables, the same columns as in 8.2 | scope_id, name |
 
 ## 8.2 Shard data
 
 | **Table** | **Key fields** | **Key/index** |
 |:---|:---|:---|
-| organizations | id, tenant_id, slug, settings, plan, created_at | slug |
-| projects | id, organization_id, parent_id, slug, policy_set_id | organization_id, slug |
+| groups | id, tenant_id, parent_id, slug, policy_set_id | parent_id, slug |
+| projects | id, tenant_id, group_id, slug, policy_set_id | group_id, slug |
 | repositories | id, project_id, provider, external_id, url, default_branch | provider, external_id |
 | pipeline_definitions | id, project_id, repository_id, path, enabled | repository_id, path |
 | pipeline_bundles | id, definition_id, commit_sha, source, module_digests, api_version, runtime_version, digest | definition_id, digest |
@@ -873,7 +876,7 @@ Data is divided into global data (the directory) and shard data. Every table of 
 | environments | id, project_id, name, tier, protection, lock_version | project_id, name |
 | deployments | id, environment_id, run_id, artifact_digest, state | environment_id, created_at |
 | credentials | id, scope, provider, encrypted_ref, metadata, version | scope, name |
-| variables | id, scope (organization, group, project, pipeline), scope_id, name, kind (plain, secret), value (plain only), credential_id (secret only), declaration (type, required, choices, pattern, max_length), version, updated_by, updated_at | scope, scope_id, name |
+| variables | id, scope (group, project, pipeline here; the organization level is in the directory, 8.1), scope_id, name, kind (plain, secret), value (plain only), credential_id (secret only), declaration (type, required, choices, pattern, max_length), version, updated_by, updated_at | scope, scope_id, name |
 | outbox | id, topic, payload, created_at, delivered_at | delivered_at, id |
 | audit_events | id, tenant_id, actor, action, resource, before, after, ip, time, prev_hash, hash | tenant_id, time, id |
 | audit_anchors | id, chain, from_seq, to_seq, head_hash, created_at, exported_at | chain, to_seq |
@@ -900,7 +903,7 @@ The table `log_streams` holds only the metadata of a stream (tenant, the job's s
 | POST | /api/v1/environments/{id}/approvals | Approve/reject with a comment and the expected policy digest |
 | GET | /api/v1/audit-events | Cursor pagination and filters; asynchronous export |
 | GET | /api/v1/audit-chain | The audit store, the newest anchor, the last verification and its result (AUD-004) |
-| GET | /api/v1/shards | Administrative: shards, load, tenants (SHD-001) |
+| GET | /api/v1/shards | Administrative: shards, load, placements of groups (SHD-001) |
 | GET | /api/v1/shards/{id}/backups | One list of rqlite and log backups, statuses and recovery progress (BKP-002) |
 | POST | /api/v1/shards/{id}/backups | Start a backup manually (`target`: state or logs), audited |
 | PUT | /api/v1/shards/{id}/backup-policy | Change the schedule, retention and verification (BKP-001), with confirmation and audit |
@@ -928,7 +931,7 @@ Internal channels are Protobuf over ZeroMQ with CURVE (D-24), package `cicd.inte
 | LogIngest | Shim → log collector (client request/reply) | Log blocks with sequence numbers and checksums, the shim's status JSON and resource metrics as a heartbeat (a batch without blocks); the acknowledgement follows vlagent's acceptance (DAT-001); also used by the job controller to hand over blocks it pulled out of a Pod's spool |
 | StepReport | Shim → scheduler (unary) | The step's result and the shim's final state (RUN-010); the answer says whether the shim may exit (RUN-017); the termination message and the Pod log carry the same facts as the fallback |
 | ExecutorChannel | Executor ↔ scheduler | Host API requests, the journal, results; the only channel of the sandbox (RUN-008) |
-| Directory | API, events → directory | Resolving a tenant to a shard, the state of shards (SHD-001) |
+| Directory | API, events → directory | Resolving a group to a shard, organisation-level data, the state of shards (SHD-001) |
 | LogPublish | Log collector → vlagent → VictoriaLogs nodes | Sending log lines to vlagent's `/insert/jsonline` (JSON lines: `_msg`, `_time`, `ln`, `ts`, `job`, `run`; headers `AccountID`, `ProjectID`; independently gzip-compressed blocks with `Content-Encoding`), delivery to both nodes; an exception to the Protobuf rule, the format is given by the product (DAT-001, DAT-008); TLS and a login and password |
 | NodeControl | Shard core (log-circuit module) → VictoriaLogs nodes and vlagent | Polling `/health` and metrics, snapshots `/internal/partition/snapshot/*`, deletion `/delete/run_task`, pausing delivery and clearing a queue on recovery (DAT-008, BKP-003, BKP-004); TLS and a login and password |
 | ClusterState | Log gateway → shard core | The state of the VictoriaLogs nodes (`up`, `catching_up`, `down`, vlagent queue) and the recommended read node (DAT-011); the scheduler gets the same state in process (RUN-015) |
@@ -1103,7 +1106,7 @@ The UI is built as an MPA, not an SPA: the HTML is produced entirely on the serv
 | Job | Steps (Pods), a log window with search and live tail (iframe, DAT-007) and a "download" button (DAT-009), timestamps, profile, namespace and Pod name, resources, storage, artifacts, tests, retry/cancel |
 | Tests | New failures, flaky tests, slowest, history, owner, baseline diff |
 | Environment | Current deployment, history, locks, checks, variables metadata, rollback |
-| Profiles and shards | Execution profiles and their settings (D-34), clusters and the state of job controllers, shards and tenants, quotas, storage use, the queue, the state of the log circuit (VictoriaLogs nodes and vlagent queues) and the reason a launch is suspended, drain (the Platform admin role) |
+| Profiles and shards | Execution profiles and their settings (D-34), clusters and the state of job controllers, shards and the placement of groups, quotas, storage use, the queue, the state of the log circuit (VictoriaLogs nodes and vlagent queues) and the reason a launch is suspended, drain (the Platform admin role) |
 | Backups | One section for rqlite and logs: the policy (schedule, retention, verification), manual start, history and statuses, the state of VictoriaLogs nodes and vlagent queues, the progress of automatic recovery and the loss journal (the Platform admin role, BKP-002) |
 | Plugin catalog | Publisher, version, digest, permissions, compatibility, security status, approved UI contributions |
 | Audit | Actor/action/resource/time filters, a details diff, export; the store and the chain verification status (AUD-004) |
@@ -1168,7 +1171,7 @@ Delivery is a sequence of vertical slices with verifiable exit criteria rather t
 | M1 CI MVP | A GitHub/GitLab webhook, run creation, a Lua script with `job`, `sh`, `use`, `parallel`, `matrix`, `input`; the job controller and a Pod per step, shared storage and exchange through .env; logs in VictoriaLogs (two nodes, vlagent, the log-circuit module in the shard core process) with a window in an iframe and download; repeated Pod starts over a volume (RUN-014); artifacts, JUnit, OIDC/RBAC; a server-rendered UI with permanent links and the MVP extension points; one shard with a directory | Acceptance criteria 1--9, 11--12, 16--24 and 26--29 within the MVP scope; 500 concurrent steps |
 | M2 Managed CD | Environments, approvals, Helm/Kubernetes, Vault/OpenBao, OIDC cloud federation, deployment history and rollback; persistent volumes between runs (STO-008) | Criteria 10, 14 and 25 |
 | M3 Ecosystem | The plugin registry and SDK, the conformance container, the remaining 10 first-party extensions, a registry of Lua libraries, the full set of extension points, signing and provenance; session mode (7.4) if SES-001 is met | Criterion 15 for all 20 extensions; N/N-1 verified for `plugin.v1` |
-| M4 Enterprise scale | SAML, audit export, HA hardening, quotas and fairness, several shards and tenant transfer (SHD-003), a benchmark of 10 shards | NFR-006 for 10 shards; criteria 13, 22 and 30 |
+| M4 Enterprise scale | SAML, audit export, HA hardening, quotas and fairness, several shards and group transfer (SHD-003), a benchmark of 10 shards | NFR-006 for 10 shards; criteria 13, 22 and 30 |
 | M5 Migration | Importers (they generate Lua), shadow runs, admin tooling, compatibility guides | MIG-001--MIG-003 on real projects |
 
 "Stage N" elsewhere in this document means the stage MN of this table.
@@ -1241,7 +1244,7 @@ Delivery is a sequence of vertical slices with verifiable exit criteria rather t
 
 21. A log of 100 million lines opens as a window at a given line and at a found match (window <= 500 lines, p95 <= 300 ms; measured about 10 ms); the full log is served only by the "download" button as a stream with a gateway buffer <= 4 MiB regardless of size; when the collector is unavailable during a step no lines are lost (RUN-007); the failure of one VictoriaLogs node affects neither ingest nor viewing (reads switch to the second node, DAT-010, DAT-011, NFR-015); the unavailability of the shard core (scheduler, log collector, log-circuit module) means the unavailability of the shard, there is no degraded mode (SHD-005).
 
-22. Two shards work independently: a request to the wrong shard gets `wrong_shard` and is redirected through the directory; stopping one shard does not affect the runs of the other (SHD-001, SHD-002).
+22. Two shards work independently: a request to the wrong shard gets `wrong_shard` and is redirected through the directory; stopping one shard does not affect the runs of the other; two groups of one organisation placed on different shards are served independently, while the projects of one group are always on the same shard (SHD-001, SHD-002, SHD-003).
 
 23. The reference pages (a run with 1 000 jobs, a log of 100 million lines, a list of 10 000 runs) fit the client memory budget of UI-008 and NFR-016 (JS heap <= 10 MiB, <= 5 MiB for log viewing; an automated test), and the main scenarios work without JS.
 
@@ -1302,7 +1305,7 @@ These points are resolved by configuration or by a later product decision. The c
 | Q-09 | The target load of the first commercial installation | One shard; its capacity is set by measurement (NFR-006), a second shard is added under SHD-003 |
 | Q-10 | The update policy for VictoriaLogs, vlagent and vmauth versions (pinned versions, a data-format compatibility check on upgrade) | A pinned version, updated quarterly with a recovery test |
 | Q-11 | Which StorageClasses are available in target clusters: whether `ReadWriteMany` exists; whether persistent volumes between runs (STO-008) and volume snapshots for restart from a stage (STO-006) are acceptable | RWX preferred; without it RWO with the run's Pods pinned to a node; persistent volumes from stage M2; snapshots off |
-| Q-12 | The shard unit and transfer: a shard per organization or per project; whether online tenant transfer between shards is needed (SHD-003) | A shard per organization; offline transfer in the MVP, online in stage M4 if needed |
+| Q-12 | The shard unit and transfer: a shard per organization, per group or per project; whether online transfer of groups between shards is needed (SHD-003) | A top-level group (an organization may span shards); offline transfer in the MVP, online in stage M4 if needed |
 | Q-13 | The log storage topology: two VictoriaLogs nodes and vlagent as the minimum pair (a single node is not supported), the backup interval, the logs' RPO target and whether an archive of finished logs in S3 is needed (DAT-010) | Two nodes, an hourly log backup, RPO close to zero when a node is lost and no more than 1 h when both are lost; the archive is off |
 | Q-14 | The start-up acceleration model: a Pod per step, repeated Pod starts over a persistent volume (RUN-014, STO-008), session mode (7.4) only if SES-001 is met | A Pod per step with volumes as in 7.4; session mode is not developed because condition (a) of SES-001 is not met in the measured environment (A.6); the RUN-013 target is p95 <= 10 s |
 | Q-15 | Whether separate subdomains for iframes (`logs.`, `x.`) and a wildcard certificate are acceptable in target installations | Yes |
