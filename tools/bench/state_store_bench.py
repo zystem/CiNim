@@ -8,6 +8,8 @@ same script so the numbers are directly comparable. Run it from a Pod inside the
   bench.py pxc       mysql://root:PASSWORD@pxc-haproxy.pxc.svc:3306/bench                 incluster:pxc
   bench.py postgres  postgresql://bench:PASSWORD@pgbench-cluster-rw.pgbench:5432/bench    incluster:pgbench
 
+All tables the script creates and drops are named `bench_*`, so it is safe to run against a database that also holds platform tables.
+
 The third argument says how the node-kill test deletes a Pod: `incluster:<namespace>` uses the Pod's service account
 (it needs the right to list and delete Pods there), anything else is a kubectl command prefix, e.g. "kubectl -n pxc".
 The fourth argument selects one test (claim, latency, batch, cas, kill); all by default. The victim is the rqlite leader,
@@ -112,31 +114,31 @@ def setup_steps(n):
     rows = [(i, i % 5, i) for i in range(1, n + 1)]
     if SQL:
         c = conn(); cur = c.cursor()
-        cur.execute("DROP TABLE IF EXISTS steps")
-        cur.execute("CREATE TABLE steps(id INT PRIMARY KEY, state VARCHAR(20), profile_id VARCHAR(20), "
+        cur.execute("DROP TABLE IF EXISTS bench_steps")
+        cur.execute("CREATE TABLE bench_steps(id INT PRIMARY KEY, state VARCHAR(20), profile_id VARCHAR(20), "
                     "priority INT, queued_at INT, controller_id VARCHAR(40), pod_name VARCHAR(80), version INT DEFAULT 0)")
-        insert_many(c, cur, "steps(id,state,profile_id,priority,queued_at)", "(%s,'queued','p',%s,%s)" if engine == "pxc" else "(%s,'queued','p',%s,%s)",
+        insert_many(c, cur, "bench_steps(id,state,profile_id,priority,queued_at)", "(%s,'queued','p',%s,%s)" if engine == "pxc" else "(%s,'queued','p',%s,%s)",
                     [(i, p, q) for i, p, q in rows])
         c.commit(); cur.close(); c.close()
     else:
-        rq_exec(["DROP TABLE IF EXISTS steps",
-                 "CREATE TABLE steps(id INTEGER PRIMARY KEY, state TEXT, profile_id TEXT, priority INT, "
+        rq_exec(["DROP TABLE IF EXISTS bench_steps",
+                 "CREATE TABLE bench_steps(id INTEGER PRIMARY KEY, state TEXT, profile_id TEXT, priority INT, "
                  "queued_at INT, controller_id TEXT, pod_name TEXT, version INT DEFAULT 0)"])
-        rq_exec([["INSERT INTO steps(id,state,profile_id,priority,queued_at) VALUES (?,'queued','p',?,?)", i, p, q]
+        rq_exec([["INSERT INTO bench_steps(id,state,profile_id,priority,queued_at) VALUES (?,'queued','p',?,?)", i, p, q]
                  for i, p, q in rows], transaction=True)
 
 def claim_three_step(cur, ctrl):
-    cur.execute("SELECT id FROM steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, "
+    cur.execute("SELECT id FROM bench_steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, "
                 "queued_at LIMIT 1 FOR UPDATE SKIP LOCKED")
     row = cur.fetchone()
     if row is None: return None
-    cur.execute("UPDATE steps SET state='dispatched', controller_id=%s, pod_name=%s, version=version+1 "
+    cur.execute("UPDATE bench_steps SET state='dispatched', controller_id=%s, pod_name=%s, version=version+1 "
                 "WHERE id=%s", (ctrl, "pod-" + str(row[0]), row[0]))
     return row[0]
 
 def claim_single_pg(cur, ctrl):
-    cur.execute("UPDATE steps SET state='dispatched', controller_id=%s, pod_name='pod-'||id, version=version+1 "
-                "WHERE id=(SELECT id FROM steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, "
+    cur.execute("UPDATE bench_steps SET state='dispatched', controller_id=%s, pod_name='pod-'||id, version=version+1 "
+                "WHERE id=(SELECT id FROM bench_steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, "
                 "queued_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id", (ctrl,))
     row = cur.fetchone()
     return None if row is None else row[0]
@@ -153,8 +155,8 @@ def claimer(ctrl, claimed, form):
         cur.close(); c.close()
     else:
         while True:
-            r = rq_exec([["UPDATE steps SET state='dispatched', controller_id=?, pod_name='pod-'||id, version=version+1 "
-                          "WHERE id=(SELECT id FROM steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, "
+            r = rq_exec([["UPDATE bench_steps SET state='dispatched', controller_id=?, pod_name='pod-'||id, version=version+1 "
+                          "WHERE id=(SELECT id FROM bench_steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, "
                           "queued_at LIMIT 1) AND state='queued' RETURNING id", ctrl]])
             vals = r["results"][0].get("values")
             if not vals: break
@@ -187,18 +189,18 @@ def bench_claim(n=300, clients=8):
 def bench_single_write_latency(reps=200):
     if SQL:
         c = conn(); cur = c.cursor()
-        cur.execute("DROP TABLE IF EXISTS ctr"); cur.execute("CREATE TABLE ctr(id INT PRIMARY KEY, n INT)")
-        cur.execute("INSERT INTO ctr VALUES (1,0)"); c.commit()
+        cur.execute("DROP TABLE IF EXISTS bench_ctr"); cur.execute("CREATE TABLE bench_ctr(id INT PRIMARY KEY, n INT)")
+        cur.execute("INSERT INTO bench_ctr VALUES (1,0)"); c.commit()
     else:
-        rq_exec(["DROP TABLE IF EXISTS ctr", "CREATE TABLE ctr(id INTEGER PRIMARY KEY, n INT)"])
-        rq_exec([["INSERT INTO ctr VALUES (1,0)"]])
+        rq_exec(["DROP TABLE IF EXISTS bench_ctr", "CREATE TABLE bench_ctr(id INTEGER PRIMARY KEY, n INT)"])
+        rq_exec([["INSERT INTO bench_ctr VALUES (1,0)"]])
     ms = []
     for _ in range(reps):
         t = time.time()
         if SQL:
-            begin(c); cur.execute("UPDATE ctr SET n=n+1 WHERE id=1"); c.commit()
+            begin(c); cur.execute("UPDATE bench_ctr SET n=n+1 WHERE id=1"); c.commit()
         else:
-            rq_exec([["UPDATE ctr SET n=n+1 WHERE id=1"]])
+            rq_exec([["UPDATE bench_ctr SET n=n+1 WHERE id=1"]])
         ms.append((time.time() - t) * 1000)
     if SQL: cur.close(); c.close()
     ms.sort()
@@ -209,40 +211,40 @@ def bench_single_write_latency(reps=200):
 def bench_batch_insert(n=500):
     def reset():
         if SQL:
-            c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS bi")
-            cur.execute("CREATE TABLE bi(id INT PRIMARY KEY, v INT)"); c.commit()
+            c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS bench_bi")
+            cur.execute("CREATE TABLE bench_bi(id INT PRIMARY KEY, v INT)"); c.commit()
             return c, cur
-        rq_exec(["DROP TABLE IF EXISTS bi", "CREATE TABLE bi(id INTEGER PRIMARY KEY, v INT)"])
+        rq_exec(["DROP TABLE IF EXISTS bench_bi", "CREATE TABLE bench_bi(id INTEGER PRIMARY KEY, v INT)"])
         return None, None
     c, cur = reset()
     t0 = time.time()
     if SQL:
-        insert_many(c, cur, "bi(id,v)", "(%s,%s)", [(i, i) for i in range(1, n + 1)])
+        insert_many(c, cur, "bench_bi(id,v)", "(%s,%s)", [(i, i) for i in range(1, n + 1)])
         c.commit()
     else:
-        rq_exec([["INSERT INTO bi(id,v) VALUES (?,?)", i, i] for i in range(1, n + 1)], transaction=True)
+        rq_exec([["INSERT INTO bench_bi(id,v) VALUES (?,?)", i, i] for i in range(1, n + 1)], transaction=True)
     dt_batch = time.time() - t0
     report(f"batch_insert_{n}_rows_one_statement_rows_per_s", f"{n/dt_batch:.0f}")
     c, cur = reset()
     t0 = time.time()
     for i in range(1, n + 1):
         if SQL:
-            begin(c); cur.execute("INSERT INTO bi(id,v) VALUES (%s,%s)", (i, i)); c.commit()
+            begin(c); cur.execute("INSERT INTO bench_bi(id,v) VALUES (%s,%s)", (i, i)); c.commit()
         else:
-            rq_exec([["INSERT INTO bi(id,v) VALUES (?,?)", i, i]])
+            rq_exec([["INSERT INTO bench_bi(id,v) VALUES (?,?)", i, i]])
     dt_single = time.time() - t0
     report(f"single_insert_{n}_rows_rows_per_s", f"{n/dt_single:.0f}")
     if SQL: cur.close(); c.close()
 
 def bench_cas_race(pairs=100):
     if SQL:
-        c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS cas")
-        cur.execute("CREATE TABLE cas(id INT PRIMARY KEY, version INT)")
-        for i in range(1, pairs + 1): cur.execute("INSERT INTO cas VALUES (%s,1)", (i,))
+        c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS bench_cas")
+        cur.execute("CREATE TABLE bench_cas(id INT PRIMARY KEY, version INT)")
+        for i in range(1, pairs + 1): cur.execute("INSERT INTO bench_cas VALUES (%s,1)", (i,))
         c.commit(); cur.close(); c.close()
     else:
-        rq_exec(["DROP TABLE IF EXISTS cas", "CREATE TABLE cas(id INTEGER PRIMARY KEY, version INT)"])
-        rq_exec([["INSERT INTO cas VALUES (?,1)", i] for i in range(1, pairs + 1)], transaction=True)
+        rq_exec(["DROP TABLE IF EXISTS bench_cas", "CREATE TABLE bench_cas(id INTEGER PRIMARY KEY, version INT)"])
+        rq_exec([["INSERT INTO bench_cas VALUES (?,1)", i] for i in range(1, pairs + 1)], transaction=True)
     wins = [0, 0]
     _cas_tls = threading.local()
     def race(i, side):
@@ -251,11 +253,11 @@ def bench_cas_race(pairs=100):
             if c is None:
                 c = conn(); _cas_tls.c = c
             cur = c.cursor()
-            begin(c); cur.execute("UPDATE cas SET version=2 WHERE id=%s AND version=1", (i,)); c.commit()
+            begin(c); cur.execute("UPDATE bench_cas SET version=2 WHERE id=%s AND version=1", (i,)); c.commit()
             ok = cur.rowcount == 1
             cur.close()
         else:
-            r = rq_exec([["UPDATE cas SET version=2 WHERE id=? AND version=1", i]])
+            r = rq_exec([["UPDATE bench_cas SET version=2 WHERE id=? AND version=1", i]])
             ok = r["results"][0].get("rows_affected", 0) == 1
         if ok: wins[side] += 1
     with cf.ThreadPoolExecutor(min(pairs * 2, 40)) as ex:
@@ -270,18 +272,18 @@ def bench_cas_race(pairs=100):
 def bench_node_kill():
     assert killer_spec, "node-kill test needs the third argument (incluster:<namespace> or a kubectl prefix)"
     if engine == "pxc":
-        c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS acked")
-        cur.execute("CREATE TABLE acked(id INT PRIMARY KEY)"); c.commit()
+        c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS bench_acked")
+        cur.execute("CREATE TABLE bench_acked(id INT PRIMARY KEY)"); c.commit()
         cur.execute("SELECT @@hostname"); target_pod = cur.fetchone()[0].split(".")[0]
         cur.close(); c.close()
         report("primary_before", target_pod)
     elif engine == "postgres":
-        c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS acked")
-        cur.execute("CREATE TABLE acked(id INT PRIMARY KEY)"); c.commit(); cur.close(); c.close()
+        c = conn(); cur = c.cursor(); cur.execute("DROP TABLE IF EXISTS bench_acked")
+        cur.execute("CREATE TABLE bench_acked(id INT PRIMARY KEY)"); c.commit(); cur.close(); c.close()
         target_pod = pg_primary()
         report("primary_before", target_pod)
     else:
-        rq_exec(["DROP TABLE IF EXISTS acked", "CREATE TABLE acked(id INTEGER PRIMARY KEY)"])
+        rq_exec(["DROP TABLE IF EXISTS bench_acked", "CREATE TABLE bench_acked(id INTEGER PRIMARY KEY)"])
         nodes = http_("GET", "/nodes")
         target_pod = next(k for k, v in nodes.items() if v.get("leader"))
         report("leader_before", target_pod)
@@ -301,10 +303,10 @@ def bench_node_kill():
         i += 1
         try:
             if SQL:
-                begin(c); cur.execute("INSERT INTO acked(id) VALUES (%s)", (i,)); c.commit()
+                begin(c); cur.execute("INSERT INTO bench_acked(id) VALUES (%s)", (i,)); c.commit()
                 ok = cur.rowcount == 1
             else:
-                r = rq_exec([["INSERT INTO acked(id) VALUES (?)", i]])
+                r = rq_exec([["INSERT INTO bench_acked(id) VALUES (?)", i]])
                 ok = r["results"][0].get("rows_affected", 0) == 1
             if ok:
                 acked.append(i); ack_times.append(time.time())
@@ -335,10 +337,10 @@ def bench_node_kill():
     for attempt in range(30):
         try:
             if SQL:
-                c = conn(); cur = c.cursor(); cur.execute("SELECT id FROM acked")
+                c = conn(); cur = c.cursor(); cur.execute("SELECT id FROM bench_acked")
                 have = set(r[0] for r in cur.fetchall()); cur.close(); c.close()
             else:
-                q = rq_query([["SELECT id FROM acked"]])
+                q = rq_query([["SELECT id FROM bench_acked"]])
                 have = set(r[0] for r in (q["results"][0].get("values") or []))
             break
         except Exception:
