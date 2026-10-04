@@ -2,6 +2,8 @@
 ## Needs CINIM_RQLITE_URL (a scratch rqlite: the suite creates its own organisations and runs); otherwise the suite is skipped.
 import std/[unittest, json, os]
 import common/rqlite
+import std/times
+import common/ctrlauth
 import core/[schema, scheduler, loggate, logcircuit]
 
 let url = getEnv("CINIM_RQLITE_URL")
@@ -47,12 +49,12 @@ suite "SHD-007 runs and controllers per organisation":
       let rb = co.createRun("p", "return 1", orgB, profB)
       c.addStep(ra, profA)
       c.addStep(rb, profB)
-      let forB = handlePoll(c, defaultProfile, PollRequest(session_id: "jc-b-" & sfx, namespace: nsB, free_pod_slots: 10))
+      let forB = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-b-" & sfx, namespace: nsB, free_pod_slots: 10))
       var runsB: seq[string]
       for cmd in forB.commands:
         if cmd.body.kind == CommandBodyKind.start: runsB.add cmd.body.start.step.run_id
       check rb in runsB and ra notin runsB
-      let forA = handlePoll(c, defaultProfile, PollRequest(session_id: "jc-a-" & sfx, namespace: nsA, free_pod_slots: 10))
+      let forA = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-a-" & sfx, namespace: nsA, free_pod_slots: 10))
       var runsA: seq[string]
       for cmd in forA.commands:
         if cmd.body.kind == CommandBodyKind.start: runsA.add cmd.body.start.step.run_id
@@ -60,8 +62,48 @@ suite "SHD-007 runs and controllers per organisation":
     test "a controller of a namespace without a profile gets nothing":
       let r = co.createRun("p", "return 1", orgA, profA)
       c.addStep(r, profA)
-      let resp = handlePoll(c, defaultProfile, PollRequest(session_id: "jc-x-" & sfx, namespace: "elsewhere-" & sfx, free_pod_slots: 10))
+      let resp = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-x-" & sfx, namespace: "elsewhere-" & sfx, free_pod_slots: 10))
       for cmd in resp.commands: check cmd.body.kind != CommandBodyKind.start
+    test "a namespace with a controller identity serves only a controller that proves it (IAM-003, T-46)":
+      let orgC = c.addOrganization("c-" & sfx, "C")
+      let nsC = "cinim-001-c-" & sfx
+      let profC = c.ensureOrganizationProfile(orgC, nsC)
+      c.ensureCredentialRow(nsC, getTime().toUnix() + 3600)
+      let rc = co.createRun("p", "return 1", orgC, profC)
+      c.addStep(rc, profC)
+      proc startsIn(resp: PollResponse): seq[string] =
+        for cmd in resp.commands:
+          if cmd.body.kind == CommandBodyKind.start: result.add cmd.body.start.step.run_id
+      # no proof: refused, nothing assigned, nothing recorded
+      let none = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-c-" & sfx, namespace: nsC, free_pod_slots: 10))
+      check none.unauthorized and none.commands.len == 0 and none.issued_credential == ""
+      # a token of another namespace, and a made-up credential: refused
+      check handlePoll(c, defaultProfile, "master", PollRequest(session_id: "x", namespace: nsC, free_pod_slots: 10,
+        bootstrap_token: bootstrapToken("master", nsB, 1))).unauthorized
+      check handlePoll(c, defaultProfile, "master", PollRequest(session_id: "x", namespace: nsC, free_pod_slots: 10,
+        credential: "made-up")).unauthorized
+      # the bootstrap token is exchanged for the credential; that poll assigns nothing
+      let issued = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-c-" & sfx, namespace: nsC, free_pod_slots: 10,
+        bootstrap_token: bootstrapToken("master", nsC, 1)))
+      check not issued.unauthorized and issued.issued_credential == controllerCredential("master", nsC, 1) and issued.commands.len == 0
+      check not c.credentialRow(nsC).confirmed
+      # with the credential the steps of the namespace are assigned, and the identity is recorded as in use
+      let served = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-c-" & sfx, namespace: nsC, free_pod_slots: 10,
+        credential: issued.issued_credential))
+      check rc in startsIn(served)
+      check c.credentialRow(nsC).confirmed
+      # the bootstrap token is spent now
+      check handlePoll(c, defaultProfile, "master", PollRequest(session_id: "x", namespace: nsC, free_pod_slots: 10,
+        bootstrap_token: bootstrapToken("master", nsC, 1))).unauthorized
+      # the credential of namespace C is no credential for namespace B's controller identity row (B has none: legacy), and a
+      # rotation locks the old credential out
+      c.rotateCredential(nsC, getTime().toUnix() + 3600)
+      check handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-c-" & sfx, namespace: nsC, free_pod_slots: 10,
+        credential: issued.issued_credential)).unauthorized
+      check handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-c-" & sfx, namespace: nsC, free_pod_slots: 10,
+        bootstrap_token: bootstrapToken("master", nsC, 2))).issued_credential == controllerCredential("master", nsC, 2)
+      c.deleteCredentialRow(nsC)
+      c.deleteOrganization("c-" & sfx)
     test "deleting an organisation takes its profile along":
       c.deleteOrganization("b-" & sfx)
       check c.profileOfNamespace(nsB) == ""

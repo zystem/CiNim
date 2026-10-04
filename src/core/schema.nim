@@ -7,7 +7,7 @@
 
 import std/[json, times]
 import uniq
-import ../common/rqlite
+import ../common/[rqlite, ctrlauth]
 
 const shardId* = "s1"  ## single shard, no directory yet (stage M5 of the roadmap adds it)
 
@@ -20,6 +20,10 @@ const ddl = [
        state TEXT NOT NULL DEFAULT 'active', settings TEXT NOT NULL DEFAULT '{}', plan TEXT NOT NULL DEFAULT '',
        created_at TEXT NOT NULL)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
+  # the identity of the job controller of an organisation's namespace (IAM-003, common/ctrlauth.nim): a generation, no secrets
+  """CREATE TABLE IF NOT EXISTS controller_credentials (
+       namespace TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1, confirmed INTEGER NOT NULL DEFAULT 0,
+       bootstrap_expires_at INTEGER NOT NULL)""",
   """CREATE TABLE IF NOT EXISTS runs (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, bundle_id TEXT,
        trigger_id TEXT, parent_run_id TEXT, state TEXT NOT NULL, actor_id TEXT,
@@ -198,3 +202,28 @@ proc profileOfRun*(c: var RqClient; runId, fallback: string): string =
   let r = c.query(%*[["SELECT profile_id FROM runs WHERE id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0 and vals[0][0].getStr.len > 0: vals[0][0].getStr else: fallback
+
+# ------------------------------------------------------------------ identity of the controller of a namespace (IAM-003, T-46)
+
+proc credentialRow*(c: var RqClient; namespace: string): CredentialRow =
+  let r = c.query(%*[["SELECT generation, confirmed, bootstrap_expires_at FROM controller_credentials WHERE namespace = ?", namespace]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0:
+    CredentialRow(found: true, generation: vals[0][0].getInt, confirmed: vals[0][1].getInt != 0, bootstrapExpiresAt: vals[0][2].getBiggestInt)
+  else: CredentialRow()
+
+proc ensureCredentialRow*(c: var RqClient; namespace: string; expiresAt: int64) =
+  ## made with the namespace; asking again (a retried provisioning) leaves the generation and the expiry as they are
+  discard c.execute(%*[["INSERT OR IGNORE INTO controller_credentials (namespace, generation, confirmed, bootstrap_expires_at) VALUES (?, 1, 0, ?)",
+    namespace, expiresAt]])
+
+proc confirmCredential*(c: var RqClient; namespace: string) =
+  discard c.execute(%*[["UPDATE controller_credentials SET confirmed = 1 WHERE namespace = ?", namespace]])
+
+proc rotateCredential*(c: var RqClient; namespace: string; expiresAt: int64) =
+  ## a new generation: the old credential and the old bootstrap token stop working, a new bootstrap token is due
+  discard c.execute(%*[["UPDATE controller_credentials SET generation = generation + 1, confirmed = 0, bootstrap_expires_at = ? WHERE namespace = ?",
+    expiresAt, namespace]])
+
+proc deleteCredentialRow*(c: var RqClient; namespace: string) =
+  discard c.execute(%*[["DELETE FROM controller_credentials WHERE namespace = ?", namespace]])

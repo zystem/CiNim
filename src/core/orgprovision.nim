@@ -8,6 +8,7 @@ import kubeapi, orgrules
 const
   controllerName* = "cinim-job-controller"      ## the ServiceAccount, the Deployment and the label of the organisation's controller
   curveSecretName* = "cinim-controller-curve"
+  bootstrapSecretName* = "cinim-controller-bootstrap"   ## the one-time token with which the controller enrols (IAM-003, common/ctrlauth.nim)
   stateClaimName* = "cinim-job-controller-state"
   coreServiceName* = "cinim-core"               ## the Service of the core in the namespace of the shard (chart cinim-shard)
 
@@ -83,15 +84,18 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
                {"name": "CINIM_COLLECTOR_ADDR", "value": coreAddress(cfg, 19743)},
                {"name": "CINIM_STEPREPORT_ADDR", "value": coreAddress(cfg, 19742)},
                {"name": "CINIM_CERTS", "value": "/etc/cinim"},
-               {"name": "CINIM_STATE_DIR", "value": "/state"}],
+               {"name": "CINIM_STATE_DIR", "value": "/state"},
+               {"name": "CINIM_BOOTSTRAP_FILE", "value": "/etc/cinim/bootstrap/token"}],
              "volumeMounts": [
                {"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true},
+               {"name": "bootstrap", "mountPath": "/etc/cinim/bootstrap", "readOnly": true},
                {"name": "state", "mountPath": "/state"},
                {"name": "tmp", "mountPath": "/tmp"}],
              "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
              "resources": {"requests": {"cpu": "20m", "memory": "64Mi"}, "limits": {"memory": "256Mi"}}}],
            "volumes": [
              {"name": "curve", "secret": {"secretName": curveSecretName, "defaultMode": 288}},   # 0440
+             {"name": "bootstrap", "secret": {"secretName": bootstrapSecretName, "defaultMode": 288}},
              {"name": "state", "persistentVolumeClaim": {"claimName": stateClaimName}},
              {"name": "tmp", "emptyDir": {}}]}}}}
 
@@ -131,7 +135,7 @@ func ingressObject(cfg: ProvisionConfig; slug: string): JsonNode =
   if cfg.tlsSecret.len > 0 and cfg.host.len > 0:
     result["spec"]["tls"] = %*[{"hosts": [cfg.host], "secretName": cfg.tlsSecret}]
 
-func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys): tuple[steps: seq[Step], skipped: seq[string]] =
+func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string): tuple[steps: seq[Step], skipped: seq[string]] =
   ## SHD-007 (2)..(5), in the order of the specification
   let ns = orgNamespace(cfg, slug)
   func step(name, kind, namespace, objName: string; obj: JsonNode): Step =
@@ -147,6 +151,9 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys): t
     result.steps.add step("controller keys", "Secret", ns, curveSecretName,
       %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, curveSecretName, ns), "type": "Opaque",
          "stringData": {"core.pub": curve.corePub, "client.pub": curve.clientPub, "client.key": curve.clientKey}})
+    result.steps.add step("controller bootstrap token", "Secret", ns, bootstrapSecretName,
+      %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, bootstrapSecretName, ns), "type": "Opaque",
+         "stringData": {"token": bootstrapToken}})
     result.steps.add step("controller state volume", "PersistentVolumeClaim", ns, stateClaimName, stateClaim(cfg, slug))
     result.steps.add step("controller", "Deployment", ns, controllerName, controllerDeployment(cfg, slug))
   else:
@@ -164,9 +171,9 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys): t
   if cfg.multi:
     result.steps.add step("ingress", "Ingress", cfg.shardNamespace, ingressName(slug), ingressObject(cfg, slug))
 
-proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys): ProvisionResult =
+proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string): ProvisionResult =
   ## stops at the first failure and says which step it was; what was created stays (a retry creates the rest)
-  let (steps, skipped) = organizationSteps(cfg, slug, curve)
+  let (steps, skipped) = organizationSteps(cfg, slug, curve, bootstrapToken)
   result.skipped = skipped
   for s in steps:
     let r = k.create(s.kind, s.namespace, s.obj)
@@ -205,8 +212,25 @@ proc purge*(k: KubeApi; cfg: ProvisionConfig; slug: string): ProvisionResult =
   else:
     result.steps.add StepResult(name: "namespace", outcome: r.outcome)
 
+proc coreSecret*(certs: string): string =
+  ## the core's own secret key: the master of the controller identities (common/ctrlauth.nim); it leaves the core nowhere
+  readFile(certs / "curve" / "core.key").strip
+
 proc loadCurve*(certs: string): CurveKeys =
   ## the keys the core itself holds for the transport (D-24), to hand to the controller of an organisation
   let d = certs / "curve"
   CurveKeys(corePub: readFile(d / "core.pub").strip, clientPub: readFile(d / "client.pub").strip,
             clientKey: readFile(d / "client.key").strip)
+
+proc renewBootstrapSecret*(k: KubeApi; cfg: ProvisionConfig; slug, bootstrapToken: string): ProvisionResult =
+  ## after a rotation of the controller's identity: the Secret with the new bootstrap token replaces the old one (the core may
+  ## create and delete Secrets, not read or change them)
+  let ns = orgNamespace(cfg, slug)
+  let gone = k.remove("Secret", ns, bootstrapSecretName)
+  if gone.outcome == oFailed:
+    return ProvisionResult(ok: false, failedStep: "remove the old bootstrap token", error: gone.detail)
+  let made = k.create("Secret", ns, %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, bootstrapSecretName, ns),
+                                       "type": "Opaque", "stringData": {"token": bootstrapToken}})
+  if made.outcome == oFailed:
+    return ProvisionResult(ok: false, failedStep: "create the new bootstrap token", error: made.detail)
+  ProvisionResult(ok: true, steps: @[StepResult(name: "controller bootstrap token", outcome: made.outcome)])

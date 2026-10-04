@@ -9,6 +9,7 @@
 import std/[json, os, strutils, uri, times]
 import guildenstern/[dispatcher, httpserver]
 import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision
+import ../common/ctrlauth
 import ../common/rqlite
 
 const base = "/api/v1/runs"
@@ -30,6 +31,7 @@ var coreRef: Core   ## set once at startup (main.nim); read-only after that, one
 let
   kube = inCluster()   ## the Pod's ServiceAccount; not available outside a cluster, and the organisation then is a record only
   provisionOn = kube.available and getEnv("CINIM_PROVISION", "auto") != "off"
+  bootstrapTtl = parseInt(getEnv("CINIM_CONTROLLER_BOOTSTRAP_TTL", "86400"))   ## seconds a bootstrap token of a controller stays good
 
 proc provisionConfig(cfg: RouterConfig): ProvisionConfig =
   ## SHD-007: what the objects of an organisation are made from. In the `multi` mode (a router is configured) the core also makes
@@ -160,7 +162,13 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           var provisioned = newJObject()
           if provisionOn:
-            let r = provision(kube, provisionConfig(cfg), slug, loadCurve(coreRef.certs))
+            # the identity of the namespace's controller (IAM-003): a generation in the database, the token made from it; asking
+            # again after a failure finds the same row and makes the same token
+            let pc = provisionConfig(cfg)
+            let ns = orgNamespace(pc, slug)
+            c.ensureCredentialRow(ns, getTime().toUnix() + bootstrapTtl)
+            let token = bootstrapToken(coreSecret(coreRef.certs), ns, c.credentialRow(ns).generation)
+            let r = provision(kube, pc, slug, loadCurve(coreRef.certs), token)
             if not r.ok:
               # what was made stays; asking again makes the rest (every create is idempotent)
               reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "provision_failed", "step": r.failedStep,
@@ -176,6 +184,33 @@ proc onRequest() {.raises: [], gcsafe.} =
                              "checked_against_router": view.configured and view.fetchedAt > 0})
         else:
           problem(Http405, "method_not_allowed", "GET or POST")
+        return
+      if path.startsWith("/api/v1/organizations/") and path.endsWith(":rotate-controller-credential"):
+        # IAM-003: a new generation of the identity of the organisation's controller, for the case that its state volume is lost or
+        # its credential leaked; the old credential stops working at once and the controller enrols again with a new bootstrap token
+        if getMethod() != "POST":
+          problem(Http405, "method_not_allowed", "POST")
+          return
+        let slug = path["/api/v1/organizations/".len ..< path.len - ":rotate-controller-credential".len]
+        var c = newRq(coreRef.rqliteUrl)
+        if c.organizationState(slug).len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
+          return
+        let pc = provisionConfig(currentConfig())
+        let ns = orgNamespace(pc, slug)
+        if not c.credentialRow(ns).found:
+          problem(Http409, "no_controller_identity", "this organisation has no controller identity (it was made without a cluster)")
+          return
+        c.rotateCredential(ns, getTime().toUnix() + bootstrapTtl)
+        var kubernetes = newJObject()
+        if provisionOn:
+          let r = renewBootstrapSecret(kube, pc, slug, bootstrapToken(coreSecret(coreRef.certs), ns, c.credentialRow(ns).generation))
+          if not r.ok:
+            reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "rotate_failed", "step": r.failedStep, "detail": r.error}),
+                  ["Content-Type: application/problem+json"])
+            return
+          kubernetes = %*{"steps": stepsJson(r)}
+        jsonOk(Http200, %*{"slug": slug, "namespace": ns, "generation": c.credentialRow(ns).generation, "kubernetes": kubernetes})
         return
       if path.startsWith("/api/v1/organizations/"):
         # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)
@@ -205,7 +240,10 @@ proc onRequest() {.raises: [], gcsafe.} =
           reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "deprovision_failed", "step": r.failedStep,
                               "detail": r.error, "done": stepsJson(r)}), ["Content-Type: application/problem+json"])
           return
-        if doPurge: c.deleteOrganization(slug) else: c.setOrganizationState(slug, "disabled")
+        if doPurge:
+          c.deleteCredentialRow(namespaceName(orgPrefix, orgShard, slug))
+          c.deleteOrganization(slug)
+        else: c.setOrganizationState(slug, "disabled")
         jsonOk(Http200, %*{"slug": slug, "state": (if doPurge: "deleted" else: "disabled"), "kubernetes": stepsJson(r)})
         return
       if path == "/api/v1/router":

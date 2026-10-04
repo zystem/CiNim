@@ -6,10 +6,10 @@
 ## path. The watchdog (watchdogPass) enforces liveness_timeout, unwantedPods tells the controller which Pods to remove, and
 ## renderCoreMetrics / componentsJson serve /metrics and /api/v1/components.
 
-import std/[json, strutils, times, atomics, httpclient, uri, sequtils]
+import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, rqlite, states, shimstate, memstats]
+import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics
 
@@ -326,7 +326,27 @@ proc unwantedPods(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
              now - row[4].getBiggestInt > 30: wanted = false     # finished by itself: its shim is exiting, leave it a little time
     if not found or not wanted: result.add p.step
 
-proc handlePoll*(c: var RqClient; defaultProfile: string; req: PollRequest): PollResponse =
+var refusedLoggedAt {.threadvar.}: Table[string, float]    ## a controller that keeps being refused is said once a minute, not every poll
+
+proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest): PollResponse =
+  # Who is asking (IAM-003, T-46): a namespace that has a controller identity is served only against its credential, or against the
+  # bootstrap token once, in which case the credential is handed out and nothing else happens in this poll. A namespace without
+  # an identity (a single-tenant setup) is trusted as before.
+  let decision = decide(c.credentialRow(req.namespace), master, req.namespace, req.credential, req.bootstrap_token, getTime().toUnix())
+  case decision.verdict
+  of vRefused:
+    let now = epochTime()
+    if now - refusedLoggedAt.getOrDefault(req.namespace, 0.0) > 60:
+      refusedLoggedAt[req.namespace] = now
+      stderr.writeLine "core: a controller for the namespace " & req.namespace & " (session " & req.session_id & ") did not prove its identity: refused"
+    return PollResponse(header: Header(protocol: 1), unauthorized: true, poll_after_ms: 5000)
+  of vIssue:
+    let row = c.credentialRow(req.namespace)
+    echo "core: the controller of ", req.namespace, " enrolled with its bootstrap token"
+    return PollResponse(header: Header(protocol: 1), issued_credential: controllerCredential(master, req.namespace, row.generation), poll_after_ms: 200)
+  of vOk:
+    if decision.confirm: c.confirmCredential(req.namespace)
+  of vLegacy: discard
   # every poll is the controller's heartbeat (D-29)
   discard registryTouch("controller", req.session_id, epochTime(), @[("pods", $req.inventory.len)])
   # The controller serves one organisation and says so by its namespace (SHD-007): it gets the steps of the profile of that namespace
@@ -383,7 +403,7 @@ proc serveControllerAttach*(co: Core; port: int) {.thread.} =
       let body = conn.receive()
       if body.len == 0: continue
       let req = Protobuf.decode(cast[seq[byte]](body), PollRequest)
-      let resp = handlePoll(c, co.profileId, req)
+      let resp = handlePoll(c, co.profileId, secretKey, req)
       let outb = Protobuf.encode(resp)
       var s = newString(outb.len)
       if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)

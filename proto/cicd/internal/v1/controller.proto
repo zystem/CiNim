@@ -58,6 +58,9 @@ message PollRequest {
                                      // false: no inventory this time, or the list call failed - core must conclude nothing
   string namespace = 9;              // SHD-007: the namespace of the organisation this controller serves; core assigns it the steps of the
                                      // execution profile of that namespace only. Empty: the shard's default profile (single-tenant setups)
+  string credential = 10;            // IAM-003: the controller's credential for that namespace, sent in every poll once it has one
+  string bootstrap_token = 11;       // IAM-003: before it has one, the one-time token from the Secret that core made with the namespace;
+                                     // core answers with `issued_credential`
 }
 
 message StartStep {
@@ -99,4 +102,6 @@ message PollResponse {
   GateState gate = 3;
   uint32 poll_after_ms = 4;
   Failure failure = 5;
+  string issued_credential = 6;      // answer to a valid bootstrap_token: the credential to keep and to send in every later poll
+  bool unauthorized = 7;             // the namespace has a controller identity and the poll did not prove it: nothing was done
 }

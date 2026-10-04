@@ -43,6 +43,9 @@ let
   # under other unrelated work in this environment. CINIM_KUBECONFIG pins a specific file/context so this
   # service does not depend on the ambient current-context.
   kubeconfig = getEnv("CINIM_KUBECONFIG", "")
+  # IAM-003: the one-time token with which this controller enrols at core (a Secret that core made with the namespace); the credential
+  # that core gives in exchange is kept next to the state and sent in every poll
+  bootstrapFile = getEnv("CINIM_BOOTSTRAP_FILE", "")
 const pollIntervalMs = 1000
 
 proc connectCore(): ZConnection =
@@ -109,6 +112,20 @@ func toProto(p: PodSeen): PodInfo =
   PodInfo(step: StepRef(run_id: p.runId, seq: uint32(p.seq), attempt: uint32(p.attempt)), pod_name: p.podName, phase: p.phase,
           command_started: p.started, node: p.node, shim_state_json: p.shimJson)
 
+proc credentialPath(): string = stateDir / "credential"
+
+proc readTrimmed(path: string): string =
+  try: (if path.len > 0 and fileExists(path): readFile(path).strip else: "")
+  except IOError: ""
+
+proc saveCredential(value: string) =
+  ## written before it is used and moved into place, so that a restart in between finds either all of it or nothing
+  createDir(stateDir)
+  let tmp = credentialPath() & ".tmp"
+  writeFile(tmp, value)
+  setFilePermissions(tmp, {fpUserRead, fpUserWrite})
+  moveFile(tmp, credentialPath())
+
 proc main() =
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   let k = connectK8s(ns, kubeconfig)
@@ -127,6 +144,7 @@ proc main() =
   echo "jobcontroller: state in ", stateDir, ", adopted ", adopted.len, " step Pod(s) from the previous run"
   let sessionId = "jc-" & $epochTime()
   var core = connectCore()
+  var credential = readTrimmed(credentialPath())
   var handBack: seq[PodTransition]       # steps assigned to us while the launch gate was closed: no Pod exists, they go back
   var ackSeq = 0'u64
   var lastSweep = 0.0
@@ -137,6 +155,7 @@ proc main() =
     let round = pollRound(be, st, cfg, now)
     for p in round.inventory: seenPhase[p.podName] = p.phase
     let req = PollRequest(header: Header(protocol: 1), session_id: sessionId, ack_command_seq: ackSeq, namespace: ns,
+      credential: credential, bootstrap_token: (if credential.len == 0: readTrimmed(bootstrapFile) else: ""),
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
       inventory: round.inventory.map(toProto), inventory_complete: true)   # every Pod this controller tracks is listed
     var resp: PollResponse
@@ -148,6 +167,22 @@ proc main() =
       try: core.close() except CatchableError: discard
       sleep 2000
       try: core = connectCore() except CatchableError: discard
+      continue
+    if resp.issued_credential.len > 0:
+      # enrolled: keep the credential, and from the next poll on it is the proof (the poll got nothing else, so nothing is lost)
+      saveCredential(resp.issued_credential)
+      credential = resp.issued_credential
+      echo "jobcontroller: enrolled at core for ", ns
+      sleep int(max(resp.poll_after_ms, 100'u32))
+      continue
+    if resp.unauthorized:
+      # core does not accept the credential (rotated, or the state was lost): drop it and enrol again with the bootstrap token
+      stderr.writeLine "jobcontroller: core does not accept this controller's identity for " & ns &
+        (if credential.len > 0: "; dropping the credential, enrolling again" else: "; no valid bootstrap token (CINIM_BOOTSTRAP_FILE) yet")
+      if credential.len > 0:
+        credential = ""
+        try: removeFile(credentialPath()) except OSError: discard
+      sleep int(max(resp.poll_after_ms, 1000'u32))
       continue
     afterPoll(st, round.transitions, int64(now))
     handBack.setLen(0)

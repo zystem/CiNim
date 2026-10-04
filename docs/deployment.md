@@ -105,7 +105,7 @@ OpenSSL, libzmq, libsodium and SQLite linked in, and the static shim that it han
 `POST /api/v1/runs` takes the slug of an organisation (`organization`): the run belongs to it, and its steps run in the namespace of the
 organisation, through the controller that the core made for it. A controller says which namespace it serves in every poll, and the core
 gives it the steps of that namespace only; the shared transport key does not yet tell controllers of different organisations apart (T-46).
-An organisation that does not exist is a 404 and a switched-off one a 409. Without `organization` a run belongs to the shard's default
+An organisation that does not exist is a 404 and a switched-off one a 409. The controller proves which namespace it serves: the core makes a one-time bootstrap token with the namespace (a Secret), the controller exchanges it for a credential that it keeps on its state volume and sends in every poll, and a poll without it is refused. If the state volume is lost or the credential leaks, `POST /api/v1/organizations/<slug>:rotate-controller-credential` locks the old one out and the controller enrols again. Without `organization` a run belongs to the shard's default
 tenant and profile (single-tenant setups). The settings of docs/settings.md are per organisation: `GET/PUT /api/v1/profile?organization=<slug>`.
 
 ## What is not in the chart yet
