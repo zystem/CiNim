@@ -46,6 +46,12 @@ spec:
             - {name: CINIM_VLAGENT_URL, value: {{ include "cinim-shard.vlagentUrl" . | quote }}}
             - {name: CINIM_METRICS, value: {{ .Values.metrics.enabled | quote }}}
             - {name: CINIM_CERTS, value: /etc/cinim}
+            # what the core makes the objects of an organisation from (SHD-007)
+            - {name: CINIM_CONTROLLER_IMAGE, value: {{ include "cinim-shard.controllerImage" . | quote }}}
+            - {name: CINIM_CONTROLLER_STATE_CLASS, value: {{ .Values.controller.stateStorageClass | quote }}}
+            - {name: CINIM_INGRESS_CLASS, value: {{ .Values.ingress.className | quote }}}
+            - {name: CINIM_INGRESS_TLS_SECRET, value: {{ .Values.ingress.tls.secretName | quote }}}
+            - {name: CINIM_INGRESS_ANNOTATIONS, value: {{ .Values.ingress.annotations | toJson | quote }}}
             {{- if eq .Values.mode "multi" }}
             - {name: CINIM_ROUTER_URL, value: {{ required "routerUrl is required in the multi mode" .Values.routerUrl | quote }}}
             - {name: CINIM_ROUTER_INTERVAL, value: {{ .Values.routerInterval | quote }}}
@@ -80,10 +86,13 @@ spec:
           secret:
             secretName: {{ required "curve.secretName is required" .Values.curve.secretName }}
             defaultMode: 0440
-            # the core's own key pair only (D-24); the client key stays out of its Pod
+            # the core's own key pair, and the client pair that it hands to the controller of each organisation (D-24; until the
+            # bootstrap token exchange of IAM-003 exists the controllers use the shared client key)
             items:
               - {key: core.pub, path: core.pub}
               - {key: core.key, path: core.key}
+              - {key: client.pub, path: client.pub}
+              - {key: client.key, path: client.key}
         - name: tmp
           emptyDir: {}
 ---

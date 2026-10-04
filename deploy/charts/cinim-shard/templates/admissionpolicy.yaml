@@ -14,7 +14,7 @@ spec:
       - apiGroups: [""]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE, DELETE]
-        resources: [namespaces, serviceaccounts, secrets, resourcequotas, limitranges]
+        resources: [namespaces, serviceaccounts, secrets, resourcequotas, limitranges, persistentvolumeclaims]
       - apiGroups: [apps]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE, DELETE]

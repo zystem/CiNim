@@ -96,10 +96,14 @@ tools/image/build_core.sh registry.example.com/cinim:dev && docker push registry
 ```
 
 The image is built by `tools/image/build_core.sh`: the core (with TLS) and the executor are static binaries in a `scratch` image of about 8 MB
-with the CA certificates, so the image needs no libraries (`deploy/core/Dockerfile`).
+with the CA certificates, so the image needs no libraries (`deploy/core/Dockerfile`). The image of the job controller is built by
+`tools/image/build_controller.sh <image:tag>` (`deploy/controller/Dockerfile`): the static controller, with the Kubernetes C client, libcurl,
+OpenSSL, libzmq, libsodium and SQLite linked in, and the static shim that it hands to every step Pod, in a `scratch` image of about 8 MB.
 
 ## What is not in the chart yet
 
-The core does not create the namespaces, controllers and Ingress objects of the organisations yet (SHD-007 steps 2 to 5, SHD-008): the chart
-only grants the rights and the admission policy for them, and the job controller is not installed by the chart. The images are not built by
-a pipeline yet: the chart expects `/core` and `/executor` in `image.repository`.
+`POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state
+volume and Deployment), the quota, the limit range, the network policies and, in the `multi` mode, the Ingress of the organisation (SHD-007);
+`DELETE` switches an organisation off and `DELETE ?purge=true` deletes it. The reconciliation of SHD-008 and the retention timer of a
+switched-off organisation are not built yet. The job controller runs from its own image, `<image.repository>-controller:<image.tag>` unless `controller.image` says otherwise.
+The images are not built by a pipeline yet: the chart expects `/core` and `/executor` in `image.repository`. A volume of the controller needs a StorageClass: set `controller.stateStorageClass` when the cluster has no default one.

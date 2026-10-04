@@ -16,6 +16,8 @@ cmake --build curl/b -j"$(nproc)" --target install >/dev/null; }
 cmake -S lws -B lws/b -DCMAKE_BUILD_TYPE=Release -DLWS_WITH_SHARED=OFF -DLWS_WITH_STATIC=ON -DLWS_WITHOUT_TESTAPPS=ON -DLWS_WITHOUT_TEST_SERVER=ON -DLWS_WITHOUT_TEST_CLIENT=ON -DLWS_WITHOUT_TEST_PING=ON -DLWS_WITHOUT_TEST_SERVER_EXTPOLL=ON -DLWS_WITH_SSL=ON -DLWS_WITH_LIBUV=OFF -DLWS_WITH_LIBEVENT=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX="$PREFIX" >/dev/null
 cmake --build lws/b -j"$(nproc)" --target install >/dev/null; }
 git clone -q --depth 1 https://github.com/kubernetes-client/c kc
-cmake -S kc/kubernetes -B kc/b -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+# K8S_STATIC=1 (tools/image/build_controller.sh, musl): libkubernetes as a static archive, so the controller links everything in
+cmake -S kc/kubernetes -B kc/b -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$PREFIX" -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  ${K8S_STATIC:+-DBUILD_STATIC_LIBS=ON} >/dev/null
 cmake --build kc/b -j"$(nproc)" --target install >/dev/null
 echo "installed to $PREFIX"; ls "$PREFIX/lib" | tr '\n' ' '

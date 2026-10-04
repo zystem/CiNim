@@ -17,6 +17,7 @@
     "rqliteUrl": {"type": "string", "pattern": "^(https?://.+)?$"},
     "logs": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "victoriaLogsUrls": {"type": "array", "items": {"type": "string"}}, "vlagentUrl": {"type": "string"}}},
     "metrics": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "monitor": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "operator": {"enum": ["prometheus", "victoriametrics"]}, "interval": {"type": "string"}}}}},
+    "controller": {"type": "object", "properties": {"image": {"type": "string"}, "stateStorageClass": {"type": "string"}}},
     "admissionPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
   },
   "if": {"properties": {"mode": {"const": "multi"}}},

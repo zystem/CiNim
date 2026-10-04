@@ -6,7 +6,11 @@ export list, keyvalue, apiclient, generic, kubeconfig, incluster, watchutil, ws
 const k8sPrefix* {.strdefine.} = ""
 when k8sPrefix.len > 0:
   {.passC: "-I" & k8sPrefix & "/include".}
-  {.passL: "-L" & k8sPrefix & "/lib -lkubernetes -Wl,-rpath," & k8sPrefix & "/lib".}
+  when defined(k8sStatic):
+    # tools/image/build_controller.sh: the client and its libraries as static archives (musl), nothing loaded at run time
+    {.passL: "-L" & k8sPrefix & "/lib -lkubernetes -lwebsockets -lcurl -lyaml -lssl -lcrypto -lz".}
+  else:
+    {.passL: "-L" & k8sPrefix & "/lib -lkubernetes -Wl,-rpath," & k8sPrefix & "/lib".}
 
 # Connection reuse: the C client creates a libcurl easy handle per call, so every call pays a TLS handshake (~200 ms).
 # A curl share handle with a shared connection cache, installed through the client's own curl_pre_invoke_func hook, makes the

@@ -67,6 +67,13 @@ ingress:
     enabled: false
     secretName: ""
 
+# The job controller of every organisation (SHD-007): the core makes its Deployment in the namespace of the organisation from this image
+# (the controller and the shim, deploy/controller/Dockerfile). Empty: <image.repository>-controller:<image.tag>.
+controller:
+  image: ""
+  # StorageClass of the controller's state volume (1 Gi per organisation); empty is the cluster's default class
+  stateStorageClass: ""
+
 core:
   resources:
     requests: {cpu: 100m, memory: 128Mi}

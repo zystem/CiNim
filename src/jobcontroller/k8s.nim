@@ -26,12 +26,17 @@ proc jstr(raw: cstring): JsonNode =
 
 proc connectK8s*(ns, kubeconfig: string): K8s =
   ## load_kube_config() always dials whatever "current-context" says in the file, with no per-call override - it silently
-  ## follows the shared ~/.kube/config if kubeconfig is empty, which drifts under unrelated work. CINIM_KUBECONFIG pins a file.
+  ## follows the shared ~/.kube/config if kubeconfig is empty, which drifts under unrelated work. CINIM_KUBECONFIG pins a file;
+  ## inside a cluster with no file given, the ServiceAccount of the Pod is used.
   var base: cstring
   var ssl: ptr sslConfig_t
   var keys: ptr list_t
   let cfgPath = if kubeconfig.len > 0: kubeconfig.cstring else: nil.cstring
-  doAssert load_kube_config(cast[cstringArray](addr base), addr ssl, addr keys, cfgPath) == 0
+  if kubeconfig.len == 0 and getEnv("KUBERNETES_SERVICE_HOST").len > 0:
+    # in a cluster (the controller of an organisation, SHD-007): the Pod's own ServiceAccount, no kubeconfig
+    doAssert load_incluster_config(cast[cstringArray](addr base), addr ssl, addr keys) == 0
+  else:
+    doAssert load_kube_config(cast[cstringArray](addr base), addr ssl, addr keys, cfgPath) == 0
   result.ns = ns
   result.api = apiClient_create_with_base_path(base, ssl, keys)
   doAssert result.api != nil

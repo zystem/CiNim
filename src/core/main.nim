@@ -67,8 +67,18 @@ proc runRouterClient(a: tuple[rqliteUrl: string]) {.thread.} =
 proc main() =
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   var c = newRq(rqliteUrl)
-  migrate(c)
-  let profileId = seedDefaultProfile(c, namespace)
+  var profileId: string
+  try:
+    migrate(c)
+    profileId = seedDefaultProfile(c, namespace)
+  except CatchableError as e:
+    # in a cluster this happens while rqlite is still starting: say what failed, exit, and let Kubernetes start the core again
+    stderr.writeLine "core: cannot use the database at " & rqliteUrl & " (CINIM_RQLITE_URL): " & e.msg
+    quit 1
+  for f in ["core.pub", "core.key"]:
+    if not fileExists(certs / "curve" / f):
+      stderr.writeLine "core: the transport key " & (certs / "curve" / f) & " is missing (CINIM_CERTS; in a cluster the Secret named by curve.secretName)"
+      quit 2
   let co = Core(rqliteUrl: rqliteUrl, profileId: profileId, namespace: namespace, certs: certs,
                 victoriaLogsUrl: victoriaLogsUrl)
   echo "core: profile=", profileId, " namespace=", namespace

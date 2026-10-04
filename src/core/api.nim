@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision
 import ../common/rqlite
 
 const base = "/api/v1/runs"
@@ -26,6 +26,29 @@ let
   metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
 
 var coreRef: Core   ## set once at startup (main.nim); read-only after that, one HTTP thread pool
+
+let
+  kube = inCluster()   ## the Pod's ServiceAccount; not available outside a cluster, and the organisation then is a record only
+  provisionOn = kube.available and getEnv("CINIM_PROVISION", "auto") != "off"
+
+proc provisionConfig(cfg: RouterConfig): ProvisionConfig =
+  ## SHD-007: what the objects of an organisation are made from. In the `multi` mode (a router is configured) the core also makes
+  ## the Ingress <basePath>/<slug>/ of the organisation; the host and the base path are those of the public URL.
+  let pub = parseUri(cfg.publicBase)
+  var annotations: JsonNode
+  try:
+    let raw = getEnv("CINIM_INGRESS_ANNOTATIONS")
+    if raw.len > 0: annotations = parseJson(raw)
+  except JsonParsingError:
+    discard
+  ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(),
+                  controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
+                  multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,
+                  ingressClass: getEnv("CINIM_INGRESS_CLASS"), tlsSecret: getEnv("CINIM_INGRESS_TLS_SECRET"), annotations: annotations)
+
+proc stepsJson(r: ProvisionResult): JsonNode =
+  result = newJArray()
+  for s in r.steps: result.add %*{"step": s.name, "outcome": ($s.outcome)[1 .. ^1].toLowerAscii}
 
 proc onRequest() {.raises: [], gcsafe.} =
   # newHttpServer's callback type is itself `raises: []` (the E-004 rule - no exception crosses the handler boundary - is
@@ -116,20 +139,63 @@ proc onRequest() {.raises: [], gcsafe.} =
           if reason.len > 0:
             problem(Http400, "invalid_slug", reason)
             return
+          if c.organizationState(slug).len > 0:
+            problem(Http409, "slug_exists", "this shard already has an organisation with that slug")
+            return
           let view = currentView()
           let other = conflictWith(view.items, cfg.coreId, slug)
           if other.len > 0:
             problem(Http409, "slug_taken", "the slug is already held by the core " & other & " (the list of the router)")
             return
+          var provisioned = newJObject()
+          if provisionOn:
+            let r = provision(kube, provisionConfig(cfg), slug, loadCurve(coreRef.certs))
+            if not r.ok:
+              # what was made stays; asking again makes the rest (every create is idempotent)
+              reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "provision_failed", "step": r.failedStep,
+                                  "detail": r.error, "done": stepsJson(r)}), ["Content-Type: application/problem+json"])
+              return
+            provisioned = %*{"steps": stepsJson(r), "skipped": r.skipped}
           let id = try: c.addOrganization(slug, j{"name"}.getStr)
                    except RqError:
                      problem(Http409, "slug_exists", "this shard already has an organisation with that slug")
                      return
           jsonOk(Http201, %*{"id": id, "slug": slug, "name": j{"name"}.getStr, "namespace": namespaceName(orgPrefix, orgShard, slug),
-                             "url": orgUrl(cfg.publicBase, slug),
+                             "url": orgUrl(cfg.publicBase, slug), "provisioned": provisionOn, "kubernetes": provisioned,
                              "checked_against_router": view.configured and view.fetchedAt > 0})
         else:
           problem(Http405, "method_not_allowed", "GET or POST")
+        return
+      if path.startsWith("/api/v1/organizations/"):
+        # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)
+        if getMethod() != "DELETE":
+          problem(Http405, "method_not_allowed", "DELETE")
+          return
+        let slug = path["/api/v1/organizations/".len .. ^1]
+        var doPurge, doForce = false
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            if k == "purge": doPurge = v == "true"
+            if k == "force": doForce = v == "true"
+        var c = newRq(coreRef.rqliteUrl)
+        let state = c.organizationState(slug)
+        if state.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
+          return
+        if doPurge and state != "disabled" and not doForce:
+          problem(Http409, "not_disabled", "switch the organisation off first (DELETE without purge), or confirm with force=true")
+          return
+        var r: ProvisionResult
+        r.ok = true
+        if provisionOn:
+          let pc = provisionConfig(currentConfig())
+          r = if doPurge: purge(kube, pc, slug) else: disable(kube, pc, slug)
+        if not r.ok:
+          reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "deprovision_failed", "step": r.failedStep,
+                              "detail": r.error, "done": stepsJson(r)}), ["Content-Type: application/problem+json"])
+          return
+        if doPurge: c.deleteOrganization(slug) else: c.setOrganizationState(slug, "disabled")
+        jsonOk(Http200, %*{"slug": slug, "state": (if doPurge: "deleted" else: "disabled"), "kubernetes": stepsJson(r)})
         return
       if path == "/api/v1/router":
         # the data of the organisation switcher and its alerts (SHD-006); without a router it holds this core's own organisations

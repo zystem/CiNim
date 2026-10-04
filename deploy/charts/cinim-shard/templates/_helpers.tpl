@@ -48,6 +48,11 @@ http://victorialogs-0:9428,http://victorialogs-1:9428
 {{- printf "%s:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag -}}
 {{- end -}}
 
+{{/* the image of the job controllers: `controller.image`, by default the controller image next to the shard image (<repository>-controller:<tag>) */}}
+{{- define "cinim-shard.controllerImage" -}}
+{{- default (printf "%s-controller:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag) .Values.controller.image -}}
+{{- end -}}
+
 {{- define "cinim-shard.labels" -}}
 app.kubernetes.io/part-of: cinim
 cinim.io/shard: {{ .Values.shard | quote }}

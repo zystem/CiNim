@@ -40,6 +40,10 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_ROUTER_INTERVAL` | 60 | seconds between two rounds: the core posts its organisations and reads the router's list |
 | `CINIM_CORE_ID` | the shard name | the name under which the core registers at the router; it must differ between cores |
 | `CINIM_METRICS` | `true` | `false` makes `/metrics` answer 404 (the Helm value `metrics.enabled`) |
+| `CINIM_PROVISION` | `auto` | `auto` makes the Kubernetes objects of an organisation when the core runs in a cluster (the Pod's ServiceAccount), `off` records the organisation only |
+| `CINIM_CONTROLLER_IMAGE` | empty | the image of the job controller (the controller and the shim); empty leaves the controller out and the answer of `POST /api/v1/organizations` says so |
+| `CINIM_CONTROLLER_STATE_CLASS` | empty | the StorageClass of the controller's 1 Gi state volume; empty is the cluster's default class |
+| `CINIM_INGRESS_CLASS`, `CINIM_INGRESS_TLS_SECRET`, `CINIM_INGRESS_ANNOTATIONS` | empty | the Ingress of an organisation in the `multi` mode: the class, the TLS Secret (for the host of `CINIM_PUBLIC_URL`) and the annotations as a JSON object |
 
 When the router does not answer, the core keeps the last list and records the error (`GET /api/v1/router`); a slug is then checked against
 the last list, and `checked_against_router` in the answer of `POST /api/v1/organizations` is false if no list was ever received. A slug that

@@ -151,3 +151,16 @@ proc addOrganization*(c: var RqClient; slug, name: string): string =
   discard c.execute(%*[["INSERT INTO organizations (id, tenant_id, slug, name, created_at) VALUES (?, ?, ?, ?, ?)",
     id, id, slug, name, $getTime().toUnix()]])
   id
+
+proc organizationState*(c: var RqClient; slug: string): string =
+  ## "" if the shard has no such organisation
+  let r = c.query(%*[["SELECT state FROM organizations WHERE slug = ?", slug]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0: vals[0][0].getStr else: ""
+
+proc setOrganizationState*(c: var RqClient; slug, state: string) =
+  discard c.execute(%*[["UPDATE organizations SET state = ? WHERE slug = ?", state, slug]])
+
+proc deleteOrganization*(c: var RqClient; slug: string) =
+  ## the record only: its rows in the other tables are the organisation's data and go with the tenant's own deletion (not built yet)
+  discard c.execute(%*[["DELETE FROM organizations WHERE slug = ?", slug]])
