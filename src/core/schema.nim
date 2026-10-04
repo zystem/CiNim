@@ -92,6 +92,7 @@ proc migrate*(c: var RqClient) =
       ("steps", "shim_n", "INTEGER NOT NULL DEFAULT 0"), ("steps", "shim_phase", "TEXT NOT NULL DEFAULT ''"),
       ("steps", "shim_json", "TEXT NOT NULL DEFAULT ''"), ("steps", "shim_seen_at", "INTEGER NOT NULL DEFAULT 0"),
       ("steps", "shim_source", "TEXT NOT NULL DEFAULT ''"), ("steps", "claimed_at", "INTEGER NOT NULL DEFAULT 0"),
+      ("runs", "profile_id", "TEXT NOT NULL DEFAULT ''"),     # the execution profile of the run's organisation (SHD-007)
       ("execution_profiles", "infra_retries", "INTEGER NOT NULL DEFAULT 3"),
       ("execution_profiles", "log_max_bytes", "INTEGER NOT NULL DEFAULT 1073741824"),
       ("execution_profiles", "liveness_timeout", "INTEGER NOT NULL DEFAULT 300"),
@@ -161,6 +162,39 @@ proc organizationState*(c: var RqClient; slug: string): string =
 proc setOrganizationState*(c: var RqClient; slug, state: string) =
   discard c.execute(%*[["UPDATE organizations SET state = ? WHERE slug = ?", state, slug]])
 
+proc organizationRow*(c: var RqClient; slug: string): tuple[id, state: string] =
+  ## ("", "") if the shard has no such organisation
+  let r = c.query(%*[["SELECT id, state FROM organizations WHERE slug = ?", slug]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0: (vals[0][0].getStr, vals[0][1].getStr) else: ("", "")
+
 proc deleteOrganization*(c: var RqClient; slug: string) =
-  ## the record only: its rows in the other tables are the organisation's data and go with the tenant's own deletion (not built yet)
+  ## the record and its execution profile; its runs and the rest are the organisation's data and go with the tenant's own
+  ## deletion (not built yet)
+  let o = c.organizationRow(slug)
+  if o.id.len > 0: discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
   discard c.execute(%*[["DELETE FROM organizations WHERE slug = ?", slug]])
+
+# ------------------------------------------------------------------ execution profile of an organisation (SHD-007)
+
+proc ensureOrganizationProfile*(c: var RqClient; orgId, namespace: string): string =
+  ## Every organisation has a profile of its own (default settings) that places its steps in its namespace; made on the first run.
+  let r = c.query(%*[["SELECT id FROM execution_profiles WHERE tenant_id = ? AND name = 'default'", orgId]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0: return vals[0][0].getStr
+  let pid = newId()
+  discard c.execute(%*[["INSERT INTO execution_profiles (id, tenant_id, name, cluster_id, namespace) VALUES (?, ?, 'default', 'default', ?)",
+    pid, orgId, namespace]])
+  pid
+
+proc profileOfNamespace*(c: var RqClient; namespace: string): string =
+  ## the profile whose steps run in that namespace; "" if there is none
+  let r = c.query(%*[["SELECT id FROM execution_profiles WHERE namespace = ? ORDER BY tenant_id LIMIT 1", namespace]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0: vals[0][0].getStr else: ""
+
+proc profileOfRun*(c: var RqClient; runId, fallback: string): string =
+  ## the profile of the run's organisation; `fallback` (the shard's default profile) for a run made without one
+  let r = c.query(%*[["SELECT profile_id FROM runs WHERE id = ?", runId]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0 and vals[0][0].getStr.len > 0: vals[0][0].getStr else: fallback

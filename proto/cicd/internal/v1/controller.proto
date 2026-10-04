@@ -56,6 +56,8 @@ message PollRequest {
   repeated PodInfo inventory = 7;    // every step Pod the controller can see (sent every few seconds, see inventory_complete)
   bool inventory_complete = 8;       // true: `inventory` is the whole list (an empty list then means "no Pods at all");
                                      // false: no inventory this time, or the list call failed - core must conclude nothing
+  string namespace = 9;              // SHD-007: the namespace of the organisation this controller serves; core assigns it the steps of the
+                                     // execution profile of that namespace only. Empty: the shard's default profile (single-tenant setups)
 }
 
 message StartStep {

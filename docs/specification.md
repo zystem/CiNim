@@ -573,7 +573,7 @@ The platform works only inside Kubernetes and uses no permanent agents: there ar
 
 **RUN-011 Services.** Service containers (`services` in `ci.job`) are started as a separate Pod of the job with a headless Service and a DNS name inside the run; a NetworkPolicy allows access only to Pods of the same run. A service Pod is created on first use and removed when the job ends; it is not part of the log of the steps but has its own log stream.
 
-**RUN-012 Limits of the model without permanent agents.** Privileged containers and Docker-in-Docker are not supported. Images are built by the BuildKit plugin through a rootless buildkitd as a service Pod of the profile. Tasks that need a long-lived container for the whole job (for example interactive debugging or heavy cache warm-up) use session mode, which is reserved for stage 3 (7.4) (open question Q-14).
+**RUN-012 Limits of the model without permanent agents.** Privileged containers and Docker-in-Docker are not supported. Images are built by the BuildKit plugin through a rootless buildkitd as a service Pod of the profile (whether a rootless builder can run in the restricted namespace of an organisation is measured in A.13 and open, Q-17). Tasks that need a long-lived container for the whole job (for example interactive debugging or heavy cache warm-up) use session mode, which is reserved for stage 3 (7.4) (open question Q-14).
 
 **RUN-013 Start latency.** Target: from placing a step in the queue to the start of the user process, p95 ≤ 10 s with warm images. Measured on a shared, noisy test environment of two worker nodes (A.6): p50 0.9--1.7 s, p95 up to 7.0 s (creating a Pod is not the bottleneck at about 0.2 s; the time is spent in the kubelet, with a tail up to 7 s), which meets the target; a batch of 50 Pods takes 8.4--11.8 s, still above the target if starting several steps in a batch becomes an ordinary scenario; a cold shim image takes about 8 s. Measures 1--3 of section 7.4 (volume, persistent volumes, image preloading) do not shorten the kubelet time in that environment and are verified again on the target cluster. To reduce latency the shim image is preloaded onto nodes by a DaemonSet (which runs no jobs); repeated starts of Pods over one volume (RUN-014) and persistent volumes between runs (STO-008) remove repeated data preparation from a step.
 
@@ -1321,6 +1321,40 @@ These points are resolved by configuration or by a later product decision. The c
 | Q-14 | The start-up acceleration model: a Pod per step, repeated Pod starts over a persistent volume (RUN-014, STO-008), session mode (7.4) only if SES-001 is met | A Pod per step with volumes as in 7.4; session mode is not developed because condition (a) of SES-001 is not met in the measured environment (A.6); the RUN-013 target is p95 <= 10 s |
 | Q-15 | Whether separate subdomains for iframes (`logs.`, `x.`) and a wildcard certificate are acceptable in target installations | Yes |
 | Q-16 | Whether an emergency bypass of the launch ban is needed when the log circuit is unavailable (for example a production rollback): a limited break-glass for the Platform admin with audit, during which the step's log accumulates in the shim's spool and is sent after recovery | No bypass, the ban always applies (RUN-015) |
+| Q-17 | How image builds run (RUN-012, A.13): a build profile with its own namespace under Pod Security `baseline`, a `Localhost` seccomp profile that allows user namespaces (to be installed on the nodes and measured; `Unconfined` worked) and user namespaces enabled on the nodes (`user.max_user_namespaces`), with rootless BuildKit or Buildah; or Kaniko in that namespace (works without the sysctl and the seccomp profile); or a privileged builder outside the organisation namespaces | Open; measure the `Localhost` profile and choose the tool |
+
+## A.13 Container image builds in a restricted namespace
+
+Measured on the TESTING cluster (Talos, Kubernetes 1.34, containerd 2.1, kernel 6.12) in a namespace made by the core for an organisation (SHD-007: Pod Security `restricted`, default-deny network policy with only the registry opened for the test, quota and limit range), and in two namespaces made for comparison with Pod Security `baseline` and `privileged`. The build is a three-line Dockerfile (a `RUN` that adds a user, a `COPY`) from a base image and to a registry inside the cluster.
+
+The nodes have `user.max_user_namespaces = 0` (Talos default). A Pod with `hostUsers: false` therefore does not start (the sandbox cannot be created), and nothing that needs a user namespace works, which is the error that rootless BuildKit reports (`[rootlesskit:parent] /proc/sys/user/max_user_namespaces needs to be set to non-zero`, `fork/exec /proc/self/exe: operation not permitted`).
+
+| Tool and way of running | Namespace policy | Result | Why |
+|:---|:---|:---|:---|
+| BuildKit rootless (`moby/buildkit:rootless`, `--oci-worker-no-process-sandbox`), user 1000 | `restricted` | fails | rootlesskit needs a user namespace |
+| Buildah, user 1000, `vfs`, `chroot` isolation | `restricted` | fails | `unshare(CLONE_NEWUSER)`: user namespaces are off |
+| Kaniko, user 1000 | `restricted` | fails | `chown /kaniko/Dockerfile: operation not permitted`: Kaniko needs root |
+| Kaniko, root, default capabilities | `baseline` | **works** (build and push, only the registry reachable) | no user namespace, no extra capability |
+| Buildah, root, default capabilities | `baseline` | fails | without `CAP_SYS_ADMIN` Buildah falls back to a user namespace |
+| Buildah, root, `CAP_SYS_ADMIN`, `--ulimit nproc=... --ulimit nofile=...` set to the current values | `privileged` | **works** | `RLIMIT_NPROC` cannot be raised without `CAP_SYS_RESOURCE`, so the limits are passed explicitly |
+| BuildKit rootful (`privileged: true`) with an insecure-registry `buildkitd.toml` | `privileged` | **works** | a privileged container |
+
+**After the sysctl was raised.** `user.max_user_namespaces` was set to 11255 on the nodes (the value of the Talos guide). The same builds, in a scratch namespace with Pod Security `privileged` where a setting of the namespace policy was the thing being tested:
+
+| Tool and way of running | Result | Why |
+|:---|:---|:---|
+| A Pod with `hostUsers: false`, user 1000, `restricted` | starts | the sandbox can be created; inside, `unshare -Ur` fails because the default seccomp profile forbids nested user namespaces |
+| The same with `runAsUser: 0` | refused by `restricted` | `restricted` forbids root even when the Pod has a user namespace (Kubernetes 1.34) |
+| BuildKit rootless, user 1000, `hostUsers: false`, default seccomp | fails | rootlesskit cannot create its namespace |
+| Buildah, user 1000, `hostUsers: false`, default seccomp | fails | `unshare(CLONE_NEWUSER)` is refused by seccomp |
+| BuildKit rootless, user 1000, seccomp `Unconfined`, no privilege escalation (as `restricted` demands) | fails | `newuidmap` is a setuid binary and needs privilege escalation and `CAP_SETUID` |
+| BuildKit rootless, user 1000, seccomp `Unconfined`, the rest as `baseline` (escalation allowed, default capabilities) | **works** | |
+| Buildah rootless, user 1000, seccomp `Unconfined`, the rest as `baseline` | **works** | |
+| Buildah, root in a `hostUsers: false` Pod, seccomp `Unconfined`, default capabilities | **works** | root of the Pod's own user namespace maps the ids itself |
+| BuildKit rootful in a `hostUsers: false` Pod, root, seccomp `Unconfined`, `CAP_SYS_ADMIN` (not `privileged`) | **works**; without `CAP_SYS_ADMIN` it fails at `mount` | the capability is scoped to the Pod's user namespace |
+| Buildah, user 1000, `restricted`-style settings, seccomp `Unconfined`, single id mapping with `ignore_chown_errors` | fails | the image is pulled, the `RUN` step fails with `error setting supplemental groups list` (needs `CAP_SETGID`) |
+
+What follows. (1) No tool runs in the `restricted` namespace of an organisation, with or without user namespaces on the nodes: the rootless tools need `newuidmap` (a setuid binary with `CAP_SETUID`/`CAP_SETGID`) or root in the Pod, and `restricted` forbids both. The statement of RUN-012 (a rootless buildkitd in the organisation's namespace) therefore holds only for a namespace with a weaker policy. (2) The weakest policy that worked is `baseline` plus a seccomp profile that allows the user-namespace calls: rootless BuildKit and rootless Buildah run as user 1000 without any added capability and without `privileged`. `baseline` forbids `Unconfined`; a `Localhost` seccomp profile is allowed, but it has to exist as a file on every node, and it was not measured (`Unconfined` was used as its upper bound). (3) Kaniko needs only `baseline` (root, default capabilities, default seccomp) and works with the cluster as it was; it needs no sysctl. (4) Rootful BuildKit and Buildah with `CAP_SYS_ADMIN` or `privileged` need a `privileged` namespace, which contradicts SEC-012 for namespaces that hold untrusted pipelines. (5) A build step needs an egress allowance to the registry that holds the base image and receives the result, beyond the default-deny policy (SEC-003: allow rules by project policy); the measurement used exactly one rule, the registry's port. Which way the platform takes is open question Q-17: a build profile (an execution profile with its own namespace, `baseline`, a seccomp profile and the registry allowance) with Kaniko or a rootless builder.
 
 # 22 Sources
 

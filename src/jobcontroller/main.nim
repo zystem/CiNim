@@ -136,7 +136,7 @@ proc main() =
     let now = epochTime()
     let round = pollRound(be, st, cfg, now)
     for p in round.inventory: seenPhase[p.podName] = p.phase
-    let req = PollRequest(header: Header(protocol: 1), session_id: sessionId, ack_command_seq: ackSeq,
+    let req = PollRequest(header: Header(protocol: 1), session_id: sessionId, ack_command_seq: ackSeq, namespace: ns,
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
       inventory: round.inventory.map(toProto), inventory_complete: true)   # every Pod this controller tracks is listed
     var resp: PollResponse

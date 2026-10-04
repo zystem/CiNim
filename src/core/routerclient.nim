@@ -129,6 +129,7 @@ proc serveRouterClient*(readOrgs: proc (): seq[OwnOrg] {.gcsafe.}; stop: ptr Ato
   {.cast(gcsafe).}:
     let cfg = currentConfig()
     var waited = cfg.intervalSec * 10          # the first round at once
+    var reported = ""                          # the last problem written to the log: a router that stays down is said once, not every round
     while not stop[].load:
       if waited >= cfg.intervalSec * 10:
         waited = 0
@@ -139,6 +140,10 @@ proc serveRouterClient*(readOrgs: proc (): seq[OwnOrg] {.gcsafe.}; stop: ptr Ato
           v.reachable = false
           v.lastError = e.msg.substr(0, 160)
         recordView(v)
-        if not v.reachable: stderr.writeLine "core: router: " & v.lastError
+        let problem = if v.reachable: "" else: v.lastError.replace('\n', ' ')
+        if problem != reported:
+          if problem.len > 0: stderr.writeLine "core: router: " & problem & " (said once; the core keeps the last list and tries again every " & $cfg.intervalSec & " s)"
+          else: stderr.writeLine "core: router: reachable again"
+          reported = problem
       sleep 100
       inc waited

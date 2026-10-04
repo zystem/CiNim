@@ -44,12 +44,15 @@ proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
 
 # ------------------------------------------------------------------ run creation and lookup (REST API)
 
-proc createRun*(co: Core; projectId, script: string): string =
+proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId = ""): string =
+  ## `tenantId` is the organisation's id and `profileId` its execution profile (SHD-007); without them the run belongs to the
+  ## shard's default tenant and profile (single-tenant setups and tests).
   var c = newRq(co.rqliteUrl)
   result = newId()
   let now = $getTime().toUnix()
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at) " &
-    "VALUES (?, 't1', ?, ?, 1, ?, ?)", result, projectId, protoName(rsRunning), now, now]])
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at, profile_id) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?)", result, tenantId, projectId, protoName(rsRunning), now, now,
+    (if profileId.len > 0: profileId else: co.profileId)]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
@@ -57,11 +60,12 @@ proc createRun*(co: Core; projectId, script: string): string =
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT id, project_id, state, created_at, updated_at FROM runs WHERE id = ?", runId]])
+  let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, '') " &
+    "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
   let row = vals[0]
-  result = %*{"id": row[0].getStr, "project_id": row[1].getStr, "state": row[2].getStr,
+  result = %*{"id": row[0].getStr, "organization": row[5].getStr, "project_id": row[1].getStr, "state": row[2].getStr,
               "created_at": row[3].getStr, "updated_at": row[4].getStr}
   # RUN-015: a queued step that waits for the log circuit says so (API shows the reason)
   let w = c.query(%*[["SELECT wait_reason FROM steps WHERE run_id = ? AND wait_reason IS NOT NULL LIMIT 1", runId]])
@@ -80,18 +84,19 @@ proc getRun*(co: Core; runId: string): JsonNode =
 
 # ------------------------------------------------------------------ retry settings (D-27)
 
-proc getProfileSettings*(co: Core): JsonNode =
-  ## What the UI shows and edits.
+proc getProfileSettings*(co: Core; profileId = ""): JsonNode =
+  ## What the UI shows and edits; of the profile given (an organisation's) or the shard's default one.
   var c = newRq(co.rqliteUrl)
-  let p = loadSettings(c, co.profileId)
+  let p = loadSettings(c, if profileId.len > 0: profileId else: co.profileId)
   %*{"infra_retries": p.infraRetries, "log_max_bytes": p.logMaxBytes, "liveness_timeout": p.livenessTimeout,
      "log_spool_bytes": p.logSpoolBytes, "log_hold_timeout": p.logHoldTimeout}
 
-proc setProfileSettings*(co: Core; s: ProfileSettings) =
+proc setProfileSettings*(co: Core; s: ProfileSettings; profileId = "") =
   var c = newRq(co.rqliteUrl)
   discard c.execute(%*[["UPDATE execution_profiles SET infra_retries = ?, log_max_bytes = ?, liveness_timeout = ?, " &
     "log_spool_bytes = ?, log_hold_timeout = ? WHERE id = ?",
-    s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout, co.profileId]])
+    s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout,
+    (if profileId.len > 0: profileId else: co.profileId)]])
 
 # ------------------------------------------------------------------ log window read (DAT-001)
 # A bare stand-in for the log gateway, served by the REST API in core/api.nim: one GET, no from/around/search
@@ -262,7 +267,7 @@ proc finalizeFromShim*(c: var RqClient; profileId, runId: string; seq, attempt: 
     else: max(1, s.exitCode.get(1))             # timeout, env_rejected, secret_in_output, shim_error: the shim's verdict, never 0
   let reason = if s.reason == "terminated": "outcome_unknown" else: s.reason
   let state = if s.reason == "terminated": STEP_STATE_LOST elif exitCode == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED
-  applyTransition(c, loadPolicy(c, profileId), PodTransition(
+  applyTransition(c, loadPolicy(c, profileOfRun(c, runId, profileId)), PodTransition(
     step: StepRef(run_id: runId, seq: uint32(seq), attempt: uint32(attempt)), state: state, exit_code: int32(exitCode),
     termination_reason: reason, shim_state_json: stateJson))
 
@@ -271,14 +276,16 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
   ## the profile's liveness_timeout. The step is finalized here (a start_timeout is not repeated, a silent shim's step has an
   ## unknown outcome and is not restarted); the Pod itself is removed by the CancelStep that the next controller poll
   ## brings back, because the step is no longer wanted.
-  let settings = loadSettings(c, profileId)
-  let policy = loadPolicy(c, profileId)
   let now = getTime().toUnix()
-  let r = c.query(%*[["SELECT run_id, ordinal, attempt, state, claimed_at, shim_n, shim_seen_at FROM steps WHERE state IN (?, ?)",
-    protoName(ssStarting), protoName(ssRunning)]])
+  # the profile of a step is that of its run's organisation (SHD-007): its liveness_timeout and retry policy
+  let r = c.query(%*[["SELECT s.run_id, s.ordinal, s.attempt, s.state, s.claimed_at, s.shim_n, s.shim_seen_at, COALESCE(r.profile_id, '') " &
+    "FROM steps s LEFT JOIN runs r ON r.id = s.run_id WHERE s.state IN (?, ?)", protoName(ssStarting), protoName(ssRunning)]])
   let rows = r["results"][0]{"values"}
   if rows == nil: return
   for row in rows:
+    let rowProfile = if row[7].getStr.len > 0: row[7].getStr else: profileId
+    let settings = loadSettings(c, rowProfile)
+    let policy = loadPolicy(c, rowProfile)
     let st = if row[3].getStr == protoName(ssRunning): ssRunning else: ssStarting
     let verdict = liveness.judge(StepLiveness(state: st, claimedAt: row[4].getBiggestInt, shimN: row[5].getInt,
                                               shimSeenAt: row[6].getBiggestInt), now, coreStartedAt, settings.livenessTimeout)
@@ -319,12 +326,15 @@ proc unwantedPods(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
              now - row[4].getBiggestInt > 30: wanted = false     # finished by itself: its shim is exiting, leave it a little time
     if not found or not wanted: result.add p.step
 
-proc handlePoll(c: var RqClient; profileId: string; req: PollRequest): PollResponse =
+proc handlePoll*(c: var RqClient; defaultProfile: string; req: PollRequest): PollResponse =
   # every poll is the controller's heartbeat (D-29)
   discard registryTouch("controller", req.session_id, epochTime(), @[("pods", $req.inventory.len)])
+  # The controller serves one organisation and says so by its namespace (SHD-007): it gets the steps of the profile of that namespace
+  # and of no other. A controller that names none (single-tenant setups) gets the shard's default profile. Until the controllers have
+  # identities of their own (SEC-010) the namespace is taken on the controller's word.
+  let profileId = if req.namespace.len == 0: defaultProfile else: profileOfNamespace(c, req.namespace)
   # 1. Apply reported Pod transitions (results, losses to retry, steps handed back because the gate closed).
-  let policy = loadPolicy(c, profileId)
-  for t in req.transitions: applyTransition(c, policy, t)
+  for t in req.transitions: applyTransition(c, loadPolicy(c, profileOfRun(c, t.step.run_id, defaultProfile)), t)
   # 2. Launch gate (RUN-015): while it is closed nothing is assigned; queued steps stay queued and say why.
   #    Run creation, cancellation and everything else is untouched, and running steps are never interrupted.
   let gate = currentGate()
@@ -332,7 +342,7 @@ proc handlePoll(c: var RqClient; profileId: string; req: PollRequest): PollRespo
   for pod in req.inventory:
     if pod.shim_state_json.len > 0:
       discard recordShimState(c, pod.step.run_id, int(pod.step.seq), int(pod.step.attempt), pod.shim_state_json, "pod_log")
-  let settings = loadSettings(c, profileId)
+  let settings = loadSettings(c, if profileId.len > 0: profileId else: defaultProfile)
   var commands: seq[Command]
   var seq = 1'u64
   # Pods nobody wants any more are removed (superseded attempts, finished steps, orphans of an earlier core or controller)
@@ -348,7 +358,7 @@ proc handlePoll(c: var RqClient; profileId: string; req: PollRequest): PollRespo
       reasonUnavailable, protoName(ssPending)]])
     waitReasonSet.store(true)
   # 3. Claim up to free_pod_slots pending steps whose pause (not_before, after a lost attempt) is over.
-  for _ in 0 ..< (if gate.isOpen: int(req.free_pod_slots) else: 0):
+  for _ in 0 ..< (if gate.isOpen and profileId.len > 0: int(req.free_pod_slots) else: 0):   # no profile for the namespace: no steps
     let r = c.execute(%*[["UPDATE steps SET state = ?, controller_id = ?, claimed_at = ?, version = version + 1 " &
       "WHERE id = (SELECT id FROM steps WHERE state = ? AND profile_id = ? AND not_before <= ? " &
       "ORDER BY priority DESC, queued_at LIMIT 1) AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts",
@@ -427,6 +437,7 @@ proc handleCall(c: var RqClient; profileId: string; req: HostCall): ExecutorResp
   let opts = if parts.len > 2: parts[2] else: ""
   let cmd = if parts.len > 3: parts[3] else: ""
   let now = $getTime().toUnix()
+  let profileId = profileOfRun(c, req.run_id, profileId)    # the profile of the run's organisation (SHD-007)
   try:
     discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, ?, ?, ?)",
       schema.newId(), req.run_id, jobKey, protoName(ssRunning), profileId]])

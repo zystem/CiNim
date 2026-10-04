@@ -1,7 +1,7 @@
 # Execution profile settings
 
 The settings are changed in the UI (in the API this is `GET/PUT /api/v1/profile`; any subset of the fields can be sent) and apply to
-steps that start after the change.
+steps that start after the change. Every organisation has a profile of its own (made on its first run), addressed with `?organization=<slug>`; without it the call concerns the shard's default profile.
 
 | Field | Range | Default | What it does |
 |---|---|---|---|

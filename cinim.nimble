@@ -44,6 +44,7 @@ task testint, "Run integration tests (need a cluster: CINIM_RQLITE_URL, K8S_PREF
   for t in ["texec", "tdrain"]:
     exec "nim c -r --hints:off --warnings:off -d:k8sPrefix=$K8S_PREFIX --outdir:build/tests tests/integration/" & t & ".nim"
   exec "nim c -r --hints:off --warnings:off --outdir:build/tests tests/integration/trqlite.nim"
+  exec "nim c -r --hints:off --warnings:off -p:src --outdir:build/tests tests/integration/torgruns.nim"     # needs CINIM_RQLITE_URL: a scratch rqlite
   # The end-to-end suite builds and runs core, job-controller and executor-service itself (see the header of
   # tests/integration/tm1skeleton.nim); only the job-controller links the Kubernetes client, so K8S_PREFIX is read from
   # the environment there. All ZeroMQ+CURVE channels (D-24) and the HTTP layer (GuildenStern, D-25) need no

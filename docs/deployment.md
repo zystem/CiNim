@@ -100,6 +100,14 @@ with the CA certificates, so the image needs no libraries (`deploy/core/Dockerfi
 `tools/image/build_controller.sh <image:tag>` (`deploy/controller/Dockerfile`): the static controller, with the Kubernetes C client, libcurl,
 OpenSSL, libzmq, libsodium and SQLite linked in, and the static shim that it hands to every step Pod, in a `scratch` image of about 8 MB.
 
+## Runs and organisations
+
+`POST /api/v1/runs` takes the slug of an organisation (`organization`): the run belongs to it, and its steps run in the namespace of the
+organisation, through the controller that the core made for it. A controller says which namespace it serves in every poll, and the core
+gives it the steps of that namespace only; the shared transport key does not yet tell controllers of different organisations apart (T-46).
+An organisation that does not exist is a 404 and a switched-off one a 409. Without `organization` a run belongs to the shard's default
+tenant and profile (single-tenant setups). The settings of docs/settings.md are per organisation: `GET/PUT /api/v1/profile?organization=<slug>`.
+
 ## What is not in the chart yet
 
 `POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state

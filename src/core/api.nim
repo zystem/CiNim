@@ -76,14 +76,25 @@ proc onRequest() {.raises: [], gcsafe.} =
         return
       if path == "/api/v1/profile":
         # D-27, D-29: the execution profile's settings. PUT takes any subset; missing fields keep their value.
+        # `?organization=<slug>` addresses the profile of an organisation (SHD-007), otherwise it is the shard's default one.
+        var profileId = ""
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            if k == "organization":
+              var oc = newRq(coreRef.rqliteUrl)
+              let org = oc.organizationRow(v)
+              if org.id.len == 0:
+                problem(Http404, "organization_not_found", "this shard has no organisation " & v)
+                return
+              profileId = oc.ensureOrganizationProfile(org.id, namespaceName(orgPrefix, orgShard, v))
         if getMethod() == "GET":
-          jsonOk(Http200, coreRef.getProfileSettings())
+          jsonOk(Http200, coreRef.getProfileSettings(profileId))
         elif getMethod() == "PUT":
           let j = try: parseJson(getBody()) except JsonParsingError: nil
           if j == nil or j.kind != JObject:
             problem(Http400, "invalid_request", "a JSON object with any of infra_retries, log_max_bytes, log_spool_bytes, log_hold_timeout, liveness_timeout is required")
             return
-          let cur = coreRef.getProfileSettings()
+          let cur = coreRef.getProfileSettings(profileId)
           var s = ProfileSettings(infraRetries: cur["infra_retries"].getInt, logMaxBytes: cur["log_max_bytes"].getBiggestInt,
                                   livenessTimeout: cur["liveness_timeout"].getInt, logSpoolBytes: cur["log_spool_bytes"].getBiggestInt,
                                   logHoldTimeout: cur["log_hold_timeout"].getInt)
@@ -100,8 +111,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           if bad.len > 0:
             problem(Http400, "invalid_request", bad)
             return
-          coreRef.setProfileSettings(s)
-          jsonOk(Http200, coreRef.getProfileSettings())
+          coreRef.setProfileSettings(s, profileId)
+          jsonOk(Http200, coreRef.getProfileSettings(profileId))
         else:
           problem(Http405, "method_not_allowed", "GET or PUT")
         return
@@ -228,8 +239,28 @@ proc onRequest() {.raises: [], gcsafe.} =
         if j == nil or not j.hasKey("project_id") or not j.hasKey("script"):
           problem(Http400, "invalid_request", "project_id and script are required")
           return
-        let id = coreRef.createRun(j["project_id"].getStr, j["script"].getStr)
-        jsonOk(Http201, %*{"id": id, "state": "RUNNING"})
+        # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
+        # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
+        var tenant = "t1"
+        var profile = ""
+        var orgSlug = ""
+        if j.hasKey("organization"):
+          if j["organization"].kind != JString:
+            problem(Http400, "invalid_request", "organization must be the slug of an organisation")
+            return
+          orgSlug = j["organization"].getStr
+          var c = newRq(coreRef.rqliteUrl)
+          let org = c.organizationRow(orgSlug)
+          if org.id.len == 0:
+            problem(Http404, "organization_not_found", "this shard has no organisation " & orgSlug)
+            return
+          if org.state != "active":
+            problem(Http409, "organization_disabled", "the organisation " & orgSlug & " is switched off")
+            return
+          tenant = org.id
+          profile = c.ensureOrganizationProfile(org.id, namespaceName(orgPrefix, orgShard, orgSlug))
+        let id = coreRef.createRun(j["project_id"].getStr, j["script"].getStr, tenant, profile)
+        jsonOk(Http201, %*{"id": id, "organization": orgSlug, "state": "RUNNING"})
       elif meth == "GET" and "/steps/" in rest and rest.endsWith("/log"):
         let parts = rest.split("/steps/", maxsplit = 1)
         let seq = try: parseInt(parts[1][0 ..< parts[1].len - "/log".len]) except ValueError: -1
