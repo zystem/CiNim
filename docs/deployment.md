@@ -141,6 +141,25 @@ public address needs no rule; one on a private address (in the cluster, in the L
 closed every address but those. The internet rule is an `ipBlock` over all addresses minus the private ranges: with a network plugin that does
 not count pods and nodes as private addresses (Cilium does not) keep the cluster's own ranges in `build.internet.except`.
 
+## A seccomp profile for rootless builders
+
+A rootless builder (BuildKit, Buildah) makes its own user and mount namespaces, which the default seccomp profile of the runtime forbids; the
+only way to allow it without `Unconfined` (which `baseline` refuses) is a `Localhost` profile that exists as a file on every node.
+`deploy/seccomp/cinim-userns.json` is Docker's default profile (as an unprivileged container with the capabilities of the build profile gets it)
+plus `unshare`, `setns`, `clone` without a flag filter, `mount`, `umount`, `umount2`, `pivot_root`, `chroot`, `sethostname`, `setdomainname`, the new
+mount calls (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `move_mount`, `open_tree`, `mount_setattr`) and `keyctl`. It still forbids `bpf`,
+`perf_event_open`, `quotactl`, `syslog`, `fanotify_init`, the kernel-module, reboot, time and raw-I/O calls. Rootless BuildKit and Buildah built
+an image under it, as user 1000 in a `baseline` namespace, with Docker and on the TESTING cluster (A.13). On Talos the profile is a machine config field:
+
+```bash
+talosctl -n <node>,<node>,... patch machineconfig --mode=no-reboot --patch @deploy/seccomp/talos-patch.yaml
+talosctl -n <node> get seccompprofiles
+talosctl -n <node> read /var/lib/kubelet/seccomp/profiles/cinim-userns.json
+```
+
+A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhostProfile: profiles/cinim-userns.json}}`. Regenerate the files with
+`tools/build-test/seccomp-userns.py <Docker's default.json> > deploy/seccomp/cinim-userns.json` after a change of the capability list.
+
 ## What is not in the chart yet
 
 `POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state
