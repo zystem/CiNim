@@ -31,7 +31,7 @@ var coreRef: Core   ## set once at startup (main.nim); read-only after that, one
 let
   kube = inCluster()   ## the Pod's ServiceAccount; not available outside a cluster, and the organisation then is a record only
   provisionOn = kube.available and getEnv("CINIM_PROVISION", "auto") != "off"
-  buildOn = getEnv("CINIM_BUILD", "off") == "on"      ## the shard has a build profile: every organisation gets a build namespace (A.13)
+  buildOn = getEnv("CINIM_BUILD", "off") == "on"      ## the shard has a build profile: the namespace of every organisation allows build Pods (A.13, D-42)
   bootstrapTtl = parseInt(getEnv("CINIM_CONTROLLER_BOOTSTRAP_TTL", "86400"))   ## seconds a bootstrap token of a controller stays good
 
 proc provisionConfig(cfg: RouterConfig): ProvisionConfig =
@@ -58,6 +58,7 @@ proc provisionConfig(cfg: RouterConfig): ProvisionConfig =
     discard
   ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet,
                   build: buildOn, buildEgress: buildEgress, buildCaps: getEnv("CINIM_BUILD_CAPS"), buildMemoryLimit: getEnv("CINIM_BUILD_MEMORY_LIMIT"),
+                  buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"),
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,
                   ingressClass: getEnv("CINIM_INGRESS_CLASS"), tlsSecret: getEnv("CINIM_INGRESS_TLS_SECRET"), annotations: annotations)
@@ -183,12 +184,7 @@ proc onRequest() {.raises: [], gcsafe.} =
             c.ensureCredentialRow(ns, getTime().toUnix() + bootstrapTtl)
             let master = coreSecret(coreRef.certs)
             let token = bootstrapToken(master, ns, c.credentialRow(ns).generation)
-            var buildToken = ""
-            if pc.build:
-              let bns = buildNamespace(pc, slug)
-              c.ensureCredentialRow(bns, getTime().toUnix() + bootstrapTtl)
-              buildToken = bootstrapToken(master, bns, c.credentialRow(bns).generation)
-            let r = provision(kube, pc, slug, loadCurve(coreRef.certs), token, buildToken)
+            let r = provision(kube, pc, slug, loadCurve(coreRef.certs), token)
             if not r.ok:
               # what was made stays; asking again makes the rest (every create is idempotent)
               reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "provision_failed", "step": r.failedStep,
@@ -221,21 +217,16 @@ proc onRequest() {.raises: [], gcsafe.} =
         if not c.credentialRow(ns).found:
           problem(Http409, "no_controller_identity", "this organisation has no controller identity (it was made without a cluster)")
           return
-        # the namespace of the organisation and, when it has one, its build namespace: each has a controller with an identity of its own
         var kubernetes = newJObject()
-        var rotated = newJArray()
-        for kind in [nkOrg, nkBuild]:
-          let kns = kindNamespace(pc, slug, kind)
-          if not c.credentialRow(kns).found: continue
-          c.rotateCredential(kns, getTime().toUnix() + bootstrapTtl)
-          rotated.add %*{"namespace": kns, "generation": c.credentialRow(kns).generation}
-          if provisionOn:
-            let r = renewBootstrapSecret(kube, pc, slug, bootstrapToken(coreSecret(coreRef.certs), kns, c.credentialRow(kns).generation), kind)
-            if not r.ok:
-              reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "rotate_failed", "step": r.failedStep, "detail": r.error}),
-                    ["Content-Type: application/problem+json"])
-              return
-            kubernetes[kns] = stepsJson(r)
+        c.rotateCredential(ns, getTime().toUnix() + bootstrapTtl)
+        let rotated = %*[{"namespace": ns, "generation": c.credentialRow(ns).generation}]
+        if provisionOn:
+          let r = renewBootstrapSecret(kube, pc, slug, bootstrapToken(coreSecret(coreRef.certs), ns, c.credentialRow(ns).generation))
+          if not r.ok:
+            reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "rotate_failed", "step": r.failedStep, "detail": r.error}),
+                  ["Content-Type: application/problem+json"])
+            return
+          kubernetes[ns] = stepsJson(r)
         jsonOk(Http200, %*{"slug": slug, "namespace": ns, "generation": c.credentialRow(ns).generation, "rotated": rotated, "kubernetes": kubernetes})
         return
       if path.startsWith("/api/v1/organizations/"):
@@ -268,7 +259,6 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         if doPurge:
           c.deleteCredentialRow(namespaceName(orgPrefix, orgShard, slug))
-          c.deleteCredentialRow(buildNamespaceName(orgPrefix, orgShard, slug))
           c.deleteOrganization(slug)
         else: c.setOrganizationState(slug, "disabled")
         jsonOk(Http200, %*{"slug": slug, "state": (if doPurge: "deleted" else: "disabled"), "kubernetes": stepsJson(r)})

@@ -184,7 +184,6 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
 
 proc ensureOrganizationProfile*(c: var RqClient; orgId, namespace: string; name = "default"): string =
   ## Every organisation has a profile of its own (default settings) that places its steps in its namespace; made on the first run.
-  ## The build profile (name "build") places them in the build namespace.
   let r = c.query(%*[["SELECT id FROM execution_profiles WHERE tenant_id = ? AND name = ?", orgId, name]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0: return vals[0][0].getStr

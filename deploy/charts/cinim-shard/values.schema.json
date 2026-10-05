@@ -21,7 +21,8 @@
               "internet": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
                            "except": {"type": "array", "items": {"type": "string"}}}},
               "egress": {"type": "array", "items": {"type": "object"}},
-              "capabilities": {"type": "array", "items": {"enum": ["AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD", "NET_BIND_SERVICE", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_CHROOT"]}},
+              "seccompProfile": {"enum": ["RuntimeDefault", "Localhost"]},
+              "capabilities": {"type": "array", "items": {"enum": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETFCAP", "SETGID", "SETUID"]}},
               "memoryLimit": {"type": "string"}}},
     "controller": {"type": "object", "properties": {"image": {"type": "string"}, "stateStorageClass": {"type": "string"}}},
     "admissionPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}

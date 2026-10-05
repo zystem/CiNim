@@ -383,7 +383,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   for _ in 0 ..< (if gate.isOpen and profileId.len > 0: int(req.free_pod_slots) else: 0):   # no profile for the namespace: no steps
     let r = c.execute(%*[["UPDATE steps SET state = ?, controller_id = ?, claimed_at = ?, version = version + 1 " &
       "WHERE id = (SELECT id FROM steps WHERE state = ? AND profile_id = ? AND not_before <= ? " &
-      "ORDER BY priority DESC, queued_at LIMIT 1) AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts",
+      "ORDER BY priority DESC, queued_at LIMIT 1) AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts, profile",
       protoName(ssStarting), req.session_id, getTime().toUnix(), protoName(ssPending), profileId, getTime().toUnix(), protoName(ssPending)]])
     let vals = r["results"][0]{"values"}
     if vals == nil or vals.len == 0: break
@@ -391,7 +391,8 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     commands.add Command(seq: seq, body: CommandBody(kind: CommandBodyKind.start, start: StartStep(
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
-      log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout))))
+      log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
+      profile: row[6].getStr)))
     inc seq
   PollResponse(header: Header(protocol: 1), commands: commands,
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)
@@ -460,17 +461,17 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
   let opts = if parts.len > 3: parts[3] else: ""
   let cmd = if parts.len > 4: parts[4] else: ""
   let now = $getTime().toUnix()
-  var profileId = profileOfRun(c, req.run_id, co.profileId)    # the profile of the run's organisation (SHD-007)
+  let profileId = profileOfRun(c, req.run_id, co.profileId)    # the profile of the run's organisation (SHD-007)
   if profile == "build":
-    # the build profile (A.13): the step runs in the organisation's build namespace, by the controller that serves it
+    # the build profile (D-42): a build Pod in the organisation's own namespace, made by its controller; the shard must allow it
+    # and the run must belong to an organisation (the namespace that carries the admission policy)
     let fail = proc (detail: string): ExecutorResponse =
       ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
     if not co.buildOn: return fail("profile \"build\" is not enabled on this shard (CINIM_BUILD)")
-    let o = c.query(%*[["SELECT o.id, o.slug FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
+    let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("profile \"build\" needs a run that belongs to an organisation")
-    profileId = c.ensureOrganizationProfile(ov[0][0].getStr, buildNamespaceName(co.orgPrefix, co.orgShard, ov[0][1].getStr), "build")
   try:
     discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, ?, ?, ?)",
       schema.newId(), req.run_id, jobKey, protoName(ssRunning), profileId]])

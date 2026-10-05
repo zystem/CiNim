@@ -24,7 +24,7 @@ type
     started*: bool
 
   StartRequest* = object
-    runId*, image*, optsJson*: string
+    runId*, image*, optsJson*, profile*: string       ## profile: "" = ordinary, "build" = an image build (D-42)
     seq*, attempt*: int
     command*: seq[string]
     logMaxBytes*, logSpoolBytes*: uint64
@@ -61,7 +61,7 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
-             spoolBytes: spool)
+             spoolBytes: spool, build: r.profile == "build")
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): bool =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds

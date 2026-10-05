@@ -201,7 +201,7 @@ proc main() =
         else:
           discard startPod(be, st, cfg, StartRequest(runId: s.step.run_id, seq: int(s.step.seq), attempt: int(s.step.attempt),
             image: s.image, command: s.command, logMaxBytes: s.log_max_bytes, optsJson: s.opts_json,
-            logSpoolBytes: s.log_spool_bytes, logHoldTimeout: int(s.log_hold_timeout_seconds)), int64(epochTime()))
+            logSpoolBytes: s.log_spool_bytes, logHoldTimeout: int(s.log_hold_timeout_seconds), profile: s.profile), int64(epochTime()))
       of CommandBodyKind.cancel:
         let c = cmd.body.cancel
         let pn = podName(c.step.run_id, int(c.step.seq), int(c.step.attempt))

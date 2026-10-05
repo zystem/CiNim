@@ -110,13 +110,22 @@ tenant and profile (single-tenant setups). The settings of docs/settings.md are 
 
 ## Image builds (the build profile)
 
-With `build.enabled=true` every organisation gets a second namespace, `<prefix>-<shard>-<org>-build`, under Pod Security `baseline`, with a
-job controller of its own. A build downloads packages all the time (npm, deb, maven, go modules, git), so its steps may reach the public
-internet on ports 80, 443 and 22 (`build.internet`) and nothing inside: the cluster's pods and services, the LAN and the metadata address
-stay closed (`build.internet.except`), as does everything else of the organisation's network rules (DNS and the log collector are open).
-A job asks for it with `profile = "build"`; the steps of such a job run as root of a Pod with a user namespace of its own
-(`hostUsers: false`, root is not root on the node), with every capability dropped but those in `build.capabilities`. The tool is
-Kaniko (the image of the job is `gcr.io/kaniko-project/executor:<tag>-debug`, which has the shell that the shim needs).
+With `build.enabled=true` the namespace of every organisation is Pod Security `baseline` by label, and the chart's ValidatingAdmissionPolicy
+(`<prefix>-<shard>-build-pods`, D-42) gives every Pod in it but a build Pod what `restricted` has over `baseline`: so the organisation's ordinary
+steps and its controller stay as strict as before, and there is one namespace, one controller and one identity per organisation. A job asks for a
+build with `profile = "build"`; the controller of the organisation then makes that step a **build Pod**: label `cinim.io/profile=build`, a user
+namespace of its own (`hostUsers: false`, root is not root on the node), and one of two classes, chosen for the shard with `build.seccompProfile`:
+
+- `RuntimeDefault` (Kaniko): root in the container, the default seccomp profile, every capability dropped but those in `build.capabilities`. The
+  image of the job is `gcr.io/kaniko-project/executor:<tag>-debug`, which has the shell that the shim needs. It needs nothing on the nodes.
+- `Localhost` (rootless BuildKit and Buildah): user 1000 under the seccomp profile `profiles/cinim-userns.json`, which must exist on every node
+  (below). It needs the images' own `subuid`/`subgid` files adjusted for a user namespace of a Pod (`deploy/examples/build-pods`).
+
+The policy lets a build Pod through only when the job controller of the namespace made it, with `hostUsers: false`, one of those two seccomp
+profiles and none of the capabilities beyond the six. A build downloads packages all the time (npm, deb, maven, go modules, git), so build Pods
+(and only they) may reach the public internet on ports 80, 443 and 22 (`build.internet`) and nothing inside: the cluster's pods and services, the
+LAN and the metadata address stay closed (`build.internet.except`), as does everything else of the organisation's network rules (DNS and the log
+collector are open). It needs Kubernetes 1.30 or later (admission policies).
 
 It needs `user.max_user_namespaces` raised on the nodes (Talos: `machine.sysctls`). A registry or a package proxy at a private address, which
 `build.internet` keeps closed, is opened with `build.egress`, a list of NetworkPolicy egress rules. For a registry in the cluster:
@@ -141,13 +150,10 @@ public address needs no rule; one on a private address (in the cluster, in the L
 closed every address but those. The internet rule is an `ipBlock` over all addresses minus the private ranges: with a network plugin that does
 not count pods and nodes as private addresses (Cilium does not) keep the cluster's own ranges in `build.internet.except`.
 
-## Build Pods in the organisation's namespace (designed, D-42)
+## Examples of build Pods
 
-The build namespace above is replaced, in the design, by build Pods in the organisation's own namespace: the namespace is `baseline` by label,
-a ValidatingAdmissionPolicy gives every Pod but a build Pod the `restricted` controls, and a Pod labelled `cinim.io/profile=build` that the job
-controller makes may run as root of a user namespace (Kaniko, `RuntimeDefault`) or as user 1000 under the `Localhost` seccomp profile (rootless
-BuildKit and Buildah). `deploy/examples/build-pods` has the namespace, the policy and one Pod per tool, and `test.sh` that builds an image with
-each and prints what the policy refuses (A.13). It is not built into the core and the chart yet.
+`deploy/examples/build-pods` has the namespace, the policy (the same text as the chart's) and one Pod per tool, and `test.sh` that builds an image
+with each and prints what the policy refuses (A.13). Use it to try a cluster by hand; the core and the chart do the same thing for every organisation.
 
 ## A seccomp profile for rootless builders
 

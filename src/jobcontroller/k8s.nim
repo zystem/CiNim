@@ -3,7 +3,7 @@
 ## SEC-010 per-job projected tokens are deferred: the shim gets the shared CURVE "client" identity through a Secret.
 import std/[os, json, strutils, times, base64, atomics, sequtils]
 import ../common/k8sbind
-import backend
+import backend, podsec
 
 type K8s* = object
   api: ptr apiClient_t
@@ -71,28 +71,12 @@ proc ensureShimAssets*(k: K8s; shimBinPath, certs: string; withCerts: bool) =
                      "client.key": readFile(certs / "curve" / "client.key"),
                      "core.pub": readFile(certs / "curve" / "core.pub")}}))
 
-let
-  buildSteps = getEnv("CINIM_STEP_SECURITY", "restricted") == "build"
-    ## this controller serves a build namespace (the build profile, A.13): its step Pods run as root of a user namespace of their
-    ## own with the few capabilities an image build needs, because the namespace is `baseline`, not `restricted`
-  buildCaps = getEnv("CINIM_BUILD_CAPS", "CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP").split(',').filterIt(it.len > 0)
-  buildMemoryLimit = getEnv("CINIM_BUILD_MEMORY_LIMIT", "4Gi")
-
-proc podSecurity(): tuple[podCtx, containerCtx, resources: JsonNode, hostUsers: bool] =
-  if buildSteps:
-    # measured in A.13: Kaniko built the test image as root of a `hostUsers: false` Pod with every capability dropped but these
-    (podCtx: %*{"runAsUser": 0, "seccompProfile": {"type": "RuntimeDefault"}},
-     containerCtx: %*{"capabilities": {"drop": ["ALL"], "add": buildCaps}},
-     resources: %*{"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": buildMemoryLimit}},
-     hostUsers: false)
-  else:
-    (podCtx: %*{"runAsNonRoot": true, "runAsUser": 1000, "fsGroup": 1000, "seccompProfile": {"type": "RuntimeDefault"}},
-     containerCtx: %*{"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
-     resources: %*{"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "128Mi"}},
-     hostUsers: true)
+let buildSettings = podsec.buildSettings(getEnv("CINIM_BUILD", "off"), getEnv("CINIM_BUILD_CAPS"), getEnv("CINIM_BUILD_MEMORY_LIMIT"),
+                                         getEnv("CINIM_BUILD_SECCOMP"))
+  ## the build profile of the namespace (D-42); what a build Pod is is in podsec.nim
 
 proc podBody(r: PodRequest): JsonNode =
-  let sec = podSecurity()
+  let sec = podsec.podSecurity(buildSettings, r.build)
   result = %*{
     "apiVersion": "v1", "kind": "Pod",
     "metadata": {"name": r.name, "labels": {"cicd.io/run": r.runId}},
@@ -114,6 +98,7 @@ proc podBody(r: PodRequest): JsonNode =
                          %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
           {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
+  for k, v in sec.labels: result["metadata"]["labels"][k] = v
   if not sec.hostUsers: result["spec"]["hostUsers"] = %false
 
 var execCaptured {.threadvar.}: string

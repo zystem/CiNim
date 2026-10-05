@@ -74,14 +74,17 @@ controller:
   # StorageClass of the controller's state volume (1 Gi per organisation); empty is the cluster's default class
   stateStorageClass: ""
 
-# The build profile (A.13, Q-17): with `enabled` every organisation gets a second namespace, <org namespace>-build, under Pod Security
-# `baseline` (a build needs root in its container), with a job controller of its own. A job asks for it with `profile = "build"`; its
-# steps run as root of a Pod with its own user namespace (`hostUsers: false`, so not root on the node), every capability dropped but
-# `capabilities`, the default seccomp profile. Needs `user.max_user_namespaces` on the nodes (Talos: machine.sysctls). A build can reach
-# DNS, the log collector of the shard, the public internet on `internet.ports` (a build downloads packages all the time: npm, deb,
-# maven, go modules, git) and what `egress` lists: `egress` is a list of NetworkPolicy egress rules for addresses `internet` does not
-# cover, for example a registry in the cluster or a package proxy in the LAN (see docs/deployment.md). The private ranges in
-# `internet.except` stay closed: the cluster's own pods and services, the LAN, the link-local metadata address.
+# The build profile (D-42, A.13, Q-17): with `enabled` the namespace of every organisation is Pod Security `baseline` by label (a build needs
+# root in its container) and the ValidatingAdmissionPolicy of this chart gives every Pod but a build Pod what `restricted` has over `baseline`.
+# A job asks for a build with `profile = "build"`; the controller of the organisation then makes that step a build Pod: its own user
+# namespace (`hostUsers: false`, so not root on the node), and, by `seccompProfile`, either Kaniko's class (root of that namespace, the default
+# seccomp profile, every capability dropped but `capabilities`) or the class of rootless BuildKit and Buildah (user 1000 under the Localhost
+# profile profiles/cinim-userns.json of deploy/seccomp, which must be installed on every node). Needs Kubernetes 1.30+ (admission policies) and
+# `user.max_user_namespaces` on the nodes (Talos: machine.sysctls). A build Pod can reach DNS, the log collector of the shard, the public
+# internet on `internet.ports` (a build downloads packages all the time: npm, deb, maven, go modules, git) and what `egress` lists: `egress` is
+# a list of NetworkPolicy egress rules for addresses `internet` does not cover, for example a registry in the cluster or a package proxy in
+# the LAN (see docs/deployment.md). The private ranges in `internet.except` stay closed: the cluster's own pods and services, the LAN, the
+# link-local metadata address. The other steps of the organisation get none of this.
 build:
   enabled: false
   internet:
@@ -89,7 +92,8 @@ build:
     ports: [80, 443, 22]
     except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
   egress: []
-  capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]
+  seccompProfile: RuntimeDefault      # RuntimeDefault (Kaniko) or Localhost (rootless BuildKit and Buildah)
+  capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]    # of the RuntimeDefault class; the policy allows no others
   memoryLimit: 4Gi
 
 core:

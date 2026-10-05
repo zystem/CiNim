@@ -104,10 +104,9 @@ suite "SHD-007 runs and controllers per organisation":
         bootstrap_token: bootstrapToken("master", nsC, 2))).issued_credential == controllerCredential("master", nsC, 2)
       c.deleteCredentialRow(nsC)
       c.deleteOrganization("c-" & sfx)
-    test "a build step goes to the build namespace's controller, not to the organisation's (A.13)":
+    test "a build step stays with the organisation's controller and reaches it as a build step (D-42)":
       let orgD = c.addOrganization("d-" & sfx, "D")
       let nsD = "cinim-001-d-" & sfx
-      let buildNs = nsD & "-build"
       let profD = c.ensureOrganizationProfile(orgD, nsD)
       let rd = co.createRun("p", "return 1", orgD, profD)
       var withBuild = co
@@ -117,21 +116,17 @@ suite "SHD-007 runs and controllers per organisation":
       proc call(core: Core; run, profile: string; seq: uint64): ExecutorResponse =
         handleCall(c, core, HostCall(run_id: run, seq: seq, kind: "job_sh",
           payload: cast[seq[byte]]("job-1\tkaniko\t" & profile & "\t\techo build")))
-      # the ordinary profile: the step stays with the organisation
       check call(withBuild, rd, "", 0).body.kind == ExecutorResponseBodyKind.result
-      # the build profile: the profile of the build namespace is made and the step belongs to it
       check call(withBuild, rd, "build", 1).body.kind == ExecutorResponseBodyKind.result
-      let buildProfile = c.profileOfNamespace(buildNs)
-      check buildProfile.len > 0 and buildProfile != profD
+      # one profile, one namespace: both steps belong to it and the second one says what it is
       let rows = c.query(%*[["SELECT ordinal, profile_id, profile FROM steps WHERE run_id = ? ORDER BY ordinal", rd]])["results"][0]["values"]
       check rows[0][1].getStr == profD and rows[0][2].getStr == ""
-      check rows[1][1].getStr == buildProfile and rows[1][2].getStr == "build"
-      proc startsIn(resp: PollResponse): int =
-        for cmd in resp.commands:
-          if cmd.body.kind == CommandBodyKind.start: inc result
-      # each controller gets its own step and no other
-      check startsIn(handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-b-" & sfx, namespace: buildNs, free_pod_slots: 10))) == 1
-      check startsIn(handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-o-" & sfx, namespace: nsD, free_pod_slots: 10))) == 1
+      check rows[1][1].getStr == profD and rows[1][2].getStr == "build"
+      let resp = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-d-" & sfx, namespace: nsD, free_pod_slots: 10))
+      var profiles: seq[string]
+      for cmd in resp.commands:
+        if cmd.body.kind == CommandBodyKind.start: profiles.add cmd.body.start.profile
+      check profiles.len == 2 and "build" in profiles and "" in profiles      # claimed by queue time, which two steps may share
       # a shard without a build profile, and a run without an organisation, refuse it
       check call(co, rd, "build", 2).body.kind == ExecutorResponseBodyKind.failure
       let legacy = co.createRun("p", "return 1")

@@ -11,6 +11,7 @@ type
     cmd*: seq[string]            ## the container's command: the shim, its flags, `--` and the step's command
     logging*: bool               ## the shim streams logs: it needs the spool volume and the CURVE keys
     spoolBytes*: int
+    build*: bool                 ## a step of the build profile: the adapter makes a build Pod of it (podsec.nim, D-42)
 
   PodSummary* = object
     name*, phase*: string

@@ -89,6 +89,9 @@ suite "creating Pods":
     check r.spoolBytes == 2097152
     let d = buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x"))
     check d.cmd[d.cmd.find("--log-hold-timeout") + 1] == "600"
+  test "a step of the build profile is a build request, any other is not (D-42)":
+    check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", profile: "build")).build
+    check not buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x")).build
   test "no core addresses -> no log streaming flags":
     check not buildRequest(defaultConfig(), req()).logging
   test "the row is written before the Pod exists":

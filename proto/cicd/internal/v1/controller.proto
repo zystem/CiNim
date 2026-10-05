@@ -74,6 +74,7 @@ message StartStep {
   uint64 log_max_bytes = 9;          // the profile's per-step log limit (0 = unlimited): the shim cuts the log there, with a marker
   uint64 log_spool_bytes = 10;       // the profile's spool size on the Pod (0 = the controller's default)
   uint32 log_hold_timeout_seconds = 11;  // the profile's wait for log delivery / core after the command ends (0 = default)
+  string profile = 12;               // D-42: the profile the step asked for ("" = ordinary, "build" = an image build): the controller picks the Pod's security class from it
   string opts_json = 8;              // the Lua step options as one canonical JSON object: mask, metrics, timeout (docs/metrics.md, docs/secrets-masking.md); "" = none
 }
 
