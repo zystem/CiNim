@@ -11,7 +11,7 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
 import std/options
-import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics
+import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -22,6 +22,8 @@ type
     namespace*: string
     certs*: string
     victoriaLogsUrl*: string   ## DAT-001/log gateway stand-in (core/api.nim's log-window read)
+    orgPrefix*, orgShard*: string   ## SHD-001: the names of the namespaces of the organisations
+    buildOn*: bool             ## the shard has a build profile (A.13): a job may ask for `profile = "build"`
 
 var stopServers*: Atomic[bool]
 var waitReasonSet: Atomic[bool]   ## some steps currently carry wait_reason = logs_unavailable (so clearing it is a write only on the open edge)
@@ -234,11 +236,11 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
          protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, $now,
          t.step.run_id, int(t.step.seq), attempt],
         # payload must equal exactly what the executor's host call sent (bootstrap.lua Job:sh:
-        # self.__key .. "\t" .. self.__image .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
+        # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
         # as a different call than the one in the journal and fails script_nondeterminism - steps.command
         # alone (the old query) is missing the job key and image, so join jobs for the key.
         ["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
-         "SELECT s.run_id, s.ordinal, 'job_sh', '', j.key || char(9) || s.image || char(9) || s.opts || char(9) || s.command, ?, ? " &
+         "SELECT s.run_id, s.ordinal, 'job_sh', '', j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command, ?, ? " &
          "FROM steps s JOIN jobs j ON j.id = s.job_id WHERE s.run_id = ? AND s.ordinal = ?",
          res, $now, t.step.run_id, int(t.step.seq)]], transaction = true)
     except RqError:
@@ -445,19 +447,30 @@ proc handleLease(c: var RqClient; profileId: string; req: LeaseRequest): Executo
     lease: LeaseGranted(lease_token: "t-" & runId, ttl_seconds: 60, run_id: runId,
                          script: loadScript(c, runId), journal: loadJournal(c, runId))))
 
-proc handleCall(c: var RqClient; profileId: string; req: HostCall): ExecutorResponse =
+proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
   ## Every host call becomes a step and the run suspends: the step's result (from a job-controller's
   ## PodTransition) lands in run_journal asynchronously, and the executor re-leases the run to continue.
   if req.kind != "job_sh":
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "unknown host call " & req.kind)))
-  let parts = cast[string](req.payload).split('\t', 3)   # key, image, options JSON ("" = none), command (bootstrap.lua)
+  let parts = cast[string](req.payload).split('\t', 4)   # key, image, profile ("" = ordinary), options JSON ("" = none), command (bootstrap.lua)
   let jobKey = parts[0]
   let image = if parts.len > 1: parts[1] else: ""
-  let opts = if parts.len > 2: parts[2] else: ""
-  let cmd = if parts.len > 3: parts[3] else: ""
+  let profile = if parts.len > 2: parts[2] else: ""
+  let opts = if parts.len > 3: parts[3] else: ""
+  let cmd = if parts.len > 4: parts[4] else: ""
   let now = $getTime().toUnix()
-  let profileId = profileOfRun(c, req.run_id, profileId)    # the profile of the run's organisation (SHD-007)
+  var profileId = profileOfRun(c, req.run_id, co.profileId)    # the profile of the run's organisation (SHD-007)
+  if profile == "build":
+    # the build profile (A.13): the step runs in the organisation's build namespace, by the controller that serves it
+    let fail = proc (detail: string): ExecutorResponse =
+      ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
+    if not co.buildOn: return fail("profile \"build\" is not enabled on this shard (CINIM_BUILD)")
+    let o = c.query(%*[["SELECT o.id, o.slug FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
+    let ov = o["results"][0]{"values"}
+    if ov == nil or ov.len == 0: return fail("profile \"build\" needs a run that belongs to an organisation")
+    profileId = c.ensureOrganizationProfile(ov[0][0].getStr, buildNamespaceName(co.orgPrefix, co.orgShard, ov[0][1].getStr), "build")
   try:
     discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, ?, ?, ?)",
       schema.newId(), req.run_id, jobKey, protoName(ssRunning), profileId]])
@@ -465,9 +478,9 @@ proc handleCall(c: var RqClient; profileId: string; req: HostCall): ExecutorResp
     discard   # already exists (a later step of the same job): fine, jobs.key is unique per (run_id, key, attempt)
   let jr = c.query(%*[["SELECT id FROM jobs WHERE run_id = ? AND key = ?", req.run_id, jobKey]])
   let jobId = jr["results"][0]{"values"}[0][0].getStr
-  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) " &
-    "VALUES (?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?)",
-    schema.newId(), req.run_id, jobId, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, now]])
+  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, profile, queued_at) " &
+    "VALUES (?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
+    schema.newId(), req.run_id, jobId, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, profile, now]])
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
     kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: true)))
 
@@ -492,7 +505,7 @@ proc serveExecutorChannel*(co: Core; port: int) {.thread.} =
       let req = Protobuf.decode(cast[seq[byte]](body), ExecutorRequest)
       let resp = case req.body.kind
         of ExecutorRequestBodyKind.lease: handleLease(c, co.profileId, req.body.lease)
-        of ExecutorRequestBodyKind.call: handleCall(c, co.profileId, req.body.call)
+        of ExecutorRequestBodyKind.call: handleCall(c, co, req.body.call)
         of ExecutorRequestBodyKind.finish: handleFinish(c, req.body.finish)
         of ExecutorRequestBodyKind.finish_run_id, ExecutorRequestBodyKind.notSet:
           ExecutorResponse(header: Header(protocol: 1),

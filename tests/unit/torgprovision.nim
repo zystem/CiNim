@@ -112,6 +112,107 @@ suite "SHD-007 the objects of an organisation":
     for s in r.steps: check s.kind notin ["Deployment", "RoleBinding", "ServiceAccount", "PersistentVolumeClaim"]
     check r.skipped.len == 1 and "CINIM_CONTROLLER_IMAGE" in r.skipped[0]
 
+proc buildCfg(egress: JsonNode = nil): ProvisionConfig =
+  result = cfg(true)
+  result.build = true
+  result.buildEgress = egress
+
+suite "build profile (A.13, Q-17): the build namespace of an organisation":
+  let registry = %*[{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "registry"}}}],
+                     "ports": [{"protocol": "TCP", "port": 5000}]}]
+  proc ofNs(steps: seq[Step]; ns: string): seq[Step] =
+    for st in steps:
+      if st.namespace == ns or (st.kind == "Namespace" and st.objectName == ns): result.add st
+  test "without a build profile there is no build namespace":
+    for st in organizationSteps(cfg(true), "acme", curve, "BT").steps: check "-build" notin st.objectName and "-build" notin st.namespace
+  test "the build namespace is <org namespace>-build under Pod Security baseline, the organisation's stays restricted":
+    let steps = organizationSteps(buildCfg(), "acme", curve, "BT", "BB").steps
+    var org, build: JsonNode
+    for st in steps:
+      if st.kind == "Namespace" and st.objectName == "cinim-001-acme": org = st.obj
+      if st.kind == "Namespace" and st.objectName == "cinim-001-acme-build": build = st.obj
+    check org["metadata"]["labels"]["pod-security.kubernetes.io/enforce"].getStr == "restricted"
+    for m in ["enforce", "audit", "warn"]: check build["metadata"]["labels"]["pod-security.kubernetes.io/" & m].getStr == "baseline"
+    check build["metadata"]["labels"]["cinim.io/profile"].getStr == "build" and org["metadata"]["labels"]["cinim.io/profile"].getStr == "default"
+  test "the build namespace has a controller of its own that makes build Pods, with its own bootstrap token and state":
+    let steps = organizationSteps(buildCfg(), "acme", curve, "BT", "BB").steps
+    var d, tok: JsonNode
+    for st in ofNs(steps, "cinim-001-acme-build"):
+      if st.kind == "Deployment": d = st.obj
+      if st.objectName == "cinim-controller-bootstrap": tok = st.obj
+    var env = initTable[string, string]()
+    for e in d["spec"]["template"]["spec"]["containers"][0]["env"]: env[e["name"].getStr] = e["value"].getStr
+    check env["CINIM_NAMESPACE"] == "cinim-001-acme-build" and env["CINIM_STEP_SECURITY"] == "build"
+    check tok["stringData"]["token"].getStr == "BB"
+    var kinds: seq[string]
+    for st in ofNs(steps, "cinim-001-acme-build"): kinds.add st.kind
+    for want in ["ServiceAccount", "RoleBinding", "Secret", "PersistentVolumeClaim", "Deployment", "ResourceQuota", "LimitRange", "NetworkPolicy"]:
+      check want in kinds
+    # the organisation's own controller does not get the build setting
+    for st in ofNs(steps, "cinim-001-acme"):
+      if st.kind == "Deployment":
+        for e in st.obj["spec"]["template"]["spec"]["containers"][0]["env"]: check e["name"].getStr != "CINIM_STEP_SECURITY"
+  test "without an internet setting a build may reach DNS, the collector and what the operator opened, nothing else":
+    var closed, opened: seq[string]
+    for st in ofNs(organizationSteps(buildCfg(), "acme", curve, "BT", "BB").steps, "cinim-001-acme-build"):
+      if st.kind == "NetworkPolicy": closed.add st.objectName
+    check "default-deny" in closed and "allow-dns-and-collector" in closed and "allow-build-egress" notin closed
+    var egress: JsonNode
+    for st in ofNs(organizationSteps(buildCfg(registry), "acme", curve, "BT", "BB").steps, "cinim-001-acme-build"):
+      if st.kind == "NetworkPolicy": opened.add st.objectName
+      if st.objectName == "allow-build-egress": egress = st.obj
+    check "allow-build-egress" in opened
+    check egress["spec"]["egress"][0]["ports"][0]["port"].getInt == 5000
+    check egress["spec"]["podSelector"]["matchExpressions"][0]["operator"].getStr == "NotIn"      # steps only, not the controller
+  test "a build may download packages from the public internet and reach no private range (npm, deb, maven, git)":
+    var cfgI = buildCfg(registry)
+    cfgI.buildInternet = %*{"ports": [80, 443, 22], "except": ["10.0.0.0/8", "192.168.0.0/16", "169.254.0.0/16"]}
+    var policy: JsonNode
+    for st in ofNs(organizationSteps(cfgI, "acme", curve, "BT", "BB").steps, "cinim-001-acme-build"):
+      if st.objectName == "allow-build-internet": policy = st.obj
+    check policy != nil
+    let rule = policy["spec"]["egress"][0]
+    check rule["to"][0]["ipBlock"]["cidr"].getStr == "0.0.0.0/0"
+    check "169.254.0.0/16" in $rule["to"][0]["ipBlock"]["except"] and "10.0.0.0/8" in $rule["to"][0]["ipBlock"]["except"]
+    var ports: seq[int]
+    for p in rule["ports"]: ports.add p["port"].getInt
+    check ports == @[80, 443, 22]
+    check policy["spec"]["podSelector"]["matchExpressions"][0]["operator"].getStr == "NotIn"       # steps only
+    # no internet setting: no such policy; and the organisation's own namespace never gets it
+    for st in organizationSteps(buildCfg(registry), "acme", curve, "BT", "BB").steps: check st.objectName != "allow-build-internet"
+    for st in ofNs(organizationSteps(cfgI, "acme", curve, "BT", "BB").steps, "cinim-001-acme"): check st.objectName != "allow-build-internet"
+  test "a build Pod gets a roomier default memory limit than an ordinary step":
+    let steps = organizationSteps(buildCfg(), "acme", curve, "BT", "BB").steps
+    var org, build: JsonNode
+    for st in steps:
+      if st.kind == "LimitRange" and st.namespace == "cinim-001-acme": org = st.obj
+      if st.kind == "LimitRange" and st.namespace == "cinim-001-acme-build": build = st.obj
+    check org["spec"]["limits"][0]["default"]["memory"].getStr == "1Gi" and build["spec"]["limits"][0]["default"]["memory"].getStr == "4Gi"
+    check build["spec"]["limits"][0]["type"].getStr == "Container"
+  test "everything is created, the Ingress between the two namespaces, and a repeat is harmless":
+    let f = Fake()
+    let r = provision(api(f), buildCfg(registry), "acme", curve, "BT", "BB")
+    check r.ok
+    check "POST /api/v1/namespaces" in f.calls and f.calls.count("POST /api/v1/namespaces") == 2
+    check "POST /apis/apps/v1/namespaces/cinim-001-acme-build/deployments" in f.calls
+    var names: seq[string]
+    for x in r.steps: names.add x.name
+    check names.find("ingress") > names.find("controller") and names.find("build namespace") > names.find("ingress")
+    let again = Fake(exists: @["/api/v1/namespaces", "/apis/apps/v1/namespaces/cinim-001-acme-build/deployments"])
+    check provision(api(again), buildCfg(registry), "acme", curve, "BT", "BB").ok
+  test "switching off removes both controllers, deleting for good removes both namespaces":
+    let f = Fake()
+    check disable(api(f), buildCfg(), "acme").ok
+    check "DELETE /apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller" in f.calls
+    check "DELETE /apis/apps/v1/namespaces/cinim-001-acme-build/deployments/cinim-job-controller" in f.calls
+    let g = Fake()
+    check purge(api(g), buildCfg(), "acme").ok
+    check "DELETE /api/v1/namespaces/cinim-001-acme" in g.calls and "DELETE /api/v1/namespaces/cinim-001-acme-build" in g.calls
+  test "the bootstrap token of the build namespace is renewed in that namespace":
+    let f = Fake()
+    check renewBootstrapSecret(api(f), buildCfg(), "acme", "NEW", nkBuild).ok
+    check f.calls[0] == "DELETE /api/v1/namespaces/cinim-001-acme-build/secrets/cinim-controller-bootstrap"
+
 suite "SHD-007 creating, switching off, deleting":
   test "everything is created in order, the namespace first":
     let f = Fake()

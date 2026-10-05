@@ -245,6 +245,14 @@ local function norm_timeout(v)
   return s
 end
 
+-- The execution profile of a job (RUN-004): "" is the organisation's ordinary one, "build" the build profile (A.13), whose steps run
+-- in the organisation's build namespace. Core refuses a profile that the shard does not have.
+local function norm_profile(v)
+  if v == nil or v == "default" then return "" end
+  if v ~= "build" then error("ci.job: profile must be \"default\" or \"build\"", 3) end
+  return v
+end
+
 -- The step's options reach the shim as one canonical JSON object (keys sorted, only what is set): "" when nothing is.
 local function step_opts(job, opts)
   local metrics, mask, timeout = job.__metrics, job.__mask, job.__timeout
@@ -264,9 +272,9 @@ end
 local Job_mt = { __index = {
   sh = function(self, cmd, opts)
     if type(cmd) ~= "string" then error("Job:sh: string expected", 2) end
-    -- payload: job key, image, canonical options JSON ("" = none) and the command, tab-separated; the command is last
-    -- because it may itself contain tabs (core splits into four fields)
-    local code, out = call("job_sh", self.__key .. "\t" .. self.__image .. "\t" .. step_opts(self, opts) .. "\t" .. cmd):match("^(%-?%d+)\n(.*)$")
+    -- payload: job key, image, profile ("" = the ordinary one), canonical options JSON ("" = none) and the command, tab-separated; the
+    -- command is last because it may itself contain tabs (core splits into five fields)
+    local code, out = call("job_sh", self.__key .. "\t" .. self.__image .. "\t" .. self.__profile .. "\t" .. step_opts(self, opts) .. "\t" .. cmd):match("^(%-?%d+)\n(.*)$")
     return { code = tonumber(code), outputs = {}, stdout = (opts and opts.capture) and out or nil }
   end,
 } }
@@ -288,7 +296,7 @@ G.ci = {
     if type(opts) ~= "table" then error("ci.job: table expected", 2) end
     if type(fn) ~= "function" then error("ci.job: function expected", 2) end
     job_seq = job_seq + 1
-    local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __metrics = norm_metrics(opts.metrics),
+    local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
       __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout) }, Job_mt)
     local ok, err = pcall(fn, j)
     if not ok then error(err, 0) end

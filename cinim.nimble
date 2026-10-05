@@ -14,9 +14,9 @@ requires "protobuf_serialization >= 0.6.2"
 requires "uniq >= 0.2.1"  # UUIDv7 identifiers (common.proto: "shard>_<uuidv7>", SHD-004)
 requires "crunchy >= 0.1.11"  # crc32c (DAT-001/logs.proto's LogChunk.crc32c) - no stdlib/checksums CRC32
 requires "db_connector >= 0.1.0"  # sqlite state of the job-controller (adoption after a restart, D-33)
-# HTTP layer (D-25): upstream 9.0.0 plus two small fixes, docs/patches/guildenstern-9.0.0.patch (apply to the installed package;
-# the fixes are sent upstream as olliNiinivaara/GuildenStern#35 and #36).
-requires "guildenstern >= 9.0.0"
+# HTTP layer (D-25). 9.0.1 has our two fixes (the ~200 ms delay of a chunked response, olliNiinivaara/GuildenStern#35, and the delivered-byte
+# count under backpressure, #36), which were a local patch on 9.0.0.
+requires "guildenstern >= 9.0.1"
 # ZeroMQ+CURVE transport (D-24): our fork, not upstream, while
 # nim-lang/nim-zmq#57 (high-level CURVE: connect/listen configure callback) is open. Branch `cinim` of the fork is
 # upstream master (which already has #58, the setsockopt value-width fix, and #59, the `=destroy` leak fix) plus #57;

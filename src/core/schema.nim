@@ -91,6 +91,7 @@ proc migrate*(c: var RqClient) =
   # columns added after a table already existed in a shard (CREATE TABLE IF NOT EXISTS leaves old tables alone)
   for (table, column, definition) in [
       ("steps", "attempt", "INTEGER NOT NULL DEFAULT 1"), ("steps", "not_before", "INTEGER NOT NULL DEFAULT 0"),
+      ("steps", "profile", "TEXT NOT NULL DEFAULT ''"),   # the job's profile name as the script gave it: "" or "build" (part of the journalled call)
       ("steps", "opts", "TEXT NOT NULL DEFAULT ''"),      # the Lua step options as one JSON object (mask, metrics, timeout)
       # the shim's last known state (D-29): the same JSON as its Pod-log line, numbered by event
       ("steps", "shim_n", "INTEGER NOT NULL DEFAULT 0"), ("steps", "shim_phase", "TEXT NOT NULL DEFAULT ''"),
@@ -181,14 +182,15 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
 
 # ------------------------------------------------------------------ execution profile of an organisation (SHD-007)
 
-proc ensureOrganizationProfile*(c: var RqClient; orgId, namespace: string): string =
+proc ensureOrganizationProfile*(c: var RqClient; orgId, namespace: string; name = "default"): string =
   ## Every organisation has a profile of its own (default settings) that places its steps in its namespace; made on the first run.
-  let r = c.query(%*[["SELECT id FROM execution_profiles WHERE tenant_id = ? AND name = 'default'", orgId]])
+  ## The build profile (name "build") places them in the build namespace.
+  let r = c.query(%*[["SELECT id FROM execution_profiles WHERE tenant_id = ? AND name = ?", orgId, name]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0: return vals[0][0].getStr
   let pid = newId()
-  discard c.execute(%*[["INSERT INTO execution_profiles (id, tenant_id, name, cluster_id, namespace) VALUES (?, ?, 'default', 'default', ?)",
-    pid, orgId, namespace]])
+  discard c.execute(%*[["INSERT INTO execution_profiles (id, tenant_id, name, cluster_id, namespace) VALUES (?, ?, ?, 'default', ?)",
+    pid, orgId, name, namespace]])
   pid
 
 proc profileOfNamespace*(c: var RqClient; namespace: string): string =

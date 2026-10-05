@@ -1,7 +1,7 @@
 ## The real Backend: the official Kubernetes C client (A.6, D-26). The only module of the controller that knows
 ## Kubernetes; it turns the platform's PodRequest into a Pod spec and answers the questions logic.nim asks of the cluster.
 ## SEC-010 per-job projected tokens are deferred: the shim gets the shared CURVE "client" identity through a Secret.
-import std/[os, json, strutils, times, base64, atomics]
+import std/[os, json, strutils, times, base64, atomics, sequtils]
 import ../common/k8sbind
 import backend
 
@@ -71,29 +71,50 @@ proc ensureShimAssets*(k: K8s; shimBinPath, certs: string; withCerts: bool) =
                      "client.key": readFile(certs / "curve" / "client.key"),
                      "core.pub": readFile(certs / "curve" / "core.pub")}}))
 
+let
+  buildSteps = getEnv("CINIM_STEP_SECURITY", "restricted") == "build"
+    ## this controller serves a build namespace (the build profile, A.13): its step Pods run as root of a user namespace of their
+    ## own with the few capabilities an image build needs, because the namespace is `baseline`, not `restricted`
+  buildCaps = getEnv("CINIM_BUILD_CAPS", "CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP").split(',').filterIt(it.len > 0)
+  buildMemoryLimit = getEnv("CINIM_BUILD_MEMORY_LIMIT", "4Gi")
+
+proc podSecurity(): tuple[podCtx, containerCtx, resources: JsonNode, hostUsers: bool] =
+  if buildSteps:
+    # measured in A.13: Kaniko built the test image as root of a `hostUsers: false` Pod with every capability dropped but these
+    (podCtx: %*{"runAsUser": 0, "seccompProfile": {"type": "RuntimeDefault"}},
+     containerCtx: %*{"capabilities": {"drop": ["ALL"], "add": buildCaps}},
+     resources: %*{"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": buildMemoryLimit}},
+     hostUsers: false)
+  else:
+    (podCtx: %*{"runAsNonRoot": true, "runAsUser": 1000, "fsGroup": 1000, "seccompProfile": {"type": "RuntimeDefault"}},
+     containerCtx: %*{"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
+     resources: %*{"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "128Mi"}},
+     hostUsers: true)
+
 proc podBody(r: PodRequest): JsonNode =
-  %*{
+  let sec = podSecurity()
+  result = %*{
     "apiVersion": "v1", "kind": "Pod",
     "metadata": {"name": r.name, "labels": {"cicd.io/run": r.runId}},
     "spec": {
       "restartPolicy": "Never", "automountServiceAccountToken": false,
       # the kubelet's SIGTERM -> SIGKILL window must cover the shim's own: build grace (20 s) + a short log flush
       "terminationGracePeriodSeconds": 60,
-      "securityContext": {"runAsNonRoot": true, "runAsUser": 1000, "fsGroup": 1000,
-                           "seccompProfile": {"type": "RuntimeDefault"}},
+      "securityContext": sec.podCtx,
       "containers": [{"name": "step", "image": r.image, "command": r.cmd,
         "volumeMounts": (@[%*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true},
                           %*{"name": "run", "mountPath": "/cicd/workspace"}] &
           (if r.logging: @[%*{"name": "certs", "mountPath": "/cicd/certs", "readOnly": true},
                            %*{"name": "spool", "mountPath": "/cicd/spool"}] else: @[])),
-        "securityContext": {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
-        "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "128Mi"}}}],
+        "securityContext": sec.containerCtx,
+        "resources": sec.resources}],
       "volumes": (@[%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}},
                     %*{"name": "run", "emptyDir": {}}] &   # the shim's --run-dir (CICD_ENV/CICD_OUTPUT) lives here
         (if r.logging: @[%*{"name": "spool", "emptyDir": {"sizeLimit": $(r.spoolBytes + 1024 * 1024)}},   # kubelet evicts above this; the shim stops itself at spoolBytes
                          %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
           {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
+  if not sec.hostUsers: result["spec"]["hostUsers"] = %false
 
 var execCaptured {.threadvar.}: string
 

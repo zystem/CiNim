@@ -52,6 +52,14 @@ spec:
             - {name: CINIM_INGRESS_CLASS, value: {{ .Values.ingress.className | quote }}}
             - {name: CINIM_INGRESS_TLS_SECRET, value: {{ .Values.ingress.tls.secretName | quote }}}
             - {name: CINIM_INGRESS_ANNOTATIONS, value: {{ .Values.ingress.annotations | toJson | quote }}}
+            # the build profile (A.13): a build namespace per organisation, Pod Security baseline, its own controller
+            - {name: CINIM_BUILD, value: {{ ternary "on" "off" .Values.build.enabled | quote }}}
+            {{- if .Values.build.enabled }}
+            - {name: CINIM_BUILD_EGRESS, value: {{ .Values.build.egress | toJson | quote }}}
+            - {name: CINIM_BUILD_INTERNET, value: {{ if .Values.build.internet.enabled }}{{ dict "ports" .Values.build.internet.ports "except" .Values.build.internet.except | toJson | quote }}{{ else }}"off"{{ end }}}
+            - {name: CINIM_BUILD_CAPS, value: {{ join "," .Values.build.capabilities | quote }}}
+            - {name: CINIM_BUILD_MEMORY_LIMIT, value: {{ .Values.build.memoryLimit | quote }}}
+            {{- end }}
             {{- if eq .Values.mode "multi" }}
             - {name: CINIM_ROUTER_URL, value: {{ required "routerUrl is required in the multi mode" .Values.routerUrl | quote }}}
             - {name: CINIM_ROUTER_INTERVAL, value: {{ .Values.routerInterval | quote }}}

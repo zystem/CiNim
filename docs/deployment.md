@@ -108,6 +108,39 @@ gives it the steps of that namespace only; the shared transport key does not yet
 An organisation that does not exist is a 404 and a switched-off one a 409. The controller proves which namespace it serves: the core makes a one-time bootstrap token with the namespace (a Secret), the controller exchanges it for a credential that it keeps on its state volume and sends in every poll, and a poll without it is refused. If the state volume is lost or the credential leaks, `POST /api/v1/organizations/<slug>:rotate-controller-credential` locks the old one out and the controller enrols again. Without `organization` a run belongs to the shard's default
 tenant and profile (single-tenant setups). The settings of docs/settings.md are per organisation: `GET/PUT /api/v1/profile?organization=<slug>`.
 
+## Image builds (the build profile)
+
+With `build.enabled=true` every organisation gets a second namespace, `<prefix>-<shard>-<org>-build`, under Pod Security `baseline`, with a
+job controller of its own. A build downloads packages all the time (npm, deb, maven, go modules, git), so its steps may reach the public
+internet on ports 80, 443 and 22 (`build.internet`) and nothing inside: the cluster's pods and services, the LAN and the metadata address
+stay closed (`build.internet.except`), as does everything else of the organisation's network rules (DNS and the log collector are open).
+A job asks for it with `profile = "build"`; the steps of such a job run as root of a Pod with a user namespace of its own
+(`hostUsers: false`, root is not root on the node), with every capability dropped but those in `build.capabilities`. The tool is
+Kaniko (the image of the job is `gcr.io/kaniko-project/executor:<tag>-debug`, which has the shell that the shim needs).
+
+It needs `user.max_user_namespaces` raised on the nodes (Talos: `machine.sysctls`). A registry or a package proxy at a private address, which
+`build.internet` keeps closed, is opened with `build.egress`, a list of NetworkPolicy egress rules. For a registry in the cluster:
+
+```yaml
+build:
+  enabled: true
+  egress:
+    - to:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: registry}}
+      ports: [{protocol: TCP, port: 5000}]
+```
+
+```lua
+ci.job({image = "gcr.io/kaniko-project/executor:v1.23.2-debug", profile = "build"}, function(j)
+  j:sh("/kaniko/executor --dockerfile=Dockerfile --context=dir:///cicd/workspace --destination=registry.example.com/team/app:1.0")
+end)
+```
+
+What a build needs beyond the six capabilities (installing packages, setting file capabilities) is not measured (A.13, Q-17). A registry on a
+public address needs no rule; one on a private address (in the cluster, in the LAN) needs a `build.egress` rule, and `build.internet.enabled=false`
+closed every address but those. The internet rule is an `ipBlock` over all addresses minus the private ranges: with a network plugin that does
+not count pods and nodes as private addresses (Cilium does not) keep the cluster's own ranges in `build.internet.except`.
+
 ## What is not in the chart yet
 
 `POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state

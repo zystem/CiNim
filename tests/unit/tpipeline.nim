@@ -7,8 +7,8 @@ import executor/[sandbox, journal, replay]
 proc fakeHost(seq: int; kind, payload: string): Option[string] =
   case kind
   of "job_sh":
-    let parts = payload.split('\t', 3)
-    if parts[3] == "fail": some("1\n")
+    let parts = payload.split('\t', 4)         # key, image, profile, options, command
+    if parts[4] == "fail": some("1\n")
     else: some("0\nout-" & $seq)
   of "now": some("1000")
   else: some("")
@@ -61,16 +61,33 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     check r.value == "s1_abc|0"
     check j.entries.len == 1
     check j.entries[0].kind == "job_sh"
-    check j.entries[0].payload == "job-1\talpine\t\techo hi"
+    check j.entries[0].payload == "job-1\talpine\t\t\techo hi"
 
+  test "RUN-004, A.13: a job may ask for the build profile; the profile is a field of the journalled call":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, """return ci.pipeline({ main = function(run)
+      ci.job({image = "kaniko", profile = "build"}, function(j) j:sh("build") end)
+      ci.job({image = "a", profile = "default"}, function(j) j:sh("plain") end)
+      return "ok" end })""", fakeHost)
+    check r.code == "ok"
+    check j.entries[0].payload == "job-1\tkaniko\tbuild\t\tbuild"
+    check j.entries[1].payload == "job-2\ta\t\t\tplain"       # "default" is the ordinary profile: the field is empty
+  test "an unknown profile is a script error":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, """return ci.pipeline({ main = function(run)
+      ci.job({image = "a", profile = "privileged"}, function(j) j:sh("x") end)
+      return "ok" end })""", fakeHost)
+    check r.code != "ok"
   test "each ci.job call gets a sequential job key (job-1, job-2, ...)":
     var sb = newSandbox()
     var j = Journal()
     let r = sb.execute(j, pipelineTwoJobs, fakeHost)
     check r.code == "ok"
     check j.entries.len == 2
-    check j.entries[0].payload == "job-1\ta\t\tone"
-    check j.entries[1].payload == "job-2\tb\t\ttwo"
+    check j.entries[0].payload == "job-1\ta\t\t\tone"
+    check j.entries[1].payload == "job-2\tb\t\t\ttwo"
 
   test "a failing step's StepResult.code lets the script fail its own job with pcall":
     var sb = newSandbox()
@@ -127,10 +144,10 @@ suite "application metrics declaration (docs/metrics.md)":
     let r = sb.execute(j, pipelineMetrics, fakeHost)
     check r.code == "ok"
     check j.entries.len == 3
-    check j.entries[0].payload == "job-1\ta\t" & """{"metrics":{"runtime":"jvm","scrape":[]}}""" & "\tone"
-    check j.entries[1].payload == "job-1\ta\t" &
+    check j.entries[0].payload == "job-1\ta\t\t" & """{"metrics":{"runtime":"jvm","scrape":[]}}""" & "\tone"
+    check j.entries[1].payload == "job-1\ta\t\t" &
       """{"metrics":{"runtime":"none","scrape":[{"format":"prometheus","include":["jvm_*"],"interval":10,"name":"app1","timeout":5,"url":"http://127.0.0.1:9404/metrics"}]}}""" & "\ttwo"
-    check j.entries[2].payload == "job-1\ta\t\tthree"
+    check j.entries[2].payload == "job-1\ta\t\t\tthree"
   test "only the step's own Pod may be scraped":
     for url in ["http://example.com/metrics", "http://10.0.0.5:9000/", "https://127.0.0.1/m", "http://127.0.0.1.evil.com/m"]:
       check metricsRun("j:sh('x', {metrics = {scrape = {{url = '" & url & "'}}}})").code != "ok"
@@ -160,14 +177,14 @@ suite "step options: mask and timeout (docs/secrets-masking.md)":
         return "ok"
       end})"""
     check sb.execute(j, script, fakeHost).code == "ok"
-    check j.entries[0].payload == "job-1\ta\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"timeout":600}""" & "\tone"
-    check j.entries[1].payload == "job-1\ta\t" & """{"mask":{"min_length":4,"runtime":false,"variants":false},"timeout":90}""" & "\ttwo"
-    check j.entries[2].payload == "job-1\ta\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"metrics":{"runtime":"jvm","scrape":[]},"timeout":600}""" & "\tthree"
+    check j.entries[0].payload == "job-1\ta\t\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"timeout":600}""" & "\tone"
+    check j.entries[1].payload == "job-1\ta\t\t" & """{"mask":{"min_length":4,"runtime":false,"variants":false},"timeout":90}""" & "\ttwo"
+    check j.entries[2].payload == "job-1\ta\t\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"metrics":{"runtime":"jvm","scrape":[]},"timeout":600}""" & "\tthree"
   test "nothing set -> no options at all (the shim's defaults apply: runtime values and variants on)":
     var sb = newSandbox()
     var j = Journal()
     check sb.execute(j, pipelineOneStep, fakeHost).code == "ok"
-    check j.entries[0].payload == "job-1\talpine\t\techo hi"
+    check j.entries[0].payload == "job-1\talpine\t\t\techo hi"
   test "bad mask and timeout fail before anything runs":
     for o in ["{mask = 'yes'}", "{mask = {runtime = 'x'}}", "{mask = {min_length = 2}}", "{mask = {typo = 1}}",
               "{timeout = 0}", "{timeout = '5x'}", "{timeout = 100000}"]:

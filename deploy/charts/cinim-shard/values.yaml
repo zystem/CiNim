@@ -74,6 +74,24 @@ controller:
   # StorageClass of the controller's state volume (1 Gi per organisation); empty is the cluster's default class
   stateStorageClass: ""
 
+# The build profile (A.13, Q-17): with `enabled` every organisation gets a second namespace, <org namespace>-build, under Pod Security
+# `baseline` (a build needs root in its container), with a job controller of its own. A job asks for it with `profile = "build"`; its
+# steps run as root of a Pod with its own user namespace (`hostUsers: false`, so not root on the node), every capability dropped but
+# `capabilities`, the default seccomp profile. Needs `user.max_user_namespaces` on the nodes (Talos: machine.sysctls). A build can reach
+# DNS, the log collector of the shard, the public internet on `internet.ports` (a build downloads packages all the time: npm, deb,
+# maven, go modules, git) and what `egress` lists: `egress` is a list of NetworkPolicy egress rules for addresses `internet` does not
+# cover, for example a registry in the cluster or a package proxy in the LAN (see docs/deployment.md). The private ranges in
+# `internet.except` stay closed: the cluster's own pods and services, the LAN, the link-local metadata address.
+build:
+  enabled: false
+  internet:
+    enabled: true
+    ports: [80, 443, 22]
+    except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+  egress: []
+  capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]
+  memoryLimit: 4Gi
+
 core:
   resources:
     requests: {cpu: 100m, memory: 128Mi}

@@ -43,6 +43,12 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_PROVISION` | `auto` | `auto` makes the Kubernetes objects of an organisation when the core runs in a cluster (the Pod's ServiceAccount), `off` records the organisation only |
 | `CINIM_CONTROLLER_IMAGE` | empty | the image of the job controller (the controller and the shim); empty leaves the controller out and the answer of `POST /api/v1/organizations` says so |
 | `CINIM_CONTROLLER_STATE_CLASS` | empty | the StorageClass of the controller's 1 Gi state volume; empty is the cluster's default class |
+| `CINIM_BUILD` | `off` | `on` turns the build profile on (D-41): every organisation gets a build namespace, and a job may ask for `profile = "build"` |
+| `CINIM_BUILD_EGRESS` | empty | a JSON array of NetworkPolicy egress rules that the build namespace opens beyond DNS and the log collector (the Helm value `build.egress`); empty: a build reaches no registry |
+| `CINIM_BUILD_INTERNET` | ports 80, 443, 22 | a JSON object `{"ports": [...], "except": [...]}` (the Helm value `build.internet`): a build may reach public addresses on these ports, the private ranges in `except` stay closed; `off`: no internet |
+| `CINIM_BUILD_CAPS` | `CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP` | the capabilities a build Pod keeps, all others are dropped; only those that Pod Security `baseline` allows |
+| `CINIM_BUILD_MEMORY_LIMIT` | `4Gi` | the memory limit of a build Pod |
+| `CINIM_BUILD_*` (controller) | | the core passes `CINIM_STEP_SECURITY=build`, `CINIM_BUILD_CAPS` and `CINIM_BUILD_MEMORY_LIMIT` to the controller of the build namespace; that controller makes the build Pods |
 | `CINIM_CONTROLLER_BOOTSTRAP_TTL` | 86400 | seconds that the bootstrap token of an organisation's controller stays good (IAM-003) |
 | `CINIM_INGRESS_CLASS`, `CINIM_INGRESS_TLS_SECRET`, `CINIM_INGRESS_ANNOTATIONS` | empty | the Ingress of an organisation in the `multi` mode: the class, the TLS Secret (for the host of `CINIM_PUBLIC_URL`) and the annotations as a JSON object |
 
