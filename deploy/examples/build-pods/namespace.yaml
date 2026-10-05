@@ -1,0 +1,27 @@
+# The namespace of an organisation under the build-pod policy: Pod Security `baseline` (enforced by the platform's own admission) plus the
+# policy of policy.yaml, which adds what `restricted` has over `baseline` to every Pod but a build Pod. The label selects the policy.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: org-example
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted     # what the policy would not allow still shows up in the audit log
+    pod-security.kubernetes.io/warn: restricted
+    cinim.io/build-pod-policy: "on"
+---
+# the job controller of the organisation (the only account that may make a build Pod) and the right to make Pods
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: cinim-job-controller, namespace: org-example}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: step-pods, namespace: org-example}
+rules: [{apiGroups: [""], resources: [pods], verbs: [create, get, list, delete]}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: step-pods, namespace: org-example}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: step-pods}
+subjects: [{kind: ServiceAccount, name: cinim-job-controller, namespace: org-example}]

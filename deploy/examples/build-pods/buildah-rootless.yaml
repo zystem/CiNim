@@ -1,0 +1,24 @@
+# Rootless Buildah as a build Pod: user 1000, the Localhost seccomp profile of deploy/seccomp, a user namespace of its own, `vfs` storage.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: buildah
+  namespace: org-example
+  labels: {cinim.io/profile: build}
+spec:
+  restartPolicy: Never
+  hostUsers: false
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, seccompProfile: {type: Localhost, localhostProfile: profiles/cinim-userns.json}}
+  containers:
+    - name: buildah
+      image: quay.io/buildah/stable:latest
+      env: [{name: HOME, value: /tmp/home}]
+      command: ["sh", "-c"]
+      args:
+        - |
+          mkdir -p /tmp/home
+          buildah --storage-driver=vfs --root /tmp/root --runroot /tmp/run bud --tls-verify=false -f /workspace/Dockerfile -t REGISTRY/example/buildah:1.0 /workspace
+          buildah --storage-driver=vfs --root /tmp/root --runroot /tmp/run push --tls-verify=false REGISTRY/example/buildah:1.0
+      resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {memory: 4Gi}}
+      volumeMounts: [{name: ctx, mountPath: /workspace}, {name: tmp, mountPath: /tmp}]
+  volumes: [{name: ctx, configMap: {name: ctx}}, {name: tmp, emptyDir: {}}]

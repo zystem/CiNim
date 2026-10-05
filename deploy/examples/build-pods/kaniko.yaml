@@ -1,0 +1,19 @@
+# Kaniko as a build Pod: root of a user namespace of its own, six capabilities, the runtime's default seccomp profile. No profile on the nodes.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kaniko
+  namespace: org-example
+  labels: {cinim.io/profile: build}
+spec:
+  restartPolicy: Never
+  hostUsers: false
+  securityContext: {runAsUser: 0, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:v1.23.2
+      args: ["--dockerfile=/workspace/Dockerfile", "--context=dir:///workspace", "--destination=REGISTRY/example/kaniko:1.0", "--insecure", "--insecure-pull"]
+      securityContext: {capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]}}
+      resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {memory: 4Gi}}
+      volumeMounts: [{name: ctx, mountPath: /workspace}]
+  volumes: [{name: ctx, configMap: {name: ctx}}]

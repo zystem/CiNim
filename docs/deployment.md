@@ -141,6 +141,14 @@ public address needs no rule; one on a private address (in the cluster, in the L
 closed every address but those. The internet rule is an `ipBlock` over all addresses minus the private ranges: with a network plugin that does
 not count pods and nodes as private addresses (Cilium does not) keep the cluster's own ranges in `build.internet.except`.
 
+## Build Pods in the organisation's namespace (designed, D-42)
+
+The build namespace above is replaced, in the design, by build Pods in the organisation's own namespace: the namespace is `baseline` by label,
+a ValidatingAdmissionPolicy gives every Pod but a build Pod the `restricted` controls, and a Pod labelled `cinim.io/profile=build` that the job
+controller makes may run as root of a user namespace (Kaniko, `RuntimeDefault`) or as user 1000 under the `Localhost` seccomp profile (rootless
+BuildKit and Buildah). `deploy/examples/build-pods` has the namespace, the policy and one Pod per tool, and `test.sh` that builds an image with
+each and prints what the policy refuses (A.13). It is not built into the core and the chart yet.
+
 ## A seccomp profile for rootless builders
 
 A rootless builder (BuildKit, Buildah) makes its own user and mount namespaces, which the default seccomp profile of the runtime forbids; the

@@ -1,0 +1,27 @@
+# Rootless BuildKit as a build Pod: user 1000, the Localhost seccomp profile of deploy/seccomp (installed on the nodes), a user namespace of its own.
+# newuidmap is a setuid binary: allowPrivilegeEscalation stays at its default and the capabilities of the image are kept.
+# A Pod with hostUsers: false has 65536 ids (0..65535) and the image's /etc/subuid and /etc/subgid name 100000..165535, outside them, so
+# newuidmap fails with "write to uid_map failed". The ConfigMap `subid` (made with the namespace: subuid and subgid, each `user:2000:60000`)
+# replaces the two files with a range inside the Pod's own ids.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: buildkit
+  namespace: org-example
+  labels: {cinim.io/profile: build}
+spec:
+  restartPolicy: Never
+  hostUsers: false
+  securityContext: {runAsUser: 1000, runAsGroup: 1000, seccompProfile: {type: Localhost, localhostProfile: profiles/cinim-userns.json}}
+  containers:
+    - name: buildkit
+      image: moby/buildkit:rootless
+      env: [{name: BUILDKITD_FLAGS, value: "--oci-worker-no-process-sandbox --config /etc/buildkit/buildkitd.toml"}]
+      command: ["buildctl-daemonless.sh"]
+      args: ["build", "--frontend", "dockerfile.v0", "--local", "context=/workspace", "--local", "dockerfile=/workspace",
+             "--output", "type=image,name=REGISTRY/example/buildkit:1.0,push=true,registry.insecure=true"]
+      resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {memory: 4Gi}}
+      volumeMounts: [{name: ctx, mountPath: /workspace}, {name: cfg, mountPath: /etc/buildkit}, {name: state, mountPath: /home/user/.local/share/buildkit},
+                     {name: subid, mountPath: /etc/subuid, subPath: subuid}, {name: subid, mountPath: /etc/subgid, subPath: subgid}]
+  volumes: [{name: ctx, configMap: {name: ctx}}, {name: cfg, configMap: {name: bkcfg}}, {name: state, emptyDir: {}},
+             {name: subid, configMap: {name: subid}}]
