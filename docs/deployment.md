@@ -155,6 +155,14 @@ public address needs no rule; one on a private address (in the cluster, in the L
 closed every address but those. The internet rule is an `ipBlock` over all addresses minus the private ranges: with a network plugin that does
 not count pods and nodes as private addresses (Cilium does not) keep the cluster's own ranges in `build.internet.except`.
 
+## CiNim builds itself
+
+`deploy/examples/self-build/self-build.lua` is a pipeline of two build steps that builds the two images of the platform from git with Kaniko and pushes
+them to the registry (`tools/image/Dockerfile.kaniko`). Checked on the TESTING cluster through the API alone: a shard of this chart, an organisation,
+`POST /api/v1/runs` with that script; both steps ran as build Pods, the images `cinim` and `cinim-controller` appeared in the registry, and the shard was
+then upgraded to run on them. The first attempt showed two things: Kaniko clones a git context into a fixed directory, so two builds of one Pod need two
+steps, and a step that exits with a non-zero code does not fail the run by itself, the script has to check `r.code`.
+
 ## Examples of build Pods
 
 `deploy/examples/build-pods` has the namespace, the policy (the same text as the chart's) and one Pod per tool, and `test.sh` that builds an image
