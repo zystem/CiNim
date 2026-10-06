@@ -61,7 +61,7 @@ spec:
             - {name: CINIM_BUILD_CAPS, value: {{ join "," .Values.build.capabilities | quote }}}
             - {name: CINIM_BUILD_MEMORY_LIMIT, value: {{ .Values.build.memoryLimit | quote }}}
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
-            - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | quote }}}
+            - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"
             {{- end }}
             # the simple mode of a small organisation (SHD-009): every step Pod may reach any address / be reached from any
             - {name: CINIM_NETWORK_EGRESS, value: {{ .Values.network.egress | quote }}}

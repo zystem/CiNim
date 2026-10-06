@@ -190,7 +190,7 @@ curl -X POST .../api/v1/organizations -d '{"slug": "acme", "name": "Acme", "netw
 ```
 
 For build Pods only there are narrower switches, `build.egress: all` (they may reach any address, private ones too) and `build.ingress: all` (any
-address may reach them; by default a build Pod is closed to every inbound connection), and the other steps stay closed. The controller of the organisation keeps its closed ingress in every mode. The simple modes give up the isolation of SEC-003 for
+address may reach them; by default a build Pod is closed to every inbound connection). Like `build.egress`, `build.ingress` is also a list of rules and takes several peers and ports, and the other steps stay closed. The controller of the organisation keeps its closed ingress in every mode. The simple modes give up the isolation of SEC-003 for
 convenience (T-48); keep the default for an organisation that runs untrusted pipelines.
 
 ## What is not in the chart yet

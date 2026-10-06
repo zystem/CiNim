@@ -56,6 +56,12 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
     if raw.len > 0: buildEgress = parseJson(raw)
   except JsonParsingError:
     discard
+  var buildIngress: JsonNode
+  try:
+    let raw = getEnv("CINIM_BUILD_INGRESS")
+    if raw.len > 0: buildIngress = parseJson(raw)
+  except JsonParsingError:
+    discard
   var buildInternet: JsonNode
   try:
     let raw = getEnv("CINIM_BUILD_INTERNET")
@@ -66,7 +72,7 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
   ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet,
                   egressOpen: (if egress.len > 0: egress else: nd.egress) == "open", ingressOpen: (if ingress.len > 0: ingress else: nd.ingress) == "open",
                   build: buildOn, buildEgress: buildEgress, buildCaps: getEnv("CINIM_BUILD_CAPS"), buildMemoryLimit: getEnv("CINIM_BUILD_MEMORY_LIMIT"),
-                  buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"), buildIngressAll: getEnv("CINIM_BUILD_INGRESS") == "all",
+                  buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"), buildIngress: buildIngress,
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,
                   ingressClass: getEnv("CINIM_INGRESS_CLASS"), tlsSecret: getEnv("CINIM_INGRESS_TLS_SECRET"), annotations: annotations)

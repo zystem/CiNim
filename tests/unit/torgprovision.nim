@@ -189,7 +189,7 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     check "allow-build-internet" notin names and "allow-all-egress" notin names and "default-deny" in names
   test "build.ingress `all`: only build Pods may be reached from any address; nothing with ingress open for all steps":
     var c = buildCfg()
-    c.buildIngressAll = true
+    c.buildIngress = %"all"
     var p: JsonNode
     for st in organizationSteps(c, "acme", curve, "BT").steps:
       if st.objectName == "allow-build-ingress": p = st.obj
@@ -197,6 +197,16 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps: check st.objectName != "allow-build-ingress"
     c.ingressOpen = true
     for st in organizationSteps(c, "acme", curve, "BT").steps: check st.objectName != "allow-build-ingress"      # the all-steps policy says it
+  test "build.ingress as a list: several peers and ports in one policy":
+    var c = buildCfg()
+    c.buildIngress = %*[{"from": [{"ipBlock": {"cidr": "192.168.10.0/24"}}], "ports": [{"protocol": "TCP", "port": 8080}]},
+                        {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "registry"}}}]}]
+    var p: JsonNode
+    for st in organizationSteps(c, "acme", curve, "BT").steps:
+      if st.objectName == "allow-build-ingress": p = st.obj
+    check p["spec"]["ingress"].len == 2 and p["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
+    c.buildIngress = %*[]
+    for st in organizationSteps(c, "acme", curve, "BT").steps: check st.objectName != "allow-build-ingress"      # an empty list is closed
   test "the simple mode: egress open and ingress open are one policy each for every step Pod, the controller stays closed":
     var c = cfg(true)
     c.egressOpen = true

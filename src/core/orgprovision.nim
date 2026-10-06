@@ -27,7 +27,7 @@ type
                                                 ## the string "all": build Pods may reach any address, private ones too
     buildInternet*: JsonNode                    ## {"ports": [...], "except": [...]}: a build may reach public addresses on these ports, the private
                                                 ## ranges in `except` stay closed (package downloads: npm, deb, maven...); nil: no internet
-    buildIngressAll*: bool                      ## build Pods may be reached from any address (`build.ingress: all`); the other steps stay closed
+    buildIngress*: JsonNode                     ## NetworkPolicy ingress rules of the build Pods (an array, like buildEgress), or the string "all"; nil: closed
     buildCaps*, buildMemoryLimit*: string       ## what the controller keeps of the capabilities of a build Pod (comma separated) and its memory limit; "" is its default
     egressOpen*, ingressOpen*: bool             ## the simple mode for a small organisation (SHD-009): its step Pods may reach any address / be reached from any;
                                                 ## the default is closed both ways, with the openings of the build profile
@@ -157,9 +157,14 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-all-ingress", ns),
                   "spec": {"podSelector": steps, "policyTypes": ["Ingress"], "ingress": [{}]}}
   let builds = %*{"matchLabels": {"cinim.io/profile": "build"}}     # the build Pods only: the other steps of the organisation get none of this
-  if cfg.build and cfg.buildIngressAll and not cfg.ingressOpen:
-    result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-ingress", ns),
-                  "spec": {"podSelector": builds, "policyTypes": ["Ingress"], "ingress": [{}]}}
+  if cfg.build and not cfg.ingressOpen and cfg.buildIngress != nil:
+    # `all`, or a list of rules, as for the egress: several peers and ports in one policy
+    if cfg.buildIngress.kind == JString and cfg.buildIngress.getStr == "all":
+      result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-ingress", ns),
+                    "spec": {"podSelector": builds, "policyTypes": ["Ingress"], "ingress": [{}]}}
+    elif cfg.buildIngress.kind == JArray and cfg.buildIngress.len > 0:
+      result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-ingress", ns),
+                    "spec": {"podSelector": builds, "policyTypes": ["Ingress"], "ingress": cfg.buildIngress}}
   let buildAll = cfg.buildEgress != nil and cfg.buildEgress.kind == JString and cfg.buildEgress.getStr == "all"
   # with every address open (for all step Pods, or for the build Pods) the internet rule of the build profile says nothing more
   if cfg.build and not cfg.egressOpen and not buildAll and cfg.buildInternet != nil and cfg.buildInternet.kind == JObject:

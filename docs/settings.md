@@ -45,7 +45,7 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_CONTROLLER_STATE_CLASS` | empty | the StorageClass of the controller's 1 Gi state volume; empty is the cluster's default class |
 | `CINIM_BUILD` | `off` | `on` turns the build profile on (D-42): the namespace of every organisation is `baseline` under the build-pod policy, and a job may ask for `profile = "build"`; a step that does becomes a build Pod made by the organisation's own controller |
 | `CINIM_BUILD_EGRESS` | empty | a JSON array of NetworkPolicy egress rules that build Pods may use beyond DNS and the log collector (the Helm value `build.egress`), or the string `"all"` (any address, private ones too); empty: a build reaches no registry |
-| `CINIM_BUILD_INGRESS` | `closed` | `all`: build Pods may be reached from any address (the Helm value `build.ingress`); the other steps stay closed |
+| `CINIM_BUILD_INGRESS` | empty | the same for inbound connections to build Pods (the Helm value `build.ingress`): a JSON array of NetworkPolicy ingress rules, several allowed, or the string `"all"`; empty: closed |
 | `CINIM_NETWORK_EGRESS` | `restricted` | `open`: the step Pods of an organisation may reach any address (SHD-009; the Helm value `network.egress`); an organisation can ask for its own at creation |
 | `CINIM_NETWORK_INGRESS` | `closed` | `open`: any address may reach the step Pods of an organisation (the Helm value `network.ingress`) |
 | `CINIM_BUILD_INTERNET` | ports 80, 443, 22 | a JSON object `{"ports": [...], "except": [...]}` (the Helm value `build.internet`): a build may reach public addresses on these ports, the private ranges in `except` stay closed; `off`: no internet |
