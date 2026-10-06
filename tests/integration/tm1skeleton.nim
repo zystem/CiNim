@@ -687,7 +687,7 @@ suite "walking skeleton end to end":
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "p1", script)["id"].getStr
-        let final = waitTerminal(apiPort, runId, 120000)        # the script ignores the step's code, so the run itself ends SUCCEEDED
+        let final = waitTerminal(apiPort, runId, 120000)        # a step that exits non-zero fails the job and so the run (6.7); only the step is checked here
         check final["steps"][0]["state"].getStr == "FAILED"
         check final["steps"][0]["termination"].getStr == "timeout"
         check final["steps"][0]["exit_code"].getInt == 124

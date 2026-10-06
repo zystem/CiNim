@@ -8,6 +8,8 @@ subcharts from their official charts: one `helm install`, no helmfile. In the `m
 ## Before the first install
 
 ```bash
+helm repo add rqlite https://rqlite.github.io/helm-charts
+helm repo add vm https://victoriametrics.github.io/helm-charts
 helm dependency build deploy/charts/cinim-shard     # downloads the subcharts into charts/
 ```
 
@@ -104,7 +106,7 @@ OpenSSL, libzmq, libsodium and SQLite linked in, and the static shim that it han
 
 `POST /api/v1/runs` takes the slug of an organisation (`organization`): the run belongs to it, and its steps run in the namespace of the
 organisation, through the controller that the core made for it. A controller says which namespace it serves in every poll, and the core
-gives it the steps of that namespace only; the shared transport key does not yet tell controllers of different organisations apart (T-46).
+gives it the steps of that namespace only; a controller proves the namespace it serves with the credential below (IAM-003, T-46); the transport key itself is still shared (T-08).
 An organisation that does not exist is a 404 and a switched-off one a 409. The controller proves which namespace it serves: the core makes a one-time bootstrap token with the namespace (a Secret), the controller exchanges it for a credential that it keeps on its state volume and sends in every poll, and a poll without it is refused. If the state volume is lost or the credential leaks, `POST /api/v1/organizations/<slug>:rotate-controller-credential` locks the old one out and the controller enrols again. Without `organization` a run belongs to the shard's default
 tenant and profile (single-tenant setups). The settings of docs/settings.md are per organisation: `GET/PUT /api/v1/profile?organization=<slug>`.
 
@@ -160,8 +162,9 @@ not count pods and nodes as private addresses (Cilium does not) keep the cluster
 `deploy/examples/self-build/self-build.lua` is a pipeline of two build steps that builds the two images of the platform from git with Kaniko and pushes
 them to the registry (`tools/image/Dockerfile.kaniko`). Checked on the TESTING cluster through the API alone: a shard of this chart, an organisation,
 `POST /api/v1/runs` with that script; both steps ran as build Pods, the images `cinim` and `cinim-controller` appeared in the registry, and the shard was
-then upgraded to run on them. The first attempt showed two things: Kaniko clones a git context into a fixed directory, so two builds of one Pod need two
-steps, and a step that exits with a non-zero code does not fail the run by itself, the script has to check `r.code`.
+then upgraded to run on them. Kaniko clones a git context into a fixed directory, so two builds in one Pod need two steps (two `ci.job`). A step that exits
+with a non-zero code fails the job and the run (`ignore_failure = true` returns the code to the script instead, PIP-018). The registry here is the plain
+in-cluster one of `deploy/registry`: its address is the one the Pods reach it at, which is not always the name the nodes pull from.
 
 ## Examples of build Pods
 
@@ -201,10 +204,22 @@ For build Pods only there are narrower switches, `build.egress: all` (they may r
 address may reach them; by default a build Pod is closed to every inbound connection). Like `build.egress`, `build.ingress` is also a list of rules and takes several peers and ports, and the other steps stay closed. The controller of the organisation keeps its closed ingress in every mode. The simple modes give up the isolation of SEC-003 for
 convenience (T-48); keep the default for an organisation that runs untrusted pipelines.
 
-## What is not in the chart yet
+## Building the images in the cluster
+
+`tools/image/kaniko-build.sh` makes a namespace under the build-pod policy (the files of `deploy/examples/build-pods`), sends the working tree to a
+Kaniko build Pod and builds both images from `tools/image/Dockerfile.kaniko`, the second one from the layer cache in the registry:
+
+```bash
+REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/image/kaniko-build.sh
+```
+
+A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
+
+## What is not built yet
 
 `POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state
 volume and Deployment), the quota, the limit range, the network policies and, in the `multi` mode, the Ingress of the organisation (SHD-007);
 `DELETE` switches an organisation off and `DELETE ?purge=true` deletes it. The reconciliation of SHD-008 and the retention timer of a
 switched-off organisation are not built yet. The job controller runs from its own image, `<image.repository>-controller:<image.tag>` unless `controller.image` says otherwise.
-The images are not built by a pipeline yet: the chart expects `/core` and `/executor` in `image.repository`. A volume of the controller needs a StorageClass: set `controller.stateStorageClass` when the cluster has no default one.
+The chart expects `/core` and `/executor` in `image.repository`; no pipeline publishes the images by itself yet (`tools/image` builds them, see above).
+A volume of the controller needs a StorageClass: set `controller.stateStorageClass` when the cluster has no default one.

@@ -274,8 +274,13 @@ local Job_mt = { __index = {
     if type(cmd) ~= "string" then error("Job:sh: string expected", 2) end
     -- payload: job key, image, profile ("" = the ordinary one), canonical options JSON ("" = none) and the command, tab-separated; the
     -- command is last because it may itself contain tabs (core splits into five fields)
+    if opts and opts.ignore_failure ~= nil and type(opts.ignore_failure) ~= "boolean" then error("Job:sh: ignore_failure must be a boolean", 2) end
     local code, out = call("job_sh", self.__key .. "\t" .. self.__image .. "\t" .. self.__profile .. "\t" .. step_opts(self, opts) .. "\t" .. cmd):match("^(%-?%d+)\n(.*)$")
-    return { code = tonumber(code), outputs = {}, stdout = (opts and opts.capture) and out or nil }
+    code = tonumber(code)
+    -- a non-zero code fails the job (and so the run, unless the script catches the error); `ignore_failure = true` returns it instead
+    -- (6.7, ShOpts.ignore_failure). The code is in the journal, so a replay fails at the same call.
+    if code ~= 0 and not (opts and opts.ignore_failure) then error("step failed with code " .. tostring(code), 2) end
+    return { code = code, outputs = {}, stdout = (opts and opts.capture) and out or nil }
   end,
 } }
 

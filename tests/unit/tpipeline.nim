@@ -52,7 +52,49 @@ return ci.pipeline({
 })
 """
 
+const pipelineStepFails = """
+return ci.pipeline({
+  main = function(run)
+    ci.job({image = "a"}, function(j) j:sh("fail") end)
+    return "not reached"
+  end,
+})
+"""
+
+const pipelineIgnoreFailure = """
+return ci.pipeline({
+  main = function(run)
+    local r
+    ci.job({image = "a"}, function(j) r = j:sh("fail", {ignore_failure = true}) end)
+    return "code=" .. tostring(r.code)
+  end,
+})
+"""
+
 suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
+  test "6.7: a step that exits non-zero fails the job and the run, and the replay fails at the same call":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, pipelineStepFails, fakeHost, runId = "s1_abc")
+    check r.code == "script_error"
+    check "step failed with code 1" in r.message
+    check j.entries.len == 1 and j.entries[0].kind == "job_sh"
+    var sb2 = newSandbox()
+    let again = sb2.execute(j, pipelineStepFails, fakeHost, runId = "s1_abc")
+    check again.code == "script_error" and j.entries.len == 1          # nothing new is called: the journal answers
+
+  test "6.7: ignore_failure returns the non-zero code to the script instead":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, pipelineIgnoreFailure, fakeHost, runId = "s1_abc")
+    check r.code == "ok" and r.value == "code=1"
+
+  test "6.7: ignore_failure must be a boolean":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {ignore_failure = 'yes'}) end) end})", fakeHost, runId = "s1_abc")
+    check r.code == "script_error" and "ignore_failure" in r.message
+
   test "run.run_id reaches main(), Job:sh yields job_sh and returns StepResult.code":
     var sb = newSandbox()
     var j = Journal()

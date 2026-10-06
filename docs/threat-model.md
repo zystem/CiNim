@@ -107,7 +107,7 @@ Status values: **verified** (automated test exists), **partial**, **designed** (
 1. **Shim identity (D-24).** Services and the job-controller authenticate with CURVE keypairs; the shim uses the shared `client` keypair plus the projected job token (SEC-010), which is meant to be checked on every message but **is not checked yet**, because a key per Pod would need a per-Pod key workflow and RUN-013 has no room for it. `NodeControl`, `LogPublish` and `LogRead` (VictoriaLogs) use TLS with login and password for the same reason (VictoriaLogs mTLS is enterprise-only). Remaining gap: the Nim-side check of the token's RS256 signature against the cluster's JWKS is not built (T-08); only an independent PyJWT check exists (A.6).
 2. **Step state names.** RUN-001 (`pending`, `starting`) and the queue example in 7.2 (`queued`, `dispatched`). Mapping in A.3: pending = queued, starting = dispatched.
 3. **PLG-008 uses `google.protobuf.Struct`**, which the Nim codec cannot compile (recursive type). A.3 keeps the normative `.proto` and carries Struct as `bytes` on the Nim side (wire-identical); a JSON string field is the alternative.
-4. **Lua API**: the test fixture `ci.sh` is not API v1 (`Job:sh` is); it is removed when `ci.job` lands.
+4. **Lua API**: the test fixture `ci.sh` is not API v1 (`Job:sh` is); `ci.job` has landed, and the fixture stays only for the unit tests of the sandbox and the journal (`tests/unit`).
 5. **TLS for the external UI** is terminated at the ingress; the spec table says "HTTPS" without saying where.
 
 ## 7. Residual risk

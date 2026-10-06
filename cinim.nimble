@@ -2,7 +2,7 @@
 
 version       = "0.0.1"
 author        = "CiNim"
-description   = "Self-hosted Kubernetes-only CI/CD platform in Nim (spec v1.13)"
+description   = "Self-hosted Kubernetes-only CI/CD platform in Nim (see docs/specification.md)"
 license       = "MIT"
 srcDir        = "src"
 

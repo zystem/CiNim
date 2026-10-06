@@ -2,9 +2,15 @@
 
 A self-hosted CI/CD platform for Kubernetes, written in Nim. The full specification is in [`docs/specification.md`](docs/specification.md): requirements, the decision log (D-xx) and, in Appendix A, the measurements behind the decisions.
 
-Working today: Lua pipelines with a replay journal, steps as Pods, the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the
-launch gate (RUN-015), component liveness, step metrics. Not built yet: UI, webhooks, artifacts, OIDC/RBAC (see the delivery plan in
-section 17 of the specification).
+Working today, through the REST API only: Lua pipelines with a replay journal (`ci.pipeline`, `ci.job`, `Job:sh`, `ci.now`, `ci.random`,
+`ci.sleep`), a Pod per step, the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the launch gate (RUN-015), component liveness,
+step metrics, organisations with a namespace and a job controller each (SHD-001 to SHD-007, SHD-009: create, switch off, delete, the router in the
+`multi` mode), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
+(SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). Not built yet: the UI (apart from the router page), webhooks and
+triggers, `j.checkout`, the run volume and `$CICD_ENV` (STO), artifacts and caches, `ci.parallel`, `ci.matrix`, `ci.input`, `ci.finally`,
+plugins, variables and secrets for steps, OIDC/RBAC and any authentication of the REST API, the audit log, backups, the reconciliation of SHD-008 and
+the retention timer of a switched-off organisation. The delivery plan is section 17 of the specification; the sections of the specification
+describe the target, and the status above is the one that holds.
 
 ## Structure
 
@@ -22,6 +28,7 @@ Transport between services: ZeroMQ with CURVE (D-24). HTTP layer: GuildenStern (
 ## Documentation
 
 - `docs/specification.md` — the specification, decision log and measurements;
+- `docs/deployment.md` — installing a shard, organisations, image builds, the network modes;
 - `docs/settings.md` — execution profile settings (retries, log limit, spool, timeouts) and cluster requirements;
 - `docs/metrics.md` — step metrics, `metrics = {...}` in Lua, `/metrics`;
 - `docs/secrets-masking.md` — secret masking and `$CICD_MASK`;
@@ -57,8 +64,11 @@ Only the shim and the CLI are required to be static; the other services may carr
 
 ```bash
 tools/shim/build_static.sh build/cicd-shim-logging-static src/shim/shim.nim -d:shimLogging 1
-tools/shim/build_static.sh build/core-static src/core/main.nim "" 0
+tools/shim/build_static.sh build/core-static src/core/main.nim "-d:ssl" 0
 ```
+
+The two images of the platform need no Docker daemon: `tools/image/kaniko-build.sh` builds them in the cluster with Kaniko, as a build Pod (D-42), from
+`tools/image/Dockerfile.kaniko`; `tools/image/build_core.sh` and `build_controller.sh` build the same images with a local Docker.
 
 Long runs (the soak test of NFR-013) use `tools/soak/run72.sh`. `tools/bench/state_store_bench.py` is the state-store benchmark behind A.2 (rqlite, PXC, PostgreSQL); `tools/bench/postgres.helmfile.yaml` deploys the PostgreSQL cluster it uses.
 
