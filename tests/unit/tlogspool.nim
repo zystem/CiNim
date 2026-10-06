@@ -28,6 +28,33 @@ suite "records and blocks":
     check r[0]["job"].getStr == "ci-s1-run-0-1" and r[0]["run"].getStr == "s1_run"
     check blocks[0].encoding == "gzip" and blocks[0].lines == 2 and blocks[0].firstLn == 0 and blocks[0].seq == 1
 
+  test "empty and whitespace-only lines are left out, the rest keep a gap-free ln and the count of lines is what is stored":
+    var b = newB()
+    var blocks = b.feed("first\n\n   \n\t\nsecond\r\n\r\n \r\nthird\n\n", 1)
+    blocks.add b.flush(1, final = true)
+    check msgs(blocks) == @["first", "second", "third"]
+    check records(blocks[0]).mapIt(it["ln"].getInt) == @[0, 1, 2]
+    check b.linesWritten == 3 and b.blankLines == 6
+    check blocks[0].lines == 3
+
+  test "an output of blank lines only makes no block and no line":
+    var b = newB()
+    var blocks = b.feed("\n\n  \n", 1)
+    blocks.add b.flush(1, final = true)
+    check blocks.len == 0 and b.linesWritten == 0 and b.blankLines == 3
+
+  test "a last blank line without a newline is left out too, a line that merely ends in spaces is kept as it is":
+    var b = newB()
+    var blocks = b.feed("kept  \n   ", 1)
+    blocks.add b.flush(1, final = true)
+    check msgs(blocks) == @["kept  "] and b.blankLines == 1
+
+  test "blank lines do not spend the step's log limit":
+    var b = newBuilder("j", "r", 1000, @[], maxBytes = 40)
+    var blocks = b.feed("\n".repeat(500) & "short line\n", 1)       # 501 bytes, 11 of them stored
+    blocks.add b.flush(1, final = true)
+    check msgs(blocks) == @["short line"] and not b.truncated
+
   test "a line split across two reads is joined; the unfinished line waits":
     var b = newB()
     check b.feed("par", 1).len == 0

@@ -32,6 +32,7 @@ type
     bytesIn: int64
     truncated*: bool
     droppedLines*: uint64
+    blankLines*: uint64           ## empty and whitespace-only lines left out: they carry no meaning (the log is the output without them)
     carry: string                 ## a started, not yet newline-terminated line
     raw: string                   ## records of the block being built
     rawLines: uint32
@@ -133,6 +134,12 @@ proc cut(b: var Builder): seq[LogBlock] =
   b.blockFirstLn = b.nextLn
 
 proc addLine(b: var Builder; text: string; wallMs: int64; newline = true) =
+  # An empty line, or one of only whitespace (a CR from CRLF or from a progress bar included), says nothing, and VictoriaLogs cannot store an empty
+  # message anyway (it keeps a text of its own instead). It is left out before it is numbered or counted, so `ln` has no gaps, the shim's count of
+  # lines is the number of records stored, and the step's log limit is not spent on it.
+  if text.isEmptyOrWhitespace:
+    inc b.blankLines
+    return
   if b.truncated:
     inc b.droppedLines                      # past the limit: read and counted, never stored
     return

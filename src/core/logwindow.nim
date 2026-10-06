@@ -2,8 +2,9 @@
 ## says whether everything the shim reported is readable yet. Pure, so `tests/unit/tlogwindow.nim` runs without VictoriaLogs.
 ##
 ## Two facts about VictoriaLogs shape this. It returns records in no particular order (the newest first, in practice), so the window is asked
-## for sorted by `ln`, the line number that the shim gives every line, and sorted again here. And a record whose `_msg` is empty, which is a
-## blank line of the build's output, is stored with the text below instead of an empty message; it is turned back into a blank line.
+## for sorted by `ln`, the line number that the shim gives every line, and sorted again here. And a record whose `_msg` is empty is stored with
+## the text below instead of an empty message. The shim no longer sends empty lines (shim/logspool.nim), but records stored before that, and any
+## other writer, can hold one: it is turned back into a blank line.
 ## A third is not a bug but the measured delay of A.7: a record is readable about one to two seconds after the collector's acknowledgement
 ## (which already waits for vlagent), so a reader that comes the moment a step has ended can find its last lines missing. `complete` is how
 ## it knows: the shim states how many lines the step wrote, and the window is complete when that many are stored.
