@@ -1722,4 +1722,14 @@ What follows. (1) No tool runs in the `restricted` namespace of an organisation,
 | the same step, an ordinary organisation and one in the simple network mode (SHD-009), reaching a service of the cluster | `BLOCKED` and `REACHED` |
 | a step that exits with a non-zero code | the step is `FAILED` and the run `SUCCEEDED` (the script returned normally): `Job:sh` did not fail the job, which `ignore_failure` in the API says it must (corrected, see PIP-018) |
 
+**Reconciliation and retention on the same shard (SHD-008).** With the interval at 20 s and the retention at 90 s, on the TESTING cluster:
+
+| Check | Result |
+|:---|:---|
+| the Deployment of a controller, a ResourceQuota and a NetworkPolicy deleted by hand | made again in the next pass, the controller of the organisation up again with its volume and credential |
+| a namespace with the labels of this shard and an organisation that is not in the database; the Pod Security `enforce` label of an organisation's namespace changed by hand | alerts `orphan_namespace` and `namespace_drift` in `GET /api/v1/organizations:reconcile`; nothing deleted or changed |
+| the whole namespace of an organisation with the simple network mode deleted (a restore into a new cluster) | the first pass reported that the namespace was being deleted; the next one made all 14 objects again, with the network policies of its mode, renewed the identity of the controller, and the controller enrolled with the new bootstrap token |
+| an organisation switched off | deleted for good, with its namespace, about 90 s later (the first pass after the retention); the namespace in `Terminating` was first reported as an orphan, which is why such namespaces are now left out of the alerts |
+| the step that exits with code 3 (PIP-018) | the run is `FAILED` |
+
 Found on the way: Kaniko clones a git context into a fixed directory, so two builds in one Pod need two steps; a build step needs a `build.egress` rule for the registry (the default-deny policy closes it) and, to reach GitHub and the base images, the internet rule of `build.internet`.

@@ -82,6 +82,7 @@ proc namespaceAlerts(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; s
   let l = k.listNamespaces("cinim.io/shard=" & shard)
   if l.error.len > 0: return (@[], "listing the namespaces: " & l.error)
   for it in l.items:
+    if it{"metadata", "deletionTimestamp"} != nil: continue      # being deleted (the end of a retention, a purge): not an orphan, and no drift to report
     let name = it{"metadata", "name"}.getStr
     let labels = it{"metadata", "labels"}
     let slug = if labels != nil: labels{"cinim.io/organization"}.getStr else: ""

@@ -164,6 +164,17 @@ suite "SHD-008 reconciliation":
     f.objects["/api/v1/namespaces/cinim-002-x"] = %*{"metadata": {"name": "cinim-002-x", "labels": {"cinim.io/shard": "002", "cinim.io/organization": "x"}}}
     check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 1
 
+  test "a namespace that is being deleted is neither an orphan nor drift":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    f.made(mk, "going")
+    f.objects[ns("going")]["metadata"]["deletionTimestamp"] = %"2026-10-06T17:12:00Z"
+    f.objects[ns("acme")]["metadata"]["deletionTimestamp"] = %"2026-10-06T17:12:00Z"
+    f.objects[ns("acme")]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = %"privileged"
+    let rec = Rec()
+    check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 0
+
   test "a namespace whose policy labels differ from the expected ones is an alert, and is left as it is":
     let f = Cluster()
     let mk = maker(build = true)
