@@ -1,0 +1,50 @@
+# Both images of the platform built in one pass, without a Docker daemon (Kaniko, as a build Pod, D-42): the static binaries are built in an
+# Alpine stage (musl end to end, as tools/shim/build_static.sh, build_core.sh and build_controller.sh do with `docker run`) and copied into
+# scratch images. Run it with tools/image/kaniko-build.sh, or by hand with Kaniko and --target=core and --target=controller (the second run
+# finds every RUN of the build stage in the cache, --cache=true).
+FROM nimlang/nim:2.2.4-alpine AS build
+RUN apk add --no-cache bash coreutils upx g++ make cmake git autoconf automake libtool linux-headers curl openssl-dev openssl-libs-static \
+    zlib-dev zlib-static sqlite-dev sqlite-static ca-certificates
+# libsodium and libzmq as static archives (the ZeroMQ transport, D-24)
+RUN set -eu; W=$(mktemp -d); cd "$W"; \
+    git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium; \
+    (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix=/opt/zmq --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null); \
+    git clone -q --depth 1 --branch v4.3.5 https://github.com/zeromq/libzmq zmq; \
+    cmake -S zmq -B zmq/b -DCMAKE_PREFIX_PATH=/opt/zmq -DCMAKE_INSTALL_PREFIX=/opt/zmq -DWITH_LIBSODIUM=ON -DWITH_LIBSODIUM_STATIC=ON \
+      -DENABLE_CURVE=ON -DBUILD_SHARED=OFF -DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DWITH_DOCS=OFF -DWITH_PERFTOOL=OFF -DENABLE_DRAFTS=OFF \
+      -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" >/dev/null; \
+    cmake --build zmq/b -j"$(nproc)" --target install >/dev/null; rm -rf "$W"
+# the Kubernetes C client with libcurl, libwebsockets, libyaml (static)
+COPY tools/k8s/build_client.sh /src/tools/k8s/build_client.sh
+RUN K8S_STATIC=1 /src/tools/k8s/build_client.sh /opt/k8s >/dev/null
+# the nimble packages, from the package file alone so that this layer is cached
+COPY cinim.nimble /src/cinim.nimble
+RUN cd /src && nimble install -y --depsOnly
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null; \
+    F="--opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static"; \
+    SSL="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto"; \
+    nim c -d:release -d:shimLogging $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/cicd-shim src/shim/shim.nim; \
+    nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm" -o:/out/core-static src/core/main.nim; \
+    nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/executor-static src/executorsvc/main.nim; \
+    nim c -d:release -d:k8sPrefix=/opt/k8s -d:k8sStatic $F --dynlibOverride:sqlite3 --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm" -o:/out/controller-static src/jobcontroller/main.nim; \
+    strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null; \
+    cp /etc/ssl/certs/ca-certificates.crt /out/; ls -l /out
+
+# the image of the shard (chart cinim-shard): the core and the pipeline executor
+FROM scratch AS core
+COPY --from=build /out/core-static /core
+COPY --from=build /out/executor-static /executor
+COPY --from=build /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 65532:65532
+EXPOSE 18081 19740 19741 19742 19743
+ENTRYPOINT ["/core"]
+
+# the image of the job controller of an organisation (SHD-007): the controller and the shim that it puts into every step Pod
+FROM scratch AS controller
+COPY --from=build /out/controller-static /controller
+COPY --from=build /out/cicd-shim /cicd-shim
+ENV CINIM_SHIM_BIN=/cicd-shim
+USER 65532:65532
+ENTRYPOINT ["/controller"]
