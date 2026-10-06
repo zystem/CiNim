@@ -58,10 +58,30 @@ proc createOrIgnore(k: K8s; client: ptr genericClient_t; kind, name, body: strin
   else:
     echo "jobcontroller: ensured ", kind, " ", name
 
+proc createOrReplace(k: K8s; client: ptr genericClient_t; kind, name, body: string) =
+  ## The shim travels in a ConfigMap that the controller makes at every start. Leaving an existing one as it is (createOrIgnore) meant that a new
+  ## controller image, and the shim in it, never reached a step Pod: it kept running the shim of the first controller of the namespace.
+  let raw = Generic_createNamespacedResource(client, k.ns.cstring, body.cstring, nil)
+  if raw == nil:
+    stderr.writeLine "jobcontroller: create " & kind & " " & name & ": no response from the Kubernetes API client"
+    return
+  let r = jstr(raw)
+  if r.kind == JObject and r{"status"}.getStr == "Failure":
+    if r{"reason"}.getStr != "AlreadyExists":
+      stderr.writeLine "jobcontroller: create " & kind & " " & name & " failed: " & $r
+      return
+    let rep = jstr(Generic_replaceNamespacedResource(client, k.ns.cstring, name.cstring, body.cstring))
+    if rep.kind == JObject and rep{"status"}.getStr == "Failure":
+      stderr.writeLine "jobcontroller: replace " & kind & " " & name & " failed: " & $rep
+    else:
+      echo "jobcontroller: replaced ", kind, " ", name, " (it was there; the content of this controller's image is what runs)"
+  else:
+    echo "jobcontroller: ensured ", kind, " ", name
+
 proc ensureShimAssets*(k: K8s; shimBinPath, certs: string; withCerts: bool) =
-  ## Idempotent (409 AlreadyExists is success) - safe at every startup. The ConfigMap is unconditional: every step Pod runs
-  ## through the shim. The Secret (the shim's CURVE identity) only when logs are streamed.
-  createOrIgnore(k, k.configmaps, "configmap", shimConfigMap, $(%*{
+  ## Safe at every startup. The ConfigMap is unconditional: every step Pod runs through the shim, and it is replaced when it exists, so that
+  ## the shim is that of the controller's own image. The Secret (the shim's CURVE identity) only when logs are streamed; an existing one is left.
+  createOrReplace(k, k.configmaps, "configmap", shimConfigMap, $(%*{
     "apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": shimConfigMap},
     "binaryData": {"cicd-shim": encode(readFile(shimBinPath))}}))
   if withCerts:

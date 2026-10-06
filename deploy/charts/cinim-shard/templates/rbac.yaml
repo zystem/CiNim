@@ -70,6 +70,10 @@ rules:
   - apiGroups: [""]
     resources: [configmaps, secrets]
     verbs: [create, get, delete]
+  # the shim travels in a ConfigMap that the controller replaces at start, so that a new controller image brings its own shim
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [update]
   - apiGroups: [""]
     resources: [persistentvolumeclaims, services]
     verbs: [create, get, list, delete]
