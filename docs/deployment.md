@@ -145,6 +145,11 @@ ci.job({image = "gcr.io/kaniko-project/executor:v1.23.2-debug", profile = "build
 end)
 ```
 
+A step may publish to several sinks at the same time, for example an image to a registry and a package to a Nexus: `build.egress` is a list, and
+every rule in it (a registry in the cluster, a Nexus at a private address, a package proxy) is open to build Pods together, on their ports. The
+rules apply to **build Pods only** (`profile = "build"`): an ordinary step has DNS and the log collector and nothing else, so a step that
+publishes has to be a build step, or the organisation has no way to reach the sink (a rule for ordinary steps is not built, Q-18).
+
 What a build needs beyond the six capabilities (installing packages, setting file capabilities) is not measured (A.13, Q-17). A registry on a
 public address needs no rule; one on a private address (in the cluster, in the LAN) needs a `build.egress` rule, and `build.internet.enabled=false`
 closed every address but those. The internet rule is an `ipBlock` over all addresses minus the private ranges: with a network plugin that does
@@ -173,6 +178,20 @@ talosctl -n <node> read /var/lib/kubelet/seccomp/profiles/cinim-userns.json
 
 A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhostProfile: profiles/cinim-userns.json}}`. Regenerate the files with
 `tools/build-test/seccomp-userns.py <Docker's default.json> > deploy/seccomp/cinim-userns.json` after a change of the capability list.
+
+## The simple mode: a small organisation, open egress or ingress
+
+By default the step Pods are closed both ways. For a small organisation or an easy case, `network.egress: open` lets every step Pod reach any
+address (including the cluster's own services and the LAN) and `network.ingress: open` lets any address reach them; both are defaults of the shard.
+An organisation can ask for its own when it is created, and what it leaves out is the shard's default:
+
+```bash
+curl -X POST .../api/v1/organizations -d '{"slug": "acme", "name": "Acme", "network": {"egress": "open", "ingress": "open"}}'
+```
+
+For build Pods only there are narrower switches, `build.egress: all` (they may reach any address, private ones too) and `build.ingress: all` (any
+address may reach them; by default a build Pod is closed to every inbound connection), and the other steps stay closed. The controller of the organisation keeps its closed ingress in every mode. The simple modes give up the isolation of SEC-003 for
+convenience (T-48); keep the default for an organisation that runs untrusted pipelines.
 
 ## What is not in the chart yet
 

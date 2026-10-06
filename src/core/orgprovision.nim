@@ -23,10 +23,14 @@ type
     annotations*: JsonNode                      ## of the Ingress, an object or nil
     build*: bool                                ## the shard has a build profile (D-42): the namespace is `baseline` under the build-pod policy, and steps that
                                                 ## ask for `profile = "build"` run as build Pods in it
-    buildEgress*: JsonNode                      ## NetworkPolicy egress rules of the build Pods (the registry), an array or nil; none: closed
+    buildEgress*: JsonNode                      ## NetworkPolicy egress rules of the build Pods (the registry, a Nexus, ...), an array or nil (none: closed);
+                                                ## the string "all": build Pods may reach any address, private ones too
     buildInternet*: JsonNode                    ## {"ports": [...], "except": [...]}: a build may reach public addresses on these ports, the private
                                                 ## ranges in `except` stay closed (package downloads: npm, deb, maven...); nil: no internet
+    buildIngressAll*: bool                      ## build Pods may be reached from any address (`build.ingress: all`); the other steps stay closed
     buildCaps*, buildMemoryLimit*: string       ## what the controller keeps of the capabilities of a build Pod (comma separated) and its memory limit; "" is its default
+    egressOpen*, ingressOpen*: bool             ## the simple mode for a small organisation (SHD-009): its step Pods may reach any address / be reached from any;
+                                                ## the default is closed both ways, with the openings of the build profile
     buildSeccomp*: string                       ## `RuntimeDefault` (Kaniko) or `Localhost` (rootless BuildKit and Buildah, deploy/seccomp); "" is the controller's default
 
   CurveKeys* = object                           ## what the controller of an organisation needs to reach the core (D-24)
@@ -144,8 +148,21 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
          {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}]}]}},
     %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "controller-no-ingress", ns),
        "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": controllerName}}, "policyTypes": ["Ingress"]}}]
+  # the simple mode: one more policy each, which adds to the default-deny (policies are only ever added together), for every step Pod. The
+  # controller is not among them: it keeps its own closed ingress.
+  if cfg.egressOpen:
+    result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-all-egress", ns),
+                  "spec": {"podSelector": steps, "policyTypes": ["Egress"], "egress": [{}]}}
+  if cfg.ingressOpen:
+    result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-all-ingress", ns),
+                  "spec": {"podSelector": steps, "policyTypes": ["Ingress"], "ingress": [{}]}}
   let builds = %*{"matchLabels": {"cinim.io/profile": "build"}}     # the build Pods only: the other steps of the organisation get none of this
-  if cfg.build and cfg.buildInternet != nil and cfg.buildInternet.kind == JObject:
+  if cfg.build and cfg.buildIngressAll and not cfg.ingressOpen:
+    result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-ingress", ns),
+                  "spec": {"podSelector": builds, "policyTypes": ["Ingress"], "ingress": [{}]}}
+  let buildAll = cfg.buildEgress != nil and cfg.buildEgress.kind == JString and cfg.buildEgress.getStr == "all"
+  # with every address open (for all step Pods, or for the build Pods) the internet rule of the build profile says nothing more
+  if cfg.build and not cfg.egressOpen and not buildAll and cfg.buildInternet != nil and cfg.buildInternet.kind == JObject:
     # a build downloads packages all the time (npm, deb, maven, go modules, git): it may reach the public internet, on the ports given,
     # and nothing inside: the private ranges (the cluster's pods and services, the LAN, the link-local metadata address) are excepted
     var ports = newJArray()
@@ -156,7 +173,10 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
     if ports.len > 0: rule["ports"] = ports
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-internet", ns),
                   "spec": {"podSelector": builds, "policyTypes": ["Egress"], "egress": [rule]}}
-  if cfg.build and cfg.buildEgress != nil and cfg.buildEgress.kind == JArray and cfg.buildEgress.len > 0:
+  if cfg.build and not cfg.egressOpen and buildAll:
+    result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-egress", ns),
+                  "spec": {"podSelector": builds, "policyTypes": ["Egress"], "egress": [{}]}}
+  elif cfg.build and not cfg.egressOpen and cfg.buildEgress != nil and cfg.buildEgress.kind == JArray and cfg.buildEgress.len > 0:
     # what a build may reach beyond DNS and the collector: the registry that holds the base images and receives the result, set by
     # the operator; with nothing set a build can reach nothing else
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-egress", ns),

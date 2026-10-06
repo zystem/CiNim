@@ -20,10 +20,12 @@
     "build": {"type": "object", "properties": {"enabled": {"type": "boolean"},
               "internet": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
                            "except": {"type": "array", "items": {"type": "string"}}}},
-              "egress": {"type": "array", "items": {"type": "object"}},
+              "egress": {"oneOf": [{"type": "array", "items": {"type": "object"}}, {"const": "all"}]},
               "seccompProfile": {"enum": ["RuntimeDefault", "Localhost"]},
+              "ingress": {"enum": ["closed", "all"]},
               "capabilities": {"type": "array", "items": {"enum": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETFCAP", "SETGID", "SETUID"]}},
               "memoryLimit": {"type": "string"}}},
+    "network": {"type": "object", "properties": {"egress": {"enum": ["restricted", "open"]}, "ingress": {"enum": ["closed", "open"]}}},
     "controller": {"type": "object", "properties": {"image": {"type": "string"}, "stateStorageClass": {"type": "string"}}},
     "admissionPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
   },

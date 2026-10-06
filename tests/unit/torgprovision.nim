@@ -167,6 +167,56 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     check "allow-build-egress" in opened
     check egress["spec"]["egress"][0]["ports"][0]["port"].getInt == 5000
     check egress["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"      # build Pods only, not the other steps
+  test "a step may publish to several sinks at once (a registry and a Nexus): every rule of build.egress is in the one policy":
+    let sinks = %*[{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "registry"}}}], "ports": [{"protocol": "TCP", "port": 5000}]},
+                   {"to": [{"ipBlock": {"cidr": "192.168.10.20/32"}}], "ports": [{"protocol": "TCP", "port": 8081}, {"protocol": "TCP", "port": 8443}]}]
+    var egress: JsonNode
+    for st in organizationSteps(buildCfg(sinks), "acme", curve, "BT").steps:
+      if st.objectName == "allow-build-egress": egress = st.obj
+    check egress["spec"]["egress"].len == 2
+    check egress["spec"]["egress"][1]["to"][0]["ipBlock"]["cidr"].getStr == "192.168.10.20/32" and egress["spec"]["egress"][1]["ports"].len == 2
+    check egress["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
+  test "build.egress `all`: build Pods may reach any address, private ones too, and the other steps stay closed":
+    var c = buildCfg(%"all")
+    c.buildInternet = %*{"ports": [80, 443], "except": ["10.0.0.0/8"]}
+    var egress: JsonNode
+    var names: seq[string]
+    for st in organizationSteps(c, "acme", curve, "BT").steps:
+      if st.kind == "NetworkPolicy": names.add st.objectName
+      if st.objectName == "allow-build-egress": egress = st.obj
+    check egress["spec"]["egress"] == %*[{}]
+    check egress["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
+    check "allow-build-internet" notin names and "allow-all-egress" notin names and "default-deny" in names
+  test "build.ingress `all`: only build Pods may be reached from any address; nothing with ingress open for all steps":
+    var c = buildCfg()
+    c.buildIngressAll = true
+    var p: JsonNode
+    for st in organizationSteps(c, "acme", curve, "BT").steps:
+      if st.objectName == "allow-build-ingress": p = st.obj
+    check p["spec"]["ingress"] == %*[{}] and p["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
+    for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps: check st.objectName != "allow-build-ingress"
+    c.ingressOpen = true
+    for st in organizationSteps(c, "acme", curve, "BT").steps: check st.objectName != "allow-build-ingress"      # the all-steps policy says it
+  test "the simple mode: egress open and ingress open are one policy each for every step Pod, the controller stays closed":
+    var c = cfg(true)
+    c.egressOpen = true
+    c.ingressOpen = true
+    var all: seq[JsonNode]
+    var names: seq[string]
+    for st in organizationSteps(c, "acme", curve, "BT").steps:
+      if st.kind == "NetworkPolicy": names.add st.objectName
+      if st.objectName in ["allow-all-egress", "allow-all-ingress"]: all.add st.obj
+    check all.len == 2 and "default-deny" in names and "controller-no-ingress" in names
+    check all[0]["spec"]["egress"] == %*[{}] and all[0]["spec"]["policyTypes"] == %*["Egress"]
+    check all[1]["spec"]["ingress"] == %*[{}] and all[1]["spec"]["policyTypes"] == %*["Ingress"]
+    for p in all: check p["spec"]["podSelector"]["matchExpressions"][0]["operator"].getStr == "NotIn"      # not the controller
+    # asked for separately; a closed organisation has neither
+    for st in organizationSteps(cfg(true), "acme", curve, "BT").steps: check st.objectName notin ["allow-all-egress", "allow-all-ingress"]
+  test "with egress open the rules of the build profile are left out, as they would say nothing more":
+    var c = buildCfg(%*[{"to": [{"ipBlock": {"cidr": "192.168.10.20/32"}}]}])
+    c.buildInternet = %*{"ports": [80], "except": []}
+    c.egressOpen = true
+    for st in organizationSteps(c, "acme", curve, "BT").steps: check st.objectName notin ["allow-build-egress", "allow-build-internet"]
   test "a build Pod may download packages from the public internet and reach no private range (npm, deb, maven, git)":
     var cfgI = buildCfg(registry)
     cfgI.buildInternet = %*{"ports": [80, 443, 22], "except": ["10.0.0.0/8", "192.168.0.0/16", "169.254.0.0/16"]}

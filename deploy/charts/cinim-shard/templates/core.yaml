@@ -56,12 +56,16 @@ spec:
             # controller of the organisation makes a build Pod of a step that asks for it
             - {name: CINIM_BUILD, value: {{ ternary "on" "off" .Values.build.enabled | quote }}}
             {{- if .Values.build.enabled }}
-            - {name: CINIM_BUILD_EGRESS, value: {{ .Values.build.egress | toJson | quote }}}
+            - {name: CINIM_BUILD_EGRESS, value: {{ .Values.build.egress | toJson | quote }}}   # a list of rules, or the string "all"
             - {name: CINIM_BUILD_INTERNET, value: {{ if .Values.build.internet.enabled }}{{ dict "ports" .Values.build.internet.ports "except" .Values.build.internet.except | toJson | quote }}{{ else }}"off"{{ end }}}
             - {name: CINIM_BUILD_CAPS, value: {{ join "," .Values.build.capabilities | quote }}}
             - {name: CINIM_BUILD_MEMORY_LIMIT, value: {{ .Values.build.memoryLimit | quote }}}
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
+            - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | quote }}}
             {{- end }}
+            # the simple mode of a small organisation (SHD-009): every step Pod may reach any address / be reached from any
+            - {name: CINIM_NETWORK_EGRESS, value: {{ .Values.network.egress | quote }}}
+            - {name: CINIM_NETWORK_INGRESS, value: {{ .Values.network.ingress | quote }}}
             {{- if eq .Values.mode "multi" }}
             - {name: CINIM_ROUTER_URL, value: {{ required "routerUrl is required in the multi mode" .Values.routerUrl | quote }}}
             - {name: CINIM_ROUTER_INTERVAL, value: {{ .Values.routerInterval | quote }}}

@@ -91,10 +91,19 @@ build:
     enabled: true
     ports: [80, 443, 22]
     except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
-  egress: []
+  egress: []                          # a list of NetworkPolicy egress rules (a registry, a Nexus, ...), or the string `all`: build Pods reach any address
+  ingress: closed                     # closed | all: build Pods may be reached from any address (a build that starts a service for its tests, a sidecar)
   seccompProfile: RuntimeDefault      # RuntimeDefault (Kaniko) or Localhost (rootless BuildKit and Buildah)
   capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]    # of the RuntimeDefault class; the policy allows no others
   memoryLimit: 4Gi
+
+# The network of the step Pods of an organisation (SHD-009). By default they are closed both ways (default-deny, with DNS and the log collector,
+# and the openings of the build profile above). For a simple case or a small organisation: `egress: open` lets every step Pod reach any address
+# (the cluster's own and the LAN too), `ingress: open` lets any address reach them. An organisation can ask for its own at creation
+# (`POST /api/v1/organizations`, `"network": {"egress": "open", "ingress": "open"}`); what it leaves out is this.
+network:
+  egress: restricted                  # restricted | open
+  ingress: closed                     # closed | open
 
 core:
   resources:

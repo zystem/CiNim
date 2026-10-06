@@ -246,7 +246,7 @@ local function norm_timeout(v)
 end
 
 -- The execution profile of a job (RUN-004): "" is the organisation's ordinary one, "build" the build profile (A.13), whose steps run
--- in the organisation's build namespace. Core refuses a profile that the shard does not have.
+-- as build Pods in the organisation's own namespace (D-42). Core refuses a profile that the shard does not have.
 local function norm_profile(v)
   if v == nil or v == "default" then return "" end
   if v ~= "build" then error("ci.job: profile must be \"default\" or \"build\"", 3) end

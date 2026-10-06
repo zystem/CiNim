@@ -97,6 +97,8 @@ proc migrate*(c: var RqClient) =
       ("steps", "shim_n", "INTEGER NOT NULL DEFAULT 0"), ("steps", "shim_phase", "TEXT NOT NULL DEFAULT ''"),
       ("steps", "shim_json", "TEXT NOT NULL DEFAULT ''"), ("steps", "shim_seen_at", "INTEGER NOT NULL DEFAULT 0"),
       ("steps", "shim_source", "TEXT NOT NULL DEFAULT ''"), ("steps", "claimed_at", "INTEGER NOT NULL DEFAULT 0"),
+      ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
+      ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
       ("runs", "profile_id", "TEXT NOT NULL DEFAULT ''"),     # the execution profile of the run's organisation (SHD-007)
       ("execution_profiles", "infra_retries", "INTEGER NOT NULL DEFAULT 3"),
       ("execution_profiles", "log_max_bytes", "INTEGER NOT NULL DEFAULT 1073741824"),
@@ -151,12 +153,18 @@ proc listOrganizationRows*(c: var RqClient): seq[tuple[id, slug, name, state: st
   if vals != nil:
     for v in vals: result.add (v[0].getStr, v[1].getStr, v[2].getStr, v[3].getStr)
 
-proc addOrganization*(c: var RqClient; slug, name: string): string =
-  ## the record only; raises RqError when the slug exists (the unique index)
+proc addOrganization*(c: var RqClient; slug, name: string; egress = ""; ingress = ""): string =
+  ## the record only; raises RqError when the slug exists (the unique index). `egress` and `ingress` are the network mode asked for at
+  ## creation ("" = the shard's default), kept so that a later reconciliation (SHD-008) makes the same objects
   let id = newId()
-  discard c.execute(%*[["INSERT INTO organizations (id, tenant_id, slug, name, created_at) VALUES (?, ?, ?, ?, ?)",
-    id, id, slug, name, $getTime().toUnix()]])
+  discard c.execute(%*[["INSERT INTO organizations (id, tenant_id, slug, name, created_at, network_egress, network_ingress) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    id, id, slug, name, $getTime().toUnix(), egress, ingress]])
   id
+
+proc organizationNetwork*(c: var RqClient; slug: string): tuple[egress, ingress: string] =
+  let r = c.query(%*[["SELECT network_egress, network_ingress FROM organizations WHERE slug = ?", slug]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0: (vals[0][0].getStr, vals[0][1].getStr) else: ("", "")
 
 proc organizationState*(c: var RqClient; slug: string): string =
   ## "" if the shard has no such organisation

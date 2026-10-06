@@ -34,7 +34,13 @@ let
   buildOn = getEnv("CINIM_BUILD", "off") == "on"      ## the shard has a build profile: the namespace of every organisation allows build Pods (A.13, D-42)
   bootstrapTtl = parseInt(getEnv("CINIM_CONTROLLER_BOOTSTRAP_TTL", "86400"))   ## seconds a bootstrap token of a controller stays good
 
-proc provisionConfig(cfg: RouterConfig): ProvisionConfig =
+proc networkDefaults(): tuple[egress, ingress: string] =
+  ## SHD-009: what an organisation gets when it asks for nothing: the chart's `network.egress` (`restricted`, `open`) and `network.ingress`
+  ## (`closed`, `open`)
+  result.egress = if getEnv("CINIM_NETWORK_EGRESS") == "open": "open" else: "restricted"
+  result.ingress = if getEnv("CINIM_NETWORK_INGRESS") == "open": "open" else: "closed"
+
+proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionConfig =
   ## SHD-007: what the objects of an organisation are made from. In the `multi` mode (a router is configured) the core also makes
   ## the Ingress <basePath>/<slug>/ of the organisation; the host and the base path are those of the public URL.
   let pub = parseUri(cfg.publicBase)
@@ -56,9 +62,11 @@ proc provisionConfig(cfg: RouterConfig): ProvisionConfig =
     if raw.len > 0 and raw != "off": buildInternet = parseJson(raw)
   except JsonParsingError:
     discard
+  let nd = networkDefaults()
   ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet,
+                  egressOpen: (if egress.len > 0: egress else: nd.egress) == "open", ingressOpen: (if ingress.len > 0: ingress else: nd.ingress) == "open",
                   build: buildOn, buildEgress: buildEgress, buildCaps: getEnv("CINIM_BUILD_CAPS"), buildMemoryLimit: getEnv("CINIM_BUILD_MEMORY_LIMIT"),
-                  buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"),
+                  buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"), buildIngressAll: getEnv("CINIM_BUILD_INGRESS") == "all",
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,
                   ingressClass: getEnv("CINIM_INGRESS_CLASS"), tlsSecret: getEnv("CINIM_INGRESS_TLS_SECRET"), annotations: annotations)
@@ -163,6 +171,18 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem(Http400, "invalid_request", "a JSON object with a string `slug` (and optionally `name`) is required")
             return
           let slug = j["slug"].getStr
+          # SHD-009: the simple mode of a small organisation, `"network": {"egress": "open", "ingress": "open"}`; what is left out is the shard's default
+          var netEgress, netIngress = ""
+          if j.hasKey("network"):
+            let nw = j["network"]
+            if nw.kind != JObject:
+              problem(Http400, "invalid_request", "network must be an object with `egress` (open, restricted) and `ingress` (open, closed)")
+              return
+            netEgress = nw{"egress"}.getStr
+            netIngress = nw{"ingress"}.getStr
+            if netEgress notin ["", "open", "restricted"] or netIngress notin ["", "open", "closed"]:
+              problem(Http400, "invalid_request", "network.egress is open or restricted, network.ingress is open or closed")
+              return
           let reason = checkSlug(slug, orgPrefix, orgShard)
           if reason.len > 0:
             problem(Http400, "invalid_slug", reason)
@@ -179,7 +199,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if provisionOn:
             # the identity of the namespace's controller (IAM-003): a generation in the database, the token made from it; asking
             # again after a failure finds the same row and makes the same token
-            let pc = provisionConfig(cfg)
+            let pc = provisionConfig(cfg, netEgress, netIngress)
             let ns = orgNamespace(pc, slug)
             c.ensureCredentialRow(ns, getTime().toUnix() + bootstrapTtl)
             let master = coreSecret(coreRef.certs)
@@ -191,12 +211,16 @@ proc onRequest() {.raises: [], gcsafe.} =
                                   "detail": r.error, "done": stepsJson(r)}), ["Content-Type: application/problem+json"])
               return
             provisioned = %*{"steps": stepsJson(r), "skipped": r.skipped}
-          let id = try: c.addOrganization(slug, j{"name"}.getStr)
+          let netNow = provisionConfig(cfg, netEgress, netIngress)
+          let egressNow = netNow.egressOpen
+          let ingressNow = netNow.ingressOpen
+          let id = try: c.addOrganization(slug, j{"name"}.getStr, netEgress, netIngress)
                    except RqError:
                      problem(Http409, "slug_exists", "this shard already has an organisation with that slug")
                      return
           jsonOk(Http201, %*{"id": id, "slug": slug, "name": j{"name"}.getStr, "namespace": namespaceName(orgPrefix, orgShard, slug),
-                             "url": orgUrl(cfg.publicBase, slug), "provisioned": provisionOn, "kubernetes": provisioned,
+                             "url": orgUrl(cfg.publicBase, slug), "provisioned": provisionOn,
+                             "network": {"egress": (if egressNow: "open" else: "restricted"), "ingress": (if ingressNow: "open" else: "closed")}, "kubernetes": provisioned,
                              "checked_against_router": view.configured and view.fetchedAt > 0})
         else:
           problem(Http405, "method_not_allowed", "GET or POST")
