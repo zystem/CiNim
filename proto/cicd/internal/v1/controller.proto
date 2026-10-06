@@ -46,6 +46,16 @@ message PodInfo {
   string shim_state_json = 6;        // the newest CICD-SHIM state in the Pod's log tail (read every few seconds)
 }
 
+// A finished step Pod that the controller keeps because core could not read from it what it needs: the result is unknown (the node was lost, the shim
+// went silent, the Pod vanished) or the log did not reach the log store. It is kept 14 days to be looked at, and core shows an alert for it.
+message KeptPod {
+  StepRef step = 1;
+  string pod_name = 2;
+  string reason = 3;                 // why it was not fully read: "logs_undelivered", "outcome_unknown", "lost_never_started"
+  int64 reported_at = 4;             // unix seconds: when core was told how the step ended
+  int64 keep_until = 5;              // unix seconds: when the controller removes the Pod
+}
+
 message PollRequest {
   Header header = 1;
   string session_id = 2;
@@ -61,6 +71,9 @@ message PollRequest {
   string credential = 10;            // IAM-003: the controller's credential for that namespace, sent in every poll once it has one
   string bootstrap_token = 11;       // IAM-003: before it has one, the one-time token from the Secret that core made with the namespace;
                                      // core answers with `issued_credential`
+  repeated KeptPod kept = 12;        // the Pods kept because they were not fully read, newest first, at most 100 (the whole list is `kept_total`)
+  uint32 kept_total = 13;
+  bool kept_complete = 14;           // true: `kept` and `kept_total` are the whole picture (an empty list then means "none"); core replaces what it had
 }
 
 message StartStep {

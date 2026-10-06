@@ -90,6 +90,7 @@ The endpoint can be turned off in Helm (`metrics.enabled: false`, on by default;
 |---|---|
 | `cinim_component_up{kind,id}`, `cinim_component_last_seen_seconds` | state of the components (controller, executor, shim, rqlite, log circuit) |
 | `cinim_steps{state}`, `cinim_runs{state}` | number of steps and runs by state |
+| `cinim_unread_pods{namespace}` | finished step Pods kept 14 days because core could not read their result or log (an alert in `GET /api/v1/alerts`) |
 | `cinim_launch_gate_open` | 1 if the launch gate is open (RUN-015) |
 | `cinim_inflight_steps` | steps whose shim is currently reporting |
 | `cinim_inflight_<name>_sum` / `_max` | over the steps in flight: `cpu_throttled_seconds`, `memory_bytes`, `memory_peak_bytes`, `process_rss_bytes`, `pids`, `io_read_bytes`... |

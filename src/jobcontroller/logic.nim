@@ -35,12 +35,12 @@ type
     collectorAddr*, stepReportAddr*: string   ## where the shim in the Pod reaches core; both empty = no log streaming
     logSpoolBytes*, logHoldTimeout*: int
     retentionRead*: int                       ## seconds a finished Pod is kept when its result and its log are both read (0: removed at once)
-    retentionOk*, retentionFailed*: int       ## seconds a finished Pod is kept when they are not (log not delivered, end unknown): after a success / otherwise
+    retentionUnread*: int                     ## seconds it is kept when they are not (log not delivered, end unknown): 14 days
     orphanGrace*: int                         ## a Pod not in our state is an orphan only after this many seconds
     logEvery*: int                            ## seconds between reads of a running Pod's log
 
 func defaultConfig*(): Config =
-  Config(logSpoolBytes: 10 * 1024 * 1024, logHoldTimeout: 600, retentionOk: 600, retentionFailed: 6 * 3600, orphanGrace: 120,
+  Config(logSpoolBytes: 10 * 1024 * 1024, logHoldTimeout: 600, retentionUnread: 14 * 86400, orphanGrace: 120,
          logEvery: 5)
 
 func podName*(runId: string; seq, attempt: int): string =
@@ -111,7 +111,7 @@ proc pollRound*(be: Backend; st: CtrlState; cfg: Config; now: float): tuple[tran
 
 proc afterPoll*(st: CtrlState; transitions: seq[Transition]; now: int64) =
   ## core acknowledged these ends: from now on the Pods are only kept for a while, not watched
-  for t in transitions: st.markReported(t.podName, t.kind == tkSucceeded, t.fullyRead, now)
+  for t in transitions: st.markReported(t.podName, t.kind == tkSucceeded, t.fullyRead, now, t.reason)
 
 const
   shimExe = "/cicd/shim/cicd-shim"
@@ -175,9 +175,9 @@ proc sweep*(be: Backend; st: CtrlState; cfg: Config; now: int64): SweepResult =
   ## Finished Pods are removed once their retention has passed; Pods in the step namespace that this controller has no record
   ## of (a namespace dedicated to it is a requirement, see docs/settings.md) are orphans and are removed after a grace period.
   for p in st.reported():
-    # a Pod whose result core has and whose log was delivered has nothing left to show (the log is in the log store): it goes at once. One whose
-    # log was not delivered, or whose end is unknown, is kept to be looked at: a success for a short time, anything else for long
-    let keep = if p.fullyRead: cfg.retentionRead elif p.ok: cfg.retentionOk else: cfg.retentionFailed
+    # a Pod whose result core has and whose log was delivered has nothing left to show (the log is in the log store): it goes at once. One that core
+    # could not read (the log was not delivered, the end is unknown) is kept long, success or not, to be looked at, and core shows an alert for it
+    let keep = if p.fullyRead: cfg.retentionRead else: cfg.retentionUnread
     if now - p.reportedAt >= keep.int64 and be.deletePod(p.name, 0):
       st.forget(p.name)
       result.expired.add p.name

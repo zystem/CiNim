@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods
 import ../common/ctrlauth
 import ../common/rqlite
 
@@ -181,6 +181,25 @@ proc onRequest() {.raises: [], gcsafe.} =
         jsonOk(Http200, %*{"ok": reason.len == 0, "reason": reason, "chars_left": charsLeft(orgPrefix, orgShard, slug),
                            "namespace": namespaceName(orgPrefix, orgShard, slug), "max_slug_length": maxSlugLen(orgPrefix, orgShard)})
         return
+      if path == "/api/v1/alerts":
+        # what an operator should look at, in one list (the UI shows it as alerts): Pods kept because they could not be read, what the
+        # reconciliation found (SHD-008) and a slug held by two cores (SHD-006)
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        var all = newJArray()
+        for a in keptAlerts(): all.add a
+        let rec = lastPassJson()
+        if rec.len > 0:
+          for a in parseJson(rec){"alerts"}: all.add a
+        let cfg = currentConfig()
+        var c = newRq(coreRef.rqliteUrl)
+        var slugs: seq[string]
+        for o in c.listOrganizationRows(): slugs.add o.slug
+        for a in alerts(currentView().items, cfg.coreId, slugs):
+          all.add %*{"code": a.code, "slug": a.slug, "other_core": a.otherCore}
+        jsonOk(Http200, %*{"alerts": all})
+        return
       if path == "/api/v1/organizations:reconcile":
         # SHD-008: the result of the last pass of the reconciliation (what it made again, the alerts, what the retention deleted); POST runs a pass now
         let e = reconcileEnv(coreRef)
@@ -330,6 +349,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         if doPurge:
           c.deleteCredentialRow(namespaceName(orgPrefix, orgShard, slug))
+          forgetKept(namespaceName(orgPrefix, orgShard, slug))
           c.deleteOrganization(slug)
         else: c.setOrganizationState(slug, "disabled")
         jsonOk(Http200, %*{"slug": slug, "state": (if doPurge: "deleted" else: "disabled"), "kubernetes": stepsJson(r)})

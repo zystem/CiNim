@@ -10,7 +10,7 @@ import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
-import logwindow
+import logwindow, keptpods
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
@@ -157,6 +157,8 @@ proc renderCoreMetrics*(co: Core): string =
   let now = epochTime()
   result = registryMetrics(now) & memstats.renderMetrics("core") & stepmetrics.render()
   let g = currentGate()
+  result.add "# HELP cinim_unread_pods Finished step Pods kept because their result or log could not be read (an alert in the API).\n# TYPE cinim_unread_pods gauge\n"
+  for (ns, n) in keptCounts(): result.add "cinim_unread_pods{namespace=\"" & ns & "\"} " & $n & "\n"
   result.add "# HELP cinim_launch_gate_open 1 when new steps may start (RUN-015).\n# TYPE cinim_launch_gate_open gauge\n" &
              "cinim_launch_gate_open " & (if g.isOpen: "1" else: "0") & "\n"
   try:
@@ -361,6 +363,13 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   of vLegacy: discard
   # every poll is the controller's heartbeat (D-29)
   discard registryTouch("controller", req.session_id, epochTime(), @[("pods", $req.inventory.len)])
+  # the Pods this controller keeps because it could not read them (the result unknown, the log undelivered): an alert for each, until it removes them
+  if req.kept_complete and req.namespace.len > 0:
+    var items: seq[KeptItem]
+    for k in req.kept:
+      items.add KeptItem(pod: k.pod_name, runId: k.step.run_id, reason: k.reason, seq: int(k.step.seq), attempt: int(k.step.attempt),
+                         reportedAt: k.reported_at, keepUntil: k.keep_until)
+    recordKept(req.namespace, getTime().toUnix(), int(req.kept_total), items)
   # The controller serves one organisation and says so by its namespace (SHD-007): it gets the steps of the profile of that namespace
   # and of no other. A controller that names none (single-tenant setups) gets the shard's default profile. Until the controllers have
   # identities of their own (SEC-010) the namespace is taken on the controller's word.

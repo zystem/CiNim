@@ -226,23 +226,24 @@ suite "cancel, retention, orphans":
     afterPoll(st, pollRound(be, st, cfg, 101.0).transitions, 1000)
     check sweep(be, st, cfg, 1000).expired.len == 2                 # nothing is left in them that the platform does not have
     check f.deleted.len == 2 and not st.has("ci-s1-run-0-1") and not st.has("ci-s1-run-1-1")
-  test "a Pod is kept for as long as the settings say when its log was not delivered or its end is unknown":
-    var c = cfg
-    c.retentionRead = 0
+  test "a Pod core could not read (log not delivered, end unknown) is kept 14 days, a success or not, and is listed as unread":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
-    discard startPod(be, st, c, req(0), 100)
-    discard startPod(be, st, c, req(1), 100)
+    discard startPod(be, st, cfg, req(0), 100)
+    discard startPod(be, st, cfg, req(1), 100)
     # the end was reported, but the log was not delivered (a success) / the Pod vanished with the command started (unknown, so not a success)
-    st.markReported("ci-s1-run-0-1", ok = true, fullyRead = false, now = 1000)
-    st.markReported("ci-s1-run-1-1", ok = false, fullyRead = false, now = 1000)
+    st.markReported("ci-s1-run-0-1", ok = true, fullyRead = false, now = 1000, reason = "logs_undelivered")
+    st.markReported("ci-s1-run-1-1", ok = false, fullyRead = false, now = 2000, reason = "outcome_unknown")
     f.pods["ci-s1-run-0-1"] = succeeded()
     f.pods["ci-s1-run-1-1"] = failed(1)
-    check sweep(be, st, c, 1000 + 599).expired.len == 0
-    check sweep(be, st, c, 1000 + 600).expired == @["ci-s1-run-0-1"]             # a success: 10 minutes
-    check sweep(be, st, c, 1000 + 6 * 3600 - 1).expired.len == 0
-    check sweep(be, st, c, 1000 + 6 * 3600).expired == @["ci-s1-run-1-1"]        # anything else: 6 hours
+    check cfg.retentionUnread == 14 * 86400
+    check st.unread().mapIt(it.name) == @["ci-s1-run-1-1", "ci-s1-run-0-1"]            # newest first
+    check st.unread()[0].endReason == "outcome_unknown"
+    check sweep(be, st, cfg, 1000 + 14 * 86400 - 1).expired.len == 0
+    check sweep(be, st, cfg, 1000 + 14 * 86400).expired == @["ci-s1-run-0-1"]
+    check sweep(be, st, cfg, 2000 + 14 * 86400).expired == @["ci-s1-run-1-1"]
+    check st.unread().len == 0                                                           # a removed Pod is no longer an alert
   test "the time a fully read Pod is kept can be set, to look at it":
     var c = cfg
     c.retentionRead = 300

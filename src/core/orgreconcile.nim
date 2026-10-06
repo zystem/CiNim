@@ -16,7 +16,7 @@
 ## The decisions are a function of what the database and the cluster say (`reconcilePass`), with the database behind closures, so that
 ## `tests/unit/torgreconcile.nim` runs them against a fake cluster. `runPass` and `runReconciler` are the glue.
 import std/[json, locks, atomics, os, strutils, times]
-import kubeapi, orgprovision, schema
+import kubeapi, orgprovision, schema, keptpods
 import ../common/[rqlite, ctrlauth]
 
 type
@@ -183,6 +183,7 @@ proc runPass*(e: PassEnv; kube: KubeApi): PassResult =
         forget: proc (slug, namespace: string) =
           var db = newRq(e.rqliteUrl)
           db.deleteCredentialRow(namespace)
+          forgetKept(namespace)
           db.deleteOrganization(slug))
       result = reconcilePass(kube, e.mk, loadCurve(e.certs), c.listOrganizationsFull(), hooks, getTime().toUnix(), e.retention)
       withLock lock: lastJson = $result.toJson

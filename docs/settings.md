@@ -30,8 +30,7 @@ did not pass the profile's setting; normally the profile applies.
 | Variable | Default | What it does |
 |---|---|---|
 | `CINIM_POD_RETENTION_READ` | 0 | seconds a finished step Pod is kept when core has its result and its log was delivered (nothing is left in it that the platform does not have); 0 removes it at once. Raise it to look at Pods with `kubectl` |
-| `CINIM_POD_RETENTION_OK` | 600 | seconds a Pod that ended well is kept when its log was **not** delivered |
-| `CINIM_POD_RETENTION_FAILED` | 21600 | seconds any other Pod is kept when it was not fully read: its log was not delivered or its end is unknown (the node was lost, the Pod vanished) |
+| `CINIM_POD_RETENTION_UNREAD` | 1209600 (14 days) | seconds a Pod is kept, a success or not, when core could not read from it what it needs: its log was not delivered or its end is unknown (the node was lost, the shim went silent). Core shows an alert for each such Pod (`GET /api/v1/alerts`, `cinim_unread_pods`) until the controller removes it |
 
 ## Core environment for the `multi` mode
 

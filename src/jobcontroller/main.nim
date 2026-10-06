@@ -37,8 +37,7 @@ let
   stateDir = getEnv("CINIM_STATE_DIR", getCurrentDir() / "state")
   # how long a finished step Pod is kept after core has its result (to look at it with kubectl), by outcome
   retentionRead = parseInt(getEnv("CINIM_POD_RETENTION_READ", "0"))     # a Pod whose result and log are both read has nothing to show: removed at once
-  retentionOk = parseInt(getEnv("CINIM_POD_RETENTION_OK", "600"))
-  retentionFailed = parseInt(getEnv("CINIM_POD_RETENTION_FAILED", $(6 * 3600)))
+  retentionUnread = parseInt(getEnv("CINIM_POD_RETENTION_UNREAD", $(14 * 86400)))    # a Pod core could not read (log undelivered, end unknown): 14 days, and an alert
   # load_kube_config() (kubernetes-client/c) always dials whatever "current-context" says in the file, with
   # no per-call override - it silently follows the shared ~/.kube/config if this is left empty, which drifts
   # under other unrelated work in this environment. CINIM_KUBECONFIG pins a specific file/context so this
@@ -127,6 +126,14 @@ proc saveCredential(value: string) =
   setFilePermissions(tmp, {fpUserRead, fpUserWrite})
   moveFile(tmp, credentialPath())
 
+proc keptPods(st: CtrlState; cfg: Config; limit: int): seq[KeptPod] =
+  ## the Pods kept because core could not read them, for the alert (newest first, at most `limit`; kept_total is the whole number)
+  for p in st.unread():
+    if result.len >= limit: break
+    result.add KeptPod(step: StepRef(run_id: p.runId, seq: uint32(p.seq), attempt: uint32(p.attempt)), pod_name: p.name,
+                       reason: (if p.endReason.len > 0: p.endReason else: "unknown"), reported_at: p.reportedAt,
+                       keep_until: p.reportedAt + cfg.retentionUnread.int64)
+
 proc main() =
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   let k = connectK8s(ns, kubeconfig)
@@ -139,8 +146,7 @@ proc main() =
   cfg.logSpoolBytes = logSpoolBytes
   cfg.logHoldTimeout = logHoldTimeout
   cfg.retentionRead = retentionRead
-  cfg.retentionOk = retentionOk
-  cfg.retentionFailed = retentionFailed
+  cfg.retentionUnread = retentionUnread
   let st = openState(stateDir / "controller.sqlite")
   let adopted = st.active()
   echo "jobcontroller: state in ", stateDir, ", adopted ", adopted.len, " step Pod(s) from the previous run"
@@ -159,7 +165,8 @@ proc main() =
     let req = PollRequest(header: Header(protocol: 1), session_id: sessionId, ack_command_seq: ackSeq, namespace: ns,
       credential: credential, bootstrap_token: (if credential.len == 0: readTrimmed(bootstrapFile) else: ""),
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
-      inventory: round.inventory.map(toProto), inventory_complete: true)   # every Pod this controller tracks is listed
+      inventory: round.inventory.map(toProto), inventory_complete: true,    # every Pod this controller tracks is listed
+      kept: keptPods(st, cfg, 100), kept_total: uint32(st.unread().len), kept_complete: true)
     var resp: PollResponse
     try:
       resp = core.rpc(req)
