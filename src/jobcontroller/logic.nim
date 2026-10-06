@@ -16,6 +16,7 @@ type
     runId*, podName*, reason*, shimJson*: string
     seq*, attempt*, exitCode*: int
     kind*: TKind
+    fullyRead*: bool             ## the shim's verdict was read and the log reached the log pipeline: the Pod has nothing left to show
 
   PodSeen* = object
     ## a tracked Pod that is still going; becomes a PodInfo on the wire
@@ -33,7 +34,8 @@ type
   Config* = object
     collectorAddr*, stepReportAddr*: string   ## where the shim in the Pod reaches core; both empty = no log streaming
     logSpoolBytes*, logHoldTimeout*: int
-    retentionOk*, retentionFailed*: int       ## seconds a finished Pod is kept: after a success / otherwise (to look at it)
+    retentionRead*: int                       ## seconds a finished Pod is kept when its result and its log are both read (0: removed at once)
+    retentionOk*, retentionFailed*: int       ## seconds a finished Pod is kept when they are not (log not delivered, end unknown): after a success / otherwise
     orphanGrace*: int                         ## a Pod not in our state is an orphan only after this many seconds
     logEvery*: int                            ## seconds between reads of a running Pod's log
 
@@ -102,13 +104,14 @@ proc pollRound*(be: Backend; st: CtrlState; cfg: Config; now: float): tuple[tran
                of vFailed, vLogsUndelivered: (if reading.exitCode == 0: tkSucceeded else: tkFailed)
                else: tkLost),
         exitCode: reading.exitCode,
+        fullyRead: reading.verdict in [vSucceeded, vFailed],
         # the kernel killed the container for exceeding its memory limit (the whole cgroup goes, shim included, so no shim verdict
         # exists): still the step's own failure, and the reason says so
         reason: (if reading.verdict == vFailed and reading.detail == "OOMKilled": "oom_killed" else: reasonOf(reading.verdict)))
 
 proc afterPoll*(st: CtrlState; transitions: seq[Transition]; now: int64) =
   ## core acknowledged these ends: from now on the Pods are only kept for a while, not watched
-  for t in transitions: st.markReported(t.podName, t.kind == tkSucceeded, now)
+  for t in transitions: st.markReported(t.podName, t.kind == tkSucceeded, t.fullyRead, now)
 
 const
   shimExe = "/cicd/shim/cicd-shim"
@@ -172,7 +175,9 @@ proc sweep*(be: Backend; st: CtrlState; cfg: Config; now: int64): SweepResult =
   ## Finished Pods are removed once their retention has passed; Pods in the step namespace that this controller has no record
   ## of (a namespace dedicated to it is a requirement, see docs/settings.md) are orphans and are removed after a grace period.
   for p in st.reported():
-    let keep = if p.ok: cfg.retentionOk else: cfg.retentionFailed
+    # a Pod whose result core has and whose log was delivered has nothing left to show (the log is in the log store): it goes at once. One whose
+    # log was not delivered, or whose end is unknown, is kept to be looked at: a success for a short time, anything else for long
+    let keep = if p.fullyRead: cfg.retentionRead elif p.ok: cfg.retentionOk else: cfg.retentionFailed
     if now - p.reportedAt >= keep.int64 and be.deletePod(p.name, 0):
       st.forget(p.name)
       result.expired.add p.name

@@ -215,7 +215,7 @@ suite "cancel, retention, orphans":
     discard startPod(be, st, cfg, req(), 100)
     discard cancelPod(be, st, "s1_run", 0, 1, 5)
     check f.deleted == @["ci-s1-run-0-1"] and not st.has("ci-s1-run-0-1")
-  test "finished Pods are kept: a success for a short time, a failure for long":
+  test "a Pod whose result core has and whose log was delivered is removed at once, a failed one too":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
@@ -224,10 +224,36 @@ suite "cancel, retention, orphans":
     f.pods["ci-s1-run-0-1"] = succeeded()
     f.pods["ci-s1-run-1-1"] = failed(1)
     afterPoll(st, pollRound(be, st, cfg, 101.0).transitions, 1000)
-    check sweep(be, st, cfg, 1000 + 599).expired.len == 0           # nothing yet
-    check sweep(be, st, cfg, 1000 + 600).expired == @["ci-s1-run-0-1"]   # the success after 10 minutes
-    check sweep(be, st, cfg, 1000 + 6 * 3600 - 1).expired.len == 0
-    check sweep(be, st, cfg, 1000 + 6 * 3600).expired == @["ci-s1-run-1-1"]
+    check sweep(be, st, cfg, 1000).expired.len == 2                 # nothing is left in them that the platform does not have
+    check f.deleted.len == 2 and not st.has("ci-s1-run-0-1") and not st.has("ci-s1-run-1-1")
+  test "a Pod is kept for as long as the settings say when its log was not delivered or its end is unknown":
+    var c = cfg
+    c.retentionRead = 0
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, c, req(0), 100)
+    discard startPod(be, st, c, req(1), 100)
+    # the end was reported, but the log was not delivered (a success) / the Pod vanished with the command started (unknown, so not a success)
+    st.markReported("ci-s1-run-0-1", ok = true, fullyRead = false, now = 1000)
+    st.markReported("ci-s1-run-1-1", ok = false, fullyRead = false, now = 1000)
+    f.pods["ci-s1-run-0-1"] = succeeded()
+    f.pods["ci-s1-run-1-1"] = failed(1)
+    check sweep(be, st, c, 1000 + 599).expired.len == 0
+    check sweep(be, st, c, 1000 + 600).expired == @["ci-s1-run-0-1"]             # a success: 10 minutes
+    check sweep(be, st, c, 1000 + 6 * 3600 - 1).expired.len == 0
+    check sweep(be, st, c, 1000 + 6 * 3600).expired == @["ci-s1-run-1-1"]        # anything else: 6 hours
+  test "the time a fully read Pod is kept can be set, to look at it":
+    var c = cfg
+    c.retentionRead = 300
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, c, req(0), 100)
+    f.pods["ci-s1-run-0-1"] = failed(2)
+    afterPoll(st, pollRound(be, st, c, 101.0).transitions, 1000)
+    check sweep(be, st, c, 1299).expired.len == 0
+    check sweep(be, st, c, 1300).expired == @["ci-s1-run-0-1"]
   test "a Pod whose end is not yet reported is never swept":
     let st = openState(":memory:")
     let f = newFake()

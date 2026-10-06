@@ -12,7 +12,8 @@ type
     started*: bool             ## this controller saw the container running (so a vanished Pod "may have run")
     lastLog*: float            ## when the Pod's log was last read (unix seconds)
     reportedAt*: int64         ## when the Pod's end was reported to core and acknowledged (0 = not yet)
-    ok*: bool                  ## the reported end was a success (decides how long the Pod is kept)
+    ok*: bool                  ## the reported end was a success (decides how long a Pod that was not fully read is kept)
+    fullyRead*: bool           ## core has the result and the log was delivered: nothing is left in the Pod worth keeping
 
   CtrlState* = object
     db: DbConn
@@ -25,14 +26,16 @@ proc openState*(path: string): CtrlState =
     name TEXT PRIMARY KEY, run_id TEXT NOT NULL, seq INTEGER NOT NULL, attempt INTEGER NOT NULL, created_at INTEGER NOT NULL,
     started INTEGER NOT NULL DEFAULT 0, last_log REAL NOT NULL DEFAULT 0, reported_at INTEGER NOT NULL DEFAULT 0,
     ok INTEGER NOT NULL DEFAULT 0)""")
+  try: result.db.exec(sql"ALTER TABLE pods ADD COLUMN fully_read INTEGER NOT NULL DEFAULT 0")     # a state file from before this column
+  except DbError: discard
 
 proc close*(s: CtrlState) = s.db.close()
 
 proc rowToPod(r: Row): TrackedPod =
   TrackedPod(name: r[0], runId: r[1], seq: parseInt(r[2]), attempt: parseInt(r[3]), createdAt: parseBiggestInt(r[4]),
-             started: r[5] == "1", lastLog: parseFloat(r[6]), reportedAt: parseBiggestInt(r[7]), ok: r[8] == "1")
+             started: r[5] == "1", lastLog: parseFloat(r[6]), reportedAt: parseBiggestInt(r[7]), ok: r[8] == "1", fullyRead: r[9] == "1")
 
-const cols = "name, run_id, seq, attempt, created_at, started, last_log, reported_at, ok"
+const cols = "name, run_id, seq, attempt, created_at, started, last_log, reported_at, ok, fully_read"
 
 proc track*(s: CtrlState; name, runId: string; seq, attempt: int; now: int64) =
   ## recorded *before* the Pod is created: if the controller dies in between, the Pod it may have made is not an orphan
@@ -48,8 +51,8 @@ proc has*(s: CtrlState; name: string): bool = s.db.getValue(sql"SELECT 1 FROM po
 proc markStarted*(s: CtrlState; name: string) = s.db.exec(sql"UPDATE pods SET started = 1 WHERE name = ?", name)
 proc setLastLog*(s: CtrlState; name: string; t: float) = s.db.exec(sql"UPDATE pods SET last_log = ? WHERE name = ?", t, name)
 
-proc markReported*(s: CtrlState; name: string; ok: bool; now: int64) =
-  s.db.exec(sql"UPDATE pods SET reported_at = ?, ok = ? WHERE name = ?", now, (if ok: 1 else: 0), name)
+proc markReported*(s: CtrlState; name: string; ok: bool; fullyRead: bool; now: int64) =
+  s.db.exec(sql"UPDATE pods SET reported_at = ?, ok = ?, fully_read = ? WHERE name = ?", now, (if ok: 1 else: 0), (if fullyRead: 1 else: 0), name)
 
 proc forget*(s: CtrlState; name: string) = s.db.exec(sql"DELETE FROM pods WHERE name = ?", name)
 

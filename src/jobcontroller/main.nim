@@ -36,6 +36,7 @@ let
   # controller adopts (D-29). Keep it on a volume that survives a restart of the controller.
   stateDir = getEnv("CINIM_STATE_DIR", getCurrentDir() / "state")
   # how long a finished step Pod is kept after core has its result (to look at it with kubectl), by outcome
+  retentionRead = parseInt(getEnv("CINIM_POD_RETENTION_READ", "0"))     # a Pod whose result and log are both read has nothing to show: removed at once
   retentionOk = parseInt(getEnv("CINIM_POD_RETENTION_OK", "600"))
   retentionFailed = parseInt(getEnv("CINIM_POD_RETENTION_FAILED", $(6 * 3600)))
   # load_kube_config() (kubernetes-client/c) always dials whatever "current-context" says in the file, with
@@ -137,6 +138,7 @@ proc main() =
   cfg.stepReportAddr = stepReportAddr
   cfg.logSpoolBytes = logSpoolBytes
   cfg.logHoldTimeout = logHoldTimeout
+  cfg.retentionRead = retentionRead
   cfg.retentionOk = retentionOk
   cfg.retentionFailed = retentionFailed
   let st = openState(stateDir / "controller.sqlite")

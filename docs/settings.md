@@ -25,6 +25,14 @@ did not pass the profile's setting; normally the profile applies.
   wait longer than that, which is exactly why a shim that lost the core reconnects and keeps working: five minutes are enough for it in
   most cases.
 
+## Job controller environment
+
+| Variable | Default | What it does |
+|---|---|---|
+| `CINIM_POD_RETENTION_READ` | 0 | seconds a finished step Pod is kept when core has its result and its log was delivered (nothing is left in it that the platform does not have); 0 removes it at once. Raise it to look at Pods with `kubectl` |
+| `CINIM_POD_RETENTION_OK` | 600 | seconds a Pod that ended well is kept when its log was **not** delivered |
+| `CINIM_POD_RETENTION_FAILED` | 21600 | seconds any other Pod is kept when it was not fully read: its log was not delivered or its end is unknown (the node was lost, the Pod vanished) |
+
 ## Core environment for the `multi` mode
 
 The shard's identity and its link to the organisation router (SHD-006). Without `CINIM_ROUTER_URL` the core works alone (`single` mode):
