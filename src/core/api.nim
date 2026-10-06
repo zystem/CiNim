@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow
 import ../common/ctrlauth
 import ../common/rqlite
 
@@ -393,7 +393,17 @@ proc onRequest() {.raises: [], gcsafe.} =
         if parts[0].len == 0 or seq < 0:
           problem(Http400, "invalid_request", "bad step log path")
           return
-        let log = coreRef.getStepLog(parts[0], seq)
+        # DAT-007: `from` (a line number) and `limit` (at most 500) choose the window; `next` in the answer is where to continue
+        var fromLine, limit = -1
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            try:
+              if k == "from": fromLine = parseInt(v)
+              if k == "limit": limit = parseInt(v)
+            except ValueError:
+              problem(Http400, "invalid_request", k & " must be an integer")
+              return
+        let log = coreRef.getStepLog(parts[0], seq, max(0, fromLine), (if limit < 1: maxWindow else: limit))
         if log == nil:
           problem(Http404, "not_found", "no log stream for this step yet")
           return

@@ -10,6 +10,7 @@ import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
+import logwindow
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
@@ -104,27 +105,36 @@ proc setProfileSettings*(co: Core; s: ProfileSettings; profileId = "") =
 # A bare stand-in for the log gateway, served by the REST API in core/api.nim: one GET, no from/around/search
 # parameters, no SSE/download. It queries VictoriaLogs directly (one node, no vmauth indirection).
 
-proc getStepLog*(co: Core; runId: string; seq: int; limit = 500): JsonNode =
-  ## nil if no log stream has been opened for this step yet (api.nim 404s on that); an opened stream
-  ## with no lines indexed yet (VictoriaLogs ingestion lags the collector's ack by ~1-2s, A.7)
-  ## returns an empty `lines` array, which is a valid, not-yet-ready state, not a 404.
+proc getStepLog*(co: Core; runId: string; seq: int; fromLine = 0; limit = maxWindow): JsonNode =
+  ## The window of a step's log: `limit` lines (at most 500) from line number `fromLine`, in the order of the build's output (logwindow.nim).
+  ## nil if no log stream has been opened for this step yet (api.nim 404s on that). An opened stream with no lines readable yet (VictoriaLogs
+  ## makes a record readable about 1-2 s after the collector's ack, A.7) is an empty `lines`, not a 404. `next` is the line to ask for next;
+  ## `lines_total` is what the shim says the step wrote (-1: nothing yet), `lines_stored` what the store has, and `complete` says that the step has
+  ## ended and all of it is stored, so a reader that finds `complete` false after the end of a step asks again.
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT id, job_id FROM steps WHERE run_id = ? AND ordinal = ?", runId, seq]])
+  let r = c.query(%*[["SELECT id, job_id, state, shim_json FROM steps WHERE run_id = ? AND ordinal = ?", runId, seq]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
   let indexName = schema.streamIndexName(c, vals[0][1].getStr, vals[0][0].getStr)
   if indexName.len == 0: return nil
+  let state = vals[0][2].getStr
+  let total = linesReported(vals[0][3].getStr)
+  let first = max(0, fromLine)
+  let n = min(max(1, limit), maxWindow)
   var lines: seq[string]
+  var stored = 0
   try:
-    let q = "job:" & indexName & " AND run:" & runId
-    let url = co.victoriaLogsUrl & "/select/logsql/query?query=" & encodeUrl(q) & "&limit=" & $limit
     var http = newHttpClient(timeout = 5000)
     defer: http.close()
-    for ln in http.getContent(url).splitLines:
-      if ln.len > 0: lines.add parseJson(ln){"_msg"}.getStr
+    let stream = "job:" & indexName & " AND run:" & runId
+    let q = stream & " AND ln:>=" & $first & " | sort by (ln) | limit " & $n
+    lines = contiguousFrom(parseLogRecords(http.getContent(co.victoriaLogsUrl & "/select/logsql/query?query=" & encodeUrl(q) & "&limit=" & $n)), first)
+    let cnt = http.getContent(co.victoriaLogsUrl & "/select/logsql/query?query=" & encodeUrl(stream & " | stats count() n"))
+    stored = parseJson(cnt.splitLines[0]){"n"}.getStr.parseInt
   except CatchableError:
     discard   # VictoriaLogs unreachable/empty result: an empty window, not a platform-level error
-  %*{"run_id": runId, "step_seq": seq, "lines": lines}
+  %*{"run_id": runId, "step_seq": seq, "from": first, "lines": lines, "next": first + lines.len, "step_state": state,
+     "lines_total": total, "lines_stored": stored, "complete": logComplete(state, total, stored)}
 
 # ------------------------------------------------------------------ components and metrics (D-29)
 
