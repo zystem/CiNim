@@ -4,12 +4,11 @@ A self-hosted CI/CD platform for Kubernetes, written in Nim. The full specificat
 
 Working today, through the REST API only: Lua pipelines with a replay journal (`ci.pipeline`, `ci.job`, `Job:sh`, `ci.now`, `ci.random`,
 `ci.sleep`), a Pod per step, the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the launch gate (RUN-015), component liveness,
-step metrics, organisations with a namespace and a job controller each (SHD-001 to SHD-007, SHD-009: create, switch off, delete, the router in the
-`multi` mode), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
+step metrics, organisations with a namespace and a job controller each (SHD-001 to SHD-009: create, switch off, delete, the reconciliation with their
+Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
 (SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). Not built yet: the UI (apart from the router page), webhooks and
 triggers, `j.checkout`, the run volume and `$CICD_ENV` (STO), artifacts and caches, `ci.parallel`, `ci.matrix`, `ci.input`, `ci.finally`,
-plugins, variables and secrets for steps, OIDC/RBAC and any authentication of the REST API, the audit log, backups, the reconciliation of SHD-008 and
-the retention timer of a switched-off organisation. The delivery plan is section 17 of the specification; the sections of the specification
+plugins, variables and secrets for steps, OIDC/RBAC and any authentication of the REST API, the audit log and backups. The delivery plan is section 17 of the specification; the sections of the specification
 describe the target, and the status above is the one that holds.
 
 ## Structure

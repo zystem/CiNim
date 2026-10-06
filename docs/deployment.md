@@ -215,11 +215,28 @@ REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/i
 
 A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
 
-## What is not built yet
+## Reconciliation and retention
+
+At start and every `organizations.reconcileInterval` seconds (300) the core compares the organisations in its database with their Kubernetes objects
+and makes again what is missing, with the same content: a deleted NetworkPolicy, a lost Deployment, the whole namespace after a restore into a new
+cluster. A switched-off organisation is expected without its controller and its Ingress. When the namespace is new or the state volume of a controller is
+gone, the identity of that controller is renewed (a new generation, a new bootstrap token) and the controller enrols again. The reconciliation
+deletes nothing: a namespace of this shard that no organisation owns, or whose policy labels differ from what the core would make (Pod Security,
+the build-pod policy), is an alert. The core reads only namespaces and the state volume of a controller, so a Secret or a Deployment that was
+changed by hand is not noticed, only one that is missing.
+
+```bash
+GET  /api/v1/organizations:reconcile      # the last pass: what was made again, the alerts, what the retention deleted, the interval and the retention
+POST /api/v1/organizations:reconcile      # run a pass now
+```
+
+A switched-off organisation is kept `organizations.retention` seconds (14 days) from the moment it was switched off, then deleted for good: its namespace
+with the volumes and its record. `0` deletes it at once and a negative value never; `DELETE ?purge=true&force=true` deletes it earlier.
+
+## What the core makes for an organisation
 
 `POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state
 volume and Deployment), the quota, the limit range, the network policies and, in the `multi` mode, the Ingress of the organisation (SHD-007);
-`DELETE` switches an organisation off and `DELETE ?purge=true` deletes it. The reconciliation of SHD-008 and the retention timer of a
-switched-off organisation are not built yet. The job controller runs from its own image, `<image.repository>-controller:<image.tag>` unless `controller.image` says otherwise.
+`DELETE` switches an organisation off and `DELETE ?purge=true` deletes it. The job controller runs from its own image, `<image.repository>-controller:<image.tag>` unless `controller.image` says otherwise.
 The chart expects `/core` and `/executor` in `image.repository`; no pipeline publishes the images by itself yet (`tools/image` builds them, see above).
 A volume of the controller needs a StorageClass: set `controller.stateStorageClass` when the cluster has no default one.

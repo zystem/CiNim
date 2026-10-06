@@ -63,6 +63,9 @@ spec:
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
             - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"
             {{- end }}
+            # the reconciliation of the organisations with their objects and the retention of a switched-off one (SHD-008)
+            - {name: CINIM_ORG_RECONCILE_INTERVAL, value: {{ .Values.organizations.reconcileInterval | quote }}}
+            - {name: CINIM_ORG_RETENTION, value: {{ .Values.organizations.retention | quote }}}
             # the simple mode of a small organisation (SHD-009): every step Pod may reach any address / be reached from any
             - {name: CINIM_NETWORK_EGRESS, value: {{ .Values.network.egress | quote }}}
             - {name: CINIM_NETWORK_INGRESS, value: {{ .Values.network.ingress | quote }}}

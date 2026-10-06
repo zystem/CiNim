@@ -6,9 +6,9 @@
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
-import std/[json, os, strutils, uri, times]
+import std/[json, os, strutils, uri, times, atomics]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile
 import ../common/ctrlauth
 import ../common/rqlite
 
@@ -76,6 +76,27 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,
                   ingressClass: getEnv("CINIM_INGRESS_CLASS"), tlsSecret: getEnv("CINIM_INGRESS_TLS_SECRET"), annotations: annotations)
+
+proc reconcileEnv(co: Core): PassEnv =
+  ## SHD-008: what a pass needs; the settings are the Helm values `organizations.reconcileInterval` and `organizations.retention`
+  PassEnv(rqliteUrl: co.rqliteUrl, certs: co.certs, bootstrapTtl: bootstrapTtl,
+          mk: proc (egress, ingress: string): ProvisionConfig {.gcsafe.} =
+            {.cast(gcsafe).}: provisionConfig(currentConfig(), egress, ingress),
+          interval: max(10, parseInt(getEnv("CINIM_ORG_RECONCILE_INTERVAL", "300"))),
+          retention: parseBiggestInt(getEnv("CINIM_ORG_RETENTION", $(14 * 86400))))
+
+var reconcilerThread: Thread[tuple[env: PassEnv, stop: ptr Atomic[bool]]]
+var reconcilerRunning = false
+
+proc startReconciler*(co: Core) =
+  ## SHD-008: the reconciliation and the retention run only where the core can reach a cluster
+  if not provisionOn: return
+  createThread(reconcilerThread, runReconciler, (reconcileEnv(co), addr stopServers))
+  reconcilerRunning = true
+  echo "core: reconciling the organisations every ", reconcileEnv(co).interval, " s, a switched-off one is kept ", reconcileEnv(co).retention, " s"
+
+proc joinReconciler*() =
+  if reconcilerRunning: joinThread(reconcilerThread)
 
 proc stepsJson(r: ProvisionResult): JsonNode =
   result = newJArray()
@@ -159,6 +180,26 @@ proc onRequest() {.raises: [], gcsafe.} =
         let reason = checkSlug(slug, orgPrefix, orgShard)
         jsonOk(Http200, %*{"ok": reason.len == 0, "reason": reason, "chars_left": charsLeft(orgPrefix, orgShard, slug),
                            "namespace": namespaceName(orgPrefix, orgShard, slug), "max_slug_length": maxSlugLen(orgPrefix, orgShard)})
+        return
+      if path == "/api/v1/organizations:reconcile":
+        # SHD-008: the result of the last pass of the reconciliation (what it made again, the alerts, what the retention deleted); POST runs a pass now
+        let e = reconcileEnv(coreRef)
+        if getMethod() == "POST":
+          if not provisionOn:
+            problem(Http409, "not_in_a_cluster", "the core does not run in a cluster, or CINIM_PROVISION is off")
+            return
+          var body = runPass(e, kube).toJson
+          body["interval"] = %e.interval
+          body["retention"] = %e.retention
+          jsonOk(Http200, body)
+        elif getMethod() == "GET":
+          let last = lastPassJson()
+          var body = if last.len > 0: parseJson(last) else: %*{"at": 0, "organizations": [], "alerts": [], "deleted": [], "error": "no pass has run yet"}
+          body["interval"] = %e.interval
+          body["retention"] = %e.retention
+          jsonOk(Http200, body)
+        else:
+          problem(Http405, "method_not_allowed", "GET or POST")
         return
       if path == "/api/v1/organizations":
         var c = newRq(coreRef.rqliteUrl)

@@ -99,6 +99,7 @@ proc migrate*(c: var RqClient) =
       ("steps", "shim_source", "TEXT NOT NULL DEFAULT ''"), ("steps", "claimed_at", "INTEGER NOT NULL DEFAULT 0"),
       ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
       ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
+      ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
       ("runs", "profile_id", "TEXT NOT NULL DEFAULT ''"),     # the execution profile of the run's organisation (SHD-007)
       ("execution_profiles", "infra_retries", "INTEGER NOT NULL DEFAULT 3"),
       ("execution_profiles", "log_max_bytes", "INTEGER NOT NULL DEFAULT 1073741824"),
@@ -173,7 +174,26 @@ proc organizationState*(c: var RqClient; slug: string): string =
   if vals != nil and vals.len > 0: vals[0][0].getStr else: ""
 
 proc setOrganizationState*(c: var RqClient; slug, state: string) =
-  discard c.execute(%*[["UPDATE organizations SET state = ? WHERE slug = ?", state, slug]])
+  ## `disabled_at` starts the retention period of a switched-off organisation and is cleared when it is anything else again
+  discard c.execute(%*[["UPDATE organizations SET state = ?, disabled_at = ? WHERE slug = ?", state,
+    (if state == "disabled": getTime().toUnix() else: 0'i64), slug]])
+
+proc startRetention*(c: var RqClient; slug: string; at: int64) =
+  ## an organisation switched off before `disabled_at` existed: the retention runs from now
+  discard c.execute(%*[["UPDATE organizations SET disabled_at = ? WHERE slug = ? AND state = 'disabled' AND disabled_at = 0", at, slug]])
+
+type OrganizationFull* = object
+  slug*, name*, state*, egress*, ingress*: string   ## egress and ingress: the network mode asked for at creation, "" = the shard's default
+  disabledAt*: int64
+
+proc listOrganizationsFull*(c: var RqClient): seq[OrganizationFull] =
+  ## everything the reconciliation (SHD-008) needs to make an organisation's objects again
+  let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at FROM organizations ORDER BY slug"]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil:
+    for v in vals:
+      result.add OrganizationFull(slug: v[0].getStr, name: v[1].getStr, state: v[2].getStr, egress: v[3].getStr, ingress: v[4].getStr,
+                                  disabledAt: v[5].getBiggestInt)
 
 proc organizationRow*(c: var RqClient; slug: string): tuple[id, state: string] =
   ## ("", "") if the shard has no such organisation

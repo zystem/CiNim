@@ -106,6 +106,7 @@ proc main() =
   var gateThread: Thread[tuple[w: Watch, stop: ptr Atomic[bool]]]
   if not launchGateOff:
     createThread(gateThread, runLogGate, (watch, addr stopServers))
+  startReconciler(co)      # SHD-008: the organisations against their objects, and the retention of a switched-off one
   var controllerThread, executorThread: Thread[Args]
   var stepReportThread: Thread[StepReportArgs]
   var logIngestThread: Thread[tuple[co: Collector, certs: string, port: int]]
@@ -135,5 +136,6 @@ proc main() =
   joinThread(watchdogThread)
   if not launchGateOff: joinThread(gateThread)
   if routerUrl.len > 0: joinThread(routerThread)
+  joinReconciler()
 
 main()

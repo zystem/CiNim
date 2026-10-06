@@ -70,7 +70,8 @@ func meta(cfg: ProvisionConfig; slug, name, namespace: string; component = ""): 
   result = %*{"name": name, "labels": labels(cfg, slug, component)}
   if namespace.len > 0: result["namespace"] = %namespace
 
-func namespaceObject(cfg: ProvisionConfig; slug: string): JsonNode =
+func namespaceLabels*(cfg: ProvisionConfig; slug: string): JsonNode =
+  ## the labels of the namespace of an organisation, as SHD-007 makes them; the reconciliation (SHD-008) compares the ones that carry policy
   var l = labels(cfg, slug)
   if cfg.build:
     # D-42: `baseline` by label, because a build Pod needs root in its container (A.13), and the ValidatingAdmissionPolicy of the chart
@@ -81,7 +82,10 @@ func namespaceObject(cfg: ProvisionConfig; slug: string): JsonNode =
   else:
     l["pod-security.kubernetes.io/enforce"] = %"restricted"
   for mode in ["audit", "warn"]: l["pod-security.kubernetes.io/" & mode] = %"restricted"
-  %*{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": orgNamespace(cfg, slug), "labels": l}}
+  l
+
+func namespaceObject(cfg: ProvisionConfig; slug: string): JsonNode =
+  %*{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": orgNamespace(cfg, slug), "labels": namespaceLabels(cfg, slug)}}
 
 func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
   let ns = orgNamespace(cfg, slug)
@@ -199,9 +203,11 @@ func ingressObject(cfg: ProvisionConfig; slug: string): JsonNode =
   if cfg.tlsSecret.len > 0 and cfg.host.len > 0:
     result["spec"]["tls"] = %*[{"hosts": [cfg.host], "secretName": cfg.tlsSecret}]
 
-func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string): tuple[steps: seq[Step], skipped: seq[string]] =
+func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string;
+                        active = true): tuple[steps: seq[Step], skipped: seq[string]] =
   ## SHD-007 (2)..(5): the objects of the namespace of the organisation, in the order of the specification, and its Ingress in the `multi` mode.
-  ## Builds (D-42) need none of their own: a build Pod is made by the same controller, in the same namespace.
+  ## Builds (D-42) need none of their own: a build Pod is made by the same controller, in the same namespace. A switched-off organisation
+  ## (`active` false) is expected without its Deployment and its Ingress (SHD-008); everything else of it stays.
   let ns = orgNamespace(cfg, slug)
   func step(name, kind, namespace, objName: string; obj: JsonNode): Step =
     Step(name: name, kind: kind, namespace: namespace, objectName: objName, obj: obj)
@@ -220,7 +226,7 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bo
       %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, bootstrapSecretName, ns), "type": "Opaque",
          "stringData": {"token": bootstrapToken}})
     result.steps.add step("controller state volume", "PersistentVolumeClaim", ns, stateClaimName, stateClaim(cfg, slug))
-    result.steps.add step("controller", "Deployment", ns, controllerName, controllerDeployment(cfg, slug))
+    if active: result.steps.add step("controller", "Deployment", ns, controllerName, controllerDeployment(cfg, slug))
   else:
     result.skipped.add "job controller: CINIM_CONTROLLER_IMAGE is not set"
   result.steps.add step("resource quota", "ResourceQuota", ns, "cinim-default",
@@ -233,12 +239,12 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bo
       {"type": "Container", "default": {"memory": "1Gi"}, "defaultRequest": {"cpu": "100m", "memory": "128Mi"}, "max": {"memory": "32Gi"}}]}})
   for p in networkPolicies(cfg, slug):
     result.steps.add step("network policy " & p["metadata"]["name"].getStr, "NetworkPolicy", ns, p["metadata"]["name"].getStr, p)
-  if cfg.multi:
+  if cfg.multi and active:
     result.steps.add Step(name: "ingress", kind: "Ingress", namespace: cfg.shardNamespace, objectName: ingressName(slug), obj: ingressObject(cfg, slug))
 
-proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string): ProvisionResult =
+proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string; active = true): ProvisionResult =
   ## stops at the first failure and says which step it was; what was created stays (a retry creates the rest)
-  let (steps, skipped) = organizationSteps(cfg, slug, curve, bootstrapToken)
+  let (steps, skipped) = organizationSteps(cfg, slug, curve, bootstrapToken, active)
   result.skipped = skipped
   for s in steps:
     let r = k.create(s.kind, s.namespace, s.obj)

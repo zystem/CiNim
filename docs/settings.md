@@ -53,6 +53,8 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_BUILD_MEMORY_LIMIT` | `4Gi` | the memory limit of a build Pod |
 | `CINIM_BUILD_SECCOMP` | `RuntimeDefault` | the class of a build Pod: `RuntimeDefault` (Kaniko: root of a user namespace, six capabilities) or `Localhost` (rootless BuildKit and Buildah: user 1000, the seccomp profile `profiles/cinim-userns.json` that exists on every node) (the Helm value `build.seccompProfile`) |
 | `CINIM_BUILD*` (controller) | | the core passes `CINIM_BUILD=on`, `CINIM_BUILD_SECCOMP`, `CINIM_BUILD_CAPS` and `CINIM_BUILD_MEMORY_LIMIT` to the controller of every organisation; it makes a build Pod of a step of the build profile |
+| `CINIM_ORG_RECONCILE_INTERVAL` | 300 | seconds between two passes of the reconciliation (SHD-008; the Helm value `organizations.reconcileInterval`, at least 10); a pass also runs at start |
+| `CINIM_ORG_RETENTION` | 1209600 (14 days) | seconds a switched-off organisation is kept before it is deleted for good with its namespace (the Helm value `organizations.retention`); `0` deletes it at once, a negative value never |
 | `CINIM_CONTROLLER_BOOTSTRAP_TTL` | 86400 | seconds that the bootstrap token of an organisation's controller stays good (IAM-003) |
 | `CINIM_INGRESS_CLASS`, `CINIM_INGRESS_TLS_SECRET`, `CINIM_INGRESS_ANNOTATIONS` | empty | the Ingress of an organisation in the `multi` mode: the class, the TLS Secret (for the host of `CINIM_PUBLIC_URL`) and the annotations as a JSON object |
 

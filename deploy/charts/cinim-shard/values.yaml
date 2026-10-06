@@ -97,6 +97,14 @@ build:
   capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]    # of the RuntimeDefault class; the policy allows no others
   memoryLimit: 4Gi
 
+# The organisations (SHD-007, SHD-008). The core compares them with their Kubernetes objects at start and every `reconcileInterval` seconds and
+# makes again what is missing (it deletes nothing; what differs, or belongs to no organisation, is an alert in `GET /api/v1/organizations:reconcile`).
+# A switched-off organisation is kept `retention` seconds (14 days) and then deleted for good with its namespace; 0 deletes it at once, a
+# negative value never.
+organizations:
+  reconcileInterval: 300
+  retention: 1209600
+
 # The network of the step Pods of an organisation (SHD-009). By default they are closed both ways (default-deny, with DNS and the log collector,
 # and the openings of the build profile above). For a simple case or a small organisation: `egress: open` lets every step Pod reach any address
 # (the cluster's own and the LAN too), `ingress: open` lets any address reach them. An organisation can ask for its own at creation

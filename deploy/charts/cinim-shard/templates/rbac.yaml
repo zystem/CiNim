@@ -1,7 +1,7 @@
 # The only cluster-wide right of the core (SHD-007, T-45): namespaces and the objects of an organisation. It may create and delete
 # these objects and nothing else; the ValidatingAdmissionPolicy (admissionpolicy.yaml) keeps every such request inside
 # {{ include "cinim-shard.ns" . }}-*. Reading Secrets and the like is not granted, so the reconciliation (SHD-008) creates and
-# treats "already exists" as done.
+# treats "already exists" as done; it reads only namespaces and the state volume of a controller.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -15,6 +15,10 @@ rules:
   - apiGroups: [""]
     resources: [serviceaccounts, secrets, resourcequotas, limitranges, persistentvolumeclaims]
     verbs: [create, delete]
+  # the reconciliation (SHD-008) asks whether the state volume of a controller is still there: a volume's metadata is all it reads
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get]
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [create, delete]

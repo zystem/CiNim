@@ -2,7 +2,7 @@
 ## The core needs a dozen kinds and nothing else (no list, no watch), so this is a few requests over std/httpclient (the pattern of the
 ## in-cluster client in the user's k8s-image-availability-exporter) instead of the C client of the job controller, which would pull
 ## libcurl and a second TLS stack into the static core. The transport is a parameter so the tests run without a cluster.
-import std/[json, httpclient, net, os, strutils]
+import std/[json, httpclient, net, os, strutils, uri]
 
 const
   saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -58,6 +58,26 @@ proc create*(k: KubeApi; kind, namespace: string; obj: JsonNode): KubeResult =
   of 200, 201, 202: KubeResult(outcome: oCreated, code: r.code)
   of 409: KubeResult(outcome: oExists, code: r.code)
   else: KubeResult(outcome: oFailed, code: r.code, detail: message(r.body, r.code))
+
+proc getObject*(k: KubeApi; kind, namespace, name: string): tuple[found: bool, obj: JsonNode, error: string] =
+  ## reading what the core itself made, for the reconciliation (SHD-008); only the kinds that its ClusterRole lets it read are asked for
+  ## (namespaces, and the ones that `get` is granted on in the chart). error "" with found false is a clean 404
+  let r = k.transport("GET", objectPath(kind, namespace, name), "")
+  case r.code
+  of 200:
+    try: (true, parseJson(r.body), "")
+    except CatchableError: (false, nil, "the answer was not JSON")
+  of 404: (false, nil, "")
+  else: (false, nil, message(r.body, r.code))
+
+proc listNamespaces*(k: KubeApi; labelSelector: string): tuple[items: seq[JsonNode], error: string] =
+  ## the namespaces with a label, as the API returns them (the core may `list` namespaces)
+  let r = k.transport("GET", "/api/v1/namespaces?labelSelector=" & encodeUrl(labelSelector), "")
+  if r.code != 200: return (@[], message(r.body, r.code))
+  try:
+    for it in parseJson(r.body){"items"}: result.items.add it
+  except CatchableError:
+    result.error = "the answer was not JSON"
 
 proc remove*(k: KubeApi; kind, namespace, name: string): KubeResult =
   ## 404 is as good as a delete: the object is gone either way
