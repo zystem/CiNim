@@ -1,0 +1,17 @@
+# The registry of a single-node test cluster (k3s, kind) that is not reached from outside: no Ingress. Build Pods push to the ClusterIP
+# (`registry-docker-registry.registry.svc:5000`, plain HTTP); the node pulls from its own NodePort as `localhost:30500/...`, which containerd
+# accepts over plain HTTP without any change to the node's configuration (it treats `localhost` as insecure).
+#   helm repo add twuni https://twuni.github.io/docker-registry.helm
+#   helm install registry twuni/docker-registry -n registry --create-namespace -f deploy/registry/values-single-node.yaml
+# No authentication: for a test cluster only.
+service:
+  type: NodePort
+  nodePort: 30500
+ingress:
+  enabled: false
+persistence:
+  enabled: true
+  size: 10Gi            # the cluster's default StorageClass
+resources:
+  requests: {cpu: 20m, memory: 32Mi}
+  limits: {memory: 256Mi}

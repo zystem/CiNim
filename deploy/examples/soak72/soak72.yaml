@@ -1,0 +1,46 @@
+# The 72 h soak (NFR-013, A.12) as a Job: next to, or instead of, the soak host. One Pod runs tools/soak/run72.sh, which runs the release
+# harness continuously (RSS growth after a 1 h warm-up must stay within 2 %) and the ASan/LSan harness in hourly runs, side by side.
+# Everything is written to the volume `soak-out`: release.csv and release.out (its last line is SOAK OK or SOAK FAIL), san-<hour>.csv and .out, san-summary.txt.
+#   kubectl apply -f deploy/examples/soak72/soak72.yaml      (replace IMAGE: the image built from tools/soak/Dockerfile)
+#   kubectl -n cinim-soak logs job/soak72                    the launcher's own output; the result is in the volume (see README.md)
+# backoffLimit 0: a Pod that dies (node restart, OOM kill) ends the run and says so. A soak that silently starts again from zero is not a
+# 72 h soak, and the volume keeps what the run had written until then.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cinim-soak
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: soak-out, namespace: cinim-soak}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 2Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: soak72, namespace: cinim-soak}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 295200            # 82 h: the 72 h of the run and a margin for the last ASan hour and the evaluation
+  template:
+    metadata: {labels: {app: soak72}}
+    spec:
+      restartPolicy: Never
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: soak
+          image: IMAGE
+          imagePullPolicy: IfNotPresent
+          args: ["/out", "72"]
+          env:
+            - {name: SOAK_CERTS, value: /cinim/tests/certs}
+          resources:
+            requests: {cpu: "2", memory: 512Mi}
+            limits: {cpu: "4", memory: 2Gi}
+          volumeMounts: [{name: out, mountPath: /out}]
+      volumes:
+        - name: out
+          persistentVolumeClaim: {claimName: soak-out}

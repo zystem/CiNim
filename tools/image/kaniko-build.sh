@@ -1,12 +1,15 @@
 #!/bin/bash
 # Builds the images of the platform in the cluster with Kaniko, as a build Pod under the admission policy of D-42 (no Docker daemon needed).
 #   REGISTRY=<registry host:port as the Pods reach it, plain HTTP>  TAG=<tag>  [NS=cinim-build] [KUBECONFIG=...]  tools/image/kaniko-build.sh
+# Other images: DOCKERFILE=<path in the tree> TARGETS="<stage>:<image> ..." (a `-` stage means no --target), for example the soak harness:
+#   DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak REGISTRY=... TAG=... tools/image/kaniko-build.sh
 # It makes the namespace (Pod Security baseline, the build-pod policy of deploy/examples/build-pods), sends the working tree as the build
 # context, runs tools/image/Dockerfile.kaniko twice (--target=core, --target=controller; the second run reads the cache) and pushes
-# <REGISTRY>/cinim:<TAG> and <REGISTRY>/cinim-controller:<TAG>. The namespace stays (the cache is in the registry); delete it when done.
+# <REGISTRY>/<image>:<TAG> for every target (by default cinim and cinim-controller). The namespace stays (the cache is in the registry); delete it when done.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 REG="${REGISTRY:?registry host:port as the Pods reach it}"; TAG="${TAG:?tag}"; NS="${NS:-cinim-build}"
+DOCKERFILE="${DOCKERFILE:-tools/image/Dockerfile.kaniko}"; TARGETS="${TARGETS:-core:cinim controller:cinim-controller}"
 K="${KUBECTL:-kubectl}"
 EX=deploy/examples/build-pods
 # the namespace and the policy of the example, with the namespace renamed; the policy needs the controller's account name in that namespace
@@ -35,9 +38,10 @@ spec:
       args:
         - |
           set -e
-          for t in core controller; do
-            n=cinim; [ \$t = controller ] && n=cinim-controller
-            /kaniko/executor --dockerfile=/workspace/tools/image/Dockerfile.kaniko --context=dir:///workspace --target=\$t \\
+          for pair in $TARGETS; do
+            t=\${pair%%:*}; n=\${pair#*:}
+            tgt=""; [ "\$t" != "-" ] && tgt="--target=\$t"
+            /kaniko/executor --dockerfile=/workspace/$DOCKERFILE --context=dir:///workspace \$tgt \\
               --destination=$REG/\$n:$TAG --cache=true --cache-repo=$REG/cinim-cache --insecure --insecure-pull --skip-tls-verify \\
               --skip-tls-verify-pull --use-new-run=true
           done
@@ -46,7 +50,6 @@ spec:
       volumeMounts: [{name: workspace, mountPath: /workspace}]
   volumes: [{name: in, emptyDir: {}}, {name: workspace, emptyDir: {}}]
 EOT
-$K -n $NS wait --for=condition=Initialized pod/kaniko-images --timeout=180s >/dev/null 2>&1 || true
 T=$(mktemp); trap 'rm -f $T' EXIT
 # the working tree as it is, without .git, build output and the Russian mirror
 tar czf $T --exclude=.git --exclude=./build --exclude=./nimbledeps --exclude=./docs-tr --exclude=./nimcache --exclude=nimble.paths .

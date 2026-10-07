@@ -83,6 +83,40 @@ VMPodScrape). A ServiceMonitor is used wherever there is a Service with the port
 Pods; rqlite's chart has two Services over the same Pods, so its Pods are scraped directly. The VictoriaLogs and vlagent subcharts have their
 own switches (`victorialogs-0.server.serviceMonitor.enabled`, `vlagent.serviceMonitor.enabled`, ...), which create Prometheus ServiceMonitors only.
 
+## A second test cluster, in place of the main one
+
+A single-node k3s cluster (or any other) can stand in for the main test cluster when that one is not available. What it needs, and what was measured
+on one (k3s 1.36, containerd 2.3, kernel 6.17, one node of 8 CPUs and 32 GiB):
+
+1. **Access.** `deploy/examples/test-cluster/claude-access.yaml` makes a ServiceAccount and a ClusterRole for building and testing CiNim (it is as good as an
+   administrator of the cluster: a test cluster only). Its token, in a kubeconfig that holds no CA when the API is published through a tunnel with a
+   public certificate, goes into the environment as a single line.
+2. **A registry.** `deploy/registry/values-single-node.yaml`: a NodePort, no Ingress. Build Pods push to `registry-docker-registry.registry.svc:5000`; the
+   node pulls `localhost:30500/<image>` over plain HTTP, which containerd allows for `localhost` without any change to the node.
+3. **The images**, built in the cluster: `REGISTRY=registry-docker-registry.registry.svc:5000 TAG=<tag> tools/image/kaniko-build.sh` (about 6 minutes cold).
+4. **The shard**: the chart with `image.repository=localhost:30500/cinim`, `controller.image=localhost:30500/cinim-controller:<tag>`, `build.enabled=true`,
+   a `build.egress` rule for the namespace `registry` port 5000 and `rqlite.replicaCount=1`; the default StorageClass (`local-path`) is enough.
+
+Checked end to end there: an organisation, an ordinary step, a step of the build profile (Kaniko built an image and pushed it), the log API. User namespaces
+(`hostUsers: false`) work, and `seccompDefault` is off. **What differs from the main cluster:** the NetworkPolicy controller of k3s (kube-router) blocks a step's way to
+the internet (`default-deny` works) but **not its way to other Pods of the cluster**: a step of a closed organisation reached the core, and rqlite, by their Pod
+addresses and through the Service. A test of the isolation between an organisation and the shard therefore does not hold there (it holds on Cilium, as measured on
+the main cluster); run it on a cluster with a network plugin that enforces it. The rootless classes (`build.seccompProfile=Localhost`) need the file `profiles/cinim-userns.json` on the node,
+which cannot be put there through the API.
+
+### The 72 h soak in a cluster
+
+`deploy/examples/soak72/soak72.yaml` runs the soak (NFR-013, `tools/soak/run72.sh`: the release harness continuously and the ASan/LSan harness in hourly runs) as a Job with
+a volume for the results, from the image of `tools/soak/Dockerfile` (`DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak tools/image/kaniko-build.sh`). It can run
+next to the soak host. `backoffLimit: 0`: a Pod that dies (a node restart, an OOM kill) ends the run, because a soak that starts again from zero is not a 72 h soak, and the
+volume keeps what was written. Read the result with `tools/soak/summarize.sh`:
+
+```bash
+kubectl -n cinim-soak exec job/soak72 -- /cinim/tools/soak/summarize.sh /out        # while it runs, or after: kubectl cp from a Pod that mounts the claim
+```
+
+The CPU and memory that other work on the same node takes do not change the RSS growth that is measured, but a restart of the node does end the run.
+
 ## The registry of the MVP stand
 
 Until the images are released to ghcr by the CI, the stand uses the plain Docker registry (the image `registry`) from the chart
