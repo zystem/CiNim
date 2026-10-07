@@ -76,14 +76,15 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if wv != nil and wv.len > 0: result["wait_reason"] = %wv[0][0].getStr
   # the steps with their attempt and the reason the last attempt ended the way it did (lost_never_started was retried,
   # outcome_unknown was not, logs_undelivered = result known but the log is incomplete, ...): visible, not buried in a log
-  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination, pod_reason, pod_message FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
+  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination, pod_reason, pod_message, pod_diag FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
   var steps = newJArray()
   let sv = st["results"][0]{"values"}
   if sv != nil:
     for r in sv:
       steps.add %*{"seq": r[0].getInt, "attempt": r[1].getInt, "state": r[2].getStr,
                    "exit_code": (if r[3].kind == JNull: newJNull() else: %r[3].getInt), "termination": r[4].getStr,
-                   "pod_reason": r[5].getStr, "pod_message": r[6].getStr}
+                   "pod_reason": r[5].getStr, "pod_message": r[6].getStr,
+                   "pod_diag": (if r[7].getStr.len > 0: (try: parseJson(r[7].getStr) except CatchableError: newJNull()) else: newJNull())}
   result["steps"] = steps
 
 # ------------------------------------------------------------------ retry settings (D-27)
@@ -175,6 +176,10 @@ proc renderCoreMetrics*(co: Core): string =
 
 # ------------------------------------------------------------------ ControllerAttach (job-controller <-> core)
 
+const
+  terminatedGrace = 30         ## seconds the end of a step whose shim was stopped from outside waits for the job controller's reading of the Pod
+  quotaPause = 15          ## seconds a step that met a used-up quota waits before it is assigned again
+
 proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let attempt = int(t.step.attempt)
   let now = getTime().toUnix()
@@ -183,7 +188,15 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let cur = c.query(%*[["SELECT attempt, state FROM steps WHERE run_id = ? AND ordinal = ?", t.step.run_id, int(t.step.seq)]])
   let cv = cur["results"][0]{"values"}
   if cv == nil or cv.len == 0 or cv[0][0].getInt != attempt: return
-  if cv[0][1].getStr in [protoName(ssSucceeded), protoName(ssFailed), protoName(ssLost)]: return   # already final
+  if cv[0][1].getStr in [protoName(ssSucceeded), protoName(ssFailed), protoName(ssLost)]:
+    # Already final, usually because the shim reported the result before the Pod's end was seen: the result stands, but what Kubernetes
+    # said about the Pod arrives only now (the events go in an hour) and is kept for the investigation, once.
+    if t.pod_diag.len > 0:
+      discard c.execute(%*[["UPDATE steps SET pod_reason = coalesce(nullif(?, ''), pod_reason), pod_message = coalesce(nullif(?, ''), pod_message), " &
+        "pod_diag = ? WHERE run_id = ? AND ordinal = ? AND attempt = ? AND pod_diag = ''",
+        t.pod_reason, t.pod_message, t.pod_diag, t.step.run_id, int(t.step.seq), attempt]])
+    return
+  if t.termination_reason == "diag_only": return      # only the diagnosis of a Pod that core had already given up on; nothing to decide
   # What the Pod's log said about the shim, applied by the same function as the ZeroMQ path - the pictures reconcile by event number
   if t.shim_state_json.len > 0:
     let rec = recordShimState(c, t.step.run_id, int(t.step.seq), attempt, t.shim_state_json, "pod_log")
@@ -192,9 +205,14 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   if t.state == STEP_STATE_PENDING:
     # starting -> pending (stepGuard: no Pod exists yet): the controller saw the gate closed before creating the Pod
     # (RUN-015 a), so the step goes back to the queue and waits with the reason, ready to be claimed again.
-    discard c.execute(%*[["UPDATE steps SET state = ?, controller_id = NULL, wait_reason = ?, version = version + 1 " &
+    # The reason it goes back is the controller's: the gate (the default) or a used-up quota, with what the API server said. A quota is not
+    # asked again at once: the step waits a few seconds before it can be assigned.
+    let waitReason = if t.termination_reason.len > 0: t.termination_reason else: reasonUnavailable
+    let pause = if waitReason == "quota_exceeded": quotaPause else: 0
+    discard c.execute(%*[["UPDATE steps SET state = ?, controller_id = NULL, wait_reason = ?, not_before = max(not_before, ?), " &
+      "pod_reason = coalesce(nullif(?, ''), pod_reason), pod_message = coalesce(nullif(?, ''), pod_message), version = version + 1 " &
       "WHERE run_id = ? AND ordinal = ? AND attempt = ? AND state = ?",
-      protoName(ssPending), reasonUnavailable, t.step.run_id, int(t.step.seq), attempt, protoName(ssStarting)]])
+      protoName(ssPending), waitReason, now + pause, t.pod_reason, t.pod_message, t.step.run_id, int(t.step.seq), attempt, protoName(ssStarting)]])
     return
   # "never started" is the controller's reading of the Pod; the shim having talked to core is proof of the opposite (it ran,
   # so its command may have): any recorded shim state, or an opened log stream, wins - the single cross-check, no further
@@ -206,14 +224,21 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
       t.step.run_id, int(t.step.seq), attempt, attempt, t.step.run_id, int(t.step.seq)]])
     let row = ev["results"][0]{"values"}[0]
     if row[0].getInt > 0 or row[1].getInt > 0: reason = "outcome_unknown"
+  # What Kubernetes said. A report without it (the shim's or the watchdog's) keeps what the inventory of the waiting Pod had already stored
+  # (ImagePullBackOff, Unschedulable...): so the stored value is read once and replaced only by a non-empty one.
+  let prev = c.query(%*[["SELECT pod_reason, pod_message, pod_diag FROM steps WHERE run_id = ? AND ordinal = ? AND attempt = ?", t.step.run_id, int(t.step.seq), attempt]])
+  let pv = prev["results"][0]{"values"}
+  let podReason = if t.pod_reason.len > 0 or pv == nil or pv.len == 0: t.pod_reason else: pv[0][0].getStr
+  let podMessage = if t.pod_message.len > 0 or pv == nil or pv.len == 0: t.pod_message else: pv[0][1].getStr
+  let podDiag = if t.pod_diag.len > 0 or pv == nil or pv.len == 0: t.pod_diag else: pv[0][2].getStr
   case decide(reason, attempt, policy)
   of dRequeue:
     # next attempt: same step row, attempt + 1, after a pause; the lost attempt's log stream is marked, not deleted
     discard c.execute(%*[
       ["UPDATE steps SET state = ?, attempt = attempt + 1, controller_id = NULL, wait_reason = NULL, exit_code = NULL, " &
        "shim_n = 0, shim_phase = '', shim_json = '', shim_seen_at = 0, shim_source = '', " &
-       "termination = ?, pod_reason = ?, pod_message = ?, not_before = ?, version = version + 1 WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-       protoName(ssPending), reason, t.pod_reason, t.pod_message, now + backoffSeconds(attempt, policy), t.step.run_id, int(t.step.seq), attempt],
+       "termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, not_before = ?, version = version + 1 WHERE run_id = ? AND ordinal = ? AND attempt = ?",
+       protoName(ssPending), reason, podReason, podMessage, podDiag, now + backoffSeconds(attempt, policy), t.step.run_id, int(t.step.seq), attempt],
       ["UPDATE log_streams SET state = 'abandoned', closed_at = ? WHERE attempt = ? AND state = 'open' AND " &
        "step_id = (SELECT id FROM steps WHERE run_id = ? AND ordinal = ?)", $now, attempt, t.step.run_id, int(t.step.seq)]],
       transaction = true)
@@ -222,9 +247,9 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     # out of retries, or the command started and its fate is unknown (not restarted, D-28): the platform, not the
     # step, failed - the reason stays on the step
     discard c.execute(%*[
-      ["UPDATE steps SET state = ?, termination = ?, pod_reason = ?, pod_message = ?, finished_at = ?, version = version + 1 " &
+      ["UPDATE steps SET state = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ?, version = version + 1 " &
        "WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-       protoName(ssLost), reason, t.pod_reason, t.pod_message, $now, t.step.run_id, int(t.step.seq), attempt],
+       protoName(ssLost), reason, podReason, podMessage, podDiag, $now, t.step.run_id, int(t.step.seq), attempt],
       ["UPDATE runs SET state = ?, updated_at = ?, version = version + 1 WHERE id = ? AND state = ?",
        protoName(rsInfrastructureError), $now, t.step.run_id, protoName(rsRunning)]], transaction = true)
     echo "core: step ", t.step.run_id, "/", t.step.seq, " attempt ", attempt, " lost (", reason, "), not retried: run -> infrastructure_error"
@@ -245,8 +270,8 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     let res = $t.exit_code & "\n"
     try:
       discard c.execute(%*[
-        ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-         protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, t.pod_reason, t.pod_message, $now,
+        ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
+         protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
          t.step.run_id, int(t.step.seq), attempt],
         # payload must equal exactly what the executor's host call sent (bootstrap.lua Job:sh:
         # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
@@ -277,11 +302,16 @@ proc finalizeFromShim*(c: var RqClient; profileId, runId: string; seq, attempt: 
   ## command's own result.
   let exitCode =
     case s.reason
-    of "terminated": -1
     of "ok", "failed", "logs_undelivered": s.cmdExit.get(s.exitCode.get(1))     # the command's own result
     else: max(1, s.exitCode.get(1))             # timeout, env_rejected, secret_in_output, shim_error: the shim's verdict, never 0
-  let reason = if s.reason == "terminated": "outcome_unknown" else: s.reason
-  let state = if s.reason == "terminated": STEP_STATE_LOST elif exitCode == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED
+  if s.reason == "terminated":
+    # The shim was stopped from outside (SIGTERM). Who stopped it decides whose fault it is, and the shim cannot know: a node drain or a
+    # preemption is the cluster's doing (outcome unknown, not restarted), an eviction for the Pod's own ephemeral-storage limit is the
+    # step's. The Pod says which, and the job controller reports it within a second or two; so the step waits for that report, and the
+    # watchdog ends it as `outcome_unknown` if none comes in `terminatedGrace` seconds (the controller is down).
+    return
+  let reason = s.reason
+  let state = if exitCode == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED
   applyTransition(c, loadPolicy(c, profileOfRun(c, runId, profileId)), PodTransition(
     step: StepRef(run_id: runId, seq: uint32(seq), attempt: uint32(attempt)), state: state, exit_code: int32(exitCode),
     termination_reason: reason, shim_state_json: stateJson))
@@ -293,7 +323,7 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
   ## brings back, because the step is no longer wanted.
   let now = getTime().toUnix()
   # the profile of a step is that of its run's organisation (SHD-007): its liveness_timeout and retry policy
-  let r = c.query(%*[["SELECT s.run_id, s.ordinal, s.attempt, s.state, s.claimed_at, s.shim_n, s.shim_seen_at, COALESCE(r.profile_id, '') " &
+  let r = c.query(%*[["SELECT s.run_id, s.ordinal, s.attempt, s.state, s.claimed_at, s.shim_n, s.shim_seen_at, COALESCE(r.profile_id, ''), s.shim_phase, s.shim_json " &
     "FROM steps s LEFT JOIN runs r ON r.id = s.run_id WHERE s.state IN (?, ?)", protoName(ssStarting), protoName(ssRunning)]])
   let rows = r["results"][0]{"values"}
   if rows == nil: return
@@ -304,7 +334,11 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
     let st = if row[3].getStr == protoName(ssRunning): ssRunning else: ssStarting
     let verdict = liveness.judge(StepLiveness(state: st, claimedAt: row[4].getBiggestInt, shimN: row[5].getInt,
                                               shimSeenAt: row[6].getBiggestInt), now, coreStartedAt, settings.livenessTimeout)
-    if verdict == lOk: continue
+    var stoppedFromOutside = false
+    if verdict == lOk and row[8].getStr == "done" and now - row[6].getBiggestInt >= terminatedGrace:
+      let sh = try: fromJson(parseJson(row[9].getStr)) except CatchableError: none(ShimState)
+      stoppedFromOutside = sh.isSome and sh.get.reason == "terminated"
+    if verdict == lOk and not stoppedFromOutside: continue
     let reason = if verdict == lStartTimeout: "start_timeout" else: "outcome_unknown"
     echo "core: step ", row[0].getStr, "/", row[1].getInt, " attempt ", row[2].getInt, ": ", reason,
          " (no sign of life for over ", settings.livenessTimeout, " s)"
@@ -382,6 +416,11 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   let gate = currentGate()
   # The Pod log's picture of each shim (read by the controller every few seconds) - recorded, never trusted over a later event
   for pod in req.inventory:
+    if pod.pod_reason.len > 0 or pod.pod_message.len > 0:
+      # a Pod that has not started and says why (ImagePullBackOff, Unschedulable...): kept on the step, so that a start_timeout has its cause
+      discard c.execute(%*[["UPDATE steps SET pod_reason = ?, pod_message = ? WHERE run_id = ? AND ordinal = ? AND attempt = ? AND state IN (?, ?) " &
+        "AND (pod_reason != ? OR pod_message != ?)", pod.pod_reason, pod.pod_message, pod.step.run_id, int(pod.step.seq), int(pod.step.attempt),
+        protoName(ssStarting), protoName(ssRunning), pod.pod_reason, pod.pod_message]])
     if pod.shim_state_json.len > 0:
       discard recordShimState(c, pod.step.run_id, int(pod.step.seq), int(pod.step.attempt), pod.shim_state_json, "pod_log")
   let settings = loadSettings(c, if profileId.len > 0: profileId else: defaultProfile)
@@ -401,7 +440,10 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     waitReasonSet.store(true)
   # 3. Claim up to free_pod_slots pending steps whose pause (not_before, after a lost attempt) is over.
   for _ in 0 ..< (if gate.isOpen and profileId.len > 0: int(req.free_pod_slots) else: 0):   # no profile for the namespace: no steps
-    let r = c.execute(%*[["UPDATE steps SET state = ?, controller_id = ?, claimed_at = ?, version = version + 1 " &
+    let r = c.execute(%*[["UPDATE steps SET state = ?, controller_id = ?, claimed_at = ?, version = version + 1, " &
+      "pod_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_reason END, " &
+      "pod_message = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_message END, " &
+      "wait_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN NULL ELSE wait_reason END " &
       "WHERE id = (SELECT id FROM steps WHERE state = ? AND profile_id = ? AND not_before <= ? " &
       "ORDER BY priority DESC, queued_at LIMIT 1) AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts, profile",
       protoName(ssStarting), req.session_id, getTime().toUnix(), protoName(ssPending), profileId, getTime().toUnix(), protoName(ssPending)]])

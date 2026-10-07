@@ -2,7 +2,7 @@
 import std/[unittest, json, tables, options, strutils, os, sequtils]
 import common/spoolwire
 import common/shimstate
-import jobcontroller/[backend, ctrlstate, logic]
+import jobcontroller/[backend, ctrlstate, logic, podverdict]
 
 type Fake = ref object
   pods: Table[string, JsonNode]          ## name -> Pod JSON as the API would return it
@@ -14,16 +14,20 @@ type Fake = ref object
   damageFirstReads: int                 ## the first N reads come back damaged (the lossy exec)
   creates: seq[PodRequest]
   listOk: bool
+  refuse: CreateOutcome                 ## when its kind is not ckOk, creating a Pod is refused like this
+  events: Table[string, seq[JsonNode]]  ## name -> the Kubernetes events about the Pod
 
 proc newFake(): Fake = Fake(listOk: true)
 
 proc backendOf(f: Fake): Backend =
   Backend(
-    createPod: proc (r: PodRequest): bool =
+    createPod: proc (r: PodRequest): CreateOutcome =
+      if f.refuse.kind != ckOk: return f.refuse
       f.creates.add r
       f.pods[r.name] = %*{"status": {"phase": "Pending"}}
       f.created[r.name] = 1000
-      true,
+      CreateOutcome(kind: ckOk),
+    readEvents: proc (name: string): seq[JsonNode] = f.events.getOrDefault(name),
     readPod: proc (name: string): JsonNode =
       if name in f.pods: f.pods[name] else: %*{"kind": "Status", "code": 404, "reason": "NotFound"},
     readLogTail: proc (name: string): string = f.logs.getOrDefault(name, ""),
@@ -99,10 +103,10 @@ suite "creating Pods":
     var seenRowBeforeCreate = false
     let f = newFake()
     var be = backendOf(f)
-    be.createPod = proc (r: PodRequest): bool =
+    be.createPod = proc (r: PodRequest): CreateOutcome =
       seenRowBeforeCreate = st.has(r.name)
-      true
-    check startPod(be, st, cfg, req(), 100)
+      CreateOutcome(kind: ckOk)
+    check startPod(be, st, cfg, req(), 100).ok
     check seenRowBeforeCreate
 
 suite "the poll round":
@@ -110,7 +114,7 @@ suite "the poll round":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
-    check startPod(be, st, cfg, req(), 100)
+    check startPod(be, st, cfg, req(), 100).ok
     let r1 = pollRound(be, st, cfg, 100.0)
     check r1.transitions.len == 0 and r1.inventory.len == 1 and not r1.inventory[0].started
     f.pods["ci-s1-run-0-1"] = running()
@@ -189,6 +193,61 @@ suite "the poll round":
     let r = pollRound(be, st, cfg, 101.0)
     check r.transitions[0].kind == tkFailed and r.transitions[0].reason == "ephemeral_storage_exceeded"
     check r.transitions[0].podReason == "Evicted" and "exceeds the total limit" in r.transitions[0].podMessage
+
+suite "what the cluster says about a Pod, and a Pod that cannot be made":
+  test "a used-up quota leaves no row behind and says what the API server said":
+    let st = openState(":memory:")
+    let f = newFake()
+    f.refuse = CreateOutcome(kind: ckQuota, reason: "Forbidden", message: "pods \"x\" is forbidden: exceeded quota: cinim-default, requested: pods=1, used: pods=100, limited: pods=100")
+    let be = backendOf(f)
+    let o = startPod(be, st, cfg, req(), 100)
+    check o.kind == ckQuota and not o.ok and "exceeded quota" in o.message
+    check not st.has("ci-s1-run-0-1")                   # nothing to find 404 later: core is told, the step waits
+  test "a refusal for good is also not left as a row, and a transport failure is (the next poll finds out)":
+    let st = openState(":memory:")
+    let f = newFake()
+    f.refuse = CreateOutcome(kind: ckRejected, reason: "Forbidden", message: "violates PodSecurity")
+    check startPod(backendOf(f), st, cfg, req(), 100).kind == ckRejected and not st.has("ci-s1-run-0-1")
+    f.refuse = CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "")
+    check startPod(backendOf(f), st, cfg, req(), 100).ok and st.has("ci-s1-run-0-1")
+  test "a Pod that waits says why: the image cannot be pulled, or no node fits":
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, cfg, req(), 100)
+    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Pending", "containerStatuses": [{"state": {"waiting":
+      {"reason": "ImagePullBackOff", "message": "Back-off pulling image \"x:1\""}}}]}}
+    var r = pollRound(be, st, cfg, 101.0)
+    check r.inventory[0].podReason == "ImagePullBackOff" and "Back-off" in r.inventory[0].podMessage
+    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+      "reason": "Unschedulable", "message": "0/6 nodes are available: 6 Insufficient cpu."}]}}
+    r = pollRound(be, st, cfg, 102.0)
+    check r.inventory[0].podReason == "Unschedulable" and "Insufficient cpu" in r.inventory[0].podMessage
+    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Pending", "containerStatuses": [{"state": {"waiting": {"reason": "ContainerCreating"}}}]}}
+    check pollRound(be, st, cfg, 103.0).inventory[0].podReason == ""      # the normal wait says nothing
+  test "the end of a Pod carries the diagnosis: containers, conditions, node, events":
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, cfg, req(), 100)
+    f.pods["ci-s1-run-0-1"] = %*{"spec": {"nodeName": "node-3", "containers": [{"name": "step", "resources": {"limits": {"memory": "128Mi"}}}]},
+      "status": {"phase": "Failed", "reason": "Evicted", "message": "The node was low on resource: ephemeral-storage.", "qosClass": "Burstable",
+                 "conditions": [{"type": "DisruptionTarget", "status": "True", "reason": "TerminationByKubelet", "message": "The node was low on resource"}],
+                 "containerStatuses": [{"name": "step", "restartCount": 0, "imageID": "docker.io/library/busybox@sha256:abc",
+                   "state": {"terminated": {"exitCode": 137, "reason": "Error", "signal": 9, "startedAt": "2026-10-02T10:00:00Z", "finishedAt": "2026-10-02T10:05:00Z"}}}]}}
+    f.events["ci-s1-run-0-1"] = @[%*{"type": "Warning", "reason": "Evicted", "message": "The node was low on resource: ephemeral-storage.", "count": 1}]
+    let r = pollRound(be, st, cfg, 101.0)
+    let d = parseJson(r.transitions[0].podDiag)
+    check d["node"].getStr == "node-3" and d["qos"].getStr == "Burstable"
+    check d["containers"][0]["state"]["terminated"]["signal"].getInt == 9 and d["containers"][0]["image_id"].getStr.endsWith("sha256:abc")
+    check d["conditions"][0]["reason"].getStr == "TerminationByKubelet"
+    check d["events"][0]["reason"].getStr == "Evicted"
+    check d["resources"][0]["resources"]["limits"]["memory"].getStr == "128Mi"
+  test "the diagnosis stays within its size: events are given up first":
+    var evs: seq[JsonNode]
+    for i in 0 ..< 40: evs.add %*{"type": "Warning", "reason": "BackOff", "message": "x".repeat(400), "count": i}
+    let d = podDiag(%*{"status": {"phase": "Failed"}}, evs)
+    check d.len <= maxDiag and parseJson(d)["events"].len <= 20
 
 suite "adoption after a restart":
   test "a new controller process continues with the Pods the old one tracked":

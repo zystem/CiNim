@@ -1,6 +1,6 @@
 ## D-27: what a Pod's state means for its step, and when a lost step is run again (pure, no cluster).
 import std/[unittest, json, options, strutils]
-import jobcontroller/podverdict
+import jobcontroller/[podverdict, backend]
 import core/retrypolicy
 
 proc pod(phase: string; reason = ""; state: JsonNode = nil): JsonNode =
@@ -80,6 +80,16 @@ suite "Pod -> step verdict":
     check classifyPod(pod("Failed", reason = "Evicted", state = terminated(1, startedAt = "0001-01-01T00:00:00Z"))).verdict == vLostNeverStarted
   test "a finished Pod with no container status at all is unknown, so it may have run":
     check classifyPod(pod("Failed")).verdict == vOutcomeUnknown
+
+suite "a Pod the API server refused":
+  test "a used-up quota and a request to slow down wait; every other refusal is final":
+    check classifyCreateFailure(403, "Forbidden", "pods \"x\" is forbidden: exceeded quota: q, requested: pods=1").kind == ckQuota
+    check classifyCreateFailure(429, "TooManyRequests", "slow down").kind == ckQuota
+    check classifyCreateFailure(403, "Forbidden", "violates PodSecurity \"restricted:latest\"").kind == ckRejected
+    check classifyCreateFailure(403, "Forbidden", "must specify limits.cpu,limits.memory").kind == ckRejected
+    check classifyCreateFailure(422, "Invalid", "spec.containers[0].image: Required value").kind == ckRejected
+  test "the step whose Pod was refused ends as an infrastructure error at once, with no attempts repeated":
+    check decide("pod_rejected", 1, defaultPolicy()) == dFailInfra
 
 suite "when a lost step is run again":
   let p = defaultPolicy()

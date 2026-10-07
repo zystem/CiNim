@@ -33,7 +33,7 @@ spec:
       volumeMounts: [{name: in, mountPath: /in}, {name: workspace, mountPath: /workspace}]
   containers:
     - name: kaniko
-      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      image: ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572
       command: ["/busybox/sh", "-c"]
       args:
         - |

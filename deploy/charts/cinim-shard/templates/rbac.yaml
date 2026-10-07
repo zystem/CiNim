@@ -83,6 +83,10 @@ rules:
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
+  # read the events about a finished step Pod (why it was not scheduled, evicted, killed): the cluster forgets them after about an hour
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list]
 {{- if eq .Values.mode "multi" }}
 ---
 # multi mode: the core creates and deletes the Ingress <basePath>/<slug>/ of an organisation in the namespace of the shard.

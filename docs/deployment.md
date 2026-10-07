@@ -153,7 +153,8 @@ build with `profile = "build"`; the controller of the organisation then makes th
 namespace of its own (`hostUsers: false`, root is not root on the node), and one of two classes, chosen for the shard with `build.seccompProfile`:
 
 - `RuntimeDefault` (Kaniko): root in the container, the default seccomp profile, every capability dropped but those in `build.capabilities`. The
-  image of the job is `gcr.io/kaniko-project/executor:<tag>-debug`, which has the shell that the shim needs. It needs nothing on the nodes.
+  image of the job is the `-debug` image of the maintained Kaniko fork, `ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572`
+  (D-43; Google archived the original in June 2025), which has the shell that the shim needs. It needs nothing on the nodes. Pin the image by digest.
 - `Localhost` (rootless BuildKit and Buildah): user 1000 under the seccomp profile `profiles/cinim-userns.json`, which must exist on every node
   (below). It needs the images' own `subuid`/`subgid` files adjusted for a user namespace of a Pod (`deploy/examples/build-pods`).
 
@@ -176,7 +177,7 @@ build:
 ```
 
 ```lua
-ci.job({image = "gcr.io/kaniko-project/executor:v1.23.2-debug", profile = "build"}, function(j)
+ci.job({image = "ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572", profile = "build"}, function(j)
   j:sh("/kaniko/executor --dockerfile=Dockerfile --context=dir:///cicd/workspace --destination=registry.example.com/team/app:1.0")
 end)
 ```

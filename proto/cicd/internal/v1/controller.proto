@@ -36,6 +36,7 @@ message PodTransition {
   string pod_reason = 9;             // what Kubernetes itself says about the end: the Pod's status.reason ("Evicted", ...) or, when that is empty,
                                      // the container's terminated reason ("OOMKilled", "Error"); "" = nothing. Stored for investigations.
   string pod_message = 10;           // the Pod's status.message (the text of an eviction, for example), cut to 1000 bytes
+  string pod_diag = 11;              // JSON for investigations: the containers' states, the Pod's conditions, its node, the events about it (podverdict.podDiag)
 }
 
 // What the controller found in the cluster for one step Pod (D-29): read from the Kubernetes API by label, not
@@ -47,6 +48,8 @@ message PodInfo {
   bool command_started = 4;
   string node = 5;
   string shim_state_json = 6;        // the newest CICD-SHIM state in the Pod's log tail (read every few seconds)
+  string pod_reason = 7;             // why a Pod that has not started waits: the container's waiting reason (ImagePullBackOff, ...) or the Pod's
+  string pod_message = 8;            // PodScheduled=False reason (Unschedulable, ...) with its message; "" once it runs
 }
 
 // A finished step Pod that the controller keeps because core could not read from it what it needs: the result is unknown (the node was lost, the shim

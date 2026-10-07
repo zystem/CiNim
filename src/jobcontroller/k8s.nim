@@ -181,20 +181,32 @@ proc parseTime(s: string): int64 =
 proc backendOf*(k: K8s): Backend =
   let kk = k            # the closures capture a copy of the (pointer-holding) handle
   Backend(
-    createPod: proc (r: PodRequest): bool =
+    createPod: proc (r: PodRequest): CreateOutcome =
       let raw = Generic_createNamespacedResource(kk.pods, kk.ns.cstring, ($podBody(r)).cstring, nil)
       if raw == nil:
         # NULL = a transport-level failure (no HTTP response parsed at all), not a Status JSON; otherwise silent
         stderr.writeLine "jobcontroller: create pod " & r.name & ": no response from the Kubernetes API client " &
           "(connection/DNS/TLS failure - check the client's target cluster, e.g. kubeconfig current-context)"
-        return false
+        return CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "no response from the Kubernetes API client")
       let j = jstr(raw)
       # 409 AlreadyExists on a poll-response retry is fine and expected (RUN-002 idempotent create)
       if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "AlreadyExists":
         stderr.writeLine "jobcontroller: create pod " & r.name & " failed: " & $j
-        return false
+        return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
       echo "jobcontroller: created pod ", r.name
-      true,
+      CreateOutcome(kind: ckOk),
+    readEvents: proc (name: string): seq[JsonNode] =
+      ## the events whose subject is this Pod: the cluster forgets them after about an hour, so they are read when the Pod's story is over
+      let g = genericClient_create(kk.api, "".cstring, "v1".cstring, "events".cstring)
+      if g == nil: return
+      let q = list_createList()
+      let selector = "involvedObject.name=" & name       # the client keeps the pointer: it must outlive the call
+      list_addElement(q, keyValuePair_create("fieldSelector".cstring, cast[pointer](selector.cstring)))
+      let raw = Generic_listNamespaced(g, kk.ns.cstring, q)
+      list_freeList(q)
+      genericClient_free(g)
+      let j = jstr(raw)
+      if j.kind == JObject and j{"items"} != nil and j["items"].kind == JArray: result = j["items"].elems,
     readPod: proc (name: string): JsonNode =
       let j = jstr(Generic_readNamespacedResource(kk.pods, kk.ns.cstring, name.cstring))
       if j.kind == JNull: nil else: j,

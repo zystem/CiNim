@@ -13,14 +13,14 @@ type
 
   Transition* = object
     ## a Pod's story is over; becomes a PodTransition on the wire
-    runId*, podName*, reason*, shimJson*, podReason*, podMessage*: string
+    runId*, podName*, reason*, shimJson*, podReason*, podMessage*, podDiag*: string
     seq*, attempt*, exitCode*: int
     kind*: TKind
     fullyRead*: bool             ## the shim's verdict was read and the log reached the log pipeline: the Pod has nothing left to show
 
   PodSeen* = object
     ## a tracked Pod that is still going; becomes a PodInfo on the wire
-    runId*, podName*, phase*, node*, shimJson*: string
+    runId*, podName*, phase*, node*, shimJson*, podReason*, podMessage*: string    ## podReason/podMessage: why it has not started
     seq*, attempt*: int
     started*: bool
 
@@ -65,12 +65,14 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
              spoolBytes: spool, build: r.profile == "build")
 
-proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): bool =
+proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds
   ## out: 404 = never started), never a Pod without a row (that would be an orphan).
   let req = buildRequest(cfg, r)
   st.track(req.name, r.runId, r.seq, r.attempt, now)
-  be.createPod(req)
+  result = be.createPod(req)
+  if result.kind in [ckQuota, ckRejected]:
+    st.forget(req.name)         # no Pod exists and none will: the caller tells core what the API server said, and nothing is left to find 404
 
 proc shimStateOf*(tail: string): string =
   ## the newest shim state in a Pod-log tail, as the JSON core's recordShimState expects ("" = none found)
@@ -96,7 +98,8 @@ proc pollRound*(be: Backend; st: CtrlState; cfg: Config; now: float): tuple[tran
     if reading.verdict == vRunning:
       result.inventory.add PodSeen(runId: p.runId, seq: p.seq, attempt: p.attempt, podName: p.name, started: started,
         phase: (if pod != nil: pod{"status", "phase"}.getStr("Unknown") else: "Unknown"),
-        node: (if pod != nil: pod{"spec", "nodeName"}.getStr else: ""), shimJson: shimJson)
+        node: (if pod != nil: pod{"spec", "nodeName"}.getStr else: ""), shimJson: shimJson,
+        podReason: pendingWhy(pod).reason, podMessage: pendingWhy(pod).message)
     else:
       result.transitions.add Transition(runId: p.runId, seq: p.seq, attempt: p.attempt, podName: p.name, shimJson: shimJson,
         kind: (case reading.verdict
@@ -108,6 +111,8 @@ proc pollRound*(be: Backend; st: CtrlState; cfg: Config; now: float): tuple[tran
         # the kernel killed the container for exceeding its memory limit (the whole cgroup goes, shim included, so no shim verdict
         # exists): still the step's own failure, and the reason says so
         podReason: reading.podReason, podMessage: reading.podMessage,
+        # everything the cluster says about the Pod while it still says it: the events are gone in about an hour
+        podDiag: podDiag(pod, (if be.readEvents != nil: be.readEvents(p.name) else: @[])),
         reason: (if reading.verdict == vFailed and reading.detail == "OOMKilled": "oom_killed"
                  elif reading.verdict == vFailed and reading.detail == "ephemeral_storage_exceeded": "ephemeral_storage_exceeded"
                  else: reasonOf(reading.verdict)))

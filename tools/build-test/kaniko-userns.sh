@@ -49,7 +49,7 @@ spec:
   securityContext: $4
   containers:
     - name: k
-      image: gcr.io/kaniko-project/executor:v1.23.2
+      image: ghcr.io/osscontainertools/kaniko:v1.28.5@sha256:738807f0e31daf07743f89260a95956dcc6ee4f62553f4f6344c990cabab8675
       args: ["--dockerfile=/workspace/Dockerfile", "--context=dir:///workspace", "--destination=$REG/bt/$1:t", "--insecure", "--insecure-pull"]
       securityContext: $5
       resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}

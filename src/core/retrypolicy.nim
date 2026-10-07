@@ -60,7 +60,7 @@ func decide*(reason: string; attempt: int; p: RetryPolicy): Decision =
   case reason
   of "lost_never_started":
     if attempt <= p.infraRetries: dRequeue else: dFailInfra
-  of "outcome_unknown", "start_timeout":
+  of "outcome_unknown", "start_timeout", "pod_rejected":     # pod_rejected: the API server refused the Pod for good, asking again would get the same answer
     dFailInfra
   else:                     # ok, failed, logs_undelivered (the exit code is the result), ...
     dFinish

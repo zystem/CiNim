@@ -5,12 +5,12 @@
 ## `ctrlstate.nim` is the controller's sqlite memory. Pod status is polled, not watched. SEC-010 per-job projected tokens are
 ## deferred: the shim gets the shared CURVE "client" identity through a Secret. The shim binary reaches the Pod through a ConfigMap
 ## mount (A.6). The step namespace must be dedicated to this controller (docs/settings.md).
-import std/[os, strutils, times, sequtils, tables]
+import std/[os, json, strutils, times, sequtils, tables]
 import crunchy
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, spoolwire]
-import backend, ctrlstate, logic, k8s
+import backend, ctrlstate, logic, k8s, podverdict
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -107,11 +107,12 @@ func toProto(t: Transition): PodTransition =
             of tkFailed: STEP_STATE_FAILED
             of tkLost: STEP_STATE_LOST),
     exit_code: int32(t.exitCode), termination_reason: t.reason, shim_state_json: t.shimJson,
-    pod_reason: t.podReason, pod_message: t.podMessage)
+    pod_reason: t.podReason, pod_message: t.podMessage, pod_diag: t.podDiag)
 
 func toProto(p: PodSeen): PodInfo =
   PodInfo(step: StepRef(run_id: p.runId, seq: uint32(p.seq), attempt: uint32(p.attempt)), pod_name: p.podName, phase: p.phase,
-          command_started: p.started, node: p.node, shim_state_json: p.shimJson)
+          command_started: p.started, node: p.node, shim_state_json: p.shimJson,
+          pod_reason: p.podReason, pod_message: p.podMessage)
 
 proc credentialPath(): string = stateDir / "credential"
 
@@ -209,12 +210,34 @@ proc main() =
           stderr.writeLine "jobcontroller: launch gate closed (" & resp.gate.reason & "), step " & s.step.run_id & "/" &
             $s.step.seq & " returned to the queue"
         else:
-          discard startPod(be, st, cfg, StartRequest(runId: s.step.run_id, seq: int(s.step.seq), attempt: int(s.step.attempt),
+          let made = startPod(be, st, cfg, StartRequest(runId: s.step.run_id, seq: int(s.step.seq), attempt: int(s.step.attempt),
             image: s.image, command: s.command, logMaxBytes: s.log_max_bytes, optsJson: s.opts_json,
             logSpoolBytes: s.log_spool_bytes, logHoldTimeout: int(s.log_hold_timeout_seconds), profile: s.profile), int64(epochTime()))
+          case made.kind
+          of ckQuota:
+            # the namespace's quota is used up (or the API server asks to slow down): not the step's fault and it passes - back to the queue,
+            # with what the API server said, and core lets it wait a little before it is assigned again
+            handBack.add PodTransition(step: s.step, state: STEP_STATE_PENDING, termination_reason: "quota_exceeded",
+                                       pod_reason: made.reason, pod_message: made.message[0 ..< min(made.message.len, 1000)])
+            stderr.writeLine "jobcontroller: no Pod for " & s.step.run_id & "/" & $s.step.seq & ": " & made.message & "; the step waits in the queue"
+          of ckRejected:
+            # refused for good (admission, Pod Security, an invalid spec): the platform's setup is at fault; the step ends as an infrastructure error
+            # with the reason, instead of three attempts at the same refusal
+            handBack.add PodTransition(step: s.step, state: STEP_STATE_LOST, exit_code: -1, termination_reason: "pod_rejected",
+                                       pod_reason: made.reason, pod_message: made.message[0 ..< min(made.message.len, 1000)])
+          else: discard
       of CommandBodyKind.cancel:
         let c = cmd.body.cancel
         let pn = podName(c.step.run_id, int(c.step.seq), int(c.step.attempt))
+        # core gave up on this Pod (start_timeout, a lost step) and will not hear its end: what the cluster says about it, and the events that are
+        # gone in an hour, are sent before the Pod goes (`diag_only`: stored with the step, decides nothing)
+        let seen = be.readPod(pn)
+        if seen != nil and seen.kind == JObject and seen{"kind"}.getStr != "Status":
+          let ps = podStatusOf(seen)
+          let w = pendingWhy(seen)
+          handBack.add PodTransition(step: c.step, state: STEP_STATE_LOST, exit_code: -1, termination_reason: "diag_only",
+            pod_reason: (if w.reason.len > 0: w.reason else: ps.reason), pod_message: (if w.reason.len > 0: w.message else: ps.message),
+            pod_diag: podDiag(seen, (if be.readEvents != nil: be.readEvents(pn) else: @[])))
         let rescued = cancelPod(be, st, c.step.run_id, int(c.step.seq), int(c.step.attempt), int(c.grace_seconds),
                                 (if seenPhase.getOrDefault(pn) == "Running": Deliver(deliverToCore) else: nil))
         seenPhase.del pn

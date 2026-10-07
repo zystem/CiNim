@@ -27,7 +27,7 @@ suite "drainSpool against a real Pod":
       let rq = buildRequest(cfg, StartRequest(runId: "s1_drain", seq: 0, attempt: 1, image: "busybox:1.36",
         command: @["sh", "-c", "i=0; while [ $i -lt 3000 ]; do echo line-$i-padding-padding-padding-padding-padding; i=$((i+1)); done; sleep 600"]))
       discard execCmd("kubectl" & kc & " -n " & ns & " delete pod " & rq.name & " --ignore-not-found --wait=true >/dev/null 2>&1")
-      check be.createPod(rq)
+      check be.createPod(rq).ok
       check execCmd("kubectl" & kc & " -n " & ns & " wait --for=condition=Ready pod/" & rq.name & " --timeout=90s") == 0
       sleep 12000
       let t0 = epochTime()
