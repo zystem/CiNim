@@ -16,6 +16,16 @@ suite "kept Pods and their alerts":
     check "could not be fully read" in a[0]["detail"].getStr
     check keptCounts() == @[("cinim-001-acme", 2)]
 
+  test "what Kubernetes said about the Pod is in the alert":
+    var i = item("ci-s1-r-2-1", "outcome_unknown", 2, 3000)
+    i.podReason = "Evicted"
+    i.podMessage = "The node was low on resource: ephemeral-storage."
+    recordKept("cinim-001-acme", 5050, 1, @[i])
+    let a = keptAlerts()[0]
+    check a["pod_reason"].getStr == "Evicted" and "low on resource" in a["pod_message"].getStr
+    check "Kubernetes says: Evicted - The node was low on resource" in a["detail"].getStr
+    recordKept("cinim-001-acme", 5060, 0, @[])
+
   test "the next picture of a namespace replaces the last, an empty one ends the alerts":
     recordKept("cinim-001-acme", 5100, 1, @[item("ci-s1-r-0-1", "logs_undelivered")])
     check keptAlerts().len == 1

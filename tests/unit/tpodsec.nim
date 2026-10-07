@@ -28,6 +28,10 @@ suite "D-42 the Pod of a step":
     check s.podCtx["runAsUser"].getInt == 1000 and s.podCtx["seccompProfile"]["type"].getStr == "Localhost"
     check s.podCtx["seccompProfile"]["localhostProfile"].getStr == "profiles/cinim-userns.json"
     check s.containerCtx.len == 0 and s.resources["limits"]["memory"].getStr == "8Gi"
+  test "a build Pod asks for 1Gi of ephemeral storage and may use 10Gi, or what the operator set":
+    let s = podSecurity(kaniko, true)
+    check s.resources["requests"]["ephemeral-storage"].getStr == "1Gi" and s.resources["limits"]["ephemeral-storage"].getStr == "10Gi"
+    check podSecurity(buildSettings("on", "", "", "", "20Gi"), true).resources["limits"]["ephemeral-storage"].getStr == "20Gi"
   test "the operator's capabilities and memory limit are used by the Kaniko class":
     let s = podSecurity(buildSettings("on", "CHOWN,SETUID", "2Gi", "RuntimeDefault"), true)
     check $s.containerCtx["capabilities"]["add"] == """["CHOWN","SETUID"]""" and s.resources["limits"]["memory"].getStr == "2Gi"

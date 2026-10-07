@@ -49,6 +49,7 @@ spec:
             # what the core makes the objects of an organisation from (SHD-007)
             - {name: CINIM_CONTROLLER_IMAGE, value: {{ include "cinim-shard.controllerImage" . | quote }}}
             - {name: CINIM_CONTROLLER_STATE_CLASS, value: {{ .Values.controller.stateStorageClass | quote }}}
+            - {name: CINIM_STEP_EPHEMERAL_LIMIT, value: {{ .Values.steps.ephemeralStorageLimit | quote }}}
             - {name: CINIM_INGRESS_CLASS, value: {{ .Values.ingress.className | quote }}}
             - {name: CINIM_INGRESS_TLS_SECRET, value: {{ .Values.ingress.tls.secretName | quote }}}
             - {name: CINIM_INGRESS_ANNOTATIONS, value: {{ .Values.ingress.annotations | toJson | quote }}}
@@ -60,6 +61,7 @@ spec:
             - {name: CINIM_BUILD_INTERNET, value: {{ if .Values.build.internet.enabled }}{{ dict "ports" .Values.build.internet.ports "except" .Values.build.internet.except | toJson | quote }}{{ else }}"off"{{ end }}}
             - {name: CINIM_BUILD_CAPS, value: {{ join "," .Values.build.capabilities | quote }}}
             - {name: CINIM_BUILD_MEMORY_LIMIT, value: {{ .Values.build.memoryLimit | quote }}}
+            - {name: CINIM_BUILD_EPHEMERAL_LIMIT, value: {{ .Values.build.ephemeralStorageLimit | quote }}}
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
             - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"
             {{- end }}

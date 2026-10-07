@@ -106,7 +106,8 @@ func toProto(t: Transition): PodTransition =
             of tkSucceeded: STEP_STATE_SUCCEEDED
             of tkFailed: STEP_STATE_FAILED
             of tkLost: STEP_STATE_LOST),
-    exit_code: int32(t.exitCode), termination_reason: t.reason, shim_state_json: t.shimJson)
+    exit_code: int32(t.exitCode), termination_reason: t.reason, shim_state_json: t.shimJson,
+    pod_reason: t.podReason, pod_message: t.podMessage)
 
 func toProto(p: PodSeen): PodInfo =
   PodInfo(step: StepRef(run_id: p.runId, seq: uint32(p.seq), attempt: uint32(p.attempt)), pod_name: p.podName, phase: p.phase,
@@ -132,7 +133,7 @@ proc keptPods(st: CtrlState; cfg: Config; limit: int): seq[KeptPod] =
     if result.len >= limit: break
     result.add KeptPod(step: StepRef(run_id: p.runId, seq: uint32(p.seq), attempt: uint32(p.attempt)), pod_name: p.name,
                        reason: (if p.endReason.len > 0: p.endReason else: "unknown"), reported_at: p.reportedAt,
-                       keep_until: p.reportedAt + cfg.retentionUnread.int64)
+                       keep_until: p.reportedAt + cfg.retentionUnread.int64, pod_reason: p.podReason, pod_message: p.podMessage)
 
 proc main() =
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete

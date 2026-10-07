@@ -96,6 +96,12 @@ build:
   seccompProfile: RuntimeDefault      # RuntimeDefault (Kaniko) or Localhost (rootless BuildKit and Buildah)
   capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]    # of the RuntimeDefault class; the policy allows no others
   memoryLimit: 4Gi
+  ephemeralStorageLimit: 10Gi         # the ephemeral-storage limit of a build Pod (the request is 1Gi)
+
+# Step Pods (the LimitRange of an organisation's namespace). A Pod that asks for no ephemeral storage gets a request of 64Mi (so it is not the
+# first one the kubelet evicts when the node runs short of it) and this limit; a Pod that uses more than its limit is evicted and the step has failed.
+steps:
+  ephemeralStorageLimit: 1Gi
 
 # The organisations (SHD-007, SHD-008). The core compares them with their Kubernetes objects at start and every `reconcileInterval` seconds and
 # makes again what is missing (it deletes nothing; what differs, or belongs to no organisation, is an alert in `GET /api/v1/organizations:reconcile`).

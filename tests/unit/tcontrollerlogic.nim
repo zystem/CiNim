@@ -178,6 +178,18 @@ suite "the poll round":
     let r = pollRound(be, st, cfg, 101.0)
     check r.transitions[0].kind == tkFailed and r.transitions[0].reason == "oom_killed" and r.transitions[0].exitCode == 137
 
+  test "a Pod evicted for its own storage limit is reported as ephemeral_storage_exceeded with what Kubernetes said":
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, cfg, req(), 100)
+    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Failed", "reason": "Evicted",
+      "message": "Pod ephemeral local storage usage exceeds the total limit of containers 1Gi. ",
+      "containerStatuses": [{"state": {"terminated": {"exitCode": 137, "startedAt": "2026-10-02T10:00:00Z"}}}]}}
+    let r = pollRound(be, st, cfg, 101.0)
+    check r.transitions[0].kind == tkFailed and r.transitions[0].reason == "ephemeral_storage_exceeded"
+    check r.transitions[0].podReason == "Evicted" and "exceeds the total limit" in r.transitions[0].podMessage
+
 suite "adoption after a restart":
   test "a new controller process continues with the Pods the old one tracked":
     let path = getTempDir() / "ctrlstate-test.sqlite"

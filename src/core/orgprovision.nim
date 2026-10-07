@@ -28,6 +28,7 @@ type
     buildInternet*: JsonNode                    ## {"ports": [...], "except": [...]}: a build may reach public addresses on these ports, the private
                                                 ## ranges in `except` stay closed (package downloads: npm, deb, maven...); nil: no internet
     buildIngress*: JsonNode                     ## NetworkPolicy ingress rules of the build Pods (an array, like buildEgress), or the string "all"; nil: closed
+    stepEphemeralLimit*, buildEphemeralLimit*: string   ## ephemeral-storage of a step Pod without limits of its own (the LimitRange: request 64Mi, this limit, 1Gi) and of a build Pod (10Gi); "" is the default
     buildCaps*, buildMemoryLimit*: string       ## what the controller keeps of the capabilities of a build Pod (comma separated) and its memory limit; "" is its default
     egressOpen*, ingressOpen*: bool             ## the simple mode for a small organisation (SHD-009): its step Pods may reach any address / be reached from any;
                                                 ## the default is closed both ways, with the openings of the build profile
@@ -102,6 +103,7 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
     if cfg.buildSeccomp.len > 0: env.add %*{"name": "CINIM_BUILD_SECCOMP", "value": cfg.buildSeccomp}
     if cfg.buildCaps.len > 0: env.add %*{"name": "CINIM_BUILD_CAPS", "value": cfg.buildCaps}
     if cfg.buildMemoryLimit.len > 0: env.add %*{"name": "CINIM_BUILD_MEMORY_LIMIT", "value": cfg.buildMemoryLimit}
+    if cfg.buildEphemeralLimit.len > 0: env.add %*{"name": "CINIM_BUILD_EPHEMERAL_LIMIT", "value": cfg.buildEphemeralLimit}
   %*{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta(cfg, slug, controllerName, ns, controllerName),
      "spec": {
        "replicas": 1,
@@ -233,10 +235,12 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bo
     %*{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": meta(cfg, slug, "cinim-default", ns),
        "spec": {"hard": {"pods": "100", "requests.cpu": "16", "requests.memory": "32Gi", "limits.memory": "64Gi",
                          "persistentvolumeclaims": "50", "requests.storage": "500Gi"}}})
-  # a build Pod sets its own memory request and limit (k8s.nim); the defaults are those of an ordinary step
+  # a build Pod sets its own memory and ephemeral-storage request and limit (k8s.nim); the defaults are those of an ordinary step. A Pod with no
+  # request for ephemeral storage is the first one the kubelet evicts when the node runs short of it, and one with no limit can fill the node.
   result.steps.add step("limit range", "LimitRange", ns, "cinim-default",
     %*{"apiVersion": "v1", "kind": "LimitRange", "metadata": meta(cfg, slug, "cinim-default", ns), "spec": {"limits": [
-      {"type": "Container", "default": {"memory": "1Gi"}, "defaultRequest": {"cpu": "100m", "memory": "128Mi"}, "max": {"memory": "32Gi"}}]}})
+      {"type": "Container", "default": {"memory": "1Gi", "ephemeral-storage": (if cfg.stepEphemeralLimit.len > 0: cfg.stepEphemeralLimit else: "1Gi")},
+      "defaultRequest": {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "64Mi"}, "max": {"memory": "32Gi"}}]}})
   for p in networkPolicies(cfg, slug):
     result.steps.add step("network policy " & p["metadata"]["name"].getStr, "NetworkPolicy", ns, p["metadata"]["name"].getStr, p)
   if cfg.multi and active:

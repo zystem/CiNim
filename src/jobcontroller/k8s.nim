@@ -92,7 +92,7 @@ proc ensureShimAssets*(k: K8s; shimBinPath, certs: string; withCerts: bool) =
                      "core.pub": readFile(certs / "curve" / "core.pub")}}))
 
 let buildSettings = podsec.buildSettings(getEnv("CINIM_BUILD", "off"), getEnv("CINIM_BUILD_CAPS"), getEnv("CINIM_BUILD_MEMORY_LIMIT"),
-                                         getEnv("CINIM_BUILD_SECCOMP"))
+                                         getEnv("CINIM_BUILD_SECCOMP"), getEnv("CINIM_BUILD_EPHEMERAL_LIMIT"))
   ## the build profile of the namespace (D-42); what a build Pod is is in podsec.nim
 
 proc podBody(r: PodRequest): JsonNode =

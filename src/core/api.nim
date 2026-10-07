@@ -72,6 +72,7 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
   ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet,
                   egressOpen: (if egress.len > 0: egress else: nd.egress) == "open", ingressOpen: (if ingress.len > 0: ingress else: nd.ingress) == "open",
                   build: buildOn, buildEgress: buildEgress, buildCaps: getEnv("CINIM_BUILD_CAPS"), buildMemoryLimit: getEnv("CINIM_BUILD_MEMORY_LIMIT"),
+                  stepEphemeralLimit: getEnv("CINIM_STEP_EPHEMERAL_LIMIT"), buildEphemeralLimit: getEnv("CINIM_BUILD_EPHEMERAL_LIMIT"),
                   buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"), buildIngress: buildIngress,
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,

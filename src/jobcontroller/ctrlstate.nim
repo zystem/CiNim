@@ -15,6 +15,7 @@ type
     ok*: bool                  ## the reported end was a success (decides how long a Pod that was not fully read is kept)
     fullyRead*: bool           ## core has the result and the log was delivered: nothing is left in the Pod worth keeping
     endReason*: string         ## how the step ended as reported to core ("ok", "failed", "logs_undelivered", "outcome_unknown", ...)
+    podReason*, podMessage*: string   ## what Kubernetes said about the end (Pod status.reason / message), for the alert
 
   CtrlState* = object
     db: DbConn
@@ -28,7 +29,9 @@ proc openState*(path: string): CtrlState =
     started INTEGER NOT NULL DEFAULT 0, last_log REAL NOT NULL DEFAULT 0, reported_at INTEGER NOT NULL DEFAULT 0,
     ok INTEGER NOT NULL DEFAULT 0)""")
   for alter in [sql"ALTER TABLE pods ADD COLUMN fully_read INTEGER NOT NULL DEFAULT 0",       # state files from before these columns
-                sql"ALTER TABLE pods ADD COLUMN end_reason TEXT NOT NULL DEFAULT ''"]:
+                sql"ALTER TABLE pods ADD COLUMN end_reason TEXT NOT NULL DEFAULT ''",
+                sql"ALTER TABLE pods ADD COLUMN pod_reason TEXT NOT NULL DEFAULT ''",
+                sql"ALTER TABLE pods ADD COLUMN pod_message TEXT NOT NULL DEFAULT ''"]:
     try: result.db.exec(alter)
     except DbError: discard
 
@@ -36,9 +39,10 @@ proc close*(s: CtrlState) = s.db.close()
 
 proc rowToPod(r: Row): TrackedPod =
   TrackedPod(name: r[0], runId: r[1], seq: parseInt(r[2]), attempt: parseInt(r[3]), createdAt: parseBiggestInt(r[4]),
-             started: r[5] == "1", lastLog: parseFloat(r[6]), reportedAt: parseBiggestInt(r[7]), ok: r[8] == "1", fullyRead: r[9] == "1", endReason: r[10])
+             started: r[5] == "1", lastLog: parseFloat(r[6]), reportedAt: parseBiggestInt(r[7]), ok: r[8] == "1", fullyRead: r[9] == "1", endReason: r[10],
+             podReason: r[11], podMessage: r[12])
 
-const cols = "name, run_id, seq, attempt, created_at, started, last_log, reported_at, ok, fully_read, end_reason"
+const cols = "name, run_id, seq, attempt, created_at, started, last_log, reported_at, ok, fully_read, end_reason, pod_reason, pod_message"
 
 proc track*(s: CtrlState; name, runId: string; seq, attempt: int; now: int64) =
   ## recorded *before* the Pod is created: if the controller dies in between, the Pod it may have made is not an orphan
@@ -54,9 +58,9 @@ proc has*(s: CtrlState; name: string): bool = s.db.getValue(sql"SELECT 1 FROM po
 proc markStarted*(s: CtrlState; name: string) = s.db.exec(sql"UPDATE pods SET started = 1 WHERE name = ?", name)
 proc setLastLog*(s: CtrlState; name: string; t: float) = s.db.exec(sql"UPDATE pods SET last_log = ? WHERE name = ?", t, name)
 
-proc markReported*(s: CtrlState; name: string; ok: bool; fullyRead: bool; now: int64; reason = "") =
-  s.db.exec(sql"UPDATE pods SET reported_at = ?, ok = ?, fully_read = ?, end_reason = ? WHERE name = ?", now, (if ok: 1 else: 0),
-            (if fullyRead: 1 else: 0), reason, name)
+proc markReported*(s: CtrlState; name: string; ok: bool; fullyRead: bool; now: int64; reason = ""; podReason = ""; podMessage = "") =
+  s.db.exec(sql"UPDATE pods SET reported_at = ?, ok = ?, fully_read = ?, end_reason = ?, pod_reason = ?, pod_message = ? WHERE name = ?",
+            now, (if ok: 1 else: 0), (if fullyRead: 1 else: 0), reason, podReason, podMessage, name)
 
 proc forget*(s: CtrlState; name: string) = s.db.exec(sql"DELETE FROM pods WHERE name = ?", name)
 

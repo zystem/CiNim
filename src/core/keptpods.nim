@@ -6,7 +6,7 @@ import std/[json, locks, tables]
 
 type
   KeptItem* = object
-    pod*, runId*, reason*: string
+    pod*, runId*, reason*, podReason*, podMessage*: string
     seq*, attempt*: int
     reportedAt*, keepUntil*: int64
 
@@ -20,7 +20,7 @@ proc recordKept*(namespace: string; at: int64; total: int; items: seq[KeptItem])
   var arr = newJArray()
   for i in items:
     arr.add %*{"pod": i.pod, "run_id": i.runId, "seq": i.seq, "attempt": i.attempt, "reason": i.reason, "reported_at": i.reportedAt,
-               "keep_until": i.keepUntil}
+               "keep_until": i.keepUntil, "pod_reason": i.podReason, "pod_message": i.podMessage}
   let p = $(%*{"at": at, "total": total, "pods": arr})
   {.cast(gcsafe).}:
     withLock lock:
@@ -43,8 +43,13 @@ proc keptAlerts*(): JsonNode =
       let reason = it["reason"].getStr
       result.add %*{"code": "pod_unread", "namespace": ns, "pod": it["pod"], "run_id": it["run_id"], "seq": it["seq"], "attempt": it["attempt"],
                     "reason": reason, "reported_at": it["reported_at"], "keep_until": it["keep_until"],
+                    "pod_reason": it{"pod_reason"}.getStr, "pod_message": it{"pod_message"}.getStr,
                     "detail": "the Pod of step " & $it["seq"].getInt & " of run " & it["run_id"].getStr & " could not be fully read (" & reason &
-                              "); it is kept until it is removed at keep_until, so that it can be looked at"}
+                              ")" &
+                              (if it{"pod_reason"}.getStr.len > 0 or it{"pod_message"}.getStr.len > 0:
+                                 "; Kubernetes says: " & it{"pod_reason"}.getStr & (if it{"pod_message"}.getStr.len > 0: " - " & it{"pod_message"}.getStr else: "")
+                               else: "") &
+                              "; it is kept until it is removed at keep_until, so that it can be looked at"}
 
 proc keptCounts*(): seq[(string, int)] =
   {.cast(gcsafe).}:

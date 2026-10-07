@@ -12,6 +12,7 @@ const
   buildLabel* = "cinim.io/profile"
   buildProfile* = "build"
   userNsProfile* = "profiles/cinim-userns.json"       ## relative to the kubelet's seccomp directory, as `localhostProfile` wants it
+  defaultBuildEphemeral* = "10Gi"
   defaultBuildCaps* = "CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP"
 
 type
@@ -19,6 +20,7 @@ type
     enabled*: bool                 ## the shard has a build profile (CINIM_BUILD): without it a step of the profile is an ordinary Pod
     caps*: seq[string]
     memoryLimit*: string
+    ephemeralLimit*: string        ## the ephemeral-storage limit of a build Pod (images are built in it): 10Gi; an ordinary step gets the LimitRange's
     localhost*: bool               ## the Localhost seccomp class (rootless builders); false: RuntimeDefault (Kaniko)
 
   PodSecurity* = object
@@ -26,11 +28,12 @@ type
     hostUsers*: bool
     labels*: JsonNode              ## added to the Pod's labels
 
-func buildSettings*(enabled: string; caps, memoryLimit, seccomp: string): BuildSettings =
+func buildSettings*(enabled: string; caps, memoryLimit, seccomp: string; ephemeralLimit = ""): BuildSettings =
   ## from the environment (CINIM_BUILD, CINIM_BUILD_CAPS, CINIM_BUILD_MEMORY_LIMIT, CINIM_BUILD_SECCOMP); "" is the default of each
   BuildSettings(enabled: enabled == "on",
                 caps: (if caps.len > 0: caps else: defaultBuildCaps).split(',').filterIt(it.len > 0),
                 memoryLimit: (if memoryLimit.len > 0: memoryLimit else: "4Gi"),
+                ephemeralLimit: (if ephemeralLimit.len > 0: ephemeralLimit else: defaultBuildEphemeral),
                 localhost: seccomp == "Localhost")
 
 func podSecurity*(b: BuildSettings; build: bool): PodSecurity =
@@ -41,7 +44,8 @@ func podSecurity*(b: BuildSettings; build: bool): PodSecurity =
       containerCtx: %*{"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
       resources: %*{"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "128Mi"}},
       hostUsers: true, labels: newJObject())
-  let resources = %*{"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": b.memoryLimit}}
+  let resources = %*{"requests": {"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "1Gi"},
+                     "limits": {"memory": b.memoryLimit, "ephemeral-storage": b.ephemeralLimit}}
   let labels = %*{buildLabel: buildProfile}
   if b.localhost:
     PodSecurity(

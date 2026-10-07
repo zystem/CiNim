@@ -61,6 +61,21 @@ suite "Pod -> step verdict":
   test "evicted or shut down after the command started may have run":
     check classifyPod(pod("Failed", reason = "Evicted", state = terminated(137))).verdict == vOutcomeUnknown
     check classifyPod(pod("Failed", reason = "NodeShutdown", state = %*{"running": {}})).verdict == vOutcomeUnknown
+  test "evicted for the Pod's own ephemeral-storage limit is the step's failure; node pressure is the platform's":
+    let own = pod("Failed", reason = "Evicted", state = terminated(137))
+    own["status"]["message"] = %"Pod ephemeral local storage usage exceeds the total limit of containers 1Gi. "
+    let r = classifyPod(own)
+    check r.verdict == vFailed and r.exitCode == 137 and r.detail == "ephemeral_storage_exceeded"
+    let node = pod("Failed", reason = "Evicted", state = terminated(137))
+    node["status"]["message"] = %"The node was low on resource: ephemeral-storage. Threshold quantity: 19127914436, available: 17489608Ki."
+    check classifyPod(node).verdict == vOutcomeUnknown
+  test "what Kubernetes says about the end is kept: status.reason and message, or the container's reason, cut to a size":
+    let e = pod("Failed", reason = "Evicted", state = terminated(137))
+    e["status"]["message"] = %("x".repeat(3000))
+    let r = classifyPod(e)
+    check r.podReason == "Evicted" and r.podMessage.len == maxMessage
+    check classifyPod(pod("Failed", state = terminated(137, reason = "OOMKilled"))).podReason == "OOMKilled"
+    check classifyPod(pod("Succeeded", state = terminated(0))).podReason == ""
   test "a terminated container whose startedAt is the zero time never started":
     check classifyPod(pod("Failed", reason = "Evicted", state = terminated(1, startedAt = "0001-01-01T00:00:00Z"))).verdict == vLostNeverStarted
   test "a finished Pod with no container status at all is unknown, so it may have run":

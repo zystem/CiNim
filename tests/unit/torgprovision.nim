@@ -242,6 +242,15 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     check ports == @[80, 443, 22]
     check policy["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
     for st in organizationSteps(buildCfg(registry), "acme", curve, "BT").steps: check st.objectName != "allow-build-internet"
+  test "the limit range gives a step Pod an ephemeral-storage request of 64Mi and a limit of 1Gi, or the operator's":
+    for cfgLimit in ["", "3Gi"]:
+      var c = buildCfg()
+      c.stepEphemeralLimit = cfgLimit
+      for st in organizationSteps(c, "acme", curve, "BT").steps:
+        if st.kind == "LimitRange":
+          let l = st.obj["spec"]["limits"][0]
+          check l["defaultRequest"]["ephemeral-storage"].getStr == "64Mi"
+          check l["default"]["ephemeral-storage"].getStr == (if cfgLimit.len > 0: cfgLimit else: "1Gi")
   test "the limit range stays that of an ordinary step: a build Pod sets its own memory":
     for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps:
       if st.kind == "LimitRange": check st.obj["spec"]["limits"][0]["default"]["memory"].getStr == "1Gi"

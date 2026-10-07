@@ -33,6 +33,9 @@ message PodTransition {
   string termination_reason = 6;     // "ok", "failed", "env_rejected", ...
   google.protobuf.Timestamp observed_at = 7;
   string shim_state_json = 8;        // the newest CICD-SHIM state found in the Pod's log (D-29); "" = none seen
+  string pod_reason = 9;             // what Kubernetes itself says about the end: the Pod's status.reason ("Evicted", ...) or, when that is empty,
+                                     // the container's terminated reason ("OOMKilled", "Error"); "" = nothing. Stored for investigations.
+  string pod_message = 10;           // the Pod's status.message (the text of an eviction, for example), cut to 1000 bytes
 }
 
 // What the controller found in the cluster for one step Pod (D-29): read from the Kubernetes API by label, not
@@ -54,6 +57,8 @@ message KeptPod {
   string reason = 3;                 // why it was not fully read: "logs_undelivered", "outcome_unknown", "lost_never_started"
   int64 reported_at = 4;             // unix seconds: when core was told how the step ended
   int64 keep_until = 5;              // unix seconds: when the controller removes the Pod
+  string pod_reason = 6;             // as PodTransition.pod_reason, so that the alert shows what Kubernetes said
+  string pod_message = 7;
 }
 
 message PollRequest {

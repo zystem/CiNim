@@ -101,7 +101,10 @@ The endpoint can be turned off in Helm (`metrics.enabled: false`, on by default;
 
 Details per component: `GET /api/v1/components`. The totals of a step (peak memory, CPU seconds, number of OOM kills) are written to its
 state in rqlite (`steps.shim_json`, field `res`) and to the last line of the Pod log, so they survive the end of the step. An OOM kill is
-the step's own failure, reason `oom_killed` (no retry). Modern Kubernetes (1.28 and later, cgroup v2) kills the whole container at once on
+the step's own failure, reason `oom_killed` (no retry). A Pod evicted by the kubelet because it used more ephemeral storage than its own limit is
+the step's own failure too (reason `ephemeral_storage_exceeded`, no retry); an eviction because the node ran short of resources ("The node was low
+on resource: ephemeral-storage") is the cluster's doing and is handled as an infrastructure loss (D-28). The text that Kubernetes gave is kept
+(`steps.pod_reason`, `steps.pod_message`, shown in the run's steps). Modern Kubernetes (1.28 and later, cgroup v2) kills the whole container at once on
 memory exhaustion, together with the shim: the verdict then comes from the Pod status (`OOMKilled`, exit code 137), not from the shim. If
 the shim is alive (older nodes, cgroup v1), it sees the OOM counter rise in the cgroup itself and reports the same reason.
 

@@ -13,7 +13,7 @@ type
 
   Transition* = object
     ## a Pod's story is over; becomes a PodTransition on the wire
-    runId*, podName*, reason*, shimJson*: string
+    runId*, podName*, reason*, shimJson*, podReason*, podMessage*: string
     seq*, attempt*, exitCode*: int
     kind*: TKind
     fullyRead*: bool             ## the shim's verdict was read and the log reached the log pipeline: the Pod has nothing left to show
@@ -107,11 +107,14 @@ proc pollRound*(be: Backend; st: CtrlState; cfg: Config; now: float): tuple[tran
         fullyRead: reading.verdict in [vSucceeded, vFailed],
         # the kernel killed the container for exceeding its memory limit (the whole cgroup goes, shim included, so no shim verdict
         # exists): still the step's own failure, and the reason says so
-        reason: (if reading.verdict == vFailed and reading.detail == "OOMKilled": "oom_killed" else: reasonOf(reading.verdict)))
+        podReason: reading.podReason, podMessage: reading.podMessage,
+        reason: (if reading.verdict == vFailed and reading.detail == "OOMKilled": "oom_killed"
+                 elif reading.verdict == vFailed and reading.detail == "ephemeral_storage_exceeded": "ephemeral_storage_exceeded"
+                 else: reasonOf(reading.verdict)))
 
 proc afterPoll*(st: CtrlState; transitions: seq[Transition]; now: int64) =
   ## core acknowledged these ends: from now on the Pods are only kept for a while, not watched
-  for t in transitions: st.markReported(t.podName, t.kind == tkSucceeded, t.fullyRead, now, t.reason)
+  for t in transitions: st.markReported(t.podName, t.kind == tkSucceeded, t.fullyRead, now, t.reason, t.podReason, t.podMessage)
 
 const
   shimExe = "/cicd/shim/cicd-shim"

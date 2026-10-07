@@ -6,7 +6,7 @@
 ## its command is safe to run again; one whose command started and whose fate is unknown is NOT restarted (a half-done
 ## deploy must not be started a second time by a machine). No heuristics beyond that: when in doubt, it is the second kind.
 ## A log that was not delivered is not a loss at all: the command's exit code is known and is the result.
-import std/[json, strutils, options]
+import std/[json, strutils, options, sequtils]
 
 type
   Verdict* = enum
@@ -21,9 +21,14 @@ type
     verdict*: Verdict
     exitCode*: int
     detail*: string
+    podReason*, podMessage*: string   ## what Kubernetes says about the end (kept in the database for investigations), cut to `maxMessage`
 
 const
   exitLogsUndelivered* = 72
+  maxMessage* = 1000
+  ownLimitMarks* = ["exceeds the total limit of containers", "exceeded its local ephemeral storage limit", "exceeds the limit of"]
+    ## the kubelet's words for a Pod evicted because it used more ephemeral storage than its own limit; node pressure
+    ## reads "The node was low on resource: ephemeral-storage" and is not the step's doing
   infraReasons* = ["Evicted", "NodeShutdown", "Shutdown", "Terminated", "NodeAffinity", "UnexpectedAdmissionError", "Preempting"]
 
 func reasonOf*(v: Verdict): string =
@@ -75,7 +80,25 @@ proc containerStarted*(pod: JsonNode): bool =
   let started = st{"terminated", "startedAt"}
   started != nil and started.kind == JString and started.getStr.len > 0 and not started.getStr.startsWith("0001-")
 
-proc classifyPod*(pod: JsonNode; logTail = ""; seenStarted = true): PodReading =
+func ownLimitEviction*(reason, message: string): bool =
+  ## An eviction the step brought on itself (it went over a limit of its own Pod) is the step's failure, like an OOM kill; one the node
+  ## brought on (pressure on the node, a drain) is the platform's, and the step may have been innocent.
+  reason == "Evicted" and ownLimitMarks.anyIt(it in message)
+
+func podStatusOf*(pod: JsonNode): tuple[reason, message: string] =
+  ## the Pod's status.reason and message; with no reason on the Pod, the reason of the container's end ("OOMKilled")
+  if pod == nil or pod.kind != JObject: return
+  result.reason = pod{"status", "reason"}.getStr
+  result.message = pod{"status", "message"}.getStr
+  if result.reason.len == 0:
+    let css = pod{"status", "containerStatuses"}
+    if css != nil and css.kind == JArray and css.len > 0:
+      let t = css[0]{"state", "terminated"}
+      if t != nil and t.kind == JObject and t{"exitCode"}.getInt(0) != 0: result.reason = t{"reason"}.getStr
+  if result.message.len > maxMessage: result.message = result.message[0 ..< maxMessage]
+
+proc classifyPodVerdict(pod: JsonNode; logTail = ""; seenStarted = true): PodReading =
+  ## `seenStarted`: see classifyPod
   ## `seenStarted`: the caller's own evidence that the container got as far as running (it observed it running, or heard
   ## from the shim). It only matters when the Pod has vanished (404): with no sign of a start the loss is the safe kind.
   if pod == nil or pod.kind != JObject: return PodReading(verdict: vRunning)
@@ -105,6 +128,14 @@ proc classifyPod*(pod: JsonNode; logTail = ""; seenStarted = true): PodReading =
   let deleted = pod{"metadata", "deletionTimestamp"}
   if deleted != nil and deleted.kind == JString and containerStarted(pod):
     return PodReading(verdict: vOutcomeUnknown, exitCode: -1, detail: "pod_deleted")
+  if phase == "Failed" and ownLimitEviction(reason, pod{"status", "message"}.getStr):
+    # evicted for using more ephemeral storage than its own limit: the step's failure (no retry), not the cluster's
+    var code = 137
+    let css0 = pod{"status", "containerStatuses"}
+    if css0 != nil and css0.kind == JArray and css0.len > 0:
+      let c = css0[0]{"state", "terminated", "exitCode"}.getInt(0)
+      if c > 0: code = c
+    return PodReading(verdict: vFailed, exitCode: code, detail: "ephemeral_storage_exceeded")
   if phase == "Failed" and reason in infraReasons:
     return PodReading(verdict: (if containerStarted(pod): vOutcomeUnknown else: vLostNeverStarted), exitCode: -1,
                       detail: "pod_" & reason)
@@ -132,3 +163,13 @@ proc classifyPod*(pod: JsonNode; logTail = ""; seenStarted = true): PodReading =
     PodReading(verdict: vSucceeded, exitCode: 0)
   else:
     PodReading(verdict: vFailed, exitCode: code, detail: term{"reason"}.getStr("Error"))      # detail "OOMKilled" when the memory limit did it
+
+proc classifyPod*(pod: JsonNode; logTail = ""; seenStarted = true): PodReading =
+  ## `seenStarted`: the caller's own evidence that the container got as far as running (it only matters when the Pod has vanished).
+  ## the verdict, with what Kubernetes said about the end added to it
+  result = classifyPodVerdict(pod, logTail, seenStarted)
+  if result.verdict != vRunning:
+    let s = podStatusOf(pod)
+    result.podReason = s.reason
+    result.podMessage = s.message
+

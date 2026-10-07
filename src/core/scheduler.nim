@@ -76,13 +76,14 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if wv != nil and wv.len > 0: result["wait_reason"] = %wv[0][0].getStr
   # the steps with their attempt and the reason the last attempt ended the way it did (lost_never_started was retried,
   # outcome_unknown was not, logs_undelivered = result known but the log is incomplete, ...): visible, not buried in a log
-  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
+  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination, pod_reason, pod_message FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
   var steps = newJArray()
   let sv = st["results"][0]{"values"}
   if sv != nil:
     for r in sv:
       steps.add %*{"seq": r[0].getInt, "attempt": r[1].getInt, "state": r[2].getStr,
-                   "exit_code": (if r[3].kind == JNull: newJNull() else: %r[3].getInt), "termination": r[4].getStr}
+                   "exit_code": (if r[3].kind == JNull: newJNull() else: %r[3].getInt), "termination": r[4].getStr,
+                   "pod_reason": r[5].getStr, "pod_message": r[6].getStr}
   result["steps"] = steps
 
 # ------------------------------------------------------------------ retry settings (D-27)
@@ -211,8 +212,8 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     discard c.execute(%*[
       ["UPDATE steps SET state = ?, attempt = attempt + 1, controller_id = NULL, wait_reason = NULL, exit_code = NULL, " &
        "shim_n = 0, shim_phase = '', shim_json = '', shim_seen_at = 0, shim_source = '', " &
-       "termination = ?, not_before = ?, version = version + 1 WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-       protoName(ssPending), reason, now + backoffSeconds(attempt, policy), t.step.run_id, int(t.step.seq), attempt],
+       "termination = ?, pod_reason = ?, pod_message = ?, not_before = ?, version = version + 1 WHERE run_id = ? AND ordinal = ? AND attempt = ?",
+       protoName(ssPending), reason, t.pod_reason, t.pod_message, now + backoffSeconds(attempt, policy), t.step.run_id, int(t.step.seq), attempt],
       ["UPDATE log_streams SET state = 'abandoned', closed_at = ? WHERE attempt = ? AND state = 'open' AND " &
        "step_id = (SELECT id FROM steps WHERE run_id = ? AND ordinal = ?)", $now, attempt, t.step.run_id, int(t.step.seq)]],
       transaction = true)
@@ -221,9 +222,9 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     # out of retries, or the command started and its fate is unknown (not restarted, D-28): the platform, not the
     # step, failed - the reason stays on the step
     discard c.execute(%*[
-      ["UPDATE steps SET state = ?, termination = ?, finished_at = ?, version = version + 1 " &
+      ["UPDATE steps SET state = ?, termination = ?, pod_reason = ?, pod_message = ?, finished_at = ?, version = version + 1 " &
        "WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-       protoName(ssLost), reason, $now, t.step.run_id, int(t.step.seq), attempt],
+       protoName(ssLost), reason, t.pod_reason, t.pod_message, $now, t.step.run_id, int(t.step.seq), attempt],
       ["UPDATE runs SET state = ?, updated_at = ?, version = version + 1 WHERE id = ? AND state = ?",
        protoName(rsInfrastructureError), $now, t.step.run_id, protoName(rsRunning)]], transaction = true)
     echo "core: step ", t.step.run_id, "/", t.step.seq, " attempt ", attempt, " lost (", reason, "), not retried: run -> infrastructure_error"
@@ -244,8 +245,8 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     let res = $t.exit_code & "\n"
     try:
       discard c.execute(%*[
-        ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-         protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, $now,
+        ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
+         protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, t.pod_reason, t.pod_message, $now,
          t.step.run_id, int(t.step.seq), attempt],
         # payload must equal exactly what the executor's host call sent (bootstrap.lua Job:sh:
         # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
@@ -368,7 +369,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     var items: seq[KeptItem]
     for k in req.kept:
       items.add KeptItem(pod: k.pod_name, runId: k.step.run_id, reason: k.reason, seq: int(k.step.seq), attempt: int(k.step.attempt),
-                         reportedAt: k.reported_at, keepUntil: k.keep_until)
+                         reportedAt: k.reported_at, keepUntil: k.keep_until, podReason: k.pod_reason, podMessage: k.pod_message)
     recordKept(req.namespace, getTime().toUnix(), int(req.kept_total), items)
   # The controller serves one organisation and says so by its namespace (SHD-007): it gets the steps of the profile of that namespace
   # and of no other. A controller that names none (single-tenant setups) gets the shard's default profile. Until the controllers have
