@@ -27,6 +27,7 @@ let
   # D-29); defaults to the address the shims use
   logIngestAddr = getEnv("CINIM_LOGINGEST_ADDR", getEnv("CINIM_COLLECTOR_ADDR", ""))
   stepReportAddr = getEnv("CINIM_STEPREPORT_ADDR", "")
+  artifactAddr = getEnv("CINIM_ARTIFACTINGEST_ADDR", "")
   shimBinPath = getEnv("CINIM_SHIM_BIN", "build/cicd-shim")
   # D-27: the step's log is spooled on the Pod's ephemeral storage until core has it. Both are per-profile
   # settings in the end (log_spool_bytes, log_hold_timeout); until execution profiles carry them, environment defaults.
@@ -145,6 +146,7 @@ proc main() =
   var cfg = defaultConfig()
   cfg.collectorAddr = collectorAddr
   cfg.stepReportAddr = stepReportAddr
+  cfg.artifactAddr = artifactAddr
   cfg.logSpoolBytes = logSpoolBytes
   cfg.logHoldTimeout = logHoldTimeout
   cfg.retentionRead = retentionRead

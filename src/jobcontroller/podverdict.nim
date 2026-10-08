@@ -25,6 +25,7 @@ type
 
 const
   exitLogsUndelivered* = 72
+  exitArtifactsUndelivered* = 76   ## the command succeeded; its artifacts are still on the Pod (the core could not take them): the Pod is kept, as for a log that was not delivered
   maxMessage* = 1000
   ownLimitMarks* = ["exceeds the total limit of containers", "exceeded its local ephemeral storage limit", "exceeds the limit of"]
     ## the kubelet's words for a Pod evicted because it used more ephemeral storage than its own limit; node pressure
@@ -117,9 +118,9 @@ proc classifyPodVerdict(pod: JsonNode; logTail = ""; seenStarted = true): PodRea
     let r = shim.get
     case r.reason
     of "ok": return PodReading(verdict: vSucceeded, exitCode: r.commandExitCode, detail: "shim_result_ok")
-    of "logs_undelivered":
-      return if r.commandExitCode >= 0: PodReading(verdict: vLogsUndelivered, exitCode: r.commandExitCode, detail: "logs_undelivered")
-             else: PodReading(verdict: vOutcomeUnknown, exitCode: -1, detail: "logs_undelivered_exit_code_unknown")
+    of "logs_undelivered", "artifacts_undelivered":
+      return if r.commandExitCode >= 0: PodReading(verdict: vLogsUndelivered, exitCode: r.commandExitCode, detail: r.reason)
+             else: PodReading(verdict: vOutcomeUnknown, exitCode: -1, detail: r.reason & "_exit_code_unknown")
     else: return PodReading(verdict: vFailed, exitCode: (if r.commandExitCode > 0: r.commandExitCode else: r.exitCode),
                             detail: "shim_result_" & r.reason)
   let reason = pod{"status", "reason"}.getStr
@@ -155,10 +156,11 @@ proc classifyPodVerdict(pod: JsonNode; logTail = ""; seenStarted = true): PodRea
   if msgReason == "terminated":
     # the shim was asked to stop from outside (SIGTERM: drain, preemption, deletion): the command was cut off part-way
     return PodReading(verdict: vOutcomeUnknown, exitCode: -1, detail: "terminated_by_signal")
-  if code == exitLogsUndelivered or msgReason == "logs_undelivered":
+  if code == exitLogsUndelivered or code == exitArtifactsUndelivered or msgReason in ["logs_undelivered", "artifacts_undelivered"]:
     # the exit code of the step's own command is the result; without it the fate of the step is unknown
-    if cmdExit >= 0: PodReading(verdict: vLogsUndelivered, exitCode: cmdExit, detail: "logs_undelivered")
-    else: PodReading(verdict: vOutcomeUnknown, exitCode: -1, detail: "logs_undelivered_exit_code_unknown")
+    let what = if code == exitArtifactsUndelivered or msgReason == "artifacts_undelivered": "artifacts_undelivered" else: "logs_undelivered"
+    if cmdExit >= 0: PodReading(verdict: vLogsUndelivered, exitCode: cmdExit, detail: what)
+    else: PodReading(verdict: vOutcomeUnknown, exitCode: -1, detail: what & "_exit_code_unknown")
   elif code == 0:
     PodReading(verdict: vSucceeded, exitCode: 0)
   else:

@@ -26,7 +26,7 @@ proc signingKey(secret, date, region: string): string =
     for i in 0 ..< 32: result[i] = char(h[i])
   raw(raw(raw(raw("AWS4" & secret, date), region), "s3"), "aws4_request")
 
-proc presignQuery*(httpMethod, host, path, region, keyId, secret, stamp: string; expires: int): string =
+proc presignQuery*(httpMethod, host, path, region, keyId, secret, stamp: string; expires: int; extra: openArray[(string, string)] = []): string =
   ## the query string of a presigned request, signature last. `host` is as the client will send it (with the port when it is not the default one),
   ## `path` is not encoded yet. `stamp` is `yyyyMMddTHHmmssZ`.
   let date = stamp[0 ..< 8]
@@ -34,6 +34,7 @@ proc presignQuery*(httpMethod, host, path, region, keyId, secret, stamp: string;
   # the canonical query: the parameters sorted by name, each name and value encoded (the `/` of the credential too)
   var params = @[("X-Amz-Algorithm", "AWS4-HMAC-SHA256"), ("X-Amz-Credential", keyId & "/" & scope), ("X-Amz-Date", stamp),
                  ("X-Amz-Expires", $expires), ("X-Amz-SignedHeaders", "host")]
+  for e in extra: params.add e                       # the request's own parameters (`uploads`, `partNumber`, `uploadId`) are signed with the rest
   params.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
   var q = ""
   for (k, v) in params:
@@ -52,9 +53,9 @@ proc splitEndpoint*(endpoint: string): tuple[ok: bool, scheme, host: string] =
   if scheme notin ["http", "https"] or host.len == 0 or '/' in host or '?' in host or ' ' in host: return
   (true, scheme, host)
 
-proc presignObject*(httpMethod, endpoint, bucket, key, region, keyId, secret: string; now: int64; expires: int): string =
+proc presignObject*(httpMethod, endpoint, bucket, key, region, keyId, secret: string; now: int64; expires: int; extra: openArray[(string, string)] = []): string =
   ## the URL of one object, path-style
   let e = splitEndpoint(endpoint)
   doAssert e.ok, "bad endpoint"
   let path = "/" & bucket & "/" & key
-  e.scheme & "://" & e.host & uriEncode(path, keepSlash = true) & "?" & presignQuery(httpMethod, e.host, path, region, keyId, secret, amzDate(now), expires)
+  e.scheme & "://" & e.host & uriEncode(path, keepSlash = true) & "?" & presignQuery(httpMethod, e.host, path, region, keyId, secret, amzDate(now), expires, extra)

@@ -1,22 +1,23 @@
 ## The object store of the shard (DAT-003, D-46, Garage or any S3-compatible store): where the artifacts of runs live.
 ##
 ## The settings (endpoint, region, bucket, the access key's id) are in the database; the secret of the access key is sealed there like a step secret (D-45,
-## core/secretvault.nim) under the tenant `_platform`, so that a restored database brings the store back and nothing is kept in Kubernetes Secrets. The core
-## signs short-lived URLs (common/sigv4.nim); the shim of a step, which has no key at all, puts and gets objects through them. The objects of a run are
-## `<tenant>/<run>/<path>`; a step may only ask for URLs of its own run, for what its own options declared (`artifacts = {upload = {...}, download = {...}}`).
-import std/[json, strutils, times, httpclient, os, sequtils]
+## core/secretvault.nim) under the tenant `_platform`, so that a restored database brings the store back and nothing is kept in Kubernetes Secrets. A step has
+## no access to the store: its shim moves the bytes to and from the core (core/artifactingest.nim), and the core talks to the store through `ObjectBackend`
+## (core/storagebackend.nim), which is the seam where the storage module can leave the core. The objects of a run are `<tenant>/<run>/<path>`; a step may only
+## put and get what its own options declared (`artifacts = {upload = {...}, download = {...}}`), in its own run.
+import std/[json, strutils, sequtils]
 import ../common/[rqlite, sigv4]
-import secretvault
+import secretvault, storagebackend, s3backend
+export storagebackend
 
 const
   platformTenant* = "_platform"
   secretName = "OBJECTSTORE_SECRET_KEY"
   metaKey = "objectstore"
-  maxFilesPerCall* = 1000
-  maxObjectBytes* = 5'i64 * 1024 * 1024 * 1024     ## one PUT of S3 holds at most 5 GiB
+  maxFilesPerStep* = 1000
+  maxObjectBytes* = 2'i64 * 1024 * 1024 * 1024      ## one artifact
+  maxRunBytes* = 10'i64 * 1024 * 1024 * 1024        ## all the artifacts of a run
   maxPathLen* = 512
-  putExpires* = 900                                 ## seconds a URL to upload is good: the time to send the biggest file
-  getExpires* = 300
 
 type
   StoreConfig* = object
@@ -107,53 +108,33 @@ proc loadStore*(c: var RqClient): Store =
   result.secret = got.values[0][1]
   result.ok = true
 
-proc url*(s: Store; httpMethod, key: string; expires: int; now = getTime().toUnix()): string =
-  presignObject(httpMethod, s.cfg.endpoint, s.cfg.bucket, key, s.cfg.region, s.cfg.keyId, s.secret, now, expires)
-
-# ------------------------------------------------------------------ talking to the store (core's own calls)
-
-proc headSize*(s: Store; key: string): int64 =
-  ## the size of an object, -1 if it is not there or the store does not answer
-  let cl = newHttpClient(timeout = 10000)
-  defer: cl.close()
-  try:
-    let r = cl.request(s.url("HEAD", key, 60), httpMethod = HttpHead)
-    if r.code.int div 100 != 2: return -1
-    result = try: parseBiggestInt(r.headers.getOrDefault("content-length")) except ValueError: -1
-  except CatchableError: result = -1
-
-proc removeObject*(s: Store; key: string): bool =
-  let cl = newHttpClient(timeout = 10000)
-  defer: cl.close()
-  try: cl.request(s.url("DELETE", key, 60), httpMethod = HttpDelete).code.int div 100 == 2
-  except CatchableError: false
-
-proc roundTrip*(s: Store): string =
-  ## "" if an object can be put, read back and deleted with these settings, else what failed; the check of `PUT /api/v1/storage` and `:check`
-  let key = "_check/" & $getTime().toUnix() & "-" & $getCurrentProcessId()
-  let body = "cinim object store check"
-  let cl = newHttpClient(timeout = 10000)
-  defer: cl.close()
-  try:
-    let put = cl.request(s.url("PUT", key, 60), httpMethod = HttpPut, body = body)
-    if put.code.int div 100 != 2: return "put: the store answered " & $put.code & " " & put.body[0 ..< min(put.body.len, 200)]
-    let got = cl.request(s.url("GET", key, 60), httpMethod = HttpGet)
-    if got.code.int div 100 != 2 or got.body != body: return "get: the store answered " & $got.code
-    if not s.removeObject(key): return "delete: the store refused"
-  except CatchableError as e:
-    return "the store did not answer: " & e.msg
-  ""
+proc backend*(s: Store): ObjectBackend =
+  ## the store as the core talks to it; the one place that says which backend it is
+  S3Backend(endpoint: s.cfg.endpoint, region: s.cfg.region, bucket: s.cfg.bucket, keyId: s.cfg.keyId, secret: s.secret)
 
 # ------------------------------------------------------------------ the rows
 
-proc recordUploading*(c: var RqClient; id, tenant, runId: string; step: int; path, key: string; size: int64; sha256: string; now: int64) =
+proc recordArtifact*(c: var RqClient; id, tenant, runId: string; step: int; path, key: string; size: int64; sha256, state, uploadId: string; now: int64) =
   ## a path is one artifact of a run: a retry of the step puts it again
-  discard c.execute(%*[["INSERT INTO artifacts (id, tenant_id, run_id, step_ordinal, path, s3_key, size, sha256, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?) " &
-    "ON CONFLICT(run_id, path) DO UPDATE SET step_ordinal = excluded.step_ordinal, size = excluded.size, sha256 = excluded.sha256, state = 'uploading', created_at = excluded.created_at",
-    id, tenant, runId, step, path, key, size, sha256, now]])
+  discard c.execute(%*[["INSERT INTO artifacts (id, tenant_id, run_id, step_ordinal, path, s3_key, size, sha256, state, created_at, upload_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " &
+    "ON CONFLICT(run_id, path) DO UPDATE SET step_ordinal = excluded.step_ordinal, size = excluded.size, sha256 = excluded.sha256, state = excluded.state, " &
+    "created_at = excluded.created_at, upload_id = excluded.upload_id",
+    id, tenant, runId, step, path, key, size, sha256, state, now, uploadId]])
+
+proc uploadingRow*(c: var RqClient; runId, path: string): tuple[found: bool, key, uploadId: string, size: int64] =
+  let r = c.query(%*[["SELECT s3_key, upload_id, size FROM artifacts WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])
+  let v = r["results"][0]{"values"}
+  if v != nil and v.len > 0: (true, v[0][0].getStr, v[0][1].getStr, v[0][2].getBiggestInt) else: (false, "", "", 0'i64)
 
 proc markStored*(c: var RqClient; runId, path: string): bool =
-  c.execute(%*[["UPDATE artifacts SET state = 'stored' WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])["results"][0]{"rows_affected"}.getInt > 0
+  c.execute(%*[["UPDATE artifacts SET state = 'stored', upload_id = '' WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])["results"][0]{"rows_affected"}.getInt > 0
+
+proc forgetArtifact*(c: var RqClient; runId, path: string) =
+  discard c.execute(%*[["DELETE FROM artifacts WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])
+
+proc runBytes*(c: var RqClient; runId, exceptPath: string): int64 =
+  ## what the run's other artifacts hold already
+  c.query(%*[["SELECT COALESCE(SUM(size), 0) FROM artifacts WHERE run_id = ? AND path != ?", runId, exceptPath]])["results"][0]{"values"}[0][0].getBiggestInt
 
 proc listArtifacts*(c: var RqClient; runId: string): JsonNode =
   result = newJArray()

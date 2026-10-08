@@ -266,32 +266,45 @@ proc fetchStepSecrets*(coreAddr, certs: string; step: StepRef; token: string): F
   except CatchableError as e:
     result = FetchedSecrets(retry: true, code: "no_answer", detail: e.msg)
 
-type ArtifactAnswer* = object
-  ok*, retry*: bool
-  answer*: JsonNode
-  code*, detail*: string
+type
+  ArtifactClient* = ref object
+    target, certs: string
+    conn: ZConnection
+    open: bool
 
-proc askArtifacts*(coreAddr, certs: string; step: StepRef; token, requestJson: string): ArtifactAnswer =
-  ## One try at asking core for URLs to put or get the artifacts of this step (DAT-003), over the same authenticated channel and with the step's own
-  ## credential as for its secrets. `requestJson` is {"op": "put" | "done" | "get", ...}; core answers with what the step's options declared, nothing more.
+  ArtifactReply* = object
+    ok*, retry*: bool          ## not ok and retry: the core or the store did not answer now, the same request may work later
+    ack*: ArtifactAck
+    code*, detail*: string
+
+proc newArtifactClient*(artifactAddr, certs: string): ArtifactClient = ArtifactClient(target: artifactAddr, certs: certs)
+
+proc close*(c: ArtifactClient) =
+  if c.open:
+    try: c.conn.close() except CatchableError: discard
+    c.open = false
+
+proc call*(c: ArtifactClient; req: ArtifactRequest; timeoutMs = 60000): ArtifactReply =
+  ## One request to the core's ArtifactIngest (DAT-003) over the same kind of authenticated channel as the log, answered once. The connection is kept
+  ## between requests and made again after an error. The credential in `req.job_token` is the step's own.
   try:
-    let conn = connectReq(coreAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"),
-                          recvTimeoutMs = 20000, sendTimeoutMs = 5000)
-    defer: (try: conn.close() except CatchableError: discard)
-    let req = StepReport(step: step, request: "artifacts", job_token: token, request_json: requestJson)
+    if not c.open:
+      c.conn = connectReq(c.target, loadPublicKey(c.certs, "core"), loadKeypair(c.certs, "client"), recvTimeoutMs = timeoutMs, sendTimeoutMs = 10000)
+      c.open = true
     let bytes = Protobuf.encode(req)
     var msg = newString(bytes.len)
     if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-    conn.send(msg)
-    let (avail, _, body) = waitForReceive(conn.socket)
-    if not avail: return ArtifactAnswer(retry: true, code: "no_answer", detail: "core did not answer")
-    let ack = Protobuf.decode(cast[seq[byte]](body), StepReportAck)
-    if ack.accepted:
-      result.ok = true
-      result.answer = parseJson(ack.answer_json)
-    else:
-      result.code = ack.failure.code
-      result.detail = ack.failure.detail
-      result.retry = ack.failure.code in ["store_unavailable"]
+    c.conn.send(msg)
+    let (avail, _, body) = waitForReceive(c.conn.socket)
+    if not avail:
+      c.close()                    # a REQ socket that did not get its answer cannot send again: a new one
+      return ArtifactReply(retry: true, code: "no_answer", detail: "core did not answer")
+    result.ack = Protobuf.decode(cast[seq[byte]](body), ArtifactAck)
+    result.ok = result.ack.accepted
+    if not result.ok:
+      result.code = result.ack.failure.code
+      result.detail = result.ack.failure.detail
+      result.retry = result.code == "store_unavailable"
   except CatchableError as e:
-    result = ArtifactAnswer(retry: true, code: "no_answer", detail: e.msg)
+    c.close()
+    result = ArtifactReply(retry: true, code: "no_answer", detail: e.msg)

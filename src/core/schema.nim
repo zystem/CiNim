@@ -131,6 +131,7 @@ proc migrate*(c: var RqClient) =
       ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
       ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
       ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
+      ("artifacts", "upload_id", "TEXT NOT NULL DEFAULT ''"),     # the store's id of a multipart upload that is under way
       ("runs", "fail_code", "TEXT NOT NULL DEFAULT ''"), ("runs", "fail_message", "TEXT NOT NULL DEFAULT ''"),   # why the run did not succeed (executor's FinishRun)
       ("runs", "params", "TEXT NOT NULL DEFAULT ''"),         # the launch parameters: a JSON object of text values, at most 4 KiB (VAR-002, core/runparams.nim)
       ("runs", "profile_id", "TEXT NOT NULL DEFAULT ''"),     # the execution profile of the run's organisation (SHD-007)

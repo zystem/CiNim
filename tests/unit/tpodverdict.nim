@@ -30,6 +30,11 @@ suite "Pod -> step verdict":
     let r = classifyPod(pod("Failed", state = terminated(72, message = msg)))
     check r.verdict == vLogsUndelivered and r.exitCode == 3
     check classifyPod(pod("Failed", state = terminated(1, message = msg))).verdict == vLogsUndelivered
+  test "DAT-003 artifacts not delivered: the command succeeded and the result stands, the Pod is kept for them (as for a log)":
+    let msg = $(%*{"exit_code": 76, "reason": "artifacts_undelivered", "command_exit_code": 0})
+    let r = classifyPod(pod("Failed", state = terminated(76, message = msg)))
+    check r.verdict == vLogsUndelivered and r.exitCode == 0 and r.detail == "artifacts_undelivered"
+    check classifyPod(pod("Failed", state = terminated(76))).verdict == vOutcomeUnknown
   test "logs not delivered and no command exit code anywhere: the fate is unknown, so it is not restarted either":
     check classifyPod(pod("Failed", state = terminated(72))).verdict == vOutcomeUnknown
   test "the Pod vanished (404): it may have run - unless nothing ever showed that its container started":

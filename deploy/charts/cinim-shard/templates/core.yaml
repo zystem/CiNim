@@ -37,6 +37,7 @@ spec:
             - {name: executor, containerPort: 19741}
             - {name: stepreport, containerPort: 19742}
             - {name: logingest, containerPort: 19743}
+            - {name: artifacts, containerPort: 19744}
           env:
             - {name: CINIM_SHARD, value: {{ .Values.shard | quote }}}
             - {name: CINIM_NAMESPACE_PREFIX, value: {{ .Values.namespacePrefix | quote }}}
@@ -176,3 +177,4 @@ spec:
     - {name: executor, port: 19741, targetPort: executor}
     - {name: stepreport, port: 19742, targetPort: stepreport}
     - {name: logingest, port: 19743, targetPort: logingest}
+    - {name: artifacts, port: 19744, targetPort: artifacts}

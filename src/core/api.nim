@@ -430,7 +430,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not st.ok:
             problem(if st.retry: Http503 else: Http409, "store_" & st.error, "the object store is not ready: " & st.error)
             return
-          let bad = st.roundTrip()
+          let bad = st.backend().roundTrip()
           if bad.len > 0: problem(Http502, "storage_unreachable", bad)
           else: jsonOk(Http200, %*{"ok": true, "endpoint": st.cfg.endpoint, "bucket": st.cfg.bucket})
         elif smeth == "GET":
@@ -455,7 +455,7 @@ proc onRequest() {.raises: [], gcsafe.} =
                   ["Content-Type: application/problem+json", "Retry-After: 15"])
             return
           # the settings are tried before they are kept: a store that does not take an object is not one to write down
-          let bad = roundTrip(Store(ok: true, cfg: cfg, secret: secret))
+          let bad = Store(ok: true, cfg: cfg, secret: secret).backend().roundTrip()
           if bad.len > 0:
             problem(Http400, "storage_unreachable", bad)
             return
@@ -757,13 +757,19 @@ proc onRequest() {.raises: [], gcsafe.} =
         if not st.ok:
           problem(Http503, "store_" & st.error, "the object store is not ready: " & st.error)
           return
-        let cl = newHttpClient(timeout = 60000)
-        defer: cl.close()
-        let got = cl.request(st.url("GET", wanted.key, getExpires), httpMethod = HttpGet)
-        if got.code.int div 100 != 2:
-          problem(Http502, "storage_unreachable", "the store answered " & $got.code)
-          return
-        reply(Http200, got.body, ["Content-Type: application/octet-stream", "X-Artifact-Sha256: " & wanted.sha256])
+        # read from the store in blocks and passed on (the API answers with a string, so what is read is held: that is why the limit is small)
+        let be = st.backend()
+        var content = newStringOfCap(int(wanted.size))
+        var offset = 0'i64
+        while offset < wanted.size:
+          let part = be.readRange(wanted.key, offset, min(int64(readSize), wanted.size - offset))
+          if not part.res.ok:
+            problem(Http502, "storage_unreachable", part.res.error)
+            return
+          content.add part.data
+          offset += part.data.len
+          if part.data.len == 0: break
+        reply(Http200, content, ["Content-Type: application/octet-stream", "X-Artifact-Sha256: " & wanted.sha256])
       elif meth == "GET" and rest.len > 0:
         let run = coreRef.getRun(rest)
         if run != nil and not who.mayUseOrg(run{"organization"}.getStr):

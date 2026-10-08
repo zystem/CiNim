@@ -1,6 +1,6 @@
 ## The object store of the shard (DAT-003, D-46): the settings, the paths and keys of artifacts, what a step declared.
 import std/[unittest, strutils]
-import core/objectstore
+import core/[objectstore, s3backend, artifactingest]
 
 suite "DAT-003 the object store's rules":
   test "DAT-003 the settings are checked before they are kept":
@@ -32,3 +32,18 @@ suite "DAT-003 the object store's rules":
     check not hasArtifacts("")
     check not hasArtifacts("{broken")
     check not hasArtifacts("""{"artifacts":"x"}""")
+
+suite "DAT-003 the S3 backend's pieces and the step's rights":
+  test "DAT-003 the body of CompleteMultipartUpload lists the parts in order with quoted ETags":
+    let x = completeXml(@[(1, "\"aa\""), (2, "bb")])
+    check x == "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"aa\"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>\"bb\"</ETag></Part></CompleteMultipartUpload>"
+
+  test "DAT-003 the upload id and the error of a store's answer are read from its XML":
+    check tagText("<InitiateMultipartUploadResult><Bucket>b</Bucket><UploadId>abc123</UploadId></InitiateMultipartUploadResult>", "UploadId") == "abc123"
+    check tagText("<x/>", "UploadId") == ""
+    check s3Error(403, "<Error><Code>AccessDenied</Code><Message>no</Message></Error>") == "the store answered 403 AccessDenied: no"
+    check s3Error(500, "") == "the store answered 500"
+
+  test "DAT-003 a step may read what its download list names, a directory's contents included, and nothing else":
+    check coveredBy(@["dist"], "dist") and coveredBy(@["dist"], "dist/sub/a.txt")
+    check not coveredBy(@["dist"], "distribution/a") and not coveredBy(@["dist/a"], "dist/b") and not coveredBy(@[], "x")

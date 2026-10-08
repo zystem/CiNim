@@ -36,6 +36,7 @@ type
 
   Config* = object
     collectorAddr*, stepReportAddr*: string   ## where the shim in the Pod reaches core; both empty = no log streaming
+    artifactAddr*: string                     ## the core's ArtifactIngest (DAT-003); empty = the Pod gets no address and a step with artifacts fails
     logSpoolBytes*, logHoldTimeout*: int
     retentionRead*: int                       ## seconds a finished Pod is kept when its result and its log are both read (0: removed at once)
     retentionUnread*: int                     ## seconds it is kept when they are not (log not delivered, end unknown): 14 days
@@ -61,6 +62,7 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
               "--run-id", r.runId, "--step-seq", $r.seq, "--step-attempt", $r.attempt,
               "--log-spool-dir", "/cicd/spool", "--log-spool-bytes", $spool,
               "--log-hold-timeout", $hold]
+  if cfg.artifactAddr.len > 0: cmd.add @["--artifact-addr", cfg.artifactAddr]
   if r.logMaxBytes > 0: cmd.add @["--log-max-bytes", $r.logMaxBytes]
   if r.optsJson.len > 0: cmd.add @["--opts-json", r.optsJson]          # validated by the Lua sandbox, holds no secret values
   # the values are fetched by the shim from core with the step's own credential; the Pod's specification holds the names (as placeholders) and the credential

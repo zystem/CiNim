@@ -1,12 +1,18 @@
-## The artifacts of a step (DAT-003, docs/artifacts.md), the shim's part: find the files, hash them, and put or get them with the short-lived URLs core
-## gives. The shim has no key for the store and no TLS client (a static binary of about a megabyte): the URLs are plain `http://` inside the cluster, and the
-## transfer is a small HTTP/1.1 client over a socket that streams the file in blocks, so a big artifact is not held in memory.
-import std/[os, strutils, algorithm, net, uri, json, posix]
+## The artifacts of a step (DAT-003, docs/artifacts.md), the shim's part: find the files, hash them, read them in blocks, and keep a manifest of what is still
+## to be delivered. The blocks go to the core over the authenticated channel (logclient.nim, like the log); the shim knows nothing of the store.
+##
+## The manifest (`artifacts.manifest` in the spool directory) lists what the command left and the core has not yet taken. It is what makes the spool fallback
+## possible: when the core cannot be reached the shim ends with `artifacts_undelivered`, the Pod stays with its workspace, and the job controller, when the
+## core orders it, reads the files out through `exec` (`cicd-shim --read-artifact`, below in shim.nim) and hands them to the core's ArtifactIngest with the
+## step's own credential, then removes the manifest (`--ack-artifacts`).
+import std/[os, strutils, algorithm, json]
 import checksums/sha2
 
 const
   blockSize = 64 * 1024
   maxFiles* = 1000
+  partSize* = 8 * 1024 * 1024         ## a block of an upload: the same as core/storagebackend.nim's
+  readSize* = 4 * 1024 * 1024         ## a block of a download
 
 # ------------------------------------------------------------------ patterns
 
@@ -85,120 +91,29 @@ proc fileSha256*(path: string): string =
     st.update(buf.toOpenArray(0, n - 1))
   for c in st.digest(): result.add toHex(ord(c), 2).toLowerAscii
 
-# ------------------------------------------------------------------ the transfer
+proc readBlock*(path: string; offset, length: int64): string =
+  ## `length` bytes of the file from `offset` (fewer at its end)
+  var f = open(path, fmRead)
+  defer: f.close()
+  f.setFilePos(offset)
+  result = newString(int(length))
+  let n = f.readBuffer(addr result[0], int(length))
+  result.setLen(n)
 
-type Transfer* = object
-  ok*: bool
-  status*: int
-  detail*: string
+type ManifestFile* = object
+  path*: string
+  size*: int64
+  sha256*: string
 
-proc readSome*(s: Socket; buf: pointer; size, timeoutMs: int): int =
-  ## what has arrived, at most `size` bytes, waiting at most `timeoutMs` for the first of it (std/net's `recv` with a timeout insists on all `size` bytes)
-  var pfd = TPollfd(fd: cint(s.getFd()), events: POLLIN)
-  let r = poll(addr pfd, 1, cint(timeoutMs))
-  if r == 0: raise newException(IOError, "the store did not answer in time")
-  if r < 0: raise newException(IOError, "waiting for the store failed")
-  s.recv(buf, size)
+proc writeManifest*(path: string; files: seq[ManifestFile]) =
+  var a = newJArray()
+  for f in files: a.add %*{"path": f.path, "size": f.size, "sha256": f.sha256}
+  writeFile(path & ".tmp", $a)
+  moveFile(path & ".tmp", path)
 
-proc connect(u: Uri; timeoutMs: int): Socket =
-  if u.scheme != "http": raise newException(IOError, "only http:// URLs are supported by the shim (the store is inside the cluster)")
-  result = newSocket(buffered = false)    # an unbuffered socket: recv with a timeout returns what has arrived, a buffered one waits for the whole block
-  try: result.connect(u.hostname, Port(if u.port.len > 0: parseInt(u.port) else: 80), timeout = timeoutMs)
-  except CatchableError: result.close(); raise
-
-proc target(u: Uri): string =
-  ## the request target exactly as the URL has it: the signature covers the encoded path
-  result = if u.path.len > 0: u.path else: "/"
-  if u.query.len > 0: result.add "?" & u.query
-
-proc readHead(s: Socket; timeoutMs: int): tuple[status: int; headers: seq[(string, string)]; rest: string] =
-  var head = ""
-  var buf = newString(4096)
-  while "\r\n\r\n" notin head:
-    let n = s.readSome(addr buf[0], buf.len, timeoutMs)
-    if n <= 0: raise newException(IOError, "the store closed the connection")
-    head.add buf[0 ..< n]
-    if head.len > 65536: raise newException(IOError, "the store's answer has no end of headers")
-  let cut = head.find("\r\n\r\n")
-  result.rest = head[cut + 4 .. ^1]
-  let lines = head[0 ..< cut].split("\r\n")
-  let parts = lines[0].split(' ')
-  result.status = if parts.len >= 2: (try: parseInt(parts[1]) except ValueError: 0) else: 0
-  for l in lines[1 .. ^1]:
-    let c = l.find(':')
-    if c > 0: result.headers.add (l[0 ..< c].toLowerAscii, l[c + 1 .. ^1].strip)
-
-proc header(h: seq[(string, string)]; name: string): string =
-  for (k, v) in h:
-    if k == name: return v
-
-proc sendAll(s: Socket; buf: pointer; n: int) =
-  var sent = 0
-  while sent < n:
-    let k = s.send(cast[pointer](cast[int](buf) + sent), n - sent)
-    if k <= 0: raise newException(IOError, "the connection to the store broke")
-    sent += k
-
-proc putFile*(url, path: string; timeoutMs = 60000): Transfer =
-  ## PUT of one file, streamed; the store must answer 2xx
+proc readManifest*(path: string): seq[ManifestFile] =
+  if not fileExists(path): return
   try:
-    let u = parseUri(url)
-    let size = getFileSize(path)
-    let s = connect(u, 10000)
-    defer: s.close()
-    let hostHeader = u.hostname & (if u.port.len > 0: ":" & u.port else: "")
-    s.send("PUT " & target(u) & " HTTP/1.1\r\nHost: " & hostHeader & "\r\nContent-Length: " & $size & "\r\nConnection: close\r\n\r\n")
-    var f = open(path, fmRead)
-    defer: f.close()
-    var buf = newString(blockSize)
-    while true:
-      let n = f.readBuffer(addr buf[0], blockSize)
-      if n <= 0: break
-      s.sendAll(addr buf[0], n)
-    let head = s.readHead(timeoutMs)
-    result.status = head.status
-    result.ok = head.status div 100 == 2
-    if not result.ok: result.detail = "the store answered " & $head.status
-  except CatchableError as e:
-    result.detail = e.msg
-
-proc getFile*(url, dest: string; expectSize: int64; timeoutMs = 60000): Transfer =
-  ## GET into `dest` (through a `.part` file, so a cut transfer leaves nothing that looks whole); the size must be what core said
-  try:
-    let u = parseUri(url)
-    let s = connect(u, 10000)
-    defer: s.close()
-    let hostHeader = u.hostname & (if u.port.len > 0: ":" & u.port else: "")
-    s.send("GET " & target(u) & " HTTP/1.1\r\nHost: " & hostHeader & "\r\nConnection: close\r\n\r\n")
-    let head = s.readHead(timeoutMs)
-    result.status = head.status
-    if head.status div 100 != 2:
-      result.detail = "the store answered " & $head.status
-      return
-    if head.headers.header("transfer-encoding").len > 0:
-      result.detail = "the store answered with a chunked body, which the shim does not read"
-      return
-    let want = try: parseBiggestInt(head.headers.header("content-length")) except ValueError: -1
-    if want != expectSize:
-      result.detail = "the store says " & $want & " bytes, core said " & $expectSize
-      return
-    createDir(parentDir(dest))
-    let part = dest & ".part"
-    var f = open(part, fmWrite)
-    var got = int64(head.rest.len)
-    if head.rest.len > 0: f.write head.rest
-    var buf = newString(blockSize)
-    while got < want:
-      let n = s.readSome(addr buf[0], min(blockSize, int(want - got)), timeoutMs)
-      if n <= 0: break
-      discard f.writeBuffer(addr buf[0], n)
-      got += n
-    f.close()
-    if got != want:
-      removeFile(part)
-      result.detail = "the transfer ended after " & $got & " of " & $want & " bytes"
-      return
-    moveFile(part, dest)
-    result.ok = true
-  except CatchableError as e:
-    result.detail = e.msg
+    for f in parseJson(readFile(path)):
+      result.add ManifestFile(path: f{"path"}.getStr, size: f{"size"}.getBiggestInt, sha256: f{"sha256"}.getStr)
+  except CatchableError: discard

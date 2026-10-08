@@ -16,9 +16,7 @@ message StepReport {
   bytes outputs_digest = 7;          // SHA-256 over the canonical outputs
   Failure failure = 8;
   string state_json = 9;             // the shim's final state, the same JSON as its last Pod-log line (D-29)
-  string request = 10;               // "" = a report; "secrets" = the shim asks for the values of the step's secrets, with `job_token` as the credential;
-                                     // "artifacts" = the shim asks for URLs to put or get the step's artifacts, `request_json` says which (core/objectstore.nim)
-  string request_json = 11;          // {"op": "put" | "done" | "get", "files": [{"path", "size", "sha256"}], "names": [...]}
+  string request = 10;               // "" = a report; "secrets" = the shim asks for the values of the step's secrets, with `job_token` as the credential
 }
 
 message StepSecret {
@@ -34,6 +32,49 @@ message StepReportAck {
   // termination message are only the fallback for a core that cannot be reached.
   bool may_exit = 4;                 // the result is recorded (or the attempt is superseded): the shim may now exit
   string disposition = 5;            // recorded | superseded | retry_later
-  string answer_json = 7;            // the answer to request = "artifacts": {"urls": [...]} / {"stored": n} / {"files": [...]}; `failure` says why there is none
   repeated StepSecret secrets = 6;   // the answer to request = "secrets": the step's secrets, decrypted; `failure` says why there are none (bad_token, not_current, unknown_secret)
+}
+
+// ArtifactIngest (DAT-003, core/artifactingest.nim): the artifacts of a step go to the core and come from it over this channel, like the log (logs.proto), in
+// blocks, each request answered. The step's own credential (`job_token`, as for its secrets) authorises it; core allows only what the step's options declared,
+// in the step's own run. The sender is the shim, or the job controller on the shim's behalf when it drains a Pod through exec (the spool fallback, D-33): the
+// requests are the same. The store is behind the core (core/storagebackend.nim); nothing here says which store it is, so the module that talks to it can move out.
+message ArtifactPart {
+  uint32 part = 1;                   // from 1
+  string etag = 2;                   // what the store answered for that part
+}
+
+message ArtifactFile {
+  string path = 1;
+  uint64 size = 2;
+  string sha256 = 3;                 // hex
+}
+
+message ArtifactRequest {
+  Header header = 1;
+  StepRef step = 2;
+  string job_token = 3;
+  // put_object (a file of at most one block: `data`), put_begin (a bigger one: starts a multipart upload), put_part, put_end (`parts` in order),
+  // put_abort, get_list (`names` of the step's download list; answers with `files`), get_block (`path`, `offset`, `length`: one block of a stored artifact)
+  string op = 4;
+  string path = 5;
+  uint64 size = 6;                   // of the whole file, for put_object and put_begin
+  string sha256 = 7;                 // of the whole file; core keeps it and a reader checks it
+  string upload_id = 8;              // put_part, put_end, put_abort: what put_begin answered
+  uint32 part = 9;                   // put_part
+  repeated ArtifactPart parts = 10;  // put_end
+  uint64 offset = 11;                // get_block
+  uint32 length = 12;                // get_block
+  bytes data = 13;                   // put_object, put_part
+  repeated string names = 14;        // get_list
+}
+
+message ArtifactAck {
+  Header header = 1;
+  bool accepted = 2;
+  Failure failure = 3;               // bad_token, not_current, not_declared, bad_path, too_big, artifact_missing, store_not_configured, store_unavailable (the same call may work later)
+  string upload_id = 4;              // put_begin
+  string etag = 5;                   // put_part
+  bytes data = 6;                    // get_block
+  repeated ArtifactFile files = 7;   // get_list
 }

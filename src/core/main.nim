@@ -5,7 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/rqlite
-import apiauth, schema, scheduler, triggers, api, logcollector, logcircuit, loggate, routerclient, orgrules
+import apiauth, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules
 
 if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token-reset`: a lost administrator token is made again (IAM-003, core/apiauth.nim); the new
@@ -23,6 +23,7 @@ let
   apiPort = parseInt(getEnv("CINIM_API_PORT", "18081"))
   stepReportPort = parseInt(getEnv("CINIM_STEPREPORT_PORT", "19742"))
   logIngestPort = parseInt(getEnv("CINIM_LOGINGEST_PORT", "19743"))
+  artifactPort = parseInt(getEnv("CINIM_ARTIFACTINGEST_PORT", "19744"))
   vlagentUrl = getEnv("CINIM_VLAGENT_URL", "http://127.0.0.1:19429/insert/jsonline")
   # one VictoriaLogs node URL, or several separated by commas, in the same order as vlagent's remoteWrite list
   # (vlagent labels its per-destination queues by that position); reads still go to the first node
@@ -59,6 +60,7 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
       for _ in 0 ..< 50:
         if stopServers.load: break
         sleep 100
+proc runArtifactIngest(a: tuple[rqliteUrl, certs: string, port: int]) {.thread.} = serveArtifactIngest(a.rqliteUrl, a.certs, a.port)
 proc runLogGate(a: tuple[w: Watch, stop: ptr Atomic[bool]]) {.thread.} = serveLogGate(a.w, a.stop)
 
 proc runRouterClient(a: tuple[rqliteUrl: string]) {.thread.} =
@@ -122,12 +124,14 @@ proc main() =
   createThread(logIngestThread, runLogIngest,
     (Collector(rqliteUrl: rqliteUrl, vlagentUrl: vlagentUrl), certs, logIngestPort))
   createThread(stepReportThread, runStepReport, (rqliteUrl, certs, stepReportPort, profileId))
+  var artifactThread: Thread[tuple[rqliteUrl, certs: string, port: int]]
+  createThread(artifactThread, runArtifactIngest, (rqliteUrl, certs, artifactPort))
   var triggerThread: Thread[tuple[co: Core, stop: ptr Atomic[bool]]]
   createThread(triggerThread, runTriggerLoop, (co, addr stopServers))
   var watchdogThread: Thread[tuple[rqliteUrl, profileId: string, startedAt: int64]]
   createThread(watchdogThread, runWatchdog, (rqliteUrl, profileId, getTime().toUnix()))
   echo "core: ControllerAttach on ", controllerPort, ", ExecutorChannel on ", executorPort,
-       ", LogIngest on ", logIngestPort, ", StepReport on ", stepReportPort, ", API on ", apiPort
+       ", LogIngest on ", logIngestPort, ", ArtifactIngest on ", artifactPort, ", StepReport on ", stepReportPort, ", API on ", apiPort
   serveApi(co, apiPort)   # returns immediately: GuildenStern runs its own thread pool (D-25)
   # GuildenStern installs its own SIGTERM/SIGINT handler that only stops *its* threads, and the loop that
   # used to sit here (`while true: sleep`) never noticed - so the process ignored SIGTERM and a supervisor
@@ -144,6 +148,7 @@ proc main() =
   joinThread(logIngestThread)
   joinThread(watchdogThread)
   joinThread(triggerThread)
+  joinThread(artifactThread)
   joinVault()
   if not launchGateOff: joinThread(gateThread)
   if routerUrl.len > 0: joinThread(routerThread)

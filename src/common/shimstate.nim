@@ -104,7 +104,7 @@ func outcomeOf*(s: ShimState): Outcome =
   of "terminated": oUnknown
   of "ok": oSucceeded
   of "": (if s.cmdExit.isSome and s.phase == spDraining: (if s.cmdExit.get == 0: oSucceeded else: oFailed) else: oNone)
-  of "logs_undelivered": (if s.cmdExit.get(1) == 0: oSucceeded else: oFailed)    # the result stands, the log is incomplete
+  of "logs_undelivered", "artifacts_undelivered": (if s.cmdExit.get(1) == 0: oSucceeded else: oFailed)    # the result stands, the log or the artifacts are incomplete
   else: oFailed
 
 func stepStateOf*(s: ShimState): StepState =

@@ -309,7 +309,7 @@ proc finalizeFromShim*(c: var RqClient; profileId, runId: string; seq, attempt: 
   ## command's own result.
   let exitCode =
     case s.reason
-    of "ok", "failed", "logs_undelivered": s.cmdExit.get(s.exitCode.get(1))     # the command's own result
+    of "ok", "failed", "logs_undelivered", "artifacts_undelivered": s.cmdExit.get(s.exitCode.get(1))     # the command's own result
     else: max(1, s.exitCode.get(1))             # timeout, env_rejected, secret_in_output, shim_error: the shim's verdict, never 0
   if s.reason == "terminated":
     # The shim was stopped from outside (SIGTERM). Who stopped it decides whose fault it is, and the shim cannot know: a node drain or a

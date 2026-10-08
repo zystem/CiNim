@@ -20,6 +20,13 @@ suite "DAT-003 SigV4 presigned URLs":
     check a.startsWith("http://s:1/b/dir/a%20b/%C3%A9.txt?")
     check a == presignObject("GET", "http://s:1", "b", "dir/a b/é.txt", "r", "K", "S", 5, 60)
 
+  test "DAT-003 the parameters of a multipart request are part of what is signed, in the sorted order":
+    let a = presignObject("PUT", "http://g:1", "b", "k", "r", "K", "S", 5, 60, [("uploadId", "U1"), ("partNumber", "2")])
+    check "partNumber=2&uploadId=U1" in a
+    check a.find("X-Amz-SignedHeaders=host") < a.find("X-Amz-Signature=")
+    check a.split("X-Amz-Signature=")[1] != presignObject("PUT", "http://g:1", "b", "k", "r", "K", "S", 5, 60, [("uploadId", "U1"), ("partNumber", "3")]).split("X-Amz-Signature=")[1]
+    check "uploads=" in presignObject("POST", "http://g:1", "b", "k", "r", "K", "S", 5, 60, [("uploads", "")])
+
   test "DAT-003 the endpoint is a scheme and a host, nothing else":
     check splitEndpoint("http://garage:3900").host == "garage:3900"
     check splitEndpoint("https://s3.example.com/").host == "s3.example.com"

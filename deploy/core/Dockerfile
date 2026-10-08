@@ -5,5 +5,5 @@ COPY core-static /core
 COPY executor-static /executor
 COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65532:65532
-EXPOSE 18081 19740 19741 19742 19743
+EXPOSE 18081 19740 19741 19742 19743 19744
 ENTRYPOINT ["/core"]

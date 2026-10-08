@@ -95,6 +95,7 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
     %*{"name": "CINIM_CORE_ADDR", "value": coreAddress(cfg, 19740)},
     %*{"name": "CINIM_COLLECTOR_ADDR", "value": coreAddress(cfg, 19743)},
     %*{"name": "CINIM_STEPREPORT_ADDR", "value": coreAddress(cfg, 19742)},
+    %*{"name": "CINIM_ARTIFACTINGEST_ADDR", "value": coreAddress(cfg, 19744)},
     %*{"name": "CINIM_CERTS", "value": "/etc/cinim"},
     %*{"name": "CINIM_STATE_DIR", "value": "/state"},
     %*{"name": "CINIM_BOOTSTRAP_FILE", "value": "/etc/cinim/bootstrap/token"}]
@@ -151,11 +152,8 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
          {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
                   "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
           "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
-         {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}]},
-         # the object store of the shard (DAT-003, deploy/examples/garage): a step puts and gets its artifacts with URLs that core signs
-         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": cfg.shardNamespace}},
-                  "podSelector": {"matchLabels": {"app": "garage"}}}],
-          "ports": [{"protocol": "TCP", "port": 3900}]}]}},
+         # 19744: the artifacts of a step go to the core and come from it (DAT-003); the store itself is not reachable from a step Pod
+         {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}, {"protocol": "TCP", "port": 19744}]}]}},
     %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "controller-no-ingress", ns),
        "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": controllerName}}, "policyTypes": ["Ingress"]}}]
   # the simple mode: one more policy each, which adds to the default-deny (policies are only ever added together), for every step Pod. The
