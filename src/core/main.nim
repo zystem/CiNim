@@ -5,7 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/rqlite
-import apiauth, schema, scheduler, api, logcollector, logcircuit, loggate, routerclient, orgrules
+import apiauth, schema, scheduler, triggers, api, logcollector, logcircuit, loggate, routerclient, orgrules
 
 if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token-reset`: a lost administrator token is made again (IAM-003, core/apiauth.nim); the new
@@ -122,6 +122,8 @@ proc main() =
   createThread(logIngestThread, runLogIngest,
     (Collector(rqliteUrl: rqliteUrl, vlagentUrl: vlagentUrl), certs, logIngestPort))
   createThread(stepReportThread, runStepReport, (rqliteUrl, certs, stepReportPort, profileId))
+  var triggerThread: Thread[tuple[co: Core, stop: ptr Atomic[bool]]]
+  createThread(triggerThread, runTriggerLoop, (co, addr stopServers))
   var watchdogThread: Thread[tuple[rqliteUrl, profileId: string, startedAt: int64]]
   createThread(watchdogThread, runWatchdog, (rqliteUrl, profileId, getTime().toUnix()))
   echo "core: ControllerAttach on ", controllerPort, ", ExecutorChannel on ", executorPort,
@@ -141,6 +143,7 @@ proc main() =
   joinThread(stepReportThread)
   joinThread(logIngestThread)
   joinThread(watchdogThread)
+  joinThread(triggerThread)
   joinVault()
   if not launchGateOff: joinThread(gateThread)
   if routerUrl.len > 0: joinThread(routerThread)

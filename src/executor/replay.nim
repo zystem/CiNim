@@ -25,13 +25,15 @@ type
     message*: string
     value*: string
 
-const hostKinds = ["now", "random", "sh", "sleep", "job_sh"]
+const hostKinds = ["now", "random", "sh", "sleep", "job_sh", "params"]
 
 proc failed(code, msg: string): ExecResult =
   ExecResult(status: esFailed, code: code, message: msg)
 
 proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
-              onAppend: proc (e: Entry) = nil; maxEntries = 100_000; runId = ""): ExecResult =
+              onAppend: proc (e: Entry) = nil; maxEntries = 100_000; runId = "";
+              params: seq[(string, string)] = @[]): ExecResult =
+  ## `params` are the launch parameters given when the run was created, as text.
   ## `runId` is passed to a real (`ci.pipeline`) script's `main(run)` as `run.run_id` (`lua/stdlib/cicd.d.lua`'s `Run` is a bigger table; only `run_id` exists so far). A script that
   ## returns a plain value directly, as the sandbox test fixtures do, ignores the extra argument.
   if not j.verify():
@@ -49,6 +51,12 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
   lua_createtable(co, 0, 1)
   discard lua_pushstring(co, runId.cstring)
   lua_setfield(co, -2, "run_id")
+  # the launch parameters as text, for the bootstrap to check against the script's declarations (PIP-012); it removes this field before `main` runs
+  lua_createtable(co, 0, cint(params.len))
+  for (k, v) in params:
+    discard lua_pushlstring(co, v.cstring, csize_t(v.len))
+    lua_setfield(co, -2, k.cstring)
+  lua_setfield(co, -2, "__given")
 
   var nargs = 2.cint
   var seq = 0

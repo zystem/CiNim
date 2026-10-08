@@ -32,6 +32,7 @@ type
     logHoldTimeout*: int                 ## per-step values from the profile; 0 = the controller's own defaults
     secretNames*: seq[string]            ## the secrets the step asked for (core/stepsecrets.nim)
     stepToken*: string                   ## the step's credential for fetching them from core
+    env*: seq[(string, string)]          ## the run's launch parameters as plain environment variables (VAR-002)
 
   Config* = object
     collectorAddr*, stepReportAddr*: string   ## where the shim in the Pod reaches core; both empty = no log streaming
@@ -67,7 +68,7 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
-             spoolBytes: spool, build: r.profile == "build", secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
+             spoolBytes: spool, build: r.profile == "build", env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds

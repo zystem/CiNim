@@ -68,6 +68,7 @@ message LeaseGranted {
   bool more = 4;
   string script = 5;                  // the run's Lua source, sent with the lease (there is no
                                        // pipeline_bundles/blob storage yet, spec 8.2 pipeline_bundles.digest)
+  map<string, string> params = 7;    // the launch parameters given when the run was created (PIP-012), as text; the script's declarations type and complete them
   string run_id = 6;                  // which run this lease is for (echoes a non-empty request, or
                                        // resolves "any available run")
 }

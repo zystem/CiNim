@@ -213,7 +213,8 @@ proc main() =
           let made = startPod(be, st, cfg, StartRequest(runId: s.step.run_id, seq: int(s.step.seq), attempt: int(s.step.attempt),
             image: s.image, command: s.command, logMaxBytes: s.log_max_bytes, optsJson: s.opts_json,
             logSpoolBytes: s.log_spool_bytes, logHoldTimeout: int(s.log_hold_timeout_seconds), profile: s.profile,
-            secretNames: s.secret_names, stepToken: s.step_token), int64(epochTime()))
+            secretNames: s.secret_names, stepToken: s.step_token,
+            env: s.env.mapIt((it.key, it.value))), int64(epochTime()))
           case made.kind
           of ckQuota:
             # the namespace's quota is used up (or the API server asks to slow down): not the step's fault and it passes - back to the queue,

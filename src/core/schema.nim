@@ -40,6 +40,15 @@ const ddl = [
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, bundle_id TEXT,
        trigger_id TEXT, parent_run_id TEXT, state TEXT NOT NULL, actor_id TEXT,
        version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+  # the triggers of an organisation (6.3, core/triggers.nim): a stored way to start a run, by the clock (`schedule`), by a call with the trigger's own secret (`webhook`),
+  # or by hand; `secret_hash` is the SHA-256 of the webhook's secret (shown once)
+  """CREATE TABLE IF NOT EXISTS triggers (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, schedule TEXT NOT NULL DEFAULT '',
+       secret_hash TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL, script TEXT NOT NULL, params TEXT NOT NULL DEFAULT '',
+       concurrency TEXT NOT NULL DEFAULT 'allow', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+       last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '')""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS triggers_tenant_name ON triggers (tenant_id, name)",
+  "CREATE INDEX IF NOT EXISTS runs_trigger ON runs (trigger_id, state)",
   "CREATE INDEX IF NOT EXISTS runs_project_created ON runs (project_id, created_at)",
   """CREATE TABLE IF NOT EXISTS run_journal (
        run_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -117,6 +126,7 @@ proc migrate*(c: var RqClient) =
       ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
       ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
       ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
+      ("runs", "params", "TEXT NOT NULL DEFAULT ''"),         # the launch parameters: a JSON object of text values, at most 4 KiB (VAR-002, core/runparams.nim)
       ("runs", "profile_id", "TEXT NOT NULL DEFAULT ''"),     # the execution profile of the run's organisation (SHD-007)
       ("execution_profiles", "infra_retries", "INTEGER NOT NULL DEFAULT 3"),
       ("execution_profiles", "log_max_bytes", "INTEGER NOT NULL DEFAULT 1073741824"),
@@ -225,6 +235,7 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
   if o.id.len > 0:
     discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id]])
+    discard c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM org_keys WHERE tenant_id = ?", o.id]])
   discard c.execute(%*[["DELETE FROM organizations WHERE slug = ?", slug]])
 

@@ -3,6 +3,7 @@
 ## the API server; the tests use a fake, so the decisions (verdicts, timeouts, adoption after a restart, orphan sweeps,
 ## retention) are tested without a cluster. Could later become a separate process if the C client has to be isolated.
 import std/[json, strutils]
+import ../common/envname
 
 type
   PodRequest* = object
@@ -12,6 +13,7 @@ type
     logging*: bool               ## the shim streams logs: it needs the spool volume and the CURVE keys
     spoolBytes*: int
     secrets*: seq[string]        ## the names of the step's secrets: the Pod's environment holds a placeholder for each, the shim fetches the values from core
+    env*: seq[(string, string)]  ## plain environment of the step: the run's launch parameters (VAR-002); never a secret
     build*: bool                 ## a step of the build profile: the adapter makes a build Pod of it (podsec.nim, D-42)
 
   PodSummary* = object
@@ -55,3 +57,10 @@ func classifyCreateFailure*(code: int; reason, message: string): CreateOutcome =
     CreateOutcome(kind: ckQuota, reason: reason, message: message)
   else:
     CreateOutcome(kind: ckRejected, reason: reason, message: message)
+
+func podEnv*(r: PodRequest): seq[(string, string)] =
+  ## The container's environment: the run's launch parameters as they are, and for each secret the placeholder the shim replaces with the value it
+  ## fetches from core (the Pod's specification holds no secret value). A secret of the same name as a parameter wins.
+  for (n, v) in r.env:
+    if n notin r.secrets: result.add (n, v)
+  for n in r.secrets: result.add (n, stepSecretPlaceholder(n))

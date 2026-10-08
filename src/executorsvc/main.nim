@@ -1,7 +1,7 @@
 ## Pipeline executor (RUN-008, PIP-003/004): wraps src/executor/{sandbox,journal,replay} behind the
 ## ExecutorChannel client (D-24: ZeroMQ+CURVE). One run leased at a
 ## time (RUN-009 density is not implemented yet).
-import std/[os, options, strutils, times]
+import std/[os, options, strutils, times, sequtils]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/zmqcurve
@@ -34,15 +34,15 @@ proc toJournal(entries: seq[JournalEntry]): Journal =
   for e in entries:
     discard result.append(e.kind, cast[string](e.payload), cast[string](e.result))
 
-proc leaseAny(s: ZConnection): Option[tuple[runId, token, script: string, journal: Journal]] =
+proc leaseAny(s: ZConnection): Option[tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)]]] =
   let resp = s.rpc(ExecutorRequest(header: Header(protocol: 1),
     body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.lease,
       lease: LeaseRequest(run_id: "", executor_id: executorId))))
-  if resp.body.kind != ExecutorResponseBodyKind.lease: return none(tuple[runId, token, script: string, journal: Journal])
+  if resp.body.kind != ExecutorResponseBodyKind.lease: return none(tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)]])
   let g = resp.body.lease
-  some (g.run_id, g.lease_token, g.script, toJournal(g.journal))
+  some (g.run_id, g.lease_token, g.script, toJournal(g.journal), g.params.mapIt((it.key, it.value)))
 
-proc runOnce(s: ZConnection; runId, token, script: string; j: Journal) =
+proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: seq[(string, string)]) =
   var sb = newSandbox()
   var jj = j
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
@@ -57,7 +57,7 @@ proc runOnce(s: ZConnection; runId, token, script: string; j: Journal) =
     let r = resp.body.result
     if r.suspended: return none(string)
     some(cast[string](r.result))
-  let r = replay.execute(sb, jj, script, host, runId = runId)
+  let r = replay.execute(sb, jj, script, host, runId = runId, params = params)
   let finalState = case r.status
     of esDone: RUN_STATE_SUCCEEDED
     of esFailed: RUN_STATE_FAILED
@@ -75,7 +75,7 @@ proc main() =
   var core = connectCore()
   echo "executor: connected as ", executorId
   while true:
-    var leased: Option[tuple[runId, token, script: string, journal: Journal]]
+    var leased: Option[tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)]]]
     try:
       leased = leaseAny(core)
     except CatchableError as e:
@@ -88,9 +88,9 @@ proc main() =
     if leased.isNone:
       sleep 1000
       continue
-    let (runId, token, script, j) = leased.get
+    let (runId, token, script, j, params) = leased.get
     try:
-      runOnce(core, runId, token, script, j)
+      runOnce(core, runId, token, script, j, params)
     except CatchableError as e:
       stderr.writeLine "executor: run " & runId & " crashed: " & e.msg
       try: core.close() except CatchableError: discard       # a half-finished request/reply may be pending on this socket

@@ -111,17 +111,17 @@ local ci = {}
 ---@param spec PipelineSpec
 ---@return PipelineSpec
 function ci.pipeline(spec) end
----@param opts? {default?:string, description?:string, pattern?:string}
+---@param opts? {default?:string, required?:boolean, description?:string, max_length?:integer, pattern?:string}   # pattern: a Lua pattern matched against the whole value
 ---@return Param
 function ci.string(opts) end
----@param opts? {default?:number, description?:string, min?:number, max?:number}
+---@param opts? {default?:number, required?:boolean, description?:string, min?:number, max?:number, integer?:boolean}
 ---@return Param
 function ci.number(opts) end
----@param opts? {default?:boolean, description?:string}
+---@param opts? {default?:boolean, required?:boolean, description?:string}
 ---@return Param
 function ci.bool(opts) end
 ---@param values string[]
----@param opts? {default?:string, description?:string}
+---@param opts? {default?:string, required?:boolean, description?:string}
 ---@return Param
 function ci.choice(values, opts) end
 ---@param element Param

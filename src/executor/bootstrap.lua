@@ -103,17 +103,6 @@ end
 local yield_, running = coroutine.yield, coroutine.running
 local state = {}
 
--- `run` is the argument for a real (`ci.pipeline`) script's `main(run)`; a script that returns a
--- plain value directly, as the sandbox test fixtures do, is unaffected.
-local function run_main(fn, run)
-  state.main = running()
-  local v = fn()
-  if type(v) == "table" and type(rawget(v, "main")) == "function" then
-    return v.main(run)
-  end
-  return v
-end
-
 local function call(kind, payload)
   if running() ~= state.main then
     error("ci." .. kind .. ": host calls are not supported inside nested coroutines", 3)
@@ -328,6 +317,134 @@ local Job_mt = { __index = {
   end,
 } }
 
+-- Launch parameters (PIP-012, VAR-002). The script declares them in `ci.pipeline{ params = { NAME = ci.string{...}, ... } }`; the names are the names of
+-- environment variables (VAR-003). The values given when the run was started arrive as text (`given`); they are checked against the declarations and
+-- completed with the defaults, and the result is journaled once, as a `params` host call: core keeps it with the run and gives it to every step as
+-- ordinary environment variables, and a replay gets the same values from the journal. `run.params` holds them typed.
+local PARAM_KINDS = { string = true, number = true, bool = true, choice = true }
+local PARAM_FIELDS = {
+  string = { default = true, required = true, max_length = true, pattern = true, description = true },
+  number = { default = true, required = true, min = true, max = true, integer = true, description = true },
+  bool = { default = true, required = true, description = true },
+  choice = { default = true, required = true, description = true },
+}
+local PARAM_MAX_VALUE, PARAM_MAX_TOTAL, PARAM_MAX_COUNT = 1024, 4096, 64
+
+-- `ci.string{...}`, `ci.number{...}`, `ci.bool{...}`, and `ci.choice({"a", "b"}, {...})` as in the API v1 signatures (lua/stdlib/cicd.d.lua)
+local function param_ctor(kind)
+  return function(a, b)
+    local spec, choices = a, nil
+    if kind == "choice" then
+      choices, spec = a, b
+      if type(choices) ~= "table" or rawlen(choices) == 0 or rawlen(choices) > 64 then error("ci.choice: the first argument is a list of 1..64 strings", 2) end
+      for i = 1, rawlen(choices) do
+        if type(choices[i]) ~= "string" or #choices[i] == 0 or #choices[i] > PARAM_MAX_VALUE then error("ci.choice: the choices are non-empty strings", 2) end
+      end
+    end
+    if spec == nil then spec = {} end
+    if type(spec) ~= "table" then error("ci." .. kind .. ": a table of options expected", 2) end
+    for k in rawnext, spec do
+      if not PARAM_FIELDS[kind][k] then error("ci." .. kind .. ": unknown field '" .. tostring_(k) .. "'", 2) end
+    end
+    if spec.required ~= nil and type(spec.required) ~= "boolean" then error("ci." .. kind .. ": required must be a boolean", 2) end
+    if spec.pattern ~= nil then
+      if type(spec.pattern) ~= "string" or #spec.pattern > 128 or not pcall(string.find, "", spec.pattern) then error("ci.string: pattern must be a valid Lua pattern of at most 128 characters", 2) end
+    end
+    return { __param = kind, spec = spec, choices = choices }
+  end
+end
+
+local function param_text(kind, v)
+  if kind == "bool" then return v and "true" or "false" end
+  if kind == "number" then
+    if mtype(v) == "integer" then return format_("%d", v) end
+    return format_("%.14g", v)
+  end
+  return tostring_(v)
+end
+
+-- the text form of a value of the declared kind, or nil and the reason; `what` names the parameter in messages
+local function param_check(name, d, text)
+  local kind, sp = d.__param, d.spec
+  if #text > PARAM_MAX_VALUE then return nil, "parameter " .. name .. " is longer than " .. PARAM_MAX_VALUE .. " bytes" end
+  if text:find("[%c]") then return nil, "parameter " .. name .. " has a control character" end
+  if kind == "string" then
+    if sp.max_length and #text > sp.max_length then return nil, "parameter " .. name .. " is longer than " .. sp.max_length end
+    if sp.pattern and not text:find("^" .. sp.pattern .. "$") then return nil, "parameter " .. name .. " does not match " .. sp.pattern end
+    return text
+  elseif kind == "number" then
+    local n = tonumber(text)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge or not text:match("^%s*%-?[%d%.eE%+%-]+%s*$") then
+      return nil, "parameter " .. name .. " must be a number"
+    end
+    if sp.integer then
+      if n ~= math.floor(n) then return nil, "parameter " .. name .. " must be an integer" end
+      n = math.tointeger(n) or n
+    end
+    if sp.min ~= nil and n < sp.min then return nil, "parameter " .. name .. " must be at least " .. param_text("number", sp.min) end
+    if sp.max ~= nil and n > sp.max then return nil, "parameter " .. name .. " must be at most " .. param_text("number", sp.max) end
+    return param_text("number", n)
+  elseif kind == "bool" then
+    if text ~= "true" and text ~= "false" then return nil, "parameter " .. name .. " must be true or false" end
+    return text
+  end
+  for i = 1, rawlen(d.choices) do
+    if d.choices[i] == text then return text end
+  end
+  return nil, "parameter " .. name .. " must be one of: " .. table.concat(d.choices, ", ")
+end
+
+local function param_typed(kind, text)
+  if kind == "number" then return tonumber(text) end
+  if kind == "bool" then return text == "true" end
+  return text
+end
+
+-- returns the typed table, the canonical JSON ("" = none) or raises a script error
+local function resolve_params(decls, given)
+  decls = decls or {}
+  local names = {}
+  for k, d in rawnext, decls do
+    if type(k) ~= "string" or #k > 64 or not k:match("^[A-Z_][A-Z0-9_]*$") then
+      error("params: a name is capital letters, digits and _, not starting with a digit, at most 64 characters", 0)
+    end
+    if type(d) ~= "table" or not PARAM_KINDS[rawget(d, "__param") or ""] then
+      error("params." .. k .. ": declare it with ci.string, ci.number, ci.bool or ci.choice", 0)
+    end
+    names[#names + 1] = k
+  end
+  if #names > PARAM_MAX_COUNT then error("params: at most " .. PARAM_MAX_COUNT .. " parameters", 0) end
+  for k in rawnext, given do
+    if decls[k] == nil then error("unknown parameter " .. tostring_(k) .. " (the pipeline declares: " .. (#names > 0 and table.concat(names, ", ") or "none") .. ")", 0) end
+  end
+  tsort(names)
+  local typed, parts, total = {}, {}, 0
+  for i = 1, #names do
+    local name = names[i]
+    local d = decls[name]
+    local text = given[name]
+    if text == nil and d.spec.default ~= nil then
+      local dk = d.__param
+      if (dk == "number" and type(d.spec.default) ~= "number") or (dk == "bool" and type(d.spec.default) ~= "boolean")
+         or ((dk == "string" or dk == "choice") and type(d.spec.default) ~= "string") then
+        error("params." .. name .. ": the default is not a " .. dk, 0)
+      end
+      text = param_text(dk, d.spec.default)
+    end
+    if text == nil then
+      if d.spec.required then error("parameter " .. name .. " is required", 0) end
+    else
+      local ok, why = param_check(name, d, text)
+      if not ok then error(why, 0) end
+      typed[name] = param_typed(d.__param, ok)
+      parts[#parts + 1] = jstr(name) .. ":" .. jstr(ok)
+      total = total + #name + #ok
+    end
+  end
+  if total > PARAM_MAX_TOTAL then error("the parameters are longer than " .. PARAM_MAX_TOTAL .. " bytes in all", 0) end
+  return typed, (#parts > 0) and ("{" .. table.concat(parts, ",") .. "}") or ""
+end
+
 G.ci = {
   now = function() return tonumber(call("now", "")) end,
   random = function() return tonumber(call("random", "")) end,
@@ -341,6 +458,7 @@ G.ci = {
     return { exit = tonumber(code), outputs = out }
   end,
   pipeline = function(spec) return spec end,  -- metadata phase, pure, not journaled (PIP-002)
+  string = param_ctor("string"), number = param_ctor("number"), bool = param_ctor("bool"), choice = param_ctor("choice"),
   job = function(opts, fn)
     if type(opts) ~= "table" then error("ci.job: table expected", 2) end
     if type(fn) ~= "function" then error("ci.job: function expected", 2) end
@@ -352,6 +470,22 @@ G.ci = {
     return { ok = true, outputs = {} }
   end,
 }
+
+-- `run` is the argument for a real (`ci.pipeline`) script's `main(run)`; a script that returns a
+-- plain value directly, as the sandbox test fixtures do, is unaffected.
+local function run_main(fn, run)
+  state.main = running()
+  local given = rawget(run, "__given") or {}
+  rawset(run, "__given", nil)
+  local v = fn()
+  if type(v) == "table" and type(rawget(v, "main")) == "function" then
+    local typed, json = resolve_params(rawget(v, "params"), given)
+    if json ~= "" then call("params", json) end
+    run.params = typed
+    return v.main(run)
+  end
+  return v
+end
 
 rawset(G, "_G", proxy)
 return proxy, run_main

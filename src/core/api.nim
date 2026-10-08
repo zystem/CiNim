@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -130,6 +130,34 @@ proc onRequest() {.raises: [], gcsafe.} =
       if path == "/healthz":
         # the probes of the Pod: alive, and says nothing else, so that it needs no token
         jsonOk(Http200, %*{"status": "ok"})
+        return
+      if path.startsWith("/api/v1/hooks/"):
+        # a webhook is called with the secret of its own trigger, which is no API token (core/triggers.nim): it starts that trigger's run and nothing else
+        if getMethod() != "POST":
+          problem(Http405, "method_not_allowed", "POST")
+          return
+        var hc = newRq(coreRef.rqliteUrl)
+        let hook = hc.authenticateHook(path["/api/v1/hooks/".len .. ^1], bearerOf(getRequest()))
+        if not hook.ok:
+          problem(Http404, "not_found", "no such webhook, or the secret is not its own")      # the same answer for both: an id is not confirmed to a stranger
+          return
+        if not hook.row.enabled:
+          problem(Http409, "trigger_disabled", "this trigger is switched off")
+          return
+        let body = getBody()
+        let bj = if body.strip.len == 0: newJObject() else: (try: parseJson(body) except JsonParsingError: nil)
+        if bj == nil or bj.kind != JObject:
+          problem(Http400, "invalid_request", "the body is empty or {\"params\": {...}}")
+          return
+        let given = checkParams(bj{"params"})
+        if given.error.len > 0:
+          problem(Http400, "invalid_params", given.error)
+          return
+        let fired = coreRef.fire(hook.row, given.pairs, getTime().toUnix())
+        if fired.started:
+          jsonOk(Http201, %*{"id": fired.runId, "organization": hook.row.slug, "trigger_id": hook.row.id, "state": "RUNNING"})
+        else:
+          problem(Http409, fired.reason, "no run was started: " & fired.reason)
         return
       # IAM-003: every route but /metrics and /healthz wants a token. An administrator may use all of them; a token of an organisation, only the runs of
       # that organisation (checked where the run is known)
@@ -389,6 +417,91 @@ proc onRequest() {.raises: [], gcsafe.} =
           kubernetes[ns] = stepsJson(r)
         jsonOk(Http200, %*{"slug": slug, "namespace": ns, "generation": c.credentialRow(ns).generation, "rotated": rotated, "kubernetes": kubernetes})
         return
+      if path.startsWith("/api/v1/organizations/") and "/triggers" in path:
+        # the triggers of an organisation (core/triggers.nim): an administrator's calls
+        let rest = path["/api/v1/organizations/".len .. ^1]
+        let parts = rest.split("/triggers", maxsplit = 1)
+        let slug = parts[0]
+        let tail = if parts.len > 1: parts[1] else: ""
+        if parts.len != 2 or slug.len == 0 or (tail.len > 0 and not tail.startsWith("/")):
+          problem(Http404, "not_found", "no such route")
+          return
+        var c = newRq(coreRef.rqliteUrl)
+        let org = c.organizationRow(slug)
+        if org.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
+          return
+        let tmeth = getMethod()
+        let target = tail.strip(chars = {'/'})
+        let colon = target.find(':')
+        let tid = if colon >= 0: target[0 ..< colon] else: target
+        let action = if colon >= 0: target[colon + 1 .. ^1] else: ""
+        if tid.len == 0:
+          if tmeth == "GET":
+            var items = newJArray()
+            for t in c.listTriggers(org.id): items.add t.view
+            jsonOk(Http200, %*{"organization": slug, "triggers": items})
+          elif tmeth == "POST":
+            if org.state != "active":
+              problem(Http409, "organization_disabled", "the organisation " & slug & " is switched off")
+              return
+            let spec = parseTriggerSpec(try: parseJson(getBody()) except JsonParsingError: nil)
+            if spec.error.len > 0:
+              problem(Http400, "invalid_request", spec.error)
+              return
+            if c.nameTaken(org.id, spec.spec.name):
+              problem(Http409, "name_taken", "the organisation has a trigger " & spec.spec.name)
+              return
+            if c.countTriggers(org.id) >= maxTriggersPerOrg:
+              problem(Http409, "too_many_triggers", "at most " & $maxTriggersPerOrg & " triggers per organisation")
+              return
+            let made = c.createTrigger(org.id, spec.spec, getTime().toUnix())
+            let created = c.getTrigger(org.id, made.id)
+            var body = created.row.view
+            if made.secret.len > 0:
+              body["secret"] = %made.secret
+              body["secret_note"] = %"shown only now; send it as 'Authorization: Bearer <secret>' to the hook"
+            jsonOk(Http201, body)
+          else:
+            problem(Http405, "method_not_allowed", "GET lists, POST creates")
+          return
+        let found = c.getTrigger(org.id, tid)
+        if not found.found:
+          problem(Http404, "not_found", "no such trigger")
+          return
+        if action == "" and tmeth == "GET":
+          jsonOk(Http200, found.row.view)
+        elif action == "" and tmeth == "DELETE":
+          discard c.deleteTrigger(org.id, tid)
+          jsonOk(Http200, %*{"id": tid, "deleted": true})
+        elif tmeth == "POST" and action in ["enable", "disable"]:
+          discard c.setEnabled(org.id, tid, action == "enable", getTime().toUnix())
+          jsonOk(Http200, c.getTrigger(org.id, tid).row.view)
+        elif tmeth == "POST" and action == "rotate-secret":
+          let fresh = c.rotateHookSecret(org.id, tid)
+          if fresh.len == 0:
+            problem(Http409, "not_a_webhook", "only a webhook has a secret")
+            return
+          jsonOk(Http200, %*{"id": tid, "secret": fresh, "secret_note": "shown only now; the old secret no longer works"})
+        elif tmeth == "POST" and action == "fire":
+          # a manual start, for any trigger (also a switched-off one); the body may carry {"params": {...}} for this run
+          let body = getBody()
+          let bj = if body.strip.len == 0: newJObject() else: (try: parseJson(body) except JsonParsingError: nil)
+          if bj == nil or bj.kind != JObject:
+            problem(Http400, "invalid_request", "the body is empty or {\"params\": {...}}")
+            return
+          let given = checkParams(bj{"params"})
+          if given.error.len > 0:
+            problem(Http400, "invalid_params", given.error)
+            return
+          let fired = coreRef.fire(found.row, given.pairs, getTime().toUnix())
+          if fired.started:
+            jsonOk(Http201, %*{"id": fired.runId, "organization": slug, "trigger_id": tid, "state": "RUNNING"})
+          else:
+            problem(Http409, fired.reason, "no run was started: " & fired.reason)
+        else:
+          problem(Http405, "method_not_allowed", "GET, DELETE, or POST :enable :disable :rotate-secret :fire")
+        return
       if path.startsWith("/api/v1/organizations/") and "/secrets" in path:
         # the secrets of an organisation that its steps may ask for (core/stepsecrets.nim): names and versions are in the database, the values only in
         # Kubernetes Secrets of the organisation's namespace. An administrator's call; the value is read from the body and is not logged or answered.
@@ -539,7 +652,11 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           tenant = org.id
           profile = c.ensureOrganizationProfile(org.id, namespaceName(orgPrefix, orgShard, orgSlug))
-        let id = coreRef.createRun(j["project_id"].getStr, j["script"].getStr, tenant, profile)
+        let given = checkParams(j{"params"})
+        if given.error.len > 0:
+          problem(Http400, "invalid_params", given.error)
+          return
+        let id = coreRef.createRun(j["project_id"].getStr, j["script"].getStr, tenant, profile, given.pairs)
         jsonOk(Http201, %*{"id": id, "organization": orgSlug, "state": "RUNNING"})
       elif meth == "GET" and "/steps/" in rest and rest.endsWith("/log"):
         let parts = rest.split("/steps/", maxsplit = 1)

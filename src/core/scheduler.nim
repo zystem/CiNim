@@ -10,7 +10,7 @@ import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
-import logwindow, keptpods, stepsecrets
+import logwindow, keptpods, stepsecrets, runparams
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
@@ -47,15 +47,16 @@ proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
 
 # ------------------------------------------------------------------ run creation and lookup (REST API)
 
-proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId = ""): string =
+proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId = ""; params: seq[(string, string)] = @[]; triggerId = ""): string =
   ## `tenantId` is the organisation's id and `profileId` its execution profile (SHD-007); without them the run belongs to the
   ## shard's default tenant and profile (single-tenant setups and tests).
   var c = newRq(co.rqliteUrl)
   result = newId()
   let now = $getTime().toUnix()
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at, profile_id) " &
-    "VALUES (?, ?, ?, ?, 1, ?, ?, ?)", result, tenantId, projectId, protoName(rsRunning), now, now,
-    (if profileId.len > 0: profileId else: co.profileId)]])
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at, profile_id, params, trigger_id) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)", result, tenantId, projectId, protoName(rsRunning), now, now,
+    (if profileId.len > 0: profileId else: co.profileId), (if params.len > 0: toJson(params) else: ""),
+    (if triggerId.len > 0: %triggerId else: newJNull())]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
@@ -63,13 +64,16 @@ proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId 
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, '') " &
+  let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, '') " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
   let row = vals[0]
   result = %*{"id": row[0].getStr, "organization": row[5].getStr, "project_id": row[1].getStr, "state": row[2].getStr,
               "created_at": row[3].getStr, "updated_at": row[4].getStr}
+  if row[7].getStr.len > 0: result["trigger_id"] = %row[7].getStr
+  if row[6].getStr.len > 0:
+    result["params"] = (try: parseJson(row[6].getStr) except JsonParsingError: newJObject())
   # RUN-015: a queued step that waits for the log circuit says so (API shows the reason)
   let w = c.query(%*[["SELECT wait_reason FROM steps WHERE run_id = ? AND wait_reason IS NOT NULL LIMIT 1", runId]])
   let wv = w["results"][0]{"values"}
@@ -454,7 +458,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
-      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr),
+      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: runParams(c, row[0].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
       step_token: (if secretNamesOf(row[5].getStr).len > 0: stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   PollResponse(header: Header(protocol: 1), commands: commands,
@@ -509,11 +513,22 @@ proc handleLease(c: var RqClient; profileId: string; req: LeaseRequest): Executo
       body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "no_run_available")))
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.lease,
     lease: LeaseGranted(lease_token: "t-" & runId, ttl_seconds: 60, run_id: runId,
-                         script: loadScript(c, runId), journal: loadJournal(c, runId))))
+                         script: loadScript(c, runId), journal: loadJournal(c, runId),
+                         params: runParams(c, runId).mapIt(ParamsEntry(key: it[0], value: it[1])))))
 
 proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
   ## Every host call becomes a step and the run suspends: the step's result (from a job-controller's
   ## PodTransition) lands in run_journal asynchronously, and the executor re-leases the run to continue.
+  if req.kind == "params":
+    # the complete launch parameters of the run, from the script's declarations (PIP-012): kept with the run and given to its steps as environment variables
+    let json = cast[string](req.payload)
+    let why = checkEffective(json)
+    if why.len > 0:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: why)))
+    c.storeEffectiveParams(req.run_id, json)
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind != "job_sh":
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "unknown host call " & req.kind)))

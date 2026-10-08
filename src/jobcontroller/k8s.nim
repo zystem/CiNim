@@ -118,10 +118,10 @@ proc podBody(r: PodRequest): JsonNode =
                          %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
           {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
-  if r.secrets.len > 0:
-    # the step's secrets: a placeholder per name, which the shim replaces with the value it fetches from core; the Pod's specification holds no value
+  let podEnv = r.podEnv
+  if podEnv.len > 0:
     var env = newJArray()
-    for n in r.secrets: env.add %*{"name": n, "value": stepSecretPlaceholder(n)}
+    for (n, v) in podEnv: env.add %*{"name": n, "value": v}
     result["spec"]["containers"][0]["env"] = env
   for k, v in sec.labels: result["metadata"]["labels"][k] = v
   if not sec.hostUsers: result["spec"]["hostUsers"] = %false

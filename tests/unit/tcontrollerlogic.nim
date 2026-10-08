@@ -209,6 +209,18 @@ suite "the secrets of a step":
     let r = buildRequest(cfg, StartRequest(runId: "s1_run", seq: 0, attempt: 1, image: "busybox", secretNames: @["A"]))
     check r.secrets.len == 0 and "--fetch-secrets" notin r.cmd
 
+suite "the launch parameters of a run":
+  test "VAR-002 they reach the container as plain environment variables, next to the placeholders of the secrets":
+    let r = buildRequest(cfg, StartRequest(runId: "s1_run", seq: 0, attempt: 1, image: "busybox", secretNames: @["TOKEN"], stepToken: "t",
+                                           env: @[("BRANCH", "main"), ("JOBS", "4")]))
+    check r.podEnv == @[("BRANCH", "main"), ("JOBS", "4"), ("TOKEN", "cinim-secret:TOKEN")]
+  test "VAR-002 a secret of the same name as a parameter wins, and the parameter value is not in the Pod":
+    let r = buildRequest(cfg, StartRequest(runId: "s1_run", seq: 0, attempt: 1, image: "busybox", secretNames: @["TOKEN"], stepToken: "t",
+                                           env: @[("TOKEN", "from-a-parameter")]))
+    check r.podEnv == @[("TOKEN", "cinim-secret:TOKEN")]
+  test "VAR-002 a step without parameters and secrets has no environment of its own":
+    check buildRequest(cfg, StartRequest(runId: "s1_run", seq: 0, attempt: 1, image: "busybox")).podEnv.len == 0
+
 suite "what the cluster says about a Pod, and a Pod that cannot be made":
   test "a used-up quota leaves no row behind and says what the API server said":
     let st = openState(":memory:")
