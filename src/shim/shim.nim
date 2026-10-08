@@ -208,6 +208,10 @@ when defined(shimLogging):
       if seqNo > 0 and seqNo <= upto: removeFile(f)
     0
 
+func items(n: JsonNode): seq[JsonNode] =
+  ## the elements of a JSON array that may be missing (nil) or something else: none then
+  if n != nil and n.kind == JArray: n.elems else: @[]
+
 when defined(shimLogging):
   proc safeRel(p: string): bool =
     ## a path core named: relative and inside the workspace, whatever core says
@@ -222,7 +226,7 @@ when defined(shimLogging):
       if ans.ok or not ans.retry or epochTime() >= until: break
       sleep 1000
     if not ans.ok: return ans.code & ": " & ans.detail
-    for f in ans.answer{"files"}:
+    for f in items(ans.answer{"files"}):
       let path = f{"path"}.getStr
       if not safeRel(path): return "core named the path " & path & ", which is not inside the workspace"
       let dest = workspace / path
@@ -242,7 +246,7 @@ when defined(shimLogging):
       files.add %*{"path": f, "size": getFileSize(workspace / f), "sha256": fileSha256(workspace / f)}
     let put = askArtifacts(coreAddr, certs, step, token, $(%*{"op": "put", "files": files}))
     if not put.ok: return put.code & ": " & put.detail
-    for u in put.answer{"urls"}:
+    for u in items(put.answer{"urls"}):
       let path = u{"path"}.getStr
       let t = putFile(u{"url"}.getStr, workspace / path)
       if not t.ok: return path & ": " & t.detail
@@ -371,8 +375,8 @@ proc main(): int =
       if o{"timeout"} != nil and timeoutSeconds == 0: timeoutSeconds = o["timeout"].getInt
       if o{"metrics"} != nil: appDecl = parseDeclaration($o["metrics"])
       if o{"artifacts"} != nil:
-        for p in o["artifacts"]{"upload"}: artUpload.add p.getStr
-        for p in o["artifacts"]{"download"}: artDownload.add p.getStr
+        for p in items(o["artifacts"]{"upload"}): artUpload.add p.getStr         # a list that is not declared is nil: `items` makes it empty
+        for p in items(o["artifacts"]{"download"}): artDownload.add p.getStr
       if o{"mask"} != nil:
         maskRuntime = o["mask"]{"runtime"}.getBool(true)
         maskVariants = o["mask"]{"variants"}.getBool(true)
