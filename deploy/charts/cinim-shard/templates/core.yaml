@@ -65,6 +65,10 @@ spec:
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
             - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"
             {{- end }}
+            {{- if .Values.secrets.keySecret }}
+            # the master key of the step secrets (core/secretvault.nim); without one it is derived from the CURVE key
+            - {name: CINIM_SECRETS_KEY_FILE, value: /etc/cinim-secrets/key}
+            {{- end }}
             {{- if .Values.auth.enabled }}
             # IAM-003: without a token or CINIM_AUTH=on the API is open
             - {name: CINIM_AUTH, value: "on"}
@@ -94,6 +98,9 @@ spec:
             {{- end }}
           volumeMounts:
             - {name: curve, mountPath: /etc/cinim/curve, readOnly: true}
+            {{- if .Values.secrets.keySecret }}
+            - {name: secrets-key, mountPath: /etc/cinim-secrets, readOnly: true}
+            {{- end }}
             - {name: tmp, mountPath: /tmp}
           readinessProbe:
             httpGet:
@@ -124,6 +131,14 @@ spec:
               - {key: core.key, path: core.key}
               - {key: client.pub, path: client.pub}
               - {key: client.key, path: client.key}
+        {{- if .Values.secrets.keySecret }}
+        - name: secrets-key
+          secret:
+            secretName: {{ .Values.secrets.keySecret }}
+            defaultMode: 0440
+            items:
+              - {key: key, path: key}
+        {{- end }}
         - name: tmp
           emptyDir: {}
 ---

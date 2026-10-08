@@ -2,7 +2,7 @@
 ## Kubernetes; it turns the platform's PodRequest into a Pod spec and answers the questions logic.nim asks of the cluster.
 ## SEC-010 per-job projected tokens are deferred: the shim gets the shared CURVE "client" identity through a Secret.
 import std/[os, json, strutils, times, base64, atomics, sequtils]
-import ../common/k8sbind
+import ../common/[k8sbind, envname]
 import backend, podsec
 
 type K8s* = object
@@ -119,10 +119,9 @@ proc podBody(r: PodRequest): JsonNode =
           {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
   if r.secrets.len > 0:
-    # the step's secrets: the kubelet puts each Secret's value into the environment of the container; the Pod spec holds names only
+    # the step's secrets: a placeholder per name, which the shim replaces with the value it fetches from core; the Pod's specification holds no value
     var env = newJArray()
-    for s in r.secrets:
-      env.add %*{"name": s.name, "valueFrom": {"secretKeyRef": {"name": s.objectName, "key": "value"}}}
+    for n in r.secrets: env.add %*{"name": n, "value": stepSecretPlaceholder(n)}
     result["spec"]["containers"][0]["env"] = env
   for k, v in sec.labels: result["metadata"]["labels"][k] = v
   if not sec.hostUsers: result["spec"]["hostUsers"] = %false

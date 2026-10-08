@@ -38,10 +38,17 @@ else:
   proc addSecrets(lp: var LogPipeline; values: openArray[string]) = discard
   proc finish(lp: var LogPipeline; limitSeconds = 0): bool = true
   proc sendStepReport(coreAddr, certs: string; step: StepRef; exitCode: int; reason: string): bool = true
+  type FetchedSecrets = object
+    ok, retry: bool
+    values: seq[(string, string)]
+    code, detail: string
+  proc fetchStepSecrets(coreAddr, certs: string; step: StepRef; token: string): FetchedSecrets =
+    FetchedSecrets(code: "no_core_client", detail: "this build has no client of core (-d:shimLogging)")
 
 const
   exitTimeout = 124            ## the step ran past its timeout_seconds (the same code `timeout(1)` uses)
   exitEnvRejected = 70
+  exitSecretsUnavailable = 73  ## the step's secrets could not be fetched from core: the command was not started
   exitLogsUndelivered = 72     ## D-27: the command ran, but its log did not reach vlagent within log_hold_timeout
   maxTerminationBytes = 4096
 
@@ -218,7 +225,9 @@ proc main(): int =
   var buildOomAdj = 500                    # ... and is the OOM killer's first choice; 0 / -1 switch each off
   var exitWait = -1                        # how long the shim asks core for permission to exit (-1: log_hold_timeout)
   var logMaxBytes = 0'i64                  # the profile's per-step log limit; 0 = unlimited (the log is cut there, with a marker)
-  var secretEnv = ""                       # names of environment variables that hold the step's secrets (the kubelet put them there); masked in the log
+  var fetchSecrets = false                 # the step has secrets: ask core for the values before the command starts (6.7)
+  var secretsWait = 30                     # seconds the shim keeps asking when core does not answer
+  var stepToken = ""                       # the step's own credential for that
   var optsJson = ""                        # the Lua step options: mask, metrics, timeout (docs/secrets-masking.md, metrics.md)
   var timeoutSeconds = 0                   # the step's timeout (Lua `timeout`, StartStep.timeout_seconds); 0 = none
   var termGrace = 20                       # after SIGTERM / timeout: seconds the build gets to stop before SIGKILL
@@ -275,9 +284,14 @@ proc main(): int =
     of "--opts-json":
       inc i
       optsJson = args[i]
-    of "--secret-env":
+    of "--fetch-secrets":
+      fetchSecrets = true
+    of "--step-token":
       inc i
-      secretEnv = args[i]
+      stepToken = args[i]
+    of "--secrets-wait":
+      inc i
+      secretsWait = parseInt(args[i])
     of "--run-id":
       inc i
       runId = args[i]
@@ -331,14 +345,28 @@ proc main(): int =
   if secretsFile.len > 0 and fileExists(secretsFile):
     for l in lines(secretsFile):
       if l.len > 0: secrets.add l
-  for name in secretEnv.split(','):
-    # a secret given as an environment variable (a Kubernetes Secret, core/stepsecrets.nim): the whole value, and each of its lines, are masked
-    let v = getEnv(name)
-    if name.len == 0 or v.len == 0: continue
-    secrets.add v
-    if '\n' in v:
-      for l in v.splitLines:
-        if l.strip.len > 0: secrets.add l.strip
+  # The step's secrets (6.7): the values come from core over the authenticated channel, with the step's own credential, and go to the environment of the
+  # command only; the Pod's specification holds a placeholder per name. They join the masked values before anything is read from the command. If they cannot
+  # be had the command is not started: a step must not run without the credentials it was written for.
+  var fetched: seq[(string, string)]
+  if fetchSecrets:
+    var got: FetchedSecrets
+    let until = epochTime() + secretsWait.float
+    while true:
+      got = fetchStepSecrets(coreAddr, certsDir, step, stepToken)
+      if got.ok or not got.retry or epochTime() >= until: break
+      sleep 1000
+    if not got.ok:
+      stderr.writeLine "cicd-shim: the step's secrets could not be fetched (" & got.code & "): " & got.detail
+      writeTermination(termLog, %*{"exit_code": exitSecretsUnavailable, "reason": "secrets_unavailable", "detail": got.code & ": " & got.detail})
+      return exitSecretsUnavailable
+    fetched = got.values
+    for (n, v) in fetched:
+      if v.len == 0: continue
+      secrets.add v
+      if '\n' in v:
+        for l in v.splitLines:
+          if l.strip.len > 0: secrets.add l.strip
 
   let maskFile = runDir / "CICD_MASK"
   var maskOffset = 0
@@ -383,6 +411,7 @@ proc main(): int =
   var childEnv = newStringTable(modeCaseSensitive)
   for k, v in envPairs(): childEnv[k] = v
   for e in inherited: childEnv[e.name] = e.value
+  for (n, v) in fetched: childEnv[n] = v          # after the inherited ones: a secret is not overridden by an earlier step's file
   childEnv["CICD_ENV"] = envFile
   childEnv["CICD_OUTPUT"] = outFile
   childEnv["CICD_RUN_DIR"] = runDir

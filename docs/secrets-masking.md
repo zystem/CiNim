@@ -63,13 +63,19 @@ end)
 ```
 
 The administrator sets the value for the organisation (`PUT /api/v1/organizations/{slug}/secrets/{NAME}` with `{"value": "..."}`; `GET .../secrets` lists the
-names and versions, `DELETE .../secrets/{NAME}` removes one). The value is kept in a Kubernetes Secret in the organisation's namespace and nowhere else:
-the database holds the name and the version, Lua sees the name, the Pod specification names the Secret and holds no value, and the kubelet gives the value
-to the container as the environment variable of that name. The shim masks it in the log like any other secret (raw, base64, URL, JSON; every line of a
-multi-line value). A step that asks for a secret the organisation does not have is refused when it is submitted, before anything runs. A changed value is a new version: steps
-that start after the change get it, a step that was assigned before keeps the version it was assigned with. The name follows the rules of an environment
-variable (capital letters, digits, `_`; not `PATH`, `LD_*`, `CICD_*`...), the value is at most 8 KiB. A secret is for a run of an organisation; a run
-of the shard's default tenant has none. After a restore of the database into a new cluster the names are known but the Secrets are gone: set the values again.
+names and versions, `DELETE .../secrets/{NAME}` removes one). The value is sealed in the shard's database (XChaCha20-Poly1305, a data key per organisation
+wrapped by a master key that is not in the database, D-45), so it is backed up and restored with the database; Lua sees the name only. When the step starts, its
+shim asks core for the values over the authenticated channel, with a credential bound to that run, step and attempt, and puts them into the environment of the
+command only. The Pod's specification holds a placeholder (`NAME=cinim-secret:NAME`) per secret and never a value, and nothing is left in Kubernetes. The shim
+masks the values in the log like any other secret (raw, base64, URL, JSON; every line of a multi-line value) before it reads a byte of the command's output. If the
+values cannot be fetched the command is not started: the step ends with the reason `secrets_unavailable` (exit code 73). A step that asks for a secret the
+organisation does not have is refused when it is submitted, before anything runs. A changed value is a new version: a step that starts after the change gets it.
+The name follows the rules of an environment variable (capital letters, digits, `_`; not `PATH`, `LD_*`, `CICD_*`...), the value is at most 8 KiB. A secret is for
+a run of an organisation; a run of the shard's default tenant has none.
+
+The master key is a file of 64 hexadecimal digits (`secrets.keySecret` in the chart, `CINIM_SECRETS_KEY_FILE`), or, when none is given, derived from the core's CURVE
+key. **Keep it apart from the database backup** and back it up too: a database restored without it holds nothing readable (GitLab and Drone say the same of their
+keys). The core stores a check value and refuses to serve secrets when started with another key, instead of writing new secrets next to ones it cannot read.
 
 ## What is not covered
 

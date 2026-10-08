@@ -36,6 +36,16 @@ proc derive(master, purpose, namespace: string; generation: int): string =
 proc bootstrapToken*(master, namespace: string; generation: int): string = derive(master, "bootstrap", namespace, generation)
 proc controllerCredential*(master, namespace: string; generation: int): string = derive(master, "credential", namespace, generation)
 
+proc coreSecretKey*(certs: string): string =
+  ## the core's own secret key (the CURVE `core` key): the master of the controller identities and the step credentials; it leaves the core nowhere
+  readFile(certs & "/curve/core.key").strip
+
+proc stepToken*(master, runId: string; seq, attempt: int): string =
+  ## The credential of one step for fetching its own secrets from core (6.7): HMAC-SHA256 under the core's key of the run, step and attempt, so a Pod
+  ## cannot ask for the secrets of another step or another organisation, and nothing is stored. Core also checks that the attempt is the current one
+  ## and still running, so the token is worth nothing once the step is over.
+  toHex(hmacSha256(master, "cinim/step/v1|" & runId & "|" & $seq & "|" & $attempt))
+
 func constantTimeEqual*(a, b: string): bool =
   ## the length is public, the content is compared without an early exit
   if a.len != b.len: return false

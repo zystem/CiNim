@@ -234,3 +234,34 @@ proc sendStepReport*(coreAddr, certs: string; step: StepRef; exitCode: int; reas
   except CatchableError as e:
     stderr.writeLine "cicd-shim: StepReport not delivered: " & e.msg
     false
+
+type FetchedSecrets* = object
+  ok*: bool
+  retry*: bool                 ## no answer (or core is not ready): worth asking again; false = core refused for good
+  values*: seq[(string, string)]
+  code*, detail*: string
+
+proc fetchStepSecrets*(coreAddr, certs: string; step: StepRef; token: string): FetchedSecrets =
+  ## One try at asking core for the values of this step's secrets (6.7), over the same authenticated channel as the report. The credential is
+  ## the step's own (bound to the run, step and attempt); core answers with what the step's options asked for.
+  try:
+    let conn = connectReq(coreAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"),
+                          recvTimeoutMs = 5000, sendTimeoutMs = 5000)
+    defer: (try: conn.close() except CatchableError: discard)
+    let req = StepReport(step: step, request: "secrets", job_token: token)
+    let bytes = Protobuf.encode(req)
+    var msg = newString(bytes.len)
+    if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
+    conn.send(msg)
+    let (avail, _, body) = waitForReceive(conn.socket)
+    if not avail: return FetchedSecrets(retry: true, code: "no_answer", detail: "core did not answer")
+    let ack = Protobuf.decode(cast[seq[byte]](body), StepReportAck)
+    if ack.accepted:
+      result.ok = true
+      for s in ack.secrets: result.values.add (s.name, s.value)
+    else:
+      result.code = ack.failure.code
+      result.detail = ack.failure.detail
+      result.retry = ack.failure.code == "secrets_unavailable"      # core is up but not ready yet; every other refusal is final
+  except CatchableError as e:
+    result = FetchedSecrets(retry: true, code: "no_answer", detail: e.msg)

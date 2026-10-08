@@ -180,15 +180,6 @@ const
   terminatedGrace = 30         ## seconds the end of a step whose shim was stopped from outside waits for the job controller's reading of the Pod
   quotaPause = 15          ## seconds a step that met a used-up quota waits before it is assigned again
 
-proc secretHandlesOfStep(c: var RqClient; runId, optsJson: string): seq[string] =
-  ## `NAME:version` of the secrets a step asked for, at the moment it is assigned (core/stepsecrets.nim)
-  let wanted = secretNamesOf(optsJson)
-  if wanted.len == 0: return
-  let o = c.query(%*[["SELECT tenant_id FROM runs WHERE id = ?", runId]])
-  let ov = o["results"][0]{"values"}
-  if ov == nil or ov.len == 0: return
-  handlesFor(c.secretVersions(ov[0][0].getStr), wanted)
-
 proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let attempt = int(t.step.attempt)
   let now = getTime().toUnix()
@@ -463,7 +454,8 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
-      profile: row[6].getStr, secret_handles: secretHandlesOfStep(c, row[0].getStr, row[5].getStr))))
+      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr),
+      step_token: (if secretNamesOf(row[5].getStr).len > 0: stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   PollResponse(header: Header(protocol: 1), commands: commands,
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)

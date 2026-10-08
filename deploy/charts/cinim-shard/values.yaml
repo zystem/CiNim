@@ -109,6 +109,13 @@ auth:
   adminToken: ""
   adminTokenSecret: ""
 
+# The step secrets (6.7): sealed in the database with XChaCha20-Poly1305, a data key per organisation, wrapped by a master key that is NOT in the database.
+# `keySecret` names a Secret whose key `key` holds 64 hexadecimal digits (32 bytes; `openssl rand -hex 32`): keep it apart from the database backup. A database
+# restored without it holds nothing readable. Without `keySecret` the master key is derived from the core's CURVE key (curve.secretName), which you keep
+# anyway; changing that key then loses the secrets. The core refuses to serve secrets when its key is not the one that sealed what the database holds.
+secrets:
+  keySecret: ""
+
 # Step Pods (the LimitRange of an organisation's namespace). A Pod that asks for no ephemeral storage gets a request of 64Mi (so it is not the
 # first one the kubelet evicts when the node runs short of it) and this limit; a Pod that uses more than its limit is evicted and the step has failed.
 steps:

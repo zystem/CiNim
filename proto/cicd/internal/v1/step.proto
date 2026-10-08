@@ -16,6 +16,12 @@ message StepReport {
   bytes outputs_digest = 7;          // SHA-256 over the canonical outputs
   Failure failure = 8;
   string state_json = 9;             // the shim's final state, the same JSON as its last Pod-log line (D-29)
+  string request = 10;               // "" = a report; "secrets" = the shim asks for the values of the step's secrets, with `job_token` as the credential
+}
+
+message StepSecret {
+  string name = 1;
+  string value = 2;
 }
 
 message StepReportAck {
@@ -26,4 +32,5 @@ message StepReportAck {
   // termination message are only the fallback for a core that cannot be reached.
   bool may_exit = 4;                 // the result is recorded (or the attempt is superseded): the shim may now exit
   string disposition = 5;            // recorded | superseded | retry_later
+  repeated StepSecret secrets = 6;   // the answer to request = "secrets": the step's secrets, decrypted; `failure` says why there are none (bad_token, not_current, unknown_secret)
 }

@@ -21,7 +21,6 @@ func deniedEnvName*(name: string): bool =
   for p in deniedPrefixes:
     if name.startsWith(p): return true
 
-func stepSecretObjectName*(name: string; version: int): string =
-  ## the Kubernetes Secret that holds one version of an organisation's step secret: `cinim-s-registry-password-v3` for REGISTRY_PASSWORD. A new value is a
-  ## new version (the core may create and delete Secrets, not change them), and the step is told which version to use.
-  "cinim-s-" & name.toLowerAscii.replace('_', '-') & "-v" & $version
+func stepSecretPlaceholder*(name: string): string =
+  ## what the Pod's environment holds in place of a secret's value; the shim replaces it with the real one (it is not a secret)
+  "cinim-secret:" & name

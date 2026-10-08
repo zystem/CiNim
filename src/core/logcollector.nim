@@ -20,9 +20,10 @@
 import std/[json, tables, strutils, httpclient, locks, atomics, times, options]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, rqlite, shimstate]
+import common/[zmqcurve, rqlite, shimstate, states]
 import crunchy
-import schema, shimrecord, components, stepmetrics, loggate
+import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets
+import common/[ctrlauth]
 import scheduler   ## for stopServers*, the shared shutdown flag every core REP-server thread polls
 
 import_proto3 "../../build/nimproto/all.proto"
@@ -169,6 +170,26 @@ proc handleBatch(c: var RqClient; co: Collector; req: LogBatch): LogAck =
     i = j
   ack(req.step, acked, if refused: "rejected" else: "")
 
+proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): StepReportAck =
+  ## The shim asks for the values of its step's secrets (6.7). The credential is bound to this run, step and attempt; the attempt must be the current one and
+  ## still running, and what is handed out is what the step's own options asked for, nothing the shim names.
+  let refuse = proc (code, detail: string): StepReportAck =
+    StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: false, disposition: "refused", failure: Failure(code: code, detail: detail))
+  if req.job_token.len == 0 or not constantTimeEqual(req.job_token, stepToken(master, req.step.run_id, int(req.step.seq), int(req.step.attempt))):
+    return refuse("bad_token", "the step's credential is not right")
+  let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id FROM steps s JOIN runs ru ON ru.id = s.run_id " &
+                      "WHERE s.run_id = ? AND s.ordinal = ? AND s.attempt = ?", req.step.run_id, int(req.step.seq), int(req.step.attempt)]])
+  let v = r["results"][0]{"values"}
+  if v == nil or v.len == 0 or v[0][0].getStr notin [protoName(ssStarting), protoName(ssRunning)]:
+    return refuse("not_current", "this attempt of the step is not running")
+  let names = secretNamesOf(v[0][1].getStr)
+  let vk = vaultKek()
+  if names.len > 0 and not vk.ready: return refuse("secrets_unavailable", "core's secrets are not available")
+  let got = c.getSecrets(vk.kek, v[0][2].getStr, names)
+  if not got.ok: return refuse("unknown_secret", got.error)
+  result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
+  for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)
+
 proc handleStepReport(c: var RqClient; req: StepReport; profileId: string): StepReportAck =
   ## The completion handshake (D-29): the shim reports its result and waits for this answer before it exits. The result is
   ## the shim's own account - recorded here, through the same path as a Pod's verdict (applyTransition, idempotent and fenced) -
@@ -228,12 +249,14 @@ proc serveLogIngest*(co: Collector; certs: string; port: int) {.thread.} =
 proc serveStepReport*(rqliteUrl, certs: string; port: int; profileId: string) {.thread.} =
   {.cast(gcsafe).}:
     var c = newRq(rqliteUrl)
+    let master = coreSecretKey(certs)
     let (_, secretKey) = loadKeypair(certs, "core")
     let conn = listenRep(port, secretKey)
     while not stopServers.load:
       let body = conn.receive()
       if body.len == 0: continue
-      let resp = handleStepReport(c, Protobuf.decode(cast[seq[byte]](body), StepReport), profileId)
+      let rep = Protobuf.decode(cast[seq[byte]](body), StepReport)
+      let resp = if rep.request == "secrets": handleSecretsRequest(c, rep, master) else: handleStepReport(c, rep, profileId)
       let outb = Protobuf.encode(resp)
       var s = newString(outb.len)
       if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)

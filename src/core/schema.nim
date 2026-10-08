@@ -20,10 +20,13 @@ const ddl = [
        state TEXT NOT NULL DEFAULT 'active', settings TEXT NOT NULL DEFAULT '{}', plan TEXT NOT NULL DEFAULT '',
        created_at TEXT NOT NULL)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
-  # the names of an organisation's step secrets and the version of each (VAR-002, 6.7); the values are only in Kubernetes Secrets (core/stepsecrets.nim)
+  # the step secrets of an organisation (VAR-002, 6.7), each sealed with the organisation's data key (core/secretvault.nim); the data key is
+  # wrapped by the master key, which is not in the database
   """CREATE TABLE IF NOT EXISTS step_secrets (
-       tenant_id TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+       tenant_id TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, value_enc TEXT NOT NULL DEFAULT '',
        PRIMARY KEY (tenant_id, name))""",
+  """CREATE TABLE IF NOT EXISTS org_keys (tenant_id TEXT PRIMARY KEY, wrapped TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+  """CREATE TABLE IF NOT EXISTS vault_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)""",
   # the API tokens (IAM-003, core/apiauth.nim): only the SHA-256 of the secret is kept; scope is `admin` or `org:<slug>`; 0 means never / not yet
   """CREATE TABLE IF NOT EXISTS api_tokens (
        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
@@ -109,7 +112,8 @@ proc migrate*(c: var RqClient) =
       # what Kubernetes said about the end of the step's Pod (status.reason, status.message), kept for investigations
       ("steps", "pod_reason", "TEXT NOT NULL DEFAULT ''"), ("steps", "pod_message", "TEXT NOT NULL DEFAULT ''"),
       ("steps", "pod_diag", "TEXT NOT NULL DEFAULT ''"),
-      ("api_tokens", "must_change", "INTEGER NOT NULL DEFAULT 0"),     # the first administrator token: it may only be changed (IAM-003)     # JSON: the containers' states, the Pod's conditions, node, events (RUN-017)
+      ("api_tokens", "must_change", "INTEGER NOT NULL DEFAULT 0"),
+      ("step_secrets", "value_enc", "TEXT NOT NULL DEFAULT ''"),      # the sealed value (core/secretvault.nim)     # the first administrator token: it may only be changed (IAM-003)     # JSON: the containers' states, the Pod's conditions, node, events (RUN-017)
       ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
       ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
       ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
@@ -221,6 +225,7 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
   if o.id.len > 0:
     discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id]])
+    discard c.execute(%*[["DELETE FROM org_keys WHERE tenant_id = ?", o.id]])
   discard c.execute(%*[["DELETE FROM organizations WHERE slug = ?", slug]])
 
 # ------------------------------------------------------------------ execution profile of an organisation (SHD-007)

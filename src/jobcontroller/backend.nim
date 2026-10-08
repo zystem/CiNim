@@ -11,7 +11,7 @@ type
     cmd*: seq[string]            ## the container's command: the shim, its flags, `--` and the step's command
     logging*: bool               ## the shim streams logs: it needs the spool volume and the CURVE keys
     spoolBytes*: int
-    secrets*: seq[tuple[name, objectName: string]]   ## the step's secrets: the environment variable and the Kubernetes Secret (key `value`) that holds it
+    secrets*: seq[string]        ## the names of the step's secrets: the Pod's environment holds a placeholder for each, the shim fetches the values from core
     build*: bool                 ## a step of the build profile: the adapter makes a build Pod of it (podsec.nim, D-42)
 
   PodSummary* = object
