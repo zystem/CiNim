@@ -5,11 +5,13 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/rqlite
-import schema, scheduler, api, logcollector, logcircuit, loggate, routerclient, orgrules
+import apiauth, schema, scheduler, api, logcollector, logcircuit, loggate, routerclient, orgrules
 
-if paramCount() >= 1 and paramStr(1) == "admin-token":
-  # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token`: the administrator's token of the shard (IAM-003, core/apiauth.nim)
-  echo resolveAdminToken()
+if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
+  # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token-reset`: a lost administrator token is made again (IAM-003, core/apiauth.nim); the new
+  # one has to be changed at first use, the other tokens stay
+  var rc = newRq(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
+  echo bootstrapAdminToken(rc, getTime().toUnix(), force = true)
   quit 0
 
 let

@@ -3,9 +3,13 @@
 ## a password hash such as Argon2id protects secrets a person chooses), shown once at creation, with a scope, an expiry, the time of last use,
 ## and revocation. The scope is `admin` (every route) or `org:<slug>` (the runs of one organisation, and nothing else).
 ##
-## The shard's own administrator token is not in the database: it comes from a Secret of the chart (`CINIM_ADMIN_TOKEN`), so that a shard
-## that has just been installed can make the first token. Without `CINIM_ADMIN_TOKEN` the API is open, as it was before this module
-## (development, tests); the core says so at start.
+## The first administrator token is made the way TeamCity makes its super user token: at its first start (the table has no administrator yet)
+## the core makes one, keeps its hash, and writes the token to its log once. That token works for one thing only, to be changed
+## (`POST /api/v1/token:rotate` answers with a new token and revokes the old one); every other route answers 403 `token_change_required`
+## until then. Nothing is generated at render time, so helmfile and `helm template` see no random value. A lost token is made again from
+## inside the Pod: `kubectl exec deploy/cinim-core -- /core admin-token-reset`. An operator who wants a token of their own sets
+## `CINIM_ADMIN_TOKEN` (the chart value `auth.adminToken` or a Secret): it is compared, not stored, needs no change, and cannot be rotated by the API.
+## With neither `CINIM_AUTH=on` nor `CINIM_ADMIN_TOKEN` the API is open, as before this module (development, tests); the core says so at start.
 ##
 ## Pure parts (the header, the token, the scope rules) are tested in tests/unit/tapiauth.nim; the rows are the glue.
 import std/[json, strutils, times, sysrand]
@@ -14,6 +18,7 @@ import ../common/[rqlite, ctrlauth]
 
 const
   tokenPrefix* = "cnm_"
+  initialName* = "initial administrator"      ## the name of the first token: its row tells that the first start has been done
   touchEvery = 60            ## seconds between two writes of `last_used_at` of one token: reads must not turn into a write each
 
 type
@@ -22,6 +27,8 @@ type
     admin*: bool
     org*: string             ## the slug of an `org:<slug>` token
     name*, id*: string
+    operator*: bool          ## the token of `CINIM_ADMIN_TOKEN`, which is not a row
+    mustChange*: bool        ## the first token: good for rotating itself, nothing else
     why*: string             ## when not ok: `missing`, `malformed`, `unknown`, `expired`, `revoked`
 
 func toHex(a: openArray[byte]): string =
@@ -33,12 +40,6 @@ func toHex(a: openArray[byte]): string =
 proc secretHash*(secret: string): string =
   ## what is stored: the SHA-256 of the secret, hex
   toHex(sha256(secret))
-
-proc derivedAdminToken*(master: string): string =
-  ## The administrator's token when nobody has given one: HMAC-SHA256 of a fixed text under the core's own secret key (the CURVE `core` key, which is in a
-  ## Secret that the operator already holds). It is the same at every install and upgrade of the same keys, so that a chart rendered with
-  ## `helm template` (helmfile, Argo CD) does not make a new one each time; it changes with the keys. `core admin-token` prints it.
-  "cnm_admin_" & toHex(hmacSha256(master, "cinim/api/admin/v1"))
 
 proc randomHex(n: int): string =
   var buf = newSeq[byte](n)
@@ -92,11 +93,36 @@ func mayUseOrg*(p: Principal; org: string): bool =
 
 # ------------------------------------------------------------------ the rows
 
-proc createApiToken*(c: var RqClient; name, scope: string; expiresAt, now: int64): tuple[id, token: string] =
+proc createApiToken*(c: var RqClient; name, scope: string; expiresAt, now: int64; mustChange = false): tuple[id, token: string] =
   let t = mintToken()
-  discard c.execute(%*[["INSERT INTO api_tokens (id, name, secret_hash, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        t.id, name, secretHash(t.secret), scope, now, expiresAt]])
+  discard c.execute(%*[["INSERT INTO api_tokens (id, name, secret_hash, scope, created_at, expires_at, must_change) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        t.id, name, secretHash(t.secret), scope, now, expiresAt, (if mustChange: 1 else: 0)]])
   (t.id, t.token)
+
+proc bootstrapAdminToken*(c: var RqClient; now: int64; force = false): string =
+  ## The first start (no administrator token was ever made): makes one that has to be changed, and returns it for the log. "" when it was done before.
+  ## `force` is the reset from inside the Pod, for a token that was lost: every other administrator token stays as it is.
+  if not force:
+    let r = c.query(%*[["SELECT count(*) FROM api_tokens WHERE name = ?", initialName]])
+    if r["results"][0]{"values"}[0][0].getInt > 0: return ""
+  if force:
+    # a first token that nobody has changed is revoked by the new one: there is one of them at a time (the other tokens stay)
+    discard c.execute(%*[["UPDATE api_tokens SET revoked_at = ? WHERE must_change = 1 AND revoked_at = 0", now]])
+  c.createApiToken(initialName, "admin", 0, now, mustChange = true).token
+
+proc rotateApiToken*(c: var RqClient; id: string; now: int64): tuple[ok: bool, id, token: string] =
+  ## The caller's own token is replaced by a new one of the same scope and expiry, the old one is revoked in the same transaction, and the new one
+  ## needs no change. The first token is called `administrator` from then on.
+  let r = c.query(%*[["SELECT name, scope, expires_at FROM api_tokens WHERE id = ? AND revoked_at = 0", id]])
+  let vals = r["results"][0]{"values"}
+  if vals == nil or vals.len == 0: return
+  let t = mintToken()
+  let name = if vals[0][0].getStr == initialName: "administrator" else: vals[0][0].getStr
+  discard c.execute(%*[
+    ["INSERT INTO api_tokens (id, name, secret_hash, scope, created_at, expires_at, must_change) VALUES (?, ?, ?, ?, ?, ?, 0)",
+     t.id, name, secretHash(t.secret), vals[0][1].getStr, now, vals[0][2].getBiggestInt],
+    ["UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at = 0", now, id]], transaction = true)
+  (true, t.id, t.token)
 
 proc listApiTokens*(c: var RqClient): JsonNode =
   ## never the secret, nor its hash
@@ -117,10 +143,10 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
   ## by its id and its secret compared the same way.
   if bearer.len == 0: return Principal(why: "missing")
   if adminToken.len > 0 and constantTimeEqual(secretHash(bearer), secretHash(adminToken)):
-    return Principal(ok: true, admin: true, name: "shard administrator", id: "admin")
+    return Principal(ok: true, admin: true, operator: true, name: "shard administrator", id: "admin")
   let t = splitToken(bearer)
   if not t.ok: return Principal(why: "malformed")
-  let r = c.query(%*[["SELECT secret_hash, scope, name, expires_at, revoked_at, last_used_at FROM api_tokens WHERE id = ?", t.id]])
+  let r = c.query(%*[["SELECT secret_hash, scope, name, expires_at, revoked_at, last_used_at, must_change FROM api_tokens WHERE id = ?", t.id]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return Principal(why: "unknown")
   let row = vals[0]
@@ -130,6 +156,7 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
   result = principalOf(row[1].getStr)
   result.name = row[2].getStr
   result.id = t.id
+  result.mustChange = row[6].getInt > 0
   if result.ok and now - row[5].getBiggestInt >= touchEvery:
     try: discard c.execute(%*[["UPDATE api_tokens SET last_used_at = ? WHERE id = ?", now, t.id]])
     except CatchableError: discard         # the use is still allowed; the time of use is bookkeeping

@@ -39,7 +39,7 @@ the organisation drop-down holds the organisations of this shard and the slug is
 
 | Variable | Default | What it does |
 |---|---|---|
-| `CINIM_ADMIN_TOKEN` | empty | the token of the shard's administrator (IAM-003): the chart value `auth.adminToken` (a Secret `cinim-admin-token` is made of it) or the key `token` of the Secret `auth.adminTokenSecret`. Empty: with `CINIM_AUTH=on` (the chart sets it when `auth.enabled`) the core derives it from its CURVE key, `/core admin-token` prints it; without both the API is open and the core says so at start |
+| `CINIM_ADMIN_TOKEN` | empty | a token of the operator's own for the shard's administrator (IAM-003): the chart value `auth.adminToken` (a Secret `cinim-admin-token` is made of it) or the key `token` of the Secret `auth.adminTokenSecret`. It is compared, not stored, and the API cannot rotate it. Empty: with `CINIM_AUTH=on` (the chart sets it when `auth.enabled`) the first start makes a token and writes it to the log, to be changed at first use; with neither the API is open and the core says so at start |
 | `CINIM_SHARD` | `001` | the name of the shard: digits only, up to 16, immutable; part of the namespace name `<prefix>-<shard>-<slug>` |
 | `CINIM_NAMESPACE_PREFIX` | `cinim` | the prefix of the namespaces of the organisations |
 | `CINIM_ROUTER_URL` | empty | the router's base URL with its base path, `http://` or `https://`, no trailing slash. `https` needs a core built with `-d:ssl` (the core image carries OpenSSL); a core without it refuses to start with an https URL |

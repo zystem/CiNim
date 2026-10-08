@@ -24,7 +24,7 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS api_tokens (
        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER NOT NULL DEFAULT 0,
-       revoked_at INTEGER NOT NULL DEFAULT 0)""",
+       revoked_at INTEGER NOT NULL DEFAULT 0, must_change INTEGER NOT NULL DEFAULT 0)""",
   # the identity of the job controller of an organisation's namespace (IAM-003, common/ctrlauth.nim): a generation, no secrets
   """CREATE TABLE IF NOT EXISTS controller_credentials (
        namespace TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1, confirmed INTEGER NOT NULL DEFAULT 0,
@@ -104,7 +104,8 @@ proc migrate*(c: var RqClient) =
       ("steps", "shim_source", "TEXT NOT NULL DEFAULT ''"), ("steps", "claimed_at", "INTEGER NOT NULL DEFAULT 0"),
       # what Kubernetes said about the end of the step's Pod (status.reason, status.message), kept for investigations
       ("steps", "pod_reason", "TEXT NOT NULL DEFAULT ''"), ("steps", "pod_message", "TEXT NOT NULL DEFAULT ''"),
-      ("steps", "pod_diag", "TEXT NOT NULL DEFAULT ''"),     # JSON: the containers' states, the Pod's conditions, node, events (RUN-017)
+      ("steps", "pod_diag", "TEXT NOT NULL DEFAULT ''"),
+      ("api_tokens", "must_change", "INTEGER NOT NULL DEFAULT 0"),     # the first administrator token: it may only be changed (IAM-003)     # JSON: the containers' states, the Pod's conditions, node, events (RUN-017)
       ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
       ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
       ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set

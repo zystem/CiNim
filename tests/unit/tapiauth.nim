@@ -41,9 +41,3 @@ suite "scopes":
     check adm.admin and adm.mayUseOrg("acme") and adm.mayUseOrg("other") and adm.mayUseOrg("")
     check acme.mayUseOrg("acme") and not acme.mayUseOrg("other") and not acme.mayUseOrg("")
     check not principalOf("nonsense").mayUseOrg("acme")
-
-suite "the administrator's token when nobody gave one":
-  test "it is derived from the core's key: the same for the same key, another for another, and it is not the key":
-    let a = derivedAdminToken("key-one")
-    check a == derivedAdminToken("key-one") and a != derivedAdminToken("key-two") and "key-one" notin a
-    check a.startsWith("cnm_admin_") and a.len == 10 + 64

@@ -26,15 +26,9 @@ let
   orgPrefix = getEnv("CINIM_NAMESPACE_PREFIX", "cinim")    ## the namespace prefix (SHD-001)
   metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
 
-proc resolveAdminToken*(): string =
-  ## the shard administrator's token (IAM-003): the one given in `CINIM_ADMIN_TOKEN`; else, with `CINIM_AUTH=on`, the one derived from the core's secret key;
-  ## else "" and the API is open (development)
-  let given = getEnv("CINIM_ADMIN_TOKEN")
-  if given.len > 0: return given
-  if getEnv("CINIM_AUTH") == "on": return derivedAdminToken(coreSecret(getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")))
-  ""
-
-let adminToken = resolveAdminToken()
+let
+  adminToken = getEnv("CINIM_ADMIN_TOKEN")      ## a token of the operator's own (IAM-003); empty: the first start makes one and writes it to the log
+  authOn* = adminToken.len > 0 or getEnv("CINIM_AUTH") == "on"     ## otherwise the API is open (development)
 
 proc unauthorized(why: string) =
   reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "unauthorized", "detail": "a valid API token is required (" & why & ")"}),
@@ -140,11 +134,28 @@ proc onRequest() {.raises: [], gcsafe.} =
       # IAM-003: every route but /metrics and /healthz wants a token. An administrator may use all of them; a token of an organisation, only the runs of
       # that organisation (checked where the run is known)
       var who = Principal(ok: true, admin: true, name: "open API")
-      if adminToken.len > 0:
+      if authOn:
         var ac = newRq(coreRef.rqliteUrl)
         who = authenticate(ac, adminToken, bearerOf(getRequest()), getTime().toUnix())
         if not who.ok:
           unauthorized(who.why)
+          return
+        if path == "/api/v1/token:rotate":
+          # a token replaces itself: the first one has to (IAM-003), any other may at any time
+          if getMethod() != "POST":
+            problem(Http405, "method_not_allowed", "POST")
+            return
+          if who.operator:
+            problem(Http409, "operator_token", "this token is set by the operator (CINIM_ADMIN_TOKEN); change it where it is set")
+            return
+          let made = ac.rotateApiToken(who.id, getTime().toUnix())
+          if not made.ok:
+            problem(Http404, "not_found", "no such token")
+            return
+          jsonOk(Http200, %*{"id": made.id, "token": made.token, "replaced": who.id})
+          return
+        if who.mustChange:
+          problem(Http403, "token_change_required", "this is the first token of the shard: change it first, POST /api/v1/token:rotate answers with a new one and revokes this one")
           return
         if not who.admin and not path.startsWith(base):
           problem(Http403, "forbidden", "this token is for the runs of one organisation only")
@@ -512,7 +523,14 @@ proc onRequest() {.raises: [], gcsafe.} =
 
 proc serveApi*(co: Core; port: int) =
   coreRef = co
-  if adminToken.len == 0:
+  if authOn and adminToken.len == 0:
+    # the first start: the first administrator token, once, in the log (as TeamCity writes its super user token); it has to be changed at first use
+    var c = newRq(co.rqliteUrl)
+    let first = c.bootstrapAdminToken(getTime().toUnix())
+    if first.len > 0:
+      echo "core: FIRST START. The administrator's API token (shown only now): ", first
+      echo "core: it works for one thing, to be changed: POST /api/v1/token:rotate with 'Authorization: Bearer <this token>' answers with a new one"
+  elif not authOn:
     stderr.writeLine "core: neither CINIM_ADMIN_TOKEN nor CINIM_AUTH=on is set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"
   let s = newHttpServer(onRequest)
   s.start(port, 64)
