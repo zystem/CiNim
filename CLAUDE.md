@@ -32,6 +32,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 - `std/net` `recv(pointer, size, timeout)` insists on all `size` bytes even on an unbuffered socket: wait with `poll` and `recv` without a timeout (`src/shim/artifacts.nim: readSome`).
 - A string made in one thread and freed in another crashes tests that use threads: use fixed arrays for what crosses.
 - Tools that write a file from itself (`open(p,'w').write(open(p).read())`) truncate it. Edit with a script that reads first, check `git diff --stat` before a commit.
+- Integration tests (`CINIM_RQLITE_URL`) need a scratch rqlite: one node, 1Gi (`helm install rqlite rqlite/rqlite --version 2.0.0 --set replicaCount=1,persistence.size=1Gi`). Port-forward to the Pod (`pod/rqlite-0 24555:4001`), not to `svc/rqlite`: through the Service the requests hang.
 - The kube API proxy eats the `Authorization` header: reach the core API through a port-forward or an Ingress.
 - Kubernetes `exec` (the controller's spool fallback) goes through the API server; the controller has no direct channel to a step Pod.
 - Do not use `.gitignore` patterns that can catch source files (`tests/**/t[!.]*[!.nim]` caught `*.nim.cfg`; there is a negation now).
