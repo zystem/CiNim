@@ -3,11 +3,11 @@
 ## SEC-010 per-job projected tokens are deferred: the shim gets the shared CURVE "client" identity through a Secret.
 import std/[os, json, strutils, times, base64, atomics, sequtils]
 import ../common/[k8sbind, envname]
-import backend, podsec
+import backend, podsec, runvolume
 
 type K8s* = object
   api: ptr apiClient_t
-  pods, configmaps, secrets: ptr genericClient_t
+  pods, configmaps, secrets, claims: ptr genericClient_t
   tailQuery: ptr list_t       ## ?tailLines=40, built once and reused: the client does not consume it
   ns: string
 
@@ -44,6 +44,7 @@ proc connectK8s*(ns, kubeconfig: string): K8s =
   result.pods = genericClient_create(result.api, "".cstring, "v1".cstring, "pods".cstring)
   result.configmaps = genericClient_create(result.api, "".cstring, "v1".cstring, "configmaps".cstring)
   result.secrets = genericClient_create(result.api, "".cstring, "v1".cstring, "secrets".cstring)
+  result.claims = genericClient_create(result.api, "".cstring, "v1".cstring, "persistentvolumeclaims".cstring)
   result.tailQuery = list_createList()
   list_addElement(result.tailQuery, keyValuePair_create("tailLines".cstring, cast[pointer]("40".cstring)))
 
@@ -95,8 +96,14 @@ let buildSettings = podsec.buildSettings(getEnv("CINIM_BUILD", "off"), getEnv("C
                                          getEnv("CINIM_BUILD_SECCOMP"), getEnv("CINIM_BUILD_EPHEMERAL_LIMIT"))
   ## the build profile of the namespace (D-42); what a build Pod is is in podsec.nim
 
+let volumeSettings = runvolume.volumeSettings(getEnv("CINIM_RUN_STORAGE", "off"), getEnv("CINIM_RUN_STORAGE_SIZE"),
+                                              getEnv("CINIM_RUN_STORAGE_CLASS"), getEnv("CINIM_RUN_STORAGE_ACCESS"))
+  ## the run volume of the namespace (STO-001); what a Pod gets of it is in runvolume.nim
+
 proc podBody(r: PodRequest): JsonNode =
   let sec = podsec.podSecurity(buildSettings, r.build)
+  let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
+  let vol = runvolume.podVolume(volumeSettings.withEnabled(r.runVolume), r.runId, r.image, shimMount, sec.containerCtx, sec.resources)
   result = %*{
     "apiVersion": "v1", "kind": "Pod",
     "metadata": {"name": r.name, "labels": {"cicd.io/run": r.runId}},
@@ -106,18 +113,18 @@ proc podBody(r: PodRequest): JsonNode =
       "terminationGracePeriodSeconds": 60,
       "securityContext": sec.podCtx,
       "containers": [{"name": "step", "image": r.image, "command": r.cmd,
-        "volumeMounts": (@[%*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true},
-                          %*{"name": "run", "mountPath": "/cicd/workspace"}] &
+        "volumeMounts": (@[shimMount] & vol.mounts &
           (if r.logging: @[%*{"name": "certs", "mountPath": "/cicd/certs", "readOnly": true},
                            %*{"name": "spool", "mountPath": "/cicd/spool"}] else: @[])),
         "securityContext": sec.containerCtx,
         "resources": sec.resources}],
-      "volumes": (@[%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}},
-                    %*{"name": "run", "emptyDir": {}}] &   # the shim's --run-dir (CICD_ENV/CICD_OUTPUT) lives here
+      "volumes": (@[%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}}] & vol.volumes &   # the run's volume, or an emptyDir for the shim's --run-dir
         (if r.logging: @[%*{"name": "spool", "emptyDir": {"sizeLimit": $(r.spoolBytes + 1024 * 1024)}},   # kubelet evicts above this; the shim stops itself at spoolBytes
                          %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
           {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
+  if vol.initContainers.len > 0: result["spec"]["initContainers"] = %vol.initContainers
+  if vol.affinity != nil: result["spec"]["affinity"] = vol.affinity
   let podEnv = r.podEnv
   if podEnv.len > 0:
     var env = newJArray()
@@ -236,6 +243,24 @@ proc backendOf*(k: K8s): Backend =
       true,
     execInPod: proc (name, container, command: string): tuple[ok: bool, output: string] =
       execInPod(kk, name, container, command),
+    ensureRunVolume: proc (runId: string): CreateOutcome =
+      let raw = Generic_createNamespacedResource(kk.claims, kk.ns.cstring, ($claimBody(volumeSettings, runId)).cstring, nil)
+      if raw == nil:
+        stderr.writeLine "jobcontroller: create claim " & claimName(runId) & ": no response from the Kubernetes API client"
+        return CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "no response from the Kubernetes API client")
+      let j = jstr(raw)
+      if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "AlreadyExists":
+        stderr.writeLine "jobcontroller: create claim " & claimName(runId) & " failed: " & $j
+        return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
+      if j.kind == JObject and j{"status"}.getStr != "Failure": echo "jobcontroller: created claim ", claimName(runId)
+      CreateOutcome(kind: ckOk),
+    releaseRunVolume: proc (runId: string): bool =
+      let j = jstr(Generic_deleteNamespacedResource(kk.claims, kk.ns.cstring, claimName(runId).cstring, "{}".cstring))
+      if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "NotFound":
+        stderr.writeLine "jobcontroller: delete claim " & claimName(runId) & " failed: " & $j
+        return false
+      echo "jobcontroller: released the volume of run ", runId
+      true,
     listPods: proc (): tuple[ok: bool, pods: seq[PodSummary]] =
       let j = jstr(Generic_listNamespaced(kk.pods, kk.ns.cstring, nil))
       if j.kind != JObject or j{"items"} == nil or j["items"].kind != JArray: return

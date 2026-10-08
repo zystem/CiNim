@@ -49,9 +49,9 @@ func podSecurity*(b: BuildSettings; build: bool): PodSecurity =
   let labels = %*{buildLabel: buildProfile}
   if b.localhost:
     PodSecurity(
-      podCtx: %*{"runAsUser": 1000, "runAsGroup": 1000, "seccompProfile": {"type": "Localhost", "localhostProfile": userNsProfile}},
+      podCtx: %*{"runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000, "seccompProfile": {"type": "Localhost", "localhostProfile": userNsProfile}},
       containerCtx: newJObject(), resources: resources, hostUsers: false, labels: labels)
   else:
     PodSecurity(
-      podCtx: %*{"runAsUser": 0, "seccompProfile": {"type": "RuntimeDefault"}},
+      podCtx: %*{"runAsUser": 0, "fsGroup": 1000, "seccompProfile": {"type": "RuntimeDefault"}},
       containerCtx: %*{"capabilities": {"drop": ["ALL"], "add": b.caps}}, resources: resources, hostUsers: false, labels: labels)

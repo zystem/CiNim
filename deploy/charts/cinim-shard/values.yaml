@@ -127,6 +127,20 @@ secrets:
 steps:
   ephemeralStorageLimit: 1Gi
 
+# The volume the steps of a run share (STO-001, STO-002): the controller of an organisation makes one claim per run and mounts it in the Pod of every step
+# (`/cicd/workspace`, and `/cicd/state` for the env file), so that a later step finds what an earlier one wrote. `accessMode` ReadWriteMany lets the Pods
+# of a run run on different nodes; with ReadWriteOnce (the usual class) they are kept on one node. The claim is deleted when the run is over and
+# `retention` seconds have passed (STO-006): 0 at once for a run that succeeded, a day for one that did not, to look at what it left; a negative value never.
+# Counts against the organisation's quota of claims and storage. `enabled: false` gives every step an emptyDir of its own (artifacts are then the way between steps).
+runStorage:
+  enabled: true
+  size: 5Gi
+  storageClass: ""                    # empty is the cluster's default class
+  accessMode: ReadWriteOnce
+  retention:
+    succeeded: 0
+    failed: 86400
+
 # The organisations (SHD-007, SHD-008). The core compares them with their Kubernetes objects at start and every `reconcileInterval` seconds and
 # makes again what is missing (it deletes nothing; what differs, or belongs to no organisation, is an alert in `GET /api/v1/organizations:reconcile`).
 # A switched-off organisation is kept `retention` seconds (14 days) and then deleted for good with its namespace; 0 deletes it at once, a

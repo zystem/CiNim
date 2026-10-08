@@ -155,6 +155,20 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
         for e in st.obj["spec"]["template"]["spec"]["containers"][0]["env"]: env[e["name"].getStr] = e["value"].getStr
     check env["CINIM_BUILD"] == "on" and env["CINIM_BUILD_SECCOMP"] == "Localhost" and env["CINIM_BUILD_CAPS"] == "CHOWN,SETUID"
     check env["CINIM_BUILD_MEMORY_LIMIT"] == "8Gi" and env["CINIM_NAMESPACE"] == "cinim-001-acme" and "CINIM_STEP_SECURITY" notin env
+  test "STO-001 the controller is told to make a volume per run, and how big, of which class and with which access":
+    proc envOf(c: ProvisionConfig): Table[string, string] =
+      for st in organizationSteps(c, "acme", curve, "BT").steps:
+        if st.kind == "Deployment":
+          for e in st.obj["spec"]["template"]["spec"]["containers"][0]["env"]: result[e["name"].getStr] = e["value"].getStr
+    var c = cfg()
+    check "CINIM_RUN_STORAGE" notin envOf(c)
+    c.runStorage = true
+    check envOf(c)["CINIM_RUN_STORAGE"] == "on" and "CINIM_RUN_STORAGE_SIZE" notin envOf(c)
+    c.runStorageSize = "20Gi"
+    c.runStorageClass = "fast"
+    c.runStorageAccess = "ReadWriteMany"
+    let e = envOf(c)
+    check e["CINIM_RUN_STORAGE_SIZE"] == "20Gi" and e["CINIM_RUN_STORAGE_CLASS"] == "fast" and e["CINIM_RUN_STORAGE_ACCESS"] == "ReadWriteMany"
   test "DAT-003 a step Pod reaches the core's artifact port and not the object store":
     var ports: seq[int]
     var toStore = false

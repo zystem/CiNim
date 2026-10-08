@@ -10,7 +10,7 @@ import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
-import logwindow, keptpods, stepsecrets, runparams, objectstore
+import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
@@ -382,6 +382,7 @@ proc unwantedPods(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
              now - row[4].getBiggestInt > 30: wanted = false     # finished by itself: its shim is exiting, leave it a little time
     if not found or not wanted: result.add p.step
 
+var releaseAskedAt {.threadvar.}: Table[string, float]     ## when the runs whose volume may go were last looked for, per profile (STO-006)
 var refusedLoggedAt {.threadvar.}: Table[string, float]    ## a controller that keeps being refused is said once a minute, not every poll
 
 proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest): PollResponse =
@@ -464,7 +465,13 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: runParams(c, row[0].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
       step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr): stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
-  PollResponse(header: Header(protocol: 1), commands: commands,
+  # STO-006: the controller deleted these volumes; and the runs whose volume may go now (it is told again until it says it is done)
+  markReleased(c, req.storage_released)
+  var release: seq[string]
+  if epochTime() - releaseAskedAt.getOrDefault(profileId, 0.0) >= 10.0 or req.storage_released.len > 0:   # a few seconds' delay in deleting a volume costs nothing
+    releaseAskedAt[profileId] = epochTime()
+    release = releasableRuns(c, profileId, getTime().toUnix(), retentionFromEnv())
+  PollResponse(header: Header(protocol: 1), commands: commands, release_storage: release,
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)
 
 proc serveControllerAttach*(co: Core; port: int) {.thread.} =

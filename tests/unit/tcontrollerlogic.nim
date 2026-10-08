@@ -109,6 +109,56 @@ suite "creating Pods":
     check startPod(be, st, cfg, req(), 100).ok
     check seenRowBeforeCreate
 
+suite "the volume the steps of a run share (STO-001, STO-006)":
+  var volCfg = cfg
+  volCfg.runVolumes = true
+  test "STO-002 the shim is told where the step's own files, the workspace and the state are":
+    let r = buildRequest(volCfg, req())
+    check r.runVolume
+    check r.cmd[r.cmd.find("--run-dir") + 1] == "/cicd/run" and r.cmd[r.cmd.find("--workspace") + 1] == "/cicd/workspace"
+    check r.cmd[r.cmd.find("--state-dir") + 1] == "/cicd/state"
+  test "without run volumes the command is what it was: the shim's files in the workspace, no shared volume":
+    let r = buildRequest(cfg, req())
+    check not r.runVolume and r.cmd[r.cmd.find("--run-dir") + 1] == "/cicd/workspace/.run" and "--state-dir" notin r.cmd
+  test "the claim of the run is made before its first Pod, and before the row":
+    let st = openState(":memory:")
+    var order: seq[string]
+    var be = backendOf(newFake())
+    be.ensureRunVolume = proc (runId: string): CreateOutcome =
+      order.add "claim " & runId & (if st.has("ci-s1-run-0-1"): " (row exists)" else: "")
+      CreateOutcome(kind: ckOk)
+    be.createPod = proc (r: PodRequest): CreateOutcome =
+      order.add "pod"
+      CreateOutcome(kind: ckOk)
+    check startPod(be, st, volCfg, req(), 100).ok
+    check order == @["claim s1_run", "pod"]
+  test "a claim that is refused (the quota of claims is used up) leaves no row and no Pod, and is told like a refused Pod":
+    let st = openState(":memory:")
+    let f = newFake()
+    var be = backendOf(f)
+    be.ensureRunVolume = proc (runId: string): CreateOutcome =
+      CreateOutcome(kind: ckQuota, reason: "Forbidden", message: "exceeded quota: persistentvolumeclaims")
+    let o = startPod(be, st, volCfg, req(), 100)
+    check o.kind == ckQuota and f.creates.len == 0 and not st.has("ci-s1-run-0-1")
+  test "a controller without run volumes never asks for a claim":
+    let st = openState(":memory:")
+    var asked = false
+    var be = backendOf(newFake())
+    be.ensureRunVolume = proc (runId: string): CreateOutcome =
+      asked = true
+      CreateOutcome(kind: ckOk)
+    check startPod(be, st, cfg, req(), 100).ok and not asked
+  test "STO-006 the volumes core names are deleted, and the ones that are gone are reported back":
+    var deleted: seq[string]
+    var be = backendOf(newFake())
+    be.releaseRunVolume = proc (runId: string): bool =
+      deleted.add runId
+      runId != "s1_stuck"
+    check releaseRunVolumes(be, @["s1_a", "s1_stuck", "s1_b"]) == @["s1_a", "s1_b"]
+    check deleted == @["s1_a", "s1_stuck", "s1_b"]
+  test "a backend without run volumes releases nothing":
+    check releaseRunVolumes(backendOf(newFake()), @["s1_a"]).len == 0
+
 suite "the poll round":
   test "a running Pod is in the inventory, an unseen one is not 'started'":
     let st = openState(":memory:")

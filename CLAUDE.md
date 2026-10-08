@@ -39,6 +39,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 ## Where things are
 
 - Core: `src/core` (API `api.nim`, scheduler, log collector, `artifactingest.nim`, `triggers.nim`, `secretvault.nim`, `objectstore.nim` + `storagebackend.nim` + `s3backend.nim`).
+- Run volume (STO-001, D-47): `src/jobcontroller/runvolume.nim` (the claim and what a Pod gets of it), `src/core/runstorage.nim` (which runs' volumes may go), `cicd-shim --prepare-volume` (the init container).
 - Shim: `src/shim` (`shim.nim`, `logclient.nim` for every call to the core, `artifacts.nim`). Controller: `src/jobcontroller`. Executor and Lua: `src/executorsvc`, `src/executor/bootstrap.lua`.
 - Chart: `deploy/charts/cinim-shard`. Examples: `deploy/examples` (Garage, the key-service emulator, build Pods, self-build, the soak harness).
 - Ports of the core: 18081 API, 19740 controller, 19741 executor, 19742 step report, 19743 log ingest, 19744 artifact ingest.

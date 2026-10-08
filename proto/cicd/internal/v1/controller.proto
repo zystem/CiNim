@@ -82,6 +82,7 @@ message PollRequest {
   repeated KeptPod kept = 12;        // the Pods kept because they were not fully read, newest first, at most 100 (the whole list is `kept_total`)
   uint32 kept_total = 13;
   bool kept_complete = 14;           // true: `kept` and `kept_total` are the whole picture (an empty list then means "none"); core replaces what it had
+  repeated string storage_released = 15;  // STO-006: the runs whose volume this controller deleted after core asked (`PollResponse.release_storage`); a run that had none counts too
 }
 
 message StartStep {
@@ -128,4 +129,5 @@ message PollResponse {
   Failure failure = 5;
   string issued_credential = 6;      // answer to a valid bootstrap_token: the credential to keep and to send in every later poll
   bool unauthorized = 7;             // the namespace has a controller identity and the poll did not prove it: nothing was done
+  repeated string release_storage = 8;  // STO-006: runs of this namespace that are over and whose retention has passed: the controller deletes the run volume of each and says so in `storage_released`
 }

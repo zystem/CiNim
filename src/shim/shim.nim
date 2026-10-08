@@ -1,9 +1,10 @@
 ## Runner shim (RUN-010): wraps the step command inside the step Pod. It is the first process of the container and outlives the
 ## command; its priority is higher than the build's.
-##   cicd-shim --run-dir DIR [--termination-log FILE] [--secrets-file FILE] [--collector-addr ADDR --core-addr ADDR --certs-dir DIR
+##   cicd-shim --run-dir DIR [--workspace DIR] [--state-dir DIR] [--termination-log FILE] [--secrets-file FILE] [--collector-addr ADDR --core-addr ADDR --certs-dir DIR
 ##             --run-id ID --step-seq N --step-attempt N --log-spool-dir DIR ...] [--opts-json JSON] -- command args...
 ## What it does (D-27 – D-30, docs/):
-##   - gives the command $CICD_ENV, $CICD_OUTPUT and $CICD_MASK, validates the files after it (STO-003, SEC-011);
+##   - gives the command $CICD_ENV, $CICD_OUTPUT, $CICD_MASK and $CICD_WORKSPACE, validates the files after it (STO-003, SEC-011); with --workspace and
+##     --state-dir (the run volume of STO-001) the workspace and the env file are the ones every step of the run shares, --run-dir is the step's own;
 ##   - starts the command in its own process group, below its own CPU priority, and enforces the step's timeout and SIGTERM;
 ##   - turns the output into masked, numbered, compressed blocks in a spool on the Pod's ephemeral storage and delivers them to
 ##     core (logclient.nim); the Pod's own log carries only the shim's events (shimlog.nim);
@@ -85,7 +86,7 @@ type Build = object
   pid: int
   fd: cint                 ## read end of the pipe carrying the build's stdout and stderr (merged)
 
-proc spawnBuild(cmd: seq[string]; env: StringTableRef; nice, oomAdj: int): Build =
+proc spawnBuild(cmd: seq[string]; env: StringTableRef; nice, oomAdj: int; cwd = ""): Build =
   ## Starts the build in its own process group, with its CPU priority lowered and its OOM score raised, *before* it
   ## execs - so there is no window in which it runs at the shim's priority, and every process it starts inherits all
   ## three. (osproc.startProcess cannot do this: setpgid after exec is refused.) Why the build is made less important
@@ -94,6 +95,7 @@ proc spawnBuild(cmd: seq[string]; env: StringTableRef; nice, oomAdj: int): Build
   ## the build, not the shim; an unprivileged process can only lower itself and its children. Why the group: a timeout or
   ## SIGTERM has to reach everything the build started, not only `sh`.
   ## Called while the shim is still single-threaded (the log sender starts later), which is what makes fork safe here.
+  ## `cwd`: the directory the command starts in (the run's workspace, STO-002); "" leaves the working directory of the image.
   var fds, errFds: array[2, cint]
   if pipe(fds) != 0 or pipe(errFds) != 0: raise newException(OSError, "pipe failed")
   discard fcntl(errFds[1], F_SETFD, FD_CLOEXEC)       # closes by itself when the exec succeeds: the parent sees EOF
@@ -103,11 +105,13 @@ proc spawnBuild(cmd: seq[string]; env: StringTableRef; nice, oomAdj: int): Build
   let envArr = allocCStringArray(envp)
   let oomPath = "/proc/self/oom_score_adj"
   let oomVal = $oomAdj
+  let cwdC = cwd.cstring
   let pid = fork()
   if pid < 0: raise newException(OSError, "fork failed")
   if pid == 0:
     # the child: only async-signal-safe calls from here to exec
     discard setpgid(Pid(0), Pid(0))
+    if cwd.len > 0: discard chdir(cwdC)       # async-signal-safe; a failure leaves the image's own directory
     if nice > 0: discard setpriorityC(0, 0, cint(nice))
     if oomAdj > 0:
       let f = open(oomPath.cstring, O_WRONLY)
@@ -208,6 +212,26 @@ when defined(shimLogging):
       let seqNo = try: parseBiggestUInt(name.split('-')[0]) except ValueError: 0'u64
       if seqNo > 0 and seqNo <= upto: removeFile(f)
     0
+
+proc prepareVolume(args: seq[string]): int =
+  ## `cicd-shim --prepare-volume DIR SUB...` is the init container of a step Pod that mounts the run volume (STO-001, STO-002): it makes the subdirectories of the
+  ## volume that the step then mounts (`workspace`, `state`) and opens them to everyone, because the kubelet would make a missing `subPath` as root, and a step
+  ## that is not root could not write there; the steps of one run are not all the same user (a build Pod is root of its user namespace).
+  if args.len < 3:
+    stderr.writeLine "usage: cicd-shim --prepare-volume DIR SUBDIRECTORY..."
+    return 2
+  for sub in args[2 .. ^1]:
+    if sub.len == 0 or sub[0] == '/' or ".." in sub.split('/'):
+      stderr.writeLine "cicd-shim: --prepare-volume: " & sub & " is not a relative path inside the volume"
+      return 2
+    let dir = args[1] / sub
+    try:
+      createDir(dir)
+      setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite, fpOthersExec})
+    except CatchableError as e:
+      stderr.writeLine "cicd-shim: --prepare-volume: " & dir & ": " & e.msg
+      return 1
+  0
 
 proc artifactTool(args: seq[string]): int =
   ## Run by the job controller through exec when the shim could not hand the artifacts to the core itself (the spool fallback, D-33), and only when the core orders it:
@@ -338,10 +362,13 @@ proc main(): int =
   block tools:
     let argv = commandLineParams()
     if argv.len > 0 and argv[0] in ["--read-artifact", "--ack-artifacts"]: return artifactTool(argv)
+    if argv.len > 0 and argv[0] == "--prepare-volume": return prepareVolume(argv)
   when defined(shimLogging):
     let argv = commandLineParams()
     if argv.len > 0 and argv[0] in ["--read-spool", "--ack-spool"]: return spoolTool(argv)
   var runDir = ""
+  var workspaceDir = ""                    # STO-002: the run's shared workspace (default: the parent of --run-dir, as before the run volume)
+  var stateDir = ""                        # STO-002: the run's shared state (the env file of STO-003); default: --run-dir, file CICD_ENV
   var termLog = "/dev/termination-log"
   var secretsFile = ""
   var collectorAddr = ""
@@ -373,6 +400,12 @@ proc main(): int =
     of "--run-dir":
       inc i
       runDir = args[i]
+    of "--workspace":
+      inc i
+      workspaceDir = args[i]
+    of "--state-dir":
+      inc i
+      stateDir = args[i]
     of "--termination-log":
       inc i
       termLog = args[i]
@@ -511,7 +544,7 @@ proc main(): int =
 
   # The artifacts the step asked for (DAT-003): fetched from the run's own earlier steps into the workspace, before the command. Without them the command is
   # not started, as with the secrets.
-  let workspace = parentDir(runDir)
+  let workspace = if workspaceDir.len > 0: workspaceDir else: parentDir(runDir)
   if artDownload.len > 0:
     var why = "this shim was built without the connection to core that artifacts need (-d:shimLogging)"
     when defined(shimLogging):
@@ -549,7 +582,7 @@ proc main(): int =
       maskPartial = maskPartial[start .. ^1]
     except CatchableError: discard
 
-  let envFile = runDir / "CICD_ENV"
+  let envFile = if stateDir.len > 0: stateDir / "env" else: runDir / "CICD_ENV"     # shared by the steps of the run when the Pod mounts the run volume (STO-003)
   let outFile = runDir / "CICD_OUTPUT"
   # variables exported by previous steps of the job come in through the same validated parser
   var inherited: seq[EnvVar]
@@ -559,6 +592,7 @@ proc main(): int =
     writeTermination(termLog, %*{"exit_code": exitEnvRejected, "reason": e.code, "detail": "inherited CICD_ENV: " & e.msg})
     return exitEnvRejected
   createDir(runDir)
+  if stateDir.len > 0: createDir(stateDir)
   writeFile(outFile, "")                    # this step starts with an empty output file
   if maskRuntime: writeFile(maskFile, "")   # ... and an empty mask file
 
@@ -569,12 +603,13 @@ proc main(): int =
   childEnv["CICD_ENV"] = envFile
   childEnv["CICD_OUTPUT"] = outFile
   childEnv["CICD_RUN_DIR"] = runDir
+  childEnv["CICD_WORKSPACE"] = workspace
   if maskRuntime: childEnv["CICD_MASK"] = maskFile
   # poStdErrToStdOut, not poParentStreams: the shim needs a pipe to read the child's bytes itself (to
   # tee them to LogIngest) - inheriting the parent's fds directly (the old behavior) gives the shim no
   # way to see them at all. stdout/stderr are merged into one stream; LogChunk.stream still carries
   # LOG_STREAM_STDOUT/STDERR, so splitting them later is a pure addition, not a wire-format change.
-  let p = spawnBuild(cmd, childEnv, buildNice, buildOomAdj)
+  let p = spawnBuild(cmd, childEnv, buildNice, buildOomAdj, (if dirExists(workspace): workspace else: ""))   # the command starts in the workspace, as the examples assume
   event(seCommandStarted)
   let startedAt = epochTime()
   var stopReason = ""                      # "" | "timeout" | "terminated": why the shim itself ended the build

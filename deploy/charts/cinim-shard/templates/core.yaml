@@ -51,6 +51,15 @@ spec:
             - {name: CINIM_CONTROLLER_IMAGE, value: {{ include "cinim-shard.controllerImage" . | quote }}}
             - {name: CINIM_CONTROLLER_STATE_CLASS, value: {{ .Values.controller.stateStorageClass | quote }}}
             - {name: CINIM_STEP_EPHEMERAL_LIMIT, value: {{ .Values.steps.ephemeralStorageLimit | quote }}}
+            # the volume the steps of a run share (STO-001): the controller of an organisation makes a claim per run; the core says when it may go (STO-006)
+            - {name: CINIM_RUN_STORAGE, value: {{ ternary "on" "off" .Values.runStorage.enabled | quote }}}
+            {{- if .Values.runStorage.enabled }}
+            - {name: CINIM_RUN_STORAGE_SIZE, value: {{ .Values.runStorage.size | quote }}}
+            - {name: CINIM_RUN_STORAGE_CLASS, value: {{ .Values.runStorage.storageClass | quote }}}
+            - {name: CINIM_RUN_STORAGE_ACCESS, value: {{ .Values.runStorage.accessMode | quote }}}
+            - {name: CINIM_STORAGE_RETENTION_SUCCEEDED, value: {{ .Values.runStorage.retention.succeeded | quote }}}
+            - {name: CINIM_STORAGE_RETENTION_FAILED, value: {{ .Values.runStorage.retention.failed | quote }}}
+            {{- end }}
             - {name: CINIM_INGRESS_CLASS, value: {{ .Values.ingress.className | quote }}}
             - {name: CINIM_INGRESS_TLS_SECRET, value: {{ .Values.ingress.tls.secretName | quote }}}
             - {name: CINIM_INGRESS_ANNOTATIONS, value: {{ .Values.ingress.annotations | toJson | quote }}}

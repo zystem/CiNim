@@ -38,6 +38,7 @@ let
   stateDir = getEnv("CINIM_STATE_DIR", getCurrentDir() / "state")
   # how long a finished step Pod is kept after core has its result (to look at it with kubectl), by outcome
   retentionRead = parseInt(getEnv("CINIM_POD_RETENTION_READ", "0"))     # a Pod whose result and log are both read has nothing to show: removed at once
+  runVolumes = getEnv("CINIM_RUN_STORAGE", "off") == "on"    # STO-001: the steps of a run share a volume (the size, class and access mode are read in k8s.nim)
   retentionUnread = parseInt(getEnv("CINIM_POD_RETENTION_UNREAD", $(14 * 86400)))    # a Pod core could not read (log undelivered, end unknown): 14 days, and an alert
   # load_kube_config() (kubernetes-client/c) always dials whatever "current-context" says in the file, with
   # no per-call override - it silently follows the shared ~/.kube/config if this is left empty, which drifts
@@ -151,6 +152,7 @@ proc main() =
   cfg.logHoldTimeout = logHoldTimeout
   cfg.retentionRead = retentionRead
   cfg.retentionUnread = retentionUnread
+  cfg.runVolumes = runVolumes
   let st = openState(stateDir / "controller.sqlite")
   let adopted = st.active()
   echo "jobcontroller: state in ", stateDir, ", adopted ", adopted.len, " step Pod(s) from the previous run"
@@ -160,6 +162,7 @@ proc main() =
   var handBack: seq[PodTransition]       # steps assigned to us while the launch gate was closed: no Pod exists, they go back
   var ackSeq = 0'u64
   var lastSweep = 0.0
+  var released: seq[string]               # run volumes deleted since the last answered poll: core is told, and stops asking (STO-006)
   var seenPhase: Table[string, string]     # pod name -> phase as of the last round (only a Running Pod has a spool worth pulling)
   echo "jobcontroller: connected, session=", sessionId
   while true:
@@ -170,7 +173,8 @@ proc main() =
       credential: credential, bootstrap_token: (if credential.len == 0: readTrimmed(bootstrapFile) else: ""),
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
       inventory: round.inventory.map(toProto), inventory_complete: true,    # every Pod this controller tracks is listed
-      kept: keptPods(st, cfg, 100), kept_total: uint32(st.unread().len), kept_complete: true)
+      kept: keptPods(st, cfg, 100), kept_total: uint32(st.unread().len), kept_complete: true,
+      storage_released: released)
     var resp: PollResponse
     try:
       resp = core.rpc(req)
@@ -198,9 +202,13 @@ proc main() =
       sleep int(max(resp.poll_after_ms, 1000'u32))
       continue
     afterPoll(st, round.transitions, int64(now))
+    released.setLen(0)
     handBack.setLen(0)
     if resp.commands.len > 0:
       stderr.writeLine "jobcontroller: poll got " & $resp.commands.len & " command(s): " & $resp.commands.mapIt($it.body.kind)
+    if resp.release_storage.len > 0:
+      released = releaseRunVolumes(be, resp.release_storage)       # idempotent: a run that never had a volume counts as released
+      if released.len > 0: echo "jobcontroller: released the volume of ", released.len, " finished run(s)"
     for cmd in resp.commands:
       case cmd.body.kind
       of CommandBodyKind.start:

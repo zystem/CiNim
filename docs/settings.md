@@ -31,6 +31,10 @@ did not pass the profile's setting; normally the profile applies.
 |---|---|---|
 | `CINIM_POD_RETENTION_READ` | 0 | seconds a finished step Pod is kept when core has its result and its log was delivered (nothing is left in it that the platform does not have); 0 removes it at once. Raise it to look at Pods with `kubectl` |
 | `CINIM_POD_RETENTION_UNREAD` | 1209600 (14 days) | seconds a Pod is kept, a success or not, when core could not read from it what it needs: its log was not delivered or its end is unknown (the node was lost, the shim went silent). Core shows an alert for each such Pod (`GET /api/v1/alerts`, `cinim_unread_pods`) until the controller removes it |
+| `CINIM_RUN_STORAGE` | `off` | `on`: the controller makes a PersistentVolumeClaim per run and mounts it in the Pod of every step (`/cicd/workspace`, `/cicd/state`), so that the steps of a run share files and the env file (STO-001). The core sets it from the Helm value `runStorage.enabled`; `off` gives every Pod an emptyDir of its own |
+| `CINIM_RUN_STORAGE_SIZE` | `5Gi` | the request of a run's claim |
+| `CINIM_RUN_STORAGE_CLASS` | the cluster's default class | its StorageClass |
+| `CINIM_RUN_STORAGE_ACCESS` | `ReadWriteOnce` | `ReadWriteMany` if the class has it; with `ReadWriteOnce` the Pods of a run are kept on one node (pod affinity over the run label) |
 
 ## Core environment for the `multi` mode
 
@@ -68,6 +72,8 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_STEP_EPHEMERAL_LIMIT` | `1Gi` | the limit that the LimitRange of an organisation's namespace gives a step Pod that sets none (the Helm value `steps.ephemeralStorageLimit`); the request it gives is `64Mi`, so that such a Pod is not the first one the kubelet evicts when the node runs short of ephemeral storage |
 | `CINIM_BUILD_SECCOMP` | `RuntimeDefault` | the class of a build Pod: `RuntimeDefault` (Kaniko: root of a user namespace, six capabilities) or `Localhost` (rootless BuildKit and Buildah: user 1000, the seccomp profile `profiles/cinim-userns.json` that exists on every node) (the Helm value `build.seccompProfile`) |
 | `CINIM_BUILD*` (controller) | | the core passes `CINIM_BUILD=on`, `CINIM_BUILD_SECCOMP`, `CINIM_BUILD_CAPS`, `CINIM_BUILD_MEMORY_LIMIT` and `CINIM_BUILD_EPHEMERAL_LIMIT` to the controller of every organisation; it makes a build Pod of a step of the build profile |
+| `CINIM_RUN_STORAGE`, `CINIM_RUN_STORAGE_SIZE`, `CINIM_RUN_STORAGE_CLASS`, `CINIM_RUN_STORAGE_ACCESS` | `off`, `5Gi`, the default class, `ReadWriteOnce` | the run volume (STO-001; the Helm values `runStorage.enabled`, `size`, `storageClass`, `accessMode`): the core passes them to the controller of every organisation (the table above) |
+| `CINIM_STORAGE_RETENTION_SUCCEEDED`, `CINIM_STORAGE_RETENTION_FAILED` | 0, 86400 | seconds after the end of a run before the core tells the controller to delete the run's volume (STO-006): at once for a run that succeeded, a day for one that did not, to look at what it left; a negative value never (the Helm values `runStorage.retention.succeeded`, `.failed`) |
 | `CINIM_ORG_RECONCILE_INTERVAL` | 300 | seconds between two passes of the reconciliation (SHD-008; the Helm value `organizations.reconcileInterval`, at least 10); a pass also runs at start |
 | `CINIM_ORG_RETENTION` | 1209600 (14 days) | seconds a switched-off organisation is kept before it is deleted for good with its namespace (the Helm value `organizations.retention`); `0` deletes it at once, a negative value never |
 | `CINIM_CONTROLLER_BOOTSTRAP_TTL` | 86400 | seconds that the bootstrap token of an organisation's controller stays good (IAM-003) |

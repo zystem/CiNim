@@ -291,6 +291,43 @@ A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client a
 
 `deploy/examples/garage/garage.yaml` runs Garage v2.4.1 (D-46) in the shard's namespace: one StatefulSet pod on an 8 GiB volume, the Service `garage` (S3 on 3900, admin API on 3903). Its secrets are made on the volume at the first start, and a sidecar makes the layout, the bucket `cinim-artifacts` and the access key `cinim` (idempotent). `kubectl -n <ns> apply -f deploy/examples/garage/garage.yaml`; change the volume size in the file first if the cluster is small (the test cluster could not give 20 GiB). The key is read with `kubectl -n <ns> exec garage-0 -c init -- cat /var/lib/garage/secrets/cinim-s3` (the platform will keep it sealed in its database once the core talks to the store). Checked: a PUT and a GET with SigV4 from another Pod (`curl --aws-sigv4 aws:amz:garage:s3`) and an anonymous GET refused (403). Then tell the core: `PUT /api/v1/storage` (docs/artifacts.md). A step Pod never reaches the store; only the core does.
 
+## The volume the steps of a run share
+
+The steps of a run see one `/cicd/workspace` (STO-001, STO-002): the controller of an organisation makes a PersistentVolumeClaim `cicd-run-<run id>` before the first
+Pod of the run and mounts it in the Pod of every step, its `workspace/` at `/cicd/workspace` and its `state/` at `/cicd/state` (the env file of `$CICD_ENV`, STO-003). A
+file that one step writes is there for the next; so is a variable it writes to `$CICD_ENV`. The step's own files (`$CICD_OUTPUT`, `$CICD_MASK`) are in an `emptyDir` at
+`/cicd/run`, so that two steps of a run never write the same one. Artifacts (docs/artifacts.md) are for what must outlive the run or reach people; the volume is for
+what the steps of one run hand to each other.
+
+```yaml
+runStorage:
+  enabled: true                  # false: every step has an emptyDir of its own, as before
+  size: 5Gi                      # the request of a run's claim
+  storageClass: ""               # empty is the cluster's default class
+  accessMode: ReadWriteOnce      # ReadWriteMany if the class has it
+  retention: {succeeded: 0, failed: 86400}
+```
+
+With `ReadWriteOnce`, which most classes of local or block storage give, the volume can be attached to one node, so the Pods of a run are kept on one node (a pod affinity term over
+the run label; the first Pod of a run matches its own term, which Kubernetes allows). That limits the steps of one run to the resources of that node; with `ReadWriteMany`
+they spread. An init container (`cicd-shim --prepare-volume`, from the step's own image, with the step's own security context) makes the two directories before the step, because
+the kubelet would make a missing `subPath` as root and a step that is not root could not write there; the directories are open to every user of the run, since a build Pod is
+root of its user namespace while an ordinary step is user 1000.
+
+When the run is over and `retention` seconds have passed, the claim is deleted: the core names the run in the poll of the organisation's controller, again and again, until the controller
+answers that the claim is gone (`runs.storage_released`; a run that never had a volume counts as released). So a lost answer or a restarted controller costs nothing, and a claim
+is not left behind by a controller that was not there at the end of a run. The namespace's quota counts the claims (50) and their size (500 Gi).
+
+Checked on the TESTING cluster (class `directpv-min-io`, `ReadWriteOnce`), through the API alone: a run of four steps in one organisation. The first step (user 1000) wrote a file, a file in a subdirectory
+and a variable to `$CICD_ENV`; the second (user 1000, another Pod) read both files and the variable; a step of the build profile (root of a user namespace, `hostUsers: false`) read what the others wrote and wrote a
+file of its own; the last step (user 1000) read the file of the build step. The directories of the volume were `drwxrwxrwx` owned by user 1000, and `$CICD_WORKSPACE` was `/cicd/workspace`. The run succeeded, and the claim was deleted a few seconds
+after the controller removed the last Pod. A run whose step exited with 3 kept its claim (the retention for a failed run is a day). The first claim on a node showed one failed provisioning
+(`VolumeBinding`) that the scheduler retried by itself; on a cluster whose node disks had no room left for a claim the Pod waited in `Pending` (the scheduler does not know DirectPV's free space) until it chose
+a node with room or `start_timeout` ended the attempt and the step was repeated. The same run, with the working directory change of the shim (every step printed `pwd` as `/cicd/workspace` and used relative paths), succeeded on the second test cluster (k3s, `local-path`, `ReadWriteOnce`), build step included. Not checked: `ReadWriteMany`, the parallel steps of one run (`ci.parallel` is not built, so the pod affinity of `ReadWriteOnce` was only
+checked for being accepted), a class without `fsGroup` support, a controller restarted while a run was going.
+
+A step's command starts in `/cicd/workspace` (the shim changes to it before the command runs; the working directory of the image is not used), so relative paths mean files on the shared volume. If the directory is missing the command starts in the image's own directory.
+
 ## Reconciliation and retention
 
 At start and every `organizations.reconcileInterval` seconds (300) the core compares the organisations in its database with their Kubernetes objects

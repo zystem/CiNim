@@ -83,6 +83,8 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
                   build: buildOn, buildEgress: buildEgress, buildCaps: getEnv("CINIM_BUILD_CAPS"), buildMemoryLimit: getEnv("CINIM_BUILD_MEMORY_LIMIT"),
                   stepEphemeralLimit: getEnv("CINIM_STEP_EPHEMERAL_LIMIT"), buildEphemeralLimit: getEnv("CINIM_BUILD_EPHEMERAL_LIMIT"),
                   buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"), buildIngress: buildIngress,
+                  runStorage: getEnv("CINIM_RUN_STORAGE", "off") == "on", runStorageSize: getEnv("CINIM_RUN_STORAGE_SIZE"),
+                  runStorageClass: getEnv("CINIM_RUN_STORAGE_CLASS"), runStorageAccess: getEnv("CINIM_RUN_STORAGE_ACCESS"),
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,
                   ingressClass: getEnv("CINIM_INGRESS_CLASS"), tlsSecret: getEnv("CINIM_INGRESS_TLS_SECRET"), annotations: annotations)

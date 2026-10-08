@@ -32,6 +32,33 @@ suite "RUN-010 runner shim":
     let r = runShim(d, "test \"$FOO\" = bar")
     check r.code == 0 and r.msg["reason"].getStr == "ok"
 
+  test "STO-002 with the run volume the env file is the run's, the step's own files are not, and the workspace is told to the command":
+    let root = getTempDir() / "shim-t-vol"; removeDir(root)
+    createDir(root / "run1"); createDir(root / "run2"); createDir(root / "ws"); createDir(root / "state")
+    let vol = @["--workspace", root / "ws", "--state-dir", root / "state"]
+    let a = runShim(root / "run1", "echo FOO=bar >> \"$CICD_ENV\"; echo shared > \"$CICD_WORKSPACE/file\"; echo \"$CICD_ENV\" > " & (root / "env-path"), vol)
+    check a.code == 0 and a.msg["reason"].getStr == "ok"
+    check readFile(root / "env-path").strip == root / "state" / "env"
+    check fileExists(root / "ws" / "file") and not fileExists(root / "run1" / "CICD_ENV")
+    # a later step, in a Pod of its own (another run directory): it sees the variable and the file
+    let b = runShim(root / "run2", "test \"$FOO\" = bar && test \"$(cat \"$CICD_WORKSPACE/file\")\" = shared", vol)
+    check b.code == 0 and b.msg["reason"].getStr == "ok"
+  test "STO-002 the command starts in the workspace when there is one, in the image's directory when not":
+    let root = getTempDir() / "shim-t-cwd"; removeDir(root); createDir(root / "ws"); createDir(root / "run")
+    let a = runShim(root / "run", "pwd -P > " & (root / "pwd.txt"), @["--workspace", root / "ws"])
+    check a.code == 0 and readFile(root / "pwd.txt").strip == (root / "ws").expandFilename
+    let b = runShim(root / "run", "pwd -P > " & (root / "pwd2.txt"), @["--workspace", root / "missing"])
+    check b.code == 0 and readFile(root / "pwd2.txt").strip == getCurrentDir().expandFilename
+  test "STO-001 --prepare-volume makes the two directories and opens them to everyone, and refuses a path outside the volume":
+    let root = getTempDir() / "shim-t-prep"; removeDir(root); createDir(root)
+    check execCmd(shimExe & " --prepare-volume " & root & " workspace state") == 0
+    for d in ["workspace", "state"]:
+      check dirExists(root / d) and fpOthersWrite in getFilePermissions(root / d) and fpOthersExec in getFilePermissions(root / d)
+    check execCmd(shimExe & " --prepare-volume " & root & " workspace") == 0              # again: nothing breaks
+    check execCmd(shimExe & " --prepare-volume " & root & " ../escape 2>/dev/null") == 2
+    check execCmd(shimExe & " --prepare-volume " & root & " /abs 2>/dev/null") == 2
+    check not dirExists(root.parentDir / "escape")
+
   test "RUN-010 the command's exit code is propagated and reported":
     let d = getTempDir() / "shim-t3"; createDir(d)
     let r = runShim(d, "exit 3")

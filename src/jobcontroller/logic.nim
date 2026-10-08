@@ -42,6 +42,7 @@ type
     retentionUnread*: int                     ## seconds it is kept when they are not (log not delivered, end unknown): 14 days
     orphanGrace*: int                         ## a Pod not in our state is an orphan only after this many seconds
     logEvery*: int                            ## seconds between reads of a running Pod's log
+    runVolumes*: bool                         ## the steps of a run share one volume (STO-001): the Pods mount it and the shim is told where the workspace and the state are
 
 func defaultConfig*(): Config =
   Config(logSpoolBytes: 10 * 1024 * 1024, logHoldTimeout: 600, retentionUnread: 14 * 86400, orphanGrace: 120,
@@ -56,7 +57,12 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   let logging = cfg.collectorAddr.len > 0 and cfg.stepReportAddr.len > 0
   let spool = if r.logSpoolBytes > 0: int(r.logSpoolBytes) else: cfg.logSpoolBytes
   let hold = if r.logHoldTimeout > 0: r.logHoldTimeout else: cfg.logHoldTimeout
-  var cmd = @["/cicd/shim/cicd-shim", "--run-dir", "/cicd/workspace/.run"]
+  var cmd = @["/cicd/shim/cicd-shim"]
+  if cfg.runVolumes:
+    # STO-002: the step's own files (CICD_OUTPUT, CICD_MASK) are in /cicd/run, the run's workspace and the env file of STO-003 on the shared volume
+    cmd.add @["--run-dir", "/cicd/run", "--workspace", "/cicd/workspace", "--state-dir", "/cicd/state"]
+  else:
+    cmd.add @["--run-dir", "/cicd/workspace/.run"]
   if logging:
     cmd.add @["--collector-addr", cfg.collectorAddr, "--core-addr", cfg.stepReportAddr, "--certs-dir", "/cicd/certs",
               "--run-id", r.runId, "--step-seq", $r.seq, "--step-attempt", $r.attempt,
@@ -72,16 +78,27 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
-             spoolBytes: spool, build: r.profile == "build", env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
+             spoolBytes: spool, build: r.profile == "build", runVolume: cfg.runVolumes, env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds
   ## out: 404 = never started), never a Pod without a row (that would be an orphan).
   let req = buildRequest(cfg, r)
+  if cfg.runVolumes and be.ensureRunVolume != nil:
+    # the claim of the run is made before its first Pod (and found again by every later one); a refusal (the namespace's quota of claims or of storage is used
+    # up, or a claim the class cannot give) is told the way a refused Pod is, and nothing is tracked for a Pod that will not exist
+    let vol = be.ensureRunVolume(r.runId)
+    if vol.kind != ckOk: return vol
   st.track(req.name, r.runId, r.seq, r.attempt, now)
   result = be.createPod(req)
   if result.kind in [ckQuota, ckRejected]:
     st.forget(req.name)         # no Pod exists and none will: the caller tells core what the API server said, and nothing is left to find 404
+
+proc releaseRunVolumes*(be: Backend; runIds: seq[string]): seq[string] =
+  ## STO-006: core says these runs' storage may go; the ones whose claim is gone afterwards are returned, and core is told in the next poll
+  if be.releaseRunVolume == nil: return
+  for id in runIds:
+    if be.releaseRunVolume(id): result.add id
 
 proc shimStateOf*(tail: string): string =
   ## the newest shim state in a Pod-log tail, as the JSON core's recordShimState expects ("" = none found)

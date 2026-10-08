@@ -133,6 +133,7 @@ proc migrate*(c: var RqClient) =
       ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
       ("artifacts", "upload_id", "TEXT NOT NULL DEFAULT ''"),     # the store's id of a multipart upload that is under way
       ("runs", "fail_code", "TEXT NOT NULL DEFAULT ''"), ("runs", "fail_message", "TEXT NOT NULL DEFAULT ''"),   # why the run did not succeed (executor's FinishRun)
+      ("runs", "storage_released", "INTEGER NOT NULL DEFAULT 0"),   # the controller deleted the run's volume (STO-006, core/runstorage.nim)
       ("runs", "params", "TEXT NOT NULL DEFAULT ''"),         # the launch parameters: a JSON object of text values, at most 4 KiB (VAR-002, core/runparams.nim)
       ("runs", "profile_id", "TEXT NOT NULL DEFAULT ''"),     # the execution profile of the run's organisation (SHD-007)
       ("execution_profiles", "infra_retries", "INTEGER NOT NULL DEFAULT 3"),
@@ -142,6 +143,7 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600")]:
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
+  discard c.execute(%*[["CREATE INDEX IF NOT EXISTS runs_storage ON runs (profile_id, storage_released, state)"]])    # what the polls of the controllers ask (core/runstorage.nim)
 
 proc seedDefaultProfile*(c: var RqClient; namespace: string; id = "default"): string =
   ## Idempotent: the one execution profile needed for now (there is no admin UI to create one yet).

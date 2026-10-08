@@ -24,7 +24,7 @@ ci.job({ image = "alpine" }, function(j)
 end)
 ```
 
-* `upload` is a list of patterns, relative to the shared workspace `/cicd/workspace` (the same directory in every step of a run). `*` is any characters within a name, `**` crosses directories (`dist/**`, `**/*.log`), `?` is one character. **Every pattern must match at least one file**; a pattern that matches nothing fails the step with `artifacts_failed` and says which one. Symbolic links and the shim's own `.run` directory are never taken. At most 1000 files per step and 5 GiB per file.
+* `upload` is a list of patterns, relative to the shared workspace `/cicd/workspace` (the same directory in every step of a run: the steps share a volume, docs/deployment.md). A command starts in the workspace (the shim changes to it before the command runs), so relative paths mean files there. `*` is any characters within a name, `**` crosses directories (`dist/**`, `**/*.log`), `?` is one character. **Every pattern must match at least one file**; a pattern that matches nothing fails the step with `artifacts_failed` and says which one. Symbolic links and the shim's own `.run` directory are never taken. At most 1000 files per step and 5 GiB per file.
 * Files are put **after the command has succeeded**, before the step's log is closed (the log says `artifact dist/app.txt put (6 bytes)`). A command that failed or was stopped leaves nothing.
 * `download` is a list of names: a file or a directory (all artifacts of this run under it). They are fetched into the workspace **before** the command, from the same run only; if one is missing the command does not start (`artifacts_unavailable`, exit 75). The SHA-256 recorded at upload is checked.
 * A job's declaration and a step's are added together, as for secrets.

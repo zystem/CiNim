@@ -32,6 +32,8 @@ type
     buildCaps*, buildMemoryLimit*: string       ## what the controller keeps of the capabilities of a build Pod (comma separated) and its memory limit; "" is its default
     egressOpen*, ingressOpen*: bool             ## the simple mode for a small organisation (SHD-009): its step Pods may reach any address / be reached from any;
                                                 ## the default is closed both ways, with the openings of the build profile
+    runStorage*: bool                           ## STO-001: the steps of a run share one volume that the organisation's controller makes (a claim per run)
+    runStorageSize*, runStorageClass*, runStorageAccess*: string   ## its request ("" = the controller's 5Gi), class ("" = the cluster's default), `ReadWriteOnce` or `ReadWriteMany`
     buildSeccomp*: string                       ## `RuntimeDefault` (Kaniko) or `Localhost` (rootless BuildKit and Buildah, deploy/seccomp); "" is the controller's default
 
   CurveKeys* = object                           ## what the controller of an organisation needs to reach the core (D-24)
@@ -99,6 +101,11 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
     %*{"name": "CINIM_CERTS", "value": "/etc/cinim"},
     %*{"name": "CINIM_STATE_DIR", "value": "/state"},
     %*{"name": "CINIM_BOOTSTRAP_FILE", "value": "/etc/cinim/bootstrap/token"}]
+  if cfg.runStorage:
+    env.add %*{"name": "CINIM_RUN_STORAGE", "value": "on"}     # the controller makes a claim per run and mounts it in the step Pods (jobcontroller/runvolume.nim)
+    if cfg.runStorageSize.len > 0: env.add %*{"name": "CINIM_RUN_STORAGE_SIZE", "value": cfg.runStorageSize}
+    if cfg.runStorageClass.len > 0: env.add %*{"name": "CINIM_RUN_STORAGE_CLASS", "value": cfg.runStorageClass}
+    if cfg.runStorageAccess.len > 0: env.add %*{"name": "CINIM_RUN_STORAGE_ACCESS", "value": cfg.runStorageAccess}
   if cfg.build:
     env.add %*{"name": "CINIM_BUILD", "value": "on"}     # the controller makes a build Pod of a step of the build profile (k8s.nim)
     if cfg.buildSeccomp.len > 0: env.add %*{"name": "CINIM_BUILD_SECCOMP", "value": cfg.buildSeccomp}
