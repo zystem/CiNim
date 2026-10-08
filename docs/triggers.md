@@ -34,7 +34,7 @@ POST /api/v1/runs
 What happens:
 
 * The API checks only what it can without the script: a name is an environment variable name (`[A-Z_][A-Z0-9_]*`, not `PATH`, `LD_*`, `CICD_*` and the like), a value is a string, number or boolean of at most 1 KiB, 64 parameters and 4 KiB in all. Anything else is `400 invalid_params`.
-* The executor then checks the values against the script's declarations, **before `main` runs**: a missing required parameter, a number out of range, a value that is not one of the choices, or a parameter the script does not declare ends the run as failed, with the parameter's name and the rule in the message. (Checking at the API, before the run exists, needs the metadata phase and preflight, PIP-016; not built yet.)
+* The executor then checks the values against the script's declarations, **before `main` runs**: a missing required parameter, a number out of range, a value that is not one of the choices, or a parameter the script does not declare ends the run as failed, with the parameter's name and the rule in the message (today the message is in the executor's log; `GET /api/v1/runs/{id}` shows the state `FAILED` and no steps, a run's failure message is not in the API yet). (Checking at the API, before the run exists, needs the metadata phase and preflight, PIP-016; not built yet.)
 * The complete set, defaults included, is journaled once and kept with the run (`GET /api/v1/runs/{id}` shows it as `params`). A replay after an executor restart gets the same values from the journal.
 * Every step of the run gets them as plain environment variables of the container. They are in the Pod's specification, so **a parameter is not a place for a secret**: a step asks for those by name (`secrets = {"NAME"}`, `docs/secrets-masking.md`). A secret of the same name wins.
 
@@ -85,3 +85,7 @@ DELETE /api/v1/organizations/acme/triggers/{id}
 ### What a trigger stores
 
 The project, the **script** and the parameters (until pipelines are read from repositories). The script is up to 256 KiB. A trigger of an organisation that is switched off starts nothing; deleting the organisation deletes its triggers.
+
+## Checked on the TESTING cluster
+
+Parameters (a run with `JOBS=8` and `BRANCH` given: the step printed the given values and the default of `TARGET`; `JOBS=0` ended the run `FAILED` before any step; `PATH` as a parameter was `400`), a webhook (wrong secret, no secret and an administrator token all `404`, the right secret `201` with a parameter, `LD_PRELOAD` as a parameter `400`), a schedule (`* * * * *` started a run in the first minute; switched off afterwards), `:fire`. Not checked: `concurrency = skip` against a long run, two cores at once, a core that was down over a firing.
