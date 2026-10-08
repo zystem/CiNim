@@ -3,13 +3,15 @@
 A self-hosted CI/CD platform for Kubernetes, written in Nim. The full specification is in [`docs/specification.md`](docs/specification.md): requirements, the decision log (D-xx) and, in Appendix A, the measurements behind the decisions.
 
 Working today, through the REST API only: Lua pipelines with a replay journal (`ci.pipeline`, `ci.job`, `Job:sh`, `ci.now`, `ci.random`,
-`ci.sleep`), a Pod per step, the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the launch gate (RUN-015), component liveness,
-step metrics, organisations with a namespace and a job controller each (SHD-001 to SHD-009: create, switch off, delete, the reconciliation with their
-Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
-(SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). Not built yet: the UI (apart from the router page), webhooks and
-triggers, `j.checkout`, the run volume and `$CICD_ENV` (STO), artifacts and caches, `ci.parallel`, `ci.matrix`, `ci.input`, `ci.finally`,
-plugins, variables and secrets for steps, OIDC/RBAC and any authentication of the REST API, the audit log and backups. The delivery plan is section 17 of the specification; the sections of the specification
-describe the target, and the status above is the one that holds.
+`ci.sleep`), typed launch parameters (`ci.string`, `ci.number`, `ci.bool`, `ci.choice`) that reach the steps as environment variables, a Pod per step,
+the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the launch gate (RUN-015), component liveness, step metrics, diagnostics of a Pod's end
+(reason, message, events, node), organisations with a namespace and a job controller each (SHD-001 to SHD-009: create, switch off, delete, the reconciliation with
+their Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), API tokens with scopes (IAM-003), step secrets sealed in the
+database under a master key that can live in a hardware token (D-45, `docs/hardware-key.md`), triggers (schedule, webhook, manual), artifacts that go through the core
+to an S3-compatible store (Garage, D-46), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
+(SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). Not built yet: the UI (apart from the router page), `j.checkout`, the run volume (STO),
+caches, `ci.parallel`, `ci.matrix`, `ci.input`, `ci.finally`, plugins, plain variables of the four levels, OIDC/RBAC, the audit log and backups. The delivery plan is
+section 17 of the specification; the sections of the specification describe the target, and the status above is the one that holds.
 
 ## Structure
 
@@ -30,7 +32,10 @@ Transport between services: ZeroMQ with CURVE (D-24). HTTP layer: GuildenStern (
 - `docs/deployment.md` — installing a shard, organisations, image builds, the network modes;
 - `docs/settings.md` — execution profile settings (retries, log limit, spool, timeouts) and cluster requirements;
 - `docs/metrics.md` — step metrics, `metrics = {...}` in Lua, `/metrics`;
-- `docs/secrets-masking.md` — secret masking and `$CICD_MASK`;
+- `docs/secrets-masking.md` — secret masking, `$CICD_MASK`, step secrets;
+- `docs/hardware-key.md` — the master key of the step secrets in a hardware token (SmartCard-HSM), the key service and its emulator;
+- `docs/triggers.md` — launch parameters and triggers;
+- `docs/artifacts.md` — artifacts, the object store, the spool fallback, moving the storage module out of the core;
 - `docs/ci-pitfalls.md` — known pitfalls of other CI systems and how this platform handles them;
 - `docs/state-machines.md` — state machines (generated: `nim c -r tools/gen_state_docs.nim`);
 - `docs/threat-model.md` — the threat model;
