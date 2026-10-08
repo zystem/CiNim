@@ -119,6 +119,11 @@ proc registryTouch*(kind, id: string; now: float; info: seq[(string, string)] = 
   {.cast(gcsafe).}:
     withLock lock: result = global.touch(kind, id, now, info)
 
+proc registryLastSeen*(kind, id: string): float =
+  ## the time of the component's last sign of life (epoch seconds), 0 if the registry does not hold it
+  {.cast(gcsafe).}:
+    withLock lock: result = global.items.getOrDefault(key(kind, id)).lastSeen
+
 proc registrySet*(kind, id: string; state: CompState; now: float; info: seq[(string, string)] = @[]): seq[Change] =
   {.cast(gcsafe).}:
     withLock lock: result = global.setState(kind, id, state, now, info)

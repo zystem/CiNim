@@ -56,9 +56,10 @@ func ok*(o: CreateOutcome): bool =
   o.kind in [ckOk, ckTransport]
 
 func classifyCreateFailure*(code: int; reason, message: string): CreateOutcome =
-  ## What a refused `create pod` means for the step. A used-up quota or a request to slow down passes by itself: the step waits in the queue.
+  ## What a refused `create pod` means for the step. A used-up quota or a request to slow down passes by itself: the step waits in the queue. So does an error of
+  ## the API server itself (5xx: `etcdserver: request timed out`, an overloaded or restarting server): it says nothing about the step, and the same request is accepted a moment later.
   ## Everything else (Pod Security, an admission policy, an invalid spec) would be refused again: it is a fault of the platform's setup, not of the step.
-  if code == 429 or (code == 403 and "exceeded quota" in message):
+  if code == 429 or code >= 500 or (code == 403 and "exceeded quota" in message):
     CreateOutcome(kind: ckQuota, reason: reason, message: message)
   else:
     CreateOutcome(kind: ckRejected, reason: reason, message: message)

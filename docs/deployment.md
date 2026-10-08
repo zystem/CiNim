@@ -194,10 +194,11 @@ not count pods and nodes as private addresses (Cilium does not) keep the cluster
 
 ## CiNim builds itself
 
-`deploy/examples/self-build/self-build.lua` is a pipeline of two build steps that builds the two images of the platform from git with Kaniko and pushes
-them to the registry (`tools/image/Dockerfile.kaniko`). Checked on the TESTING cluster through the API alone: a shard of this chart, an organisation,
-`POST /api/v1/runs` with that script; both steps ran as build Pods, the images `cinim` and `cinim-controller` appeared in the registry, and the shard was
-then upgraded to run on them. Kaniko clones a git context into a fixed directory, so two builds in one Pod need two steps (two `ci.job`). A step that exits
+`deploy/examples/self-build/self-build.lua` is a pipeline of three build steps that share the run's volume: the first clones the source into `/cicd/workspace`
+(`alpine/git`), the other two are Kaniko build Pods that build the two images of the platform from that directory (`tools/image/Dockerfile.kaniko`) and push them to the registry.
+The registry address and the tag are launch parameters (`REGISTRY`, `TAG`, also `REPO` and `REF`): `POST /api/v1/runs` with `"params": {"REGISTRY": "<host:port>", "TAG": "dev-1"}`. The clone is a build step
+too, because only build Pods reach the internet. Checked on the TESTING cluster through the API alone: an organisation, a run of that script; the images `cinim` and `cinim-controller` appeared in the registry
+(the second build read the cache of the first), and an earlier run of the same kind had been upgraded to run on its images. Kaniko needs one step per build, since it works on one Dockerfile and target at a time. A step that exits
 with a non-zero code fails the job and the run (`ignore_failure = true` returns the code to the script instead, PIP-018). The registry here is the plain
 in-cluster one of `deploy/registry`: its address is the one the Pods reach it at, which is not always the name the nodes pull from.
 

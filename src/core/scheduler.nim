@@ -339,8 +339,11 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
     let settings = loadSettings(c, rowProfile)
     let policy = loadPolicy(c, rowProfile)
     let st = if row[3].getStr == protoName(ssRunning): ssRunning else: ssStarting
+    # The shim's heartbeats (a log batch every 5 s) are not written to rqlite (RUN-002): the database holds the time of its last *event*, which for a command
+    # that runs a long time is the start. The heartbeats are in the component registry, in memory, and count as signs of life too (RUN-016, RUN-017).
+    let heartbeat = int64(registryLastSeen("shim", row[0].getStr & "/" & $row[1].getInt & "/" & $row[2].getInt))
     let verdict = liveness.judge(StepLiveness(state: st, claimedAt: row[4].getBiggestInt, shimN: row[5].getInt,
-                                              shimSeenAt: row[6].getBiggestInt), now, coreStartedAt, settings.livenessTimeout)
+                                              shimSeenAt: max(row[6].getBiggestInt, heartbeat)), now, coreStartedAt, settings.livenessTimeout)
     var stoppedFromOutside = false
     if verdict == lOk and row[8].getStr == "done" and now - row[6].getBiggestInt >= terminatedGrace:
       let sh = try: fromJson(parseJson(row[9].getStr)) except CatchableError: none(ShimState)

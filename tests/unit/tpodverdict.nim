@@ -90,6 +90,8 @@ suite "a Pod the API server refused":
   test "a used-up quota and a request to slow down wait; every other refusal is final":
     check classifyCreateFailure(403, "Forbidden", "pods \"x\" is forbidden: exceeded quota: q, requested: pods=1").kind == ckQuota
     check classifyCreateFailure(429, "TooManyRequests", "slow down").kind == ckQuota
+    check classifyCreateFailure(500, "InternalError", "etcdserver: request timed out").kind == ckQuota      # the API server's own trouble, not the step's
+    check classifyCreateFailure(503, "ServiceUnavailable", "the server is currently unable to handle the request").kind == ckQuota
     check classifyCreateFailure(403, "Forbidden", "violates PodSecurity \"restricted:latest\"").kind == ckRejected
     check classifyCreateFailure(403, "Forbidden", "must specify limits.cpu,limits.memory").kind == ckRejected
     check classifyCreateFailure(422, "Invalid", "spec.containers[0].image: Required value").kind == ckRejected
