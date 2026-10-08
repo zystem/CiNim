@@ -95,6 +95,39 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {ignore_failure = 'yes'}) end) end})", fakeHost, runId = "s1_abc")
     check r.code == "script_error" and "ignore_failure" in r.message
 
+  test "6.7: secrets are names in the journalled options, sorted, a job's and a step's together, no repeats":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', secrets = {'REGISTRY_PASSWORD', 'A_TOKEN'}}, function(j) j:sh('x', {secrets = {'A_TOKEN', 'DEPLOY_KEY'}}) end) end})", fakeHost, runId = "s1_abc")
+    check r.code == "ok"
+    check j.entries[0].payload == "job-1\ta\t\t{\"secrets\":[\"A_TOKEN\",\"DEPLOY_KEY\",\"REGISTRY_PASSWORD\"]}\tx"
+
+  test "6.7: a step without secrets has no secrets key":
+    var sb = newSandbox()
+    var j = Journal()
+    discard sb.execute(j, pipelineOneStep, fakeHost, runId = "s1_abc")
+    check "secrets" notin j.entries[0].payload
+
+  test "a call that the core refuses for good fails the run with the core's words; it is not suspended":
+    var sb = newSandbox()
+    var j = Journal()
+    let refusing: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
+      raise (ref HostRefusal)(code: "script_error", msg: "the organisation has no secret DEPLOY_KEY")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x') end) end})", refusing, runId = "s1_abc")
+    check r.status == esFailed and r.code == "script_error" and "no secret DEPLOY_KEY" in r.message
+    check j.entries.len == 0                      # nothing was journalled: the refusal is not a result
+
+  test "6.7: a secret name is a capital-letter environment name; anything else is refused before the run goes on":
+    for bad in ["'lower'", "'1ABC'", "'A-B'", "42", "'" & "A".repeat(65) & "'", "{}"]:
+      var sb = newSandbox()
+      var j = Journal()
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {secrets = {" & bad & "}}) end) end})", fakeHost, runId = "s1_abc")
+      check r.code == "script_error" and "secrets" in r.message
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', secrets = 'X'}, function(j) j:sh('x') end) end})", fakeHost, runId = "s1_abc")
+    check r.code == "script_error" and "secrets" in r.message
+
   test "run.run_id reaches main(), Job:sh yields job_sh and returns StepResult.code":
     var sb = newSandbox()
     var j = Journal()

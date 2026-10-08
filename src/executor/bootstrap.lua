@@ -245,6 +245,47 @@ local function norm_timeout(v)
   return s
 end
 
+-- The secrets of a step (6.7, VAR-002): names only, never values. They are defined for the organisation (PUT /api/v1/organizations/{slug}/secrets/{NAME});
+-- the job controller gives the step's container each as the environment variable of that name and the shim masks the value in the log. A job's list and
+-- a step's are added together. Returns a sorted list without repeats, or nil when none was given.
+local function norm_secrets(v, depth)
+  if v == nil then return nil end
+  if type(v) ~= "table" then error("secrets: a list of names, for example {\"REGISTRY_PASSWORD\"}", depth) end
+  local names, seen = {}, {}
+  for i = 1, rawlen(v) do
+    local n = v[i]
+    if type(n) ~= "string" or #n > 64 or not n:match("^[A-Z_][A-Z0-9_]*$") then
+      error("secrets: a name is capital letters, digits and _, not starting with a digit, at most 64 characters", depth)
+    end
+    if not seen[n] then seen[n] = true; names[#names + 1] = n end
+  end
+  if #names > 32 then error("secrets: at most 32 per step", depth) end
+  tsort(names)
+  return names
+end
+
+local function merge_secrets(a, b)
+  if a == nil then return b end
+  if b == nil then return a end
+  local names, seen = {}, {}
+  for k = 1, 2 do
+    local l = (k == 1) and a or b
+    for i = 1, rawlen(l) do
+      local n = l[i]
+      if not seen[n] then seen[n] = true; names[#names + 1] = n end
+    end
+  end
+  if #names > 32 then error("secrets: at most 32 per step", 4) end
+  tsort(names)
+  return names
+end
+
+local function secrets_json(names)
+  local parts = {}
+  for i = 1, #names do parts[i] = '"' .. names[i] .. '"' end
+  return "[" .. table.concat(parts, ",") .. "]"
+end
+
 -- The execution profile of a job (RUN-004): "" is the organisation's ordinary one, "build" the build profile (A.13), whose steps run
 -- as build Pods in the organisation's own namespace (D-42). Core refuses a profile that the shard does not have.
 local function norm_profile(v)
@@ -256,7 +297,9 @@ end
 -- The step's options reach the shim as one canonical JSON object (keys sorted, only what is set): "" when nothing is.
 local function step_opts(job, opts)
   local metrics, mask, timeout = job.__metrics, job.__mask, job.__timeout
+  local secrets = job.__secrets
   if opts then
+    if opts.secrets ~= nil then secrets = merge_secrets(secrets, norm_secrets(opts.secrets, 4)) end
     if opts.metrics ~= nil then metrics = norm_metrics(opts.metrics) end
     if opts.mask ~= nil then mask = norm_mask(opts.mask) end
     if opts.timeout ~= nil then timeout = norm_timeout(opts.timeout) end
@@ -264,6 +307,7 @@ local function step_opts(job, opts)
   local parts = {}
   if mask ~= "" then parts[#parts + 1] = '"mask":' .. mask end
   if metrics ~= "" then parts[#parts + 1] = '"metrics":' .. metrics end
+  if secrets and #secrets > 0 then parts[#parts + 1] = '"secrets":' .. secrets_json(secrets) end
   if timeout then parts[#parts + 1] = '"timeout":' .. timeout end
   if #parts == 0 then return "" end
   return "{" .. table.concat(parts, ",") .. "}"
@@ -302,7 +346,7 @@ G.ci = {
     if type(fn) ~= "function" then error("ci.job: function expected", 2) end
     job_seq = job_seq + 1
     local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
-      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout) }, Job_mt)
+      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3) }, Job_mt)
     local ok, err = pcall(fn, j)
     if not ok then error(err, 0) end
     return { ok = true, outputs = {} }

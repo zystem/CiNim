@@ -218,6 +218,7 @@ proc main(): int =
   var buildOomAdj = 500                    # ... and is the OOM killer's first choice; 0 / -1 switch each off
   var exitWait = -1                        # how long the shim asks core for permission to exit (-1: log_hold_timeout)
   var logMaxBytes = 0'i64                  # the profile's per-step log limit; 0 = unlimited (the log is cut there, with a marker)
+  var secretEnv = ""                       # names of environment variables that hold the step's secrets (the kubelet put them there); masked in the log
   var optsJson = ""                        # the Lua step options: mask, metrics, timeout (docs/secrets-masking.md, metrics.md)
   var timeoutSeconds = 0                   # the step's timeout (Lua `timeout`, StartStep.timeout_seconds); 0 = none
   var termGrace = 20                       # after SIGTERM / timeout: seconds the build gets to stop before SIGKILL
@@ -274,6 +275,9 @@ proc main(): int =
     of "--opts-json":
       inc i
       optsJson = args[i]
+    of "--secret-env":
+      inc i
+      secretEnv = args[i]
     of "--run-id":
       inc i
       runId = args[i]
@@ -327,6 +331,14 @@ proc main(): int =
   if secretsFile.len > 0 and fileExists(secretsFile):
     for l in lines(secretsFile):
       if l.len > 0: secrets.add l
+  for name in secretEnv.split(','):
+    # a secret given as an environment variable (a Kubernetes Secret, core/stepsecrets.nim): the whole value, and each of its lines, are masked
+    let v = getEnv(name)
+    if name.len == 0 or v.len == 0: continue
+    secrets.add v
+    if '\n' in v:
+      for l in v.splitLines:
+        if l.strip.len > 0: secrets.add l.strip
 
   let maskFile = runDir / "CICD_MASK"
   var maskOffset = 0

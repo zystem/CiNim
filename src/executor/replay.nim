@@ -11,6 +11,11 @@ type
   HostCallProc* = proc (seq: int; kind, payload: string): Option[string] {.closure.}
     ## Performs a call. `none` suspends the run (approval, waiting for a step).
 
+  HostRefusal* = object of CatchableError
+    ## Raised by a host when the core refuses a call for good (an unknown secret, a profile the shard does not have): the run fails with `code` and the
+    ## message, as a script error does. Without it the refusal looked like "suspended" and the run was asked again for ever.
+    code*: string
+
   ExecStatus* = enum esDone, esSuspended, esFailed
 
   ExecResult* = object
@@ -71,7 +76,11 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
       else:
         if j.entries.len >= maxEntries:
           return failed("journal_limit", "journal reached " & $maxEntries & " entries")
-        let r = host(seq, kind, payload)
+        var r: Option[string]
+        try:
+          r = host(seq, kind, payload)
+        except HostRefusal as refused:
+          return failed(if refused.code.len > 0: refused.code else: "script_error", refused.msg)
         if r.isNone:
           return ExecResult(status: esSuspended, code: "suspended",
                             message: "waiting on seq " & $seq & " " & kind)

@@ -20,6 +20,10 @@ const ddl = [
        state TEXT NOT NULL DEFAULT 'active', settings TEXT NOT NULL DEFAULT '{}', plan TEXT NOT NULL DEFAULT '',
        created_at TEXT NOT NULL)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
+  # the names of an organisation's step secrets and the version of each (VAR-002, 6.7); the values are only in Kubernetes Secrets (core/stepsecrets.nim)
+  """CREATE TABLE IF NOT EXISTS step_secrets (
+       tenant_id TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+       PRIMARY KEY (tenant_id, name))""",
   # the API tokens (IAM-003, core/apiauth.nim): only the SHA-256 of the secret is kept; scope is `admin` or `org:<slug>`; 0 means never / not yet
   """CREATE TABLE IF NOT EXISTS api_tokens (
        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
@@ -214,7 +218,9 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
   ## the record and its execution profile; its runs and the rest are the organisation's data and go with the tenant's own
   ## deletion (not built yet)
   let o = c.organizationRow(slug)
-  if o.id.len > 0: discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
+  if o.id.len > 0:
+    discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
+    discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id]])
   discard c.execute(%*[["DELETE FROM organizations WHERE slug = ?", slug]])
 
 # ------------------------------------------------------------------ execution profile of an organisation (SHD-007)

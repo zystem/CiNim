@@ -6,10 +6,10 @@
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
-import std/[json, os, strutils, uri, times, atomics]
+import std/[json, os, strutils, uri, times, atomics, tables]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth
-import ../common/ctrlauth
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets
+import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
 const base = "/api/v1/runs"
@@ -388,6 +388,70 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           kubernetes[ns] = stepsJson(r)
         jsonOk(Http200, %*{"slug": slug, "namespace": ns, "generation": c.credentialRow(ns).generation, "rotated": rotated, "kubernetes": kubernetes})
+        return
+      if path.startsWith("/api/v1/organizations/") and "/secrets" in path:
+        # the secrets of an organisation that its steps may ask for (core/stepsecrets.nim): names and versions are in the database, the values only in
+        # Kubernetes Secrets of the organisation's namespace. An administrator's call; the value is read from the body and is not logged or answered.
+        let rest = path["/api/v1/organizations/".len .. ^1]
+        let parts = rest.split("/secrets")
+        let slug = parts[0]
+        let secName = if parts.len > 1: parts[1].strip(chars = {'/'}) else: ""
+        if parts.len != 2 or (parts[1].len > 0 and not parts[1].startsWith("/")) or slug.len == 0:
+          problem(Http404, "not_found", "no such route")
+          return
+        var c = newRq(coreRef.rqliteUrl)
+        let org = c.organizationRow(slug)
+        if org.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
+          return
+        let smeth = getMethod()
+        if smeth == "GET" and secName.len == 0:
+          jsonOk(Http200, %*{"organization": slug, "secrets": c.listStepSecrets(org.id)})
+          return
+        if secName.len == 0:
+          problem(Http405, "method_not_allowed", "GET lists, PUT and DELETE name a secret: /secrets/{NAME}")
+          return
+        let nameProblem = checkName(secName)
+        if nameProblem.len > 0:
+          problem(Http400, "invalid_name", nameProblem)
+          return
+        if not provisionOn or not kube.available:
+          problem(Http503, "no_cluster", "the core cannot reach the cluster (CINIM_PROVISION), so it cannot keep a secret in the organisation's namespace")
+          return
+        let pc = provisionConfig(currentConfig(), "", "")
+        let ns = orgNamespace(pc, slug)
+        let have = c.secretVersions(org.id)
+        let current = have.getOrDefault(secName, 0)
+        if smeth == "PUT":
+          if org.state != "active":
+            problem(Http409, "organization_disabled", "the organisation " & slug & " is switched off")
+            return
+          let j = try: parseJson(getBody()) except JsonParsingError: nil
+          if j == nil or j.kind != JObject or not j.hasKey("value") or j["value"].kind != JString:
+            problem(Http400, "invalid_request", "the body is {\"value\": \"...\"}")
+            return
+          let value = j["value"].getStr
+          let valueProblem = checkValue(value)
+          if valueProblem.len > 0:
+            problem(Http400, "invalid_value", valueProblem)
+            return
+          let version = current + 1
+          let made = kube.create("Secret", ns, stepSecretObject(pc, slug, secName, version, value))
+          if made.outcome == oFailed:
+            problem(Http502, "kubernetes_refused", "creating the Secret in " & ns & ": " & made.detail)
+            return
+          c.recordStepSecret(org.id, secName, version, getTime().toUnix())
+          # the version before the previous one is not needed any more: a step assigned with the previous one still finds it
+          if version > 2: discard kube.remove("Secret", ns, stepSecretObjectName(secName, version - 2))
+          jsonOk(Http200, %*{"organization": slug, "name": secName, "version": version})
+        elif smeth == "DELETE":
+          if not c.forgetStepSecret(org.id, secName):
+            problem(Http404, "not_found", "no such secret")
+            return
+          for v in max(1, current - 1) .. current: discard kube.remove("Secret", ns, stepSecretObjectName(secName, v))
+          jsonOk(Http200, %*{"organization": slug, "name": secName, "deleted": true})
+        else:
+          problem(Http405, "method_not_allowed", "PUT or DELETE")
         return
       if path.startsWith("/api/v1/organizations/"):
         # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)

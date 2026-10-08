@@ -51,6 +51,26 @@ end)
 `mask = false` turns both off. The secret values themselves never reach Lua (the script works only with opaque handles); the setting
 affects only the way of masking.
 
+## Secrets of an organisation
+
+A step asks for the secrets it needs by name, on the job or on the step (the two lists are added together):
+
+```lua
+ci.job({ image = "alpine", secrets = { "REGISTRY_PASSWORD" } }, function(job)
+  job:sh("login.sh")                                         -- $REGISTRY_PASSWORD is in the environment of the command
+  job:sh("deploy.sh", { secrets = { "DEPLOY_KEY" } })        -- this step also gets $DEPLOY_KEY
+end)
+```
+
+The administrator sets the value for the organisation (`PUT /api/v1/organizations/{slug}/secrets/{NAME}` with `{"value": "..."}`; `GET .../secrets` lists the
+names and versions, `DELETE .../secrets/{NAME}` removes one). The value is kept in a Kubernetes Secret in the organisation's namespace and nowhere else:
+the database holds the name and the version, Lua sees the name, the Pod specification names the Secret and holds no value, and the kubelet gives the value
+to the container as the environment variable of that name. The shim masks it in the log like any other secret (raw, base64, URL, JSON; every line of a
+multi-line value). A step that asks for a secret the organisation does not have is refused when it is submitted, before anything runs. A changed value is a new version: steps
+that start after the change get it, a step that was assigned before keeps the version it was assigned with. The name follows the rules of an environment
+variable (capital letters, digits, `_`; not `PATH`, `LD_*`, `CICD_*`...), the value is at most 8 KiB. A secret is for a run of an organisation; a run
+of the shard's default tenant has none. After a restore of the database into a new cluster the names are known but the Secrets are gone: set the values again.
+
 ## What is not covered
 
 - A value split by a line break is masked only line by line: it is not recognised across the boundary of two lines.

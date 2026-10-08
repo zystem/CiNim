@@ -200,6 +200,18 @@ suite "secret masking through the log pipeline (docs/secrets-masking.md)":
       check "raw ***" in text
       check "hunter2-secret-value" notin text and "aHVudGVyMi1zZWNyZXQtdmFsdWU" notin text
 
+  test "a step secret that arrives as an environment variable (--secret-env) is masked, and the build still sees it":
+    if not available: skip()
+    else:
+      putEnv("CINIM_TEST_SECRET", "registry-pa55w0rd-value")
+      putEnv("CINIM_TEST_KEY", "-----BEGIN KEY-----\nline-two-of-the-key\n-----END KEY-----")
+      defer: delEnv("CINIM_TEST_SECRET"); delEnv("CINIM_TEST_KEY")
+      let text = spooled(getTempDir() / "shim-m5", "echo pw $CINIM_TEST_SECRET; echo used-ok=$([ -n \"$CINIM_TEST_SECRET\" ] && echo yes); echo key $CINIM_TEST_KEY; echo b64 $(printf '%s' \"$CINIM_TEST_SECRET\" | base64)",
+                         @["--secret-env", "CINIM_TEST_SECRET,CINIM_TEST_KEY,NOT_SET_ANYWHERE"])
+      check "pw ***" in text and "used-ok=yes" in text
+      check "registry-pa55w0rd-value" notin text and "line-two-of-the-key" notin text
+      check "cmVnaXN0cnktcGE1NXcwcmQtdmFsdWU" notin text
+
   test "the build registers a value in $CICD_MASK and the lines after it are masked":
     if not available: skip()
     else:

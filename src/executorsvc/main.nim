@@ -50,6 +50,9 @@ proc runOnce(s: ZConnection; runId, token, script: string; j: Journal) =
       body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.call,
         call: HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind,
                         payload: cast[seq[byte]](payload)))))
+    if resp.body.kind == ExecutorResponseBodyKind.failure:
+      # core refuses this call for good: the run fails with its words, it is not suspended
+      raise (ref HostRefusal)(code: resp.body.failure.code, msg: resp.body.failure.detail)
     if resp.body.kind != ExecutorResponseBodyKind.result: return none(string)
     let r = resp.body.result
     if r.suspended: return none(string)

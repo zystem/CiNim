@@ -194,6 +194,21 @@ suite "the poll round":
     check r.transitions[0].kind == tkFailed and r.transitions[0].reason == "ephemeral_storage_exceeded"
     check r.transitions[0].podReason == "Evicted" and "exceeds the total limit" in r.transitions[0].podMessage
 
+suite "the secrets of a step":
+  test "the Pod is told which Secret holds each, and the shim which names to mask; no value is on the command line":
+    let r = buildRequest(cfg, StartRequest(runId: "s1_run", seq: 0, attempt: 1, image: "busybox", command: @["sh", "-c", "true"],
+                                           secretHandles: @["REGISTRY_PASSWORD:3", "DEPLOY_KEY:1"]))
+    check r.secrets == @[(name: "REGISTRY_PASSWORD", objectName: "cinim-s-registry-password-v3"), (name: "DEPLOY_KEY", objectName: "cinim-s-deploy-key-v1")]
+    let at = r.cmd.find("--secret-env")
+    check at >= 0 and r.cmd[at + 1] == "REGISTRY_PASSWORD,DEPLOY_KEY"
+    check r.cmd.find("--") > at
+  test "a step without secrets has none of this":
+    let r = buildRequest(cfg, StartRequest(runId: "s1_run", seq: 0, attempt: 1, image: "busybox"))
+    check r.secrets.len == 0 and "--secret-env" notin r.cmd
+  test "a damaged handle is left out, not turned into a Secret name":
+    let r = buildRequest(cfg, StartRequest(runId: "s1_run", seq: 0, attempt: 1, image: "busybox", secretHandles: @["nocolon", "A:x", "B:2"]))
+    check r.secrets == @[(name: "B", objectName: "cinim-s-b-v2")]
+
 suite "what the cluster says about a Pod, and a Pod that cannot be made":
   test "a used-up quota leaves no row behind and says what the API server said":
     let st = openState(":memory:")

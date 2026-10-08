@@ -3,6 +3,7 @@
 ## The file is data: it is never given to a shell.
 
 import std/[strutils]
+import ../common/envname
 
 type
   EnvVar* = tuple[name, value: string]
@@ -15,26 +16,13 @@ const
   maxValueBytes* = 8 * 1024
   maxKeys* = 256
   maxTotalBytes* = 64 * 1024
-  deniedNames = ["PATH", "IFS", "BASH_ENV", "ENV", "SHELL", "HOME", "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH",
-                 "PYTHONHOME", "PYTHONSTARTUP", "RUBYOPT", "RUBYLIB", "PERL5OPT", "PERL5LIB", "JAVA_TOOL_OPTIONS",
-                 "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "GCONV_PATH", "HOSTALIASES", "LOCPATH", "NLSPATH",
-                 "PS4", "PROMPT_COMMAND", "CDPATH", "GLOBIGNORE", "SHELLOPTS", "BASHOPTS"]
-  deniedPrefixes = ["LD_", "CICD_", "BASH_FUNC_", "DYLD_", "GLIBC_"]
 
 proc reject(code, msg: string; line: int): ref EnvError =
   (ref EnvError)(msg: msg & (if line > 0: " (line " & $line & ")" else: ""), code: code, line: line)
 
-proc validName(name: string): bool =
-  if name.len == 0 or name.len > 256: return false
-  if name[0] notin {'A'..'Z', '_'}: return false
-  for c in name:
-    if c notin {'A'..'Z', '0'..'9', '_'}: return false
-  true
+proc validName(name: string): bool = validEnvName(name)
 
-proc denied(name: string): bool =
-  if name in deniedNames: return true
-  for p in deniedPrefixes:
-    if name.startsWith(p): return true
+proc denied(name: string): bool = deniedEnvName(name)
 
 proc checkValue(value: string; line: int) =
   for c in value:

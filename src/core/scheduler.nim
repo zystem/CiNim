@@ -10,7 +10,7 @@ import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
-import logwindow, keptpods
+import logwindow, keptpods, stepsecrets
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
@@ -179,6 +179,15 @@ proc renderCoreMetrics*(co: Core): string =
 const
   terminatedGrace = 30         ## seconds the end of a step whose shim was stopped from outside waits for the job controller's reading of the Pod
   quotaPause = 15          ## seconds a step that met a used-up quota waits before it is assigned again
+
+proc secretHandlesOfStep(c: var RqClient; runId, optsJson: string): seq[string] =
+  ## `NAME:version` of the secrets a step asked for, at the moment it is assigned (core/stepsecrets.nim)
+  let wanted = secretNamesOf(optsJson)
+  if wanted.len == 0: return
+  let o = c.query(%*[["SELECT tenant_id FROM runs WHERE id = ?", runId]])
+  let ov = o["results"][0]{"values"}
+  if ov == nil or ov.len == 0: return
+  handlesFor(c.secretVersions(ov[0][0].getStr), wanted)
 
 proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let attempt = int(t.step.attempt)
@@ -454,7 +463,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
-      profile: row[6].getStr)))
+      profile: row[6].getStr, secret_handles: secretHandlesOfStep(c, row[0].getStr, row[5].getStr))))
     inc seq
   PollResponse(header: Header(protocol: 1), commands: commands,
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)
@@ -534,6 +543,18 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
     let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("profile \"build\" needs a run that belongs to an organisation")
+  let wantedSecrets = secretNamesOf(opts)
+  if wantedSecrets.len > 0:
+    # the step asks for secrets of the organisation (6.7): they must exist now, and the run must belong to an organisation
+    let fail = proc (detail: string): ExecutorResponse =
+      ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
+    if wantedSecrets.len > maxSecretsPerStep: return fail("a step may ask for at most " & $maxSecretsPerStep & " secrets")
+    let o = c.query(%*[["SELECT tenant_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
+    let ov = o["results"][0]{"values"}
+    if ov == nil or ov.len == 0: return fail("secrets need a run that belongs to an organisation")
+    let missing = missingSecrets(c.secretVersions(ov[0][0].getStr), wantedSecrets)
+    if missing.len > 0: return fail("the organisation has no secret " & missing.join(", ") & " (PUT /api/v1/organizations/{slug}/secrets/{NAME})")
   try:
     discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, ?, ?, ?)",
       schema.newId(), req.run_id, jobKey, protoName(ssRunning), profileId]])

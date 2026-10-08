@@ -3,8 +3,8 @@
 ## cluster. What lives here: creating Pods (state first, then the Pod), the poll round (read each tracked Pod, classify it, read
 ## the shim's state from its log), cancelling Pods core no longer wants, keeping finished Pods for a while and then removing them,
 ## and sweeping orphans out of the (dedicated) step namespace.
-import std/[json, options, strutils, tables, times]
-import ../common/[shimstate, spoolwire]
+import std/[json, options, strutils, tables, times, sequtils]
+import ../common/[shimstate, spoolwire, envname]
 import backend, ctrlstate, podverdict
 
 type
@@ -30,6 +30,7 @@ type
     command*: seq[string]
     logMaxBytes*, logSpoolBytes*: uint64
     logHoldTimeout*: int                 ## per-step values from the profile; 0 = the controller's own defaults
+    secretHandles*: seq[string]          ## `NAME:version` of the secrets the step asked for (core/stepsecrets.nim)
 
   Config* = object
     collectorAddr*, stepReportAddr*: string   ## where the shim in the Pod reaches core; both empty = no log streaming
@@ -60,10 +61,18 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
               "--log-hold-timeout", $hold]
   if r.logMaxBytes > 0: cmd.add @["--log-max-bytes", $r.logMaxBytes]
   if r.optsJson.len > 0: cmd.add @["--opts-json", r.optsJson]          # validated by the Lua sandbox, holds no secret values
+  var secrets: seq[tuple[name, objectName: string]]
+  for h in r.secretHandles:
+    let colon = h.rfind(':')
+    if colon <= 0: continue
+    let v = try: parseInt(h[colon + 1 .. ^1]) except ValueError: continue
+    secrets.add (h[0 ..< colon], stepSecretObjectName(h[0 ..< colon], v))
+  # the shim reads the values from its own environment, to mask them in the log; only the names are on the command line
+  if secrets.len > 0: cmd.add @["--secret-env", secrets.mapIt(it.name).join(",")]
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
-             spoolBytes: spool, build: r.profile == "build")
+             spoolBytes: spool, build: r.profile == "build", secrets: secrets)
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds

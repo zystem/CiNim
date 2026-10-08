@@ -4,6 +4,7 @@
 ## on the explicit request of an administrator. The objects are plain JSON: the tests compare them, the API server validates them.
 import std/[json, os, strutils]
 import kubeapi, orgrules
+import ../common/envname
 
 const
   controllerName* = "cinim-job-controller"      ## the ServiceAccount, the Deployment and the label of the organisation's controller
@@ -52,6 +53,13 @@ type
     skipped*: seq[string]                       ## parts left out on purpose, with the reason
 
 func orgNamespace*(cfg: ProvisionConfig; slug: string): string = namespaceName(cfg.prefix, cfg.shard, slug)
+
+func stepSecretObject*(cfg: ProvisionConfig; slug, name: string; version: int; value: string): JsonNode =
+  ## one version of an organisation's step secret (core/stepsecrets.nim): the key `value` of a Secret in the organisation's namespace
+  let objName = stepSecretObjectName(name, version)
+  var m = %*{"name": objName, "namespace": orgNamespace(cfg, slug),
+             "labels": {"app.kubernetes.io/part-of": "cinim", "cinim.io/shard": cfg.shard, "cinim.io/organization": slug, "cinim.io/step-secret": name.toLowerAscii.replace('_', '-')}}
+  %*{"apiVersion": "v1", "kind": "Secret", "metadata": m, "type": "Opaque", "stringData": {"value": value}}
 
 func stepRunnerRole*(cfg: ProvisionConfig): string =
   ## the ClusterRole that the chart creates once per shard, the only role the core may bind (SHD-007, T-45)
