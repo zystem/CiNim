@@ -10,7 +10,7 @@ What exists today and what does not:
 |---|---|
 | Master key from a file (`CINIM_SECRETS_KEY_FILE`) or derived from the CURVE key | built |
 | `KekProvider` seam in `core/kekprovider.nim` (wrap, unwrap, key id, "may pass or final" failures) | built |
-| The core's side of a key service next to the token (`CINIM_KEKD_URL`, mutual TLS, retry, cache, a component in `/api/v1/components`), and an emulator of that service | built, tested on a cluster with the emulator (section 9) |
+| The core's side of a key service next to the token (`CINIM_KEKD_URL`, mutual TLS, retry, cache, a component in `/api/v1/components`), and an emulator of that service | built, tested on a cluster with the emulator (sections 9 and 10) |
 | The service itself, `kekd`, with ECDH on the card | **not built yet**; this page prepares the hardware and the key so that it can be |
 | Wrapping a data key for two cards at once (a spare), rotation of the master key | not built |
 
@@ -151,7 +151,29 @@ The key reference of the key (1 here) is the number the card gave it; `sc-hsm-to
 
 Because losing the card loses the secrets, the second card of section 5 is not optional in a setup that matters.
 
-## 9. The emulator, and what is built on the core's side
+## 9. How the key service knows it is the core that asks
+
+The key service must not open a data key for whoever asks: whoever has a wrapped data key (a backup of the database has them all) and can reach the service could
+otherwise have it opened. The private key never leaves the card, but the service is an oracle for it, so its door matters.
+
+- **Mutual TLS, pinned on both sides.** The core trusts exactly the certificate of the key service (`CINIM_KEKD_CA` holds that certificate, or a CA that issues nothing else); the
+  service accepts exactly the certificate of the core (its fingerprint is pinned), not "any certificate from our CA", and a name in a certificate proves nothing (a test
+  below uses a certificate with the same name and another key). TLS 1.3 only. The core's key and certificate are in a Secret that only the core's Pod mounts (the step Pods are in other
+  namespaces and cannot read it); `secrets.kekd.tlsSecret` in the chart. To change the core's certificate, change the pin on the service.
+- **Not ZeroMQ.** The ZeroMQ links of the platform (the shim's, the controller's) are encrypted and the server is proven to the client, but the server does not check which client
+  it is: that needs a ZAP handler that is not built, and the client key is one for all step Pods. That is acceptable for them (the step has its own credential for its secrets), not for a
+  service that holds a master key.
+- **Not the address.** Pods leave the cluster with the address of their node, so a filter by address does not tell the core from a step Pod; use it as an extra layer, never as the check.
+- **What the service must do besides** (when it is built): open only a data key that it wrapped, for an additional data that begins `cinim/dek/v1|`; limit the operations per minute and
+  per day; write down every call (time, the pinned client, the organisation, the result); and have a switch that makes it refuse all, without touching the card.
+- **What this does not cover**: a core that is taken over can ask for every data key it has. The limits and the record are there so that it cannot do it unnoticed or all at once,
+  and the answer to such an incident is a new master key and new secrets.
+
+Checked with `tests/unit/tkekclient_tls.nim` (the emulator behind `tools/kekd-emu/tls-front.py`, certificates from `tools/kekd-emu/certs.py`): the right pair of certificates works; a
+client certificate with the same name and another key, an expired certificate of the right key, and no certificate at all are refused by the service; a service that shows another
+certificate for the same address is refused by the core; a core with no certificate to trust refuses the right service. Not yet run in a cluster, with the real `kekd`.
+
+## 10. The emulator, and what is built on the core's side
 
 The core's side is built and tested without the card, against an emulator of the key service (`tools/kekd-emu`, `src/kekd/emulator.nim`). The card's own service
 (`kekd`: ECDH on the card, a standard ECDH-ES construction for the wrapped key) is **not built yet**; it will speak the same protocol and replace the emulator.
@@ -167,7 +189,7 @@ The core's side is built and tested without the card, against an emulator of the
   `fSlow` (with `delay_ms`) or `fNone`; `POST /emu/rekey` is "another card was put in". `deploy/examples/kekd-emu/kekd-emu.yaml` runs it in a cluster (the `kekd-emu` target
   of `tools/image/Dockerfile.kaniko`). It is not secure and plain HTTP: never for anything that matters.
 
-Checked on a cluster with the emulator: a data key opened through it; a step that starts while the service is down gets its secrets from the cache; a core that starts while
+Checked on a cluster with the emulator over plain HTTP (the mutual TLS of section 9 is tested apart, not in the cluster): a data key opened through it; a step that starts while the service is down gets its secrets from the cache; a core that starts while
 it is down answers `secrets_unavailable`, a step started then waits in its shim and runs 19 s later when the service is back; a service with another key than the one that sealed
 the database is refused.
 
