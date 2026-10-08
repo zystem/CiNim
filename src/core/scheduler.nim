@@ -527,6 +527,9 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: why)))
     c.storeEffectiveParams(req.run_id, json)
+    # a call that answers at once has no step to write its journal entry later: core writes it (the replay of a restarted executor finds it there)
+    discard c.execute(%*[["INSERT OR IGNORE INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) VALUES (?, ?, 'params', '', ?, '', ?)",
+      req.run_id, int(req.seq), json, $getTime().toUnix()]])
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind != "job_sh":
