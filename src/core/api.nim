@@ -6,13 +6,14 @@
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
-import std/[json, os, strutils, uri, times, atomics, tables]
+import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
 const base = "/api/v1/runs"
+const maxDownloadBytes = 64 * 1024 * 1024
 
 proc problem(status: HttpCode; code, detail: string) =
   reply(status, $(%*{"type": "about:blank", "status": ord(status), "code": code, "detail": detail}),
@@ -417,6 +418,55 @@ proc onRequest() {.raises: [], gcsafe.} =
           kubernetes[ns] = stepsJson(r)
         jsonOk(Http200, %*{"slug": slug, "namespace": ns, "generation": c.credentialRow(ns).generation, "rotated": rotated, "kubernetes": kubernetes})
         return
+      if path == "/api/v1/storage" or path == "/api/v1/storage:check":
+        # the object store of the shard (core/objectstore.nim): an administrator's calls; the secret is sealed in the database and never answered
+        var c = newRq(coreRef.rqliteUrl)
+        let smeth = getMethod()
+        if path == "/api/v1/storage:check":
+          if smeth != "POST":
+            problem(Http405, "method_not_allowed", "POST")
+            return
+          let st = c.loadStore()
+          if not st.ok:
+            problem(if st.retry: Http503 else: Http409, "store_" & st.error, "the object store is not ready: " & st.error)
+            return
+          let bad = st.roundTrip()
+          if bad.len > 0: problem(Http502, "storage_unreachable", bad)
+          else: jsonOk(Http200, %*{"ok": true, "endpoint": st.cfg.endpoint, "bucket": st.cfg.bucket})
+        elif smeth == "GET":
+          let cfg = c.loadConfig()
+          jsonOk(Http200, %*{"configured": cfg.found, "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "access_key_id": cfg.keyId})
+        elif smeth == "DELETE":
+          jsonOk(Http200, %*{"deleted": c.forgetStore()})
+        elif smeth == "PUT":
+          let j = try: parseJson(getBody()) except JsonParsingError: nil
+          if j == nil or j.kind != JObject:
+            problem(Http400, "invalid_request", "the body is {endpoint, region, bucket, access_key_id, secret_access_key}")
+            return
+          let cfg = StoreConfig(found: true, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr)
+          let secret = j{"secret_access_key"}.getStr
+          let why = checkConfig(cfg, secret)
+          if why.len > 0:
+            problem(Http400, "invalid_request", why)
+            return
+          let vk = vaultKek()
+          if not vk.ready:
+            reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": vaultError()}),
+                  ["Content-Type: application/problem+json", "Retry-After: 15"])
+            return
+          # the settings are tried before they are kept: a store that does not take an object is not one to write down
+          let bad = roundTrip(Store(ok: true, cfg: cfg, secret: secret))
+          if bad.len > 0:
+            problem(Http400, "storage_unreachable", bad)
+            return
+          let saved = c.saveStore(vk.kek, cfg, secret, getTime().toUnix())
+          if not saved.ok:
+            problem(if saved.retry: Http503 else: Http500, "secrets_error", saved.error)
+            return
+          jsonOk(Http200, %*{"configured": true, "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "access_key_id": cfg.keyId, "checked": true})
+        else:
+          problem(Http405, "method_not_allowed", "GET, PUT, DELETE, or POST :check")
+        return
       if path.startsWith("/api/v1/organizations/") and "/triggers" in path:
         # the triggers of an organisation (core/triggers.nim): an administrator's calls
         let rest = path["/api/v1/organizations/".len .. ^1]
@@ -684,6 +734,36 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http404, "not_found", "no log stream for this step yet")
           return
         jsonOk(Http200, log)
+      elif meth == "GET" and "/artifacts" in rest:
+        # the artifacts of a run (DAT-003): the list, or one file (read from the store by the core and passed on, up to 64 MiB)
+        let parts = rest.split("/artifacts", maxsplit = 1)
+        let owner = coreRef.getRun(parts[0])
+        if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+          problem(Http404, "not_found", "no such run")
+          return
+        var c = newRq(coreRef.rqliteUrl)
+        let tail = parts[1].strip(chars = {'/'})
+        if tail.len == 0:
+          jsonOk(Http200, %*{"run_id": parts[0], "artifacts": c.listArtifacts(parts[0])})
+          return
+        let wanted = c.storedArtifact(parts[0], tail)
+        if not wanted.found:
+          problem(Http404, "not_found", "this run has no artifact " & tail)
+          return
+        if wanted.size > maxDownloadBytes:
+          problem(Http413, "too_big", "the artifact is bigger than " & $maxDownloadBytes & " bytes; it is read from the store directly")
+          return
+        let st = c.loadStore()
+        if not st.ok:
+          problem(Http503, "store_" & st.error, "the object store is not ready: " & st.error)
+          return
+        let cl = newHttpClient(timeout = 60000)
+        defer: cl.close()
+        let got = cl.request(st.url("GET", wanted.key, getExpires), httpMethod = HttpGet)
+        if got.code.int div 100 != 2:
+          problem(Http502, "storage_unreachable", "the store answered " & $got.code)
+          return
+        reply(Http200, got.body, ["Content-Type: application/octet-stream", "X-Artifact-Sha256: " & wanted.sha256])
       elif meth == "GET" and rest.len > 0:
         let run = coreRef.getRun(rest)
         if run != nil and not who.mayUseOrg(run{"organization"}.getStr):

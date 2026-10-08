@@ -155,6 +155,15 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
         for e in st.obj["spec"]["template"]["spec"]["containers"][0]["env"]: env[e["name"].getStr] = e["value"].getStr
     check env["CINIM_BUILD"] == "on" and env["CINIM_BUILD_SECCOMP"] == "Localhost" and env["CINIM_BUILD_CAPS"] == "CHOWN,SETUID"
     check env["CINIM_BUILD_MEMORY_LIMIT"] == "8Gi" and env["CINIM_NAMESPACE"] == "cinim-001-acme" and "CINIM_STEP_SECURITY" notin env
+  test "DAT-003 a step Pod may reach the object store of the shard on its S3 port, and only that":
+    var rule: JsonNode
+    for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps:
+      if st.kind == "NetworkPolicy" and st.objectName == "allow-dns-and-collector":
+        for r in st.obj["spec"]["egress"]:
+          if r["to"][0]{"podSelector"}{"matchLabels"}{"app"}.getStr == "garage": rule = r
+    check rule != nil
+    check rule["ports"].len == 1 and rule["ports"][0]["port"].getInt == 3900
+    check rule["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"].getStr == "cinim-001"
   test "without an internet setting a build Pod may reach DNS, the collector and what the operator opened, nothing else":
     var closed, opened: seq[string]
     for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps:

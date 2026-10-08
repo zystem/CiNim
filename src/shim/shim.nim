@@ -17,7 +17,7 @@
 
 import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options]
 import checksums/sha2
-import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape
+import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts
 when defined(shimLogging):
   import logclient   ## also brings in StepRef (import_proto3-generated) for the calls below
 else:
@@ -49,6 +49,8 @@ const
   exitTimeout = 124            ## the step ran past its timeout_seconds (the same code `timeout(1)` uses)
   exitEnvRejected = 70
   exitSecretsUnavailable = 73  ## the step's secrets could not be fetched from core: the command was not started
+  exitArtifactsFailed = 74     ## the command succeeded, but its artifacts could not be put into the store (DAT-003)
+  exitArtifactsUnavailable = 75  ## the artifacts the step asked for could not be fetched: the command was not started
   exitLogsUndelivered = 72     ## D-27: the command ran, but its log did not reach vlagent within log_hold_timeout
   maxTerminationBytes = 4096
 
@@ -206,6 +208,50 @@ when defined(shimLogging):
       if seqNo > 0 and seqNo <= upto: removeFile(f)
     0
 
+when defined(shimLogging):
+  proc safeRel(p: string): bool =
+    ## a path core named: relative and inside the workspace, whatever core says
+    p.len > 0 and p[0] != '/' and ".." notin p.split('/') and '\0' notin p
+
+  proc downloadArtifacts(coreAddr, certs: string; step: StepRef; token: string; names: seq[string]; workspace: string; wait: int): string =
+    ## the artifacts the step asked for, from this run, into the workspace; "" or what went wrong
+    var ans: ArtifactAnswer
+    let until = epochTime() + wait.float
+    while true:
+      ans = askArtifacts(coreAddr, certs, step, token, $(%*{"op": "get", "names": names}))
+      if ans.ok or not ans.retry or epochTime() >= until: break
+      sleep 1000
+    if not ans.ok: return ans.code & ": " & ans.detail
+    for f in ans.answer{"files"}:
+      let path = f{"path"}.getStr
+      if not safeRel(path): return "core named the path " & path & ", which is not inside the workspace"
+      let dest = workspace / path
+      let t = getFile(f{"url"}.getStr, dest, f{"size"}.getBiggestInt)
+      if not t.ok: return path & ": " & t.detail
+      if fileSha256(dest) != f{"sha256"}.getStr:
+        removeFile(dest)
+        return path & ": the SHA-256 is not the one recorded when it was put"
+    ""
+
+  proc uploadArtifacts(coreAddr, certs: string; step: StepRef; token: string; patterns: seq[string]; workspace: string; say: proc (line: string) {.closure.}): string =
+    ## the files under the workspace that match, put into the store with the URLs core gives, and confirmed to core; "" or what went wrong
+    let found = collectFiles(workspace, patterns)
+    if found.error.len > 0: return found.error
+    var files = newJArray()
+    for f in found.files:
+      files.add %*{"path": f, "size": getFileSize(workspace / f), "sha256": fileSha256(workspace / f)}
+    let put = askArtifacts(coreAddr, certs, step, token, $(%*{"op": "put", "files": files}))
+    if not put.ok: return put.code & ": " & put.detail
+    for u in put.answer{"urls"}:
+      let path = u{"path"}.getStr
+      let t = putFile(u{"url"}.getStr, workspace / path)
+      if not t.ok: return path & ": " & t.detail
+      say "artifact " & path & " put (" & $getFileSize(workspace / path) & " bytes)"
+    let done = askArtifacts(coreAddr, certs, step, token, $(%*{"op": "done", "files": files}))
+    if not done.ok: return done.code & ": " & done.detail
+    if done.answer{"failed"} != nil and done.answer["failed"].len > 0: return "the store does not hold " & $done.answer["failed"]
+    ""
+
 proc main(): int =
   when defined(shimLogging):
     let argv = commandLineParams()
@@ -229,6 +275,7 @@ proc main(): int =
   var secretsWait = 30                     # seconds the shim keeps asking when core does not answer
   var stepToken = ""                       # the step's own credential for that
   var optsJson = ""                        # the Lua step options: mask, metrics, timeout (docs/secrets-masking.md, metrics.md)
+  var artUpload, artDownload: seq[string]  # the Lua `artifacts` option: what to put into the object store after the command, what to fetch before it
   var timeoutSeconds = 0                   # the step's timeout (Lua `timeout`, StartStep.timeout_seconds); 0 = none
   var termGrace = 20                       # after SIGTERM / timeout: seconds the build gets to stop before SIGKILL
   var cmd: seq[string]
@@ -323,6 +370,9 @@ proc main(): int =
       let o = parseJson(optsJson)
       if o{"timeout"} != nil and timeoutSeconds == 0: timeoutSeconds = o["timeout"].getInt
       if o{"metrics"} != nil: appDecl = parseDeclaration($o["metrics"])
+      if o{"artifacts"} != nil:
+        for p in o["artifacts"]{"upload"}: artUpload.add p.getStr
+        for p in o["artifacts"]{"download"}: artDownload.add p.getStr
       if o{"mask"} != nil:
         maskRuntime = o["mask"]{"runtime"}.getBool(true)
         maskVariants = o["mask"]{"variants"}.getBool(true)
@@ -367,6 +417,19 @@ proc main(): int =
       if '\n' in v:
         for l in v.splitLines:
           if l.strip.len > 0: secrets.add l.strip
+
+  # The artifacts the step asked for (DAT-003): fetched from the run's own earlier steps into the workspace, before the command. Without them the command is
+  # not started, as with the secrets.
+  let workspace = parentDir(runDir)
+  if artDownload.len > 0:
+    var why = "this shim was built without the connection to core that artifacts need (-d:shimLogging)"
+    when defined(shimLogging):
+      why = downloadArtifacts(coreAddr, certsDir, step, stepToken, artDownload, workspace, secretsWait)
+    else: discard
+    if why.len > 0:
+      stderr.writeLine "cicd-shim: the step's artifacts could not be fetched: " & why
+      writeTermination(termLog, %*{"exit_code": exitArtifactsUnavailable, "reason": "artifacts_unavailable", "detail": why})
+      return exitArtifactsUnavailable
 
   let maskFile = runDir / "CICD_MASK"
   var maskOffset = 0
@@ -495,6 +558,20 @@ proc main(): int =
   let code = if WIFEXITED(status): int(WEXITSTATUS(status)) elif WIFSIGNALED(status): 128 + int(WTERMSIG(status)) else: 1
   sampleResources()                         # the last reading, for the verdict
   event(seCommandExited, cmdExit = code)
+  # The artifacts of a step that succeeded (DAT-003): put into the store before the log is finished, so that what happened is in the log. A command that
+  # failed or was cut off leaves nothing behind.
+  var artifactFailure = ""
+  if artUpload.len > 0 and code == 0 and stopReason.len == 0:
+    var tell: proc (line: string) {.closure.} = proc (line: string) = discard
+    when defined(shimLogging):
+      if logging: tell = proc (line: string) = lp.write(line & "\n")
+      artifactFailure = uploadArtifacts(coreAddr, certsDir, step, stepToken, artUpload, workspace, tell)
+    else:
+      artifactFailure = "this shim was built without the connection to core that artifacts need (-d:shimLogging)"
+    if artifactFailure.len > 0:
+      stderr.writeLine "cicd-shim: artifacts: " & artifactFailure
+      when defined(shimLogging):
+        if logging: lp.write("cicd-shim: artifacts: " & artifactFailure & "\n")
   # The step is not finished until its log is: wait (up to log_hold_timeout) for delivery. The Pod stays Running meanwhile.
   # A Pod being deleted has only its termination grace period left, so then the wait is short.
   event(seLogsDelivering)
@@ -539,10 +616,10 @@ proc main(): int =
   # why the build ended: its own exit, our timeout (the step's own failure) or a signal from outside (the cluster's doing:
   # the command was cut off, so what it left behind is unknown - never reported as the step's own failure)
   # a SIGKILL while the cgroup counted OOM kills is the memory limit, not something the step decided: say so
-  let reason = if stopReason.len > 0: stopReason elif code == 0: "ok" elif code == 137 and usage.oomKills > 0: "oom_killed" else: "failed"
-  let exitCode = if stopReason == "timeout": exitTimeout else: code
+  let reason = if stopReason.len > 0: stopReason elif artifactFailure.len > 0: "artifacts_failed" elif code == 0: "ok" elif code == 137 and usage.oomKills > 0: "oom_killed" else: "failed"
+  let exitCode = if stopReason == "timeout": exitTimeout elif artifactFailure.len > 0: exitArtifactsFailed else: code
   writeTermination(termLog, %*{"exit_code": exitCode, "reason": reason, "command_exit_code": code,
-                               "outputs": outputs.len, "digest": sha256hex(canon)})
+                               "outputs": outputs.len, "digest": sha256hex(canon), "detail": artifactFailure})
   result = done(reason, exitCode)
   release(exitCode, reason)
 

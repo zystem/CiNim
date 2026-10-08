@@ -145,3 +145,28 @@ suite "VAR-003 what core accepts as launch parameters":
     check fromJson("").len == 0
     check fromJson("{{").len == 0
     check fromJson("""{"A":"1","PATH":"x","b":"y"}""") == @[("A", "1")]
+
+suite "DAT-003 the artifacts of a step in the script":
+  proc optsOf(job, step: string): string =
+    ## the options JSON that reaches core for one step of a script with these declarations
+    var sb = newSandbox()
+    var j: Journal
+    var seen = ""
+    let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
+      if kind == "job_sh": seen = payload.split('\t', 4)[3]
+      some("0\n")
+    let r = replay.execute(sb, j, "return ci.pipeline({ main = function(run) ci.job({ image = 'a'" & job & " }, function(j) j:sh('x'" & step & ") end) end })", host, runId = "r")
+    if r.status != esDone: return "ERROR " & r.message
+    seen
+
+  test "DAT-003 upload patterns and download names reach the shim as sorted lists":
+    check optsOf(", artifacts = { upload = { 'dist/**', 'a.txt' }, download = { 'app' } }", "") ==
+      """{"artifacts":{"download":["app"],"upload":["a.txt","dist/**"]}}"""
+
+  test "DAT-003 a job's declaration and a step's are added together":
+    check optsOf(", artifacts = { upload = { 'a' } }", ", { artifacts = { upload = { 'b' }, download = { 'x' } } }") ==
+      """{"artifacts":{"download":["x"],"upload":["a","b"]}}"""
+
+  test "DAT-003 absolute paths, .. and wildcards in a download name are refused":
+    for bad in ["upload = { '/etc/passwd' }", "upload = { '../x' }", "download = { 'dist/*' }", "upload = 'x'", "colour = 1"]:
+      check optsOf(", artifacts = { " & bad & " }", "").startsWith("ERROR")

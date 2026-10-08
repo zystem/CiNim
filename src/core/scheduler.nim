@@ -10,7 +10,7 @@ import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
-import logwindow, keptpods, stepsecrets, runparams
+import logwindow, keptpods, stepsecrets, runparams, objectstore
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
@@ -462,7 +462,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
       profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: runParams(c, row[0].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
-      step_token: (if secretNamesOf(row[5].getStr).len > 0: stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
+      step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr): stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   PollResponse(header: Header(protocol: 1), commands: commands,
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)
@@ -556,6 +556,10 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
     let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("profile \"build\" needs a run that belongs to an organisation")
+  if hasArtifacts(opts) and not c.loadConfig().found:
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",
+        detail: "the step declares artifacts, and this shard has no object store (PUT /api/v1/storage)")))
   let wantedSecrets = secretNamesOf(opts)
   if wantedSecrets.len > 0:
     # the step asks for secrets of the organisation (6.7): they must exist now, and the run must belong to an organisation

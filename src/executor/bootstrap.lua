@@ -275,6 +275,72 @@ local function secrets_json(names)
   return "[" .. table.concat(parts, ",") .. "]"
 end
 
+-- The artifacts of a step (DAT-003, docs/artifacts.md): `artifacts = { upload = { "dist/**" }, download = { "app" } }`. After the command has succeeded the shim
+-- puts every file under /cicd/workspace that matches an `upload` pattern into the shard's object store; before the command starts it fetches what `download`
+-- names (an artifact of the same run, a file or a directory) to the same place. The patterns are paths relative to the workspace with `*` (within a name),
+-- `**` (across directories) and `?`. A job's declaration and a step's are added together. Returns a table or nil.
+local ART_MAX = 32
+local function norm_art_list(v, what, glob, depth)
+  if v == nil then return nil end
+  if type(v) ~= "table" then error("artifacts." .. what .. ": a list of paths", depth) end
+  local out, seen = {}, {}
+  for i = 1, rawlen(v) do
+    local p = v[i]
+    if type(p) ~= "string" or #p == 0 or #p > 256 or p:sub(1, 1) == "/" or p:find("%.%.") or p:find("[%c\\]") then
+      error("artifacts." .. what .. ": a path inside the workspace (relative, no .., at most 256 characters)", depth)
+    end
+    if not glob and p:find("[%*%?]") then error("artifacts.download: a name or a directory, no wildcards", depth) end
+    if not seen[p] then seen[p] = true; out[#out + 1] = p end
+  end
+  if #out > ART_MAX then error("artifacts." .. what .. ": at most " .. ART_MAX .. " entries", depth) end
+  tsort(out)
+  return out
+end
+
+local function norm_artifacts(v, depth)
+  if v == nil then return nil end
+  if type(v) ~= "table" then error("artifacts: a table { upload = {...}, download = {...} }", depth) end
+  for k in rawnext, v do
+    if k ~= "upload" and k ~= "download" then error("artifacts: unknown field '" .. tostring_(k) .. "'", depth) end
+  end
+  return { upload = norm_art_list(v.upload, "upload", true, depth), download = norm_art_list(v.download, "download", false, depth) }
+end
+
+local function merge_art_list(a, b, what)
+  if a == nil then return b end
+  if b == nil then return a end
+  local out, seen = {}, {}
+  for k = 1, 2 do
+    local l = (k == 1) and a or b
+    for i = 1, #l do
+      if not seen[l[i]] then seen[l[i]] = true; out[#out + 1] = l[i] end
+    end
+  end
+  if #out > ART_MAX then error("artifacts." .. what .. ": at most " .. ART_MAX .. " entries", 4) end
+  tsort(out)
+  return out
+end
+
+local function merge_artifacts(a, b)
+  if a == nil then return b end
+  if b == nil then return a end
+  return { upload = merge_art_list(a.upload, b.upload, "upload"), download = merge_art_list(a.download, b.download, "download") }
+end
+
+local function artifacts_json(a)
+  local parts = {}
+  for _, k in ipairs({ "download", "upload" }) do
+    local l = a[k]
+    if l and #l > 0 then
+      local items = {}
+      for i = 1, #l do items[i] = jstr(l[i]) end
+      parts[#parts + 1] = '"' .. k .. '":[' .. table.concat(items, ",") .. "]"
+    end
+  end
+  if #parts == 0 then return nil end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
 -- The execution profile of a job (RUN-004): "" is the organisation's ordinary one, "build" the build profile (A.13), whose steps run
 -- as build Pods in the organisation's own namespace (D-42). Core refuses a profile that the shard does not have.
 local function norm_profile(v)
@@ -287,13 +353,17 @@ end
 local function step_opts(job, opts)
   local metrics, mask, timeout = job.__metrics, job.__mask, job.__timeout
   local secrets = job.__secrets
+  local artifacts = job.__artifacts
   if opts then
+    if opts.artifacts ~= nil then artifacts = merge_artifacts(artifacts, norm_artifacts(opts.artifacts, 4)) end
     if opts.secrets ~= nil then secrets = merge_secrets(secrets, norm_secrets(opts.secrets, 4)) end
     if opts.metrics ~= nil then metrics = norm_metrics(opts.metrics) end
     if opts.mask ~= nil then mask = norm_mask(opts.mask) end
     if opts.timeout ~= nil then timeout = norm_timeout(opts.timeout) end
   end
   local parts = {}
+  local art = artifacts and artifacts_json(artifacts)
+  if art then parts[#parts + 1] = '"artifacts":' .. art end
   if mask ~= "" then parts[#parts + 1] = '"mask":' .. mask end
   if metrics ~= "" then parts[#parts + 1] = '"metrics":' .. metrics end
   if secrets and #secrets > 0 then parts[#parts + 1] = '"secrets":' .. secrets_json(secrets) end
@@ -464,7 +534,7 @@ G.ci = {
     if type(fn) ~= "function" then error("ci.job: function expected", 2) end
     job_seq = job_seq + 1
     local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
-      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3) }, Job_mt)
+      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3) }, Job_mt)
     local ok, err = pcall(fn, j)
     if not ok then error(err, 0) end
     return { ok = true, outputs = {} }

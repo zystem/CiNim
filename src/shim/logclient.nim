@@ -265,3 +265,33 @@ proc fetchStepSecrets*(coreAddr, certs: string; step: StepRef; token: string): F
       result.retry = ack.failure.code == "secrets_unavailable"      # core is up but not ready yet; every other refusal is final
   except CatchableError as e:
     result = FetchedSecrets(retry: true, code: "no_answer", detail: e.msg)
+
+type ArtifactAnswer* = object
+  ok*, retry*: bool
+  answer*: JsonNode
+  code*, detail*: string
+
+proc askArtifacts*(coreAddr, certs: string; step: StepRef; token, requestJson: string): ArtifactAnswer =
+  ## One try at asking core for URLs to put or get the artifacts of this step (DAT-003), over the same authenticated channel and with the step's own
+  ## credential as for its secrets. `requestJson` is {"op": "put" | "done" | "get", ...}; core answers with what the step's options declared, nothing more.
+  try:
+    let conn = connectReq(coreAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"),
+                          recvTimeoutMs = 20000, sendTimeoutMs = 5000)
+    defer: (try: conn.close() except CatchableError: discard)
+    let req = StepReport(step: step, request: "artifacts", job_token: token, request_json: requestJson)
+    let bytes = Protobuf.encode(req)
+    var msg = newString(bytes.len)
+    if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
+    conn.send(msg)
+    let (avail, _, body) = waitForReceive(conn.socket)
+    if not avail: return ArtifactAnswer(retry: true, code: "no_answer", detail: "core did not answer")
+    let ack = Protobuf.decode(cast[seq[byte]](body), StepReportAck)
+    if ack.accepted:
+      result.ok = true
+      result.answer = parseJson(ack.answer_json)
+    else:
+      result.code = ack.failure.code
+      result.detail = ack.failure.detail
+      result.retry = ack.failure.code in ["store_unavailable"]
+  except CatchableError as e:
+    result = ArtifactAnswer(retry: true, code: "no_answer", detail: e.msg)

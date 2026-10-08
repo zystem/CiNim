@@ -47,6 +47,11 @@ const ddl = [
        secret_hash TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL, script TEXT NOT NULL, params TEXT NOT NULL DEFAULT '',
        concurrency TEXT NOT NULL DEFAULT 'allow', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
        last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '')""",
+  # the artifacts of runs (DAT-003, core/objectstore.nim): the object is in the store, this is what the platform knows about it; a path is one artifact of a run
+  """CREATE TABLE IF NOT EXISTS artifacts (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL, step_ordinal INTEGER NOT NULL, path TEXT NOT NULL, s3_key TEXT NOT NULL,
+       size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS artifacts_run_path ON artifacts (run_id, path)",
   "CREATE UNIQUE INDEX IF NOT EXISTS triggers_tenant_name ON triggers (tenant_id, name)",
   "CREATE INDEX IF NOT EXISTS runs_trigger ON runs (trigger_id, state)",
   "CREATE INDEX IF NOT EXISTS runs_project_created ON runs (project_id, created_at)",
@@ -237,6 +242,7 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
     discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ?", o.id]])
+    discard c.execute(%*[["DELETE FROM artifacts WHERE tenant_id = ?", o.id]])      # the objects stay in the store until a sweeper removes them (not built)
     discard c.execute(%*[["DELETE FROM org_keys WHERE tenant_id = ?", o.id]])
   discard c.execute(%*[["DELETE FROM organizations WHERE slug = ?", slug]])
 

@@ -64,7 +64,9 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   if r.logMaxBytes > 0: cmd.add @["--log-max-bytes", $r.logMaxBytes]
   if r.optsJson.len > 0: cmd.add @["--opts-json", r.optsJson]          # validated by the Lua sandbox, holds no secret values
   # the values are fetched by the shim from core with the step's own credential; the Pod's specification holds the names (as placeholders) and the credential
-  if r.secretNames.len > 0 and r.stepToken.len > 0: cmd.add @["--fetch-secrets", "--step-token", r.stepToken]
+  # the credential is given whenever the step needs one (secrets, artifacts); only secrets are fetched at the start by a flag of their own
+  if r.stepToken.len > 0: cmd.add @["--step-token", r.stepToken]
+  if r.secretNames.len > 0 and r.stepToken.len > 0: cmd.add "--fetch-secrets"
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,

@@ -151,7 +151,11 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
          {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
                   "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
           "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
-         {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}]}]}},
+         {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}]},
+         # the object store of the shard (DAT-003, deploy/examples/garage): a step puts and gets its artifacts with URLs that core signs
+         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": cfg.shardNamespace}},
+                  "podSelector": {"matchLabels": {"app": "garage"}}}],
+          "ports": [{"protocol": "TCP", "port": 3900}]}]}},
     %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "controller-no-ingress", ns),
        "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": controllerName}}, "policyTypes": ["Ingress"]}}]
   # the simple mode: one more policy each, which adds to the default-deny (policies are only ever added together), for every step Pod. The

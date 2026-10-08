@@ -17,12 +17,12 @@
 ## it does not touch `steps.state` (job-controller's Pod polling stays the source of truth for step completion).
 ##
 ## SEC-010 (job_token) is deferred: accepted but not checked.
-import std/[json, tables, strutils, httpclient, locks, atomics, times, options]
+import std/[json, tables, strutils, httpclient, locks, atomics, times, options, sequtils]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, shimstate, states]
 import crunchy
-import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets
+import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, objectstore
 import common/[ctrlauth]
 import scheduler   ## for stopServers*, the shared shutdown flag every core REP-server thread polls
 
@@ -190,6 +190,77 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
   result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
   for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)
 
+proc handleArtifactsRequest(c: var RqClient; req: StepReport; master: string): StepReportAck =
+  ## The shim asks for URLs to put or get the artifacts of its step (DAT-003). The credential is the step's own, the attempt must be running, and what is
+  ## allowed is what the step's options declared: it can put under its own run and get what its own run stored. The URLs are short-lived and carry the key;
+  ## the shim has none.
+  let refuse = proc (code, detail: string): StepReportAck =
+    StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: false, disposition: "refused", failure: Failure(code: code, detail: detail))
+  if req.job_token.len == 0 or not constantTimeEqual(req.job_token, stepToken(master, req.step.run_id, int(req.step.seq), int(req.step.attempt))):
+    return refuse("bad_token", "the step's credential is not right")
+  let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id FROM steps s JOIN runs ru ON ru.id = s.run_id " &
+                      "WHERE s.run_id = ? AND s.ordinal = ? AND s.attempt = ?", req.step.run_id, int(req.step.seq), int(req.step.attempt)]])
+  let v = r["results"][0]{"values"}
+  if v == nil or v.len == 0 or v[0][0].getStr notin [protoName(ssStarting), protoName(ssRunning)]:
+    return refuse("not_current", "this attempt of the step is not running")
+  let decl = artifactDecl(v[0][1].getStr)
+  let tenant = v[0][2].getStr
+  let q = try: parseJson(req.request_json) except JsonParsingError: nil
+  if q == nil or q.kind != JObject or q{"op"}.getStr notin ["put", "done", "get"]: return refuse("bad_request", "the request is {\"op\": put | done | get, ...}")
+  let store = c.loadStore()
+  if not store.ok:
+    return refuse(if store.error == "not_configured": "store_not_configured" else: "store_unavailable",
+                  if store.error == "not_configured": "the shard has no object store (PUT /api/v1/storage)" else: "the object store's key cannot be read now: " & store.error)
+  let now = getTime().toUnix()
+  var answer = newJObject()
+  let op = q["op"].getStr
+  if op == "get":
+    if decl.download.len == 0: return refuse("not_declared", "the step declared no artifacts to download")
+    var files = newJArray()
+    for nv in q{"names"}:
+      let name = nv.getStr
+      if name notin decl.download: return refuse("not_declared", name & " is not in the step's download list")
+      var found = c.storedUnder(req.step.run_id, name)
+      if found.len == 0: return refuse("artifact_missing", "this run has no artifact " & name)
+      for f in found:
+        files.add %*{"path": f.path, "size": f.size, "sha256": f.sha256, "url": store.url("GET", f.key, getExpires, now)}
+    answer["files"] = files
+  else:
+    if decl.upload.len == 0: return refuse("not_declared", "the step declared no artifacts to upload")
+    let files = q{"files"}
+    if files == nil or files.kind != JArray or files.len > maxFilesPerCall: return refuse("bad_request", "at most " & $maxFilesPerCall & " files in a call")
+    if op == "put":
+      var urls = newJArray()
+      for f in files:
+        let path = cleanPath(f{"path"}.getStr)
+        let size = f{"size"}.getBiggestInt(-1)
+        let sha = f{"sha256"}.getStr
+        if path.len == 0: return refuse("bad_path", "the path " & f{"path"}.getStr & " is not a path inside the workspace")
+        if size < 0 or size > maxObjectBytes: return refuse("too_big", path & " is bigger than " & $maxObjectBytes & " bytes")
+        if sha.len != 64 or sha.anyIt(it notin HexDigits): return refuse("bad_request", "sha256 of " & path & " is not 64 hex digits")
+        let key = objectKey(tenant, req.step.run_id, path)
+        c.recordUploading(schema.newId(), tenant, req.step.run_id, int(req.step.seq), path, key, size, sha.toLowerAscii, now)
+        urls.add %*{"path": path, "url": store.url("PUT", key, putExpires, now)}
+      answer["urls"] = urls
+    else:
+      var stored = 0
+      var failed = newJArray()
+      for f in files:
+        let path = cleanPath(f{"path"}.getStr)
+        let rec = c.query(%*[["SELECT s3_key, size FROM artifacts WHERE run_id = ? AND path = ? AND state = 'uploading'", req.step.run_id, path]])
+        let rv = rec["results"][0]{"values"}
+        if path.len == 0 or rv == nil or rv.len == 0:
+          failed.add %path
+          continue
+        # the object has to be there, with the size the shim said; the store answers to the core itself, not to the Pod's word
+        if store.headSize(rv[0][0].getStr) != rv[0][1].getBiggestInt:
+          failed.add %path
+          continue
+        if c.markStored(req.step.run_id, path): inc stored
+      answer["stored"] = %stored
+      answer["failed"] = failed
+  result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "artifacts", answer_json: $answer)
+
 proc handleStepReport(c: var RqClient; req: StepReport; profileId: string): StepReportAck =
   ## The completion handshake (D-29): the shim reports its result and waits for this answer before it exits. The result is
   ## the shim's own account - recorded here, through the same path as a Pod's verdict (applyTransition, idempotent and fenced) -
@@ -256,7 +327,9 @@ proc serveStepReport*(rqliteUrl, certs: string; port: int; profileId: string) {.
       let body = conn.receive()
       if body.len == 0: continue
       let rep = Protobuf.decode(cast[seq[byte]](body), StepReport)
-      let resp = if rep.request == "secrets": handleSecretsRequest(c, rep, master) else: handleStepReport(c, rep, profileId)
+      let resp = if rep.request == "secrets": handleSecretsRequest(c, rep, master)
+                 elif rep.request == "artifacts": handleArtifactsRequest(c, rep, master)
+                 else: handleStepReport(c, rep, profileId)
       let outb = Protobuf.encode(resp)
       var s = newString(outb.len)
       if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)

@@ -605,6 +605,8 @@ The platform works only inside Kubernetes and uses no permanent agents: there ar
 
 **DAT-003 Artifacts.** The shim and plugins upload artifacts straight to S3-compatible storage by short-lived URL (multipart); SHA-256, size, media type, expiry, provenance and ACL are kept in rqlite. S3 is the store of artifacts and cache, not of logs.
 
+(Built, docs/artifacts.md: a step's option `artifacts = {upload = {patterns}, download = {names}}`; core signs SigV4 URLs, the shim streams single PUTs and GETs over `http://`, the size is checked by core against the store before an artifact is `stored`; the S3 key is sealed in the database, `PUT /api/v1/storage`. Not built: multipart, expiry, ACL, provenance, retention, quotas.)
+
 **DAT-004 Cache.** The cache key is immutable; restore-keys select the latest compatible object; protection against poisoning separates trusted and untrusted refs and projects. Restore and save are performed by a plugin step into the shared storage (STO-001) through S3. The cache does not replace storage: the cache lives between runs, storage lives within a run. Persistent volumes (STO-008) are for reusing directories between runs without an exchange through S3.
 
 **DAT-005 Tests.** A normalised suite/case/attempt model; duration history, flaky detection, owner, failure fingerprint and comparison with the base branch.
@@ -892,6 +894,7 @@ These tables belong to each shard like all the others; there is no global databa
 | repositories | id, project_id, provider, external_id, url, default_branch | provider, external_id |
 | pipeline_definitions | id, project_id, repository_id, path, enabled | repository_id, path |
 | pipeline_bundles | id, definition_id, commit_sha, source, module_digests, api_version, runtime_version, digest | definition_id, digest |
+| artifacts | id, tenant_id, run_id, step_ordinal, path, s3_key, size, sha256, state (uploading, stored), created_at | run_id, path (unique) |
 | triggers | id, tenant_id, name, kind, schedule, secret_hash, project_id, script, params, concurrency, enabled, created_at, last_fired_at, last_run_id, last_result | tenant_id, name (unique) |
 | runs | id, project_id, bundle_id, trigger_id, parent_run_id, state, actor_id, params (launch parameters, at most 4 KiB), version, timestamps | project_id, created_at |
 | run_journal | run_id, seq, kind, fingerprint, payload, result, created_at | run_id, seq |
@@ -945,6 +948,8 @@ The table `log_streams` holds only the metadata of a stream (tenant, the job's s
 | PUT, DELETE | /api/v1/organizations/{slug}/secrets/{NAME} | PUT `{"value": "..."}` sets (a new version) and DELETE removes a step secret; the value goes to a Kubernetes Secret of the organisation's namespace and is neither stored in the database nor answered (administrator; docs/secrets-masking.md) |
 | POST | /api/v1/token:rotate | The caller's own token is replaced by a new one (shown once) and revoked; the first administrator token may do only this (403 `token_change_required` elsewhere) |
 | POST, GET, DELETE | /api/v1/tokens, /api/v1/tokens/{id} | API tokens (IAM-003, D-44), for an administrator: POST `{name, scope, ttl_seconds}` answers with the token once; GET lists them without secrets; DELETE revokes. `/healthz` and `/metrics` need no token, every other route does |
+| GET, PUT, DELETE, POST | /api/v1/storage, /api/v1/storage:check | The object store of the shard (DAT-003, D-46), for an administrator: PUT `{endpoint, region, bucket, access_key_id, secret_access_key}` tries a round trip and seals the secret; GET shows the settings without it; POST `:check` repeats the round trip |
+| GET | /api/v1/runs/{id}/artifacts, /api/v1/runs/{id}/artifacts/{path} | The stored artifacts of a run, or one of them (up to 64 MiB) |
 | GET, POST | /api/v1/organizations/{slug}/triggers | The triggers of an organisation (TRG-001..004), for an administrator: POST `{name, kind: schedule or webhook, schedule, project_id, script, params, concurrency, enabled}`; a webhook's secret is in the answer once |
 | GET, DELETE | /api/v1/organizations/{slug}/triggers/{id} | One trigger (never its secret or its script), or delete it |
 | POST | /api/v1/organizations/{slug}/triggers/{id}:enable, :disable, :rotate-secret, :fire | Switch on or off, give a webhook a new secret (shown once), start a run now with optional `params` |
