@@ -579,7 +579,8 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
     discard   # already exists (a later step of the same job): fine, jobs.key is unique per (run_id, key, attempt)
   let jr = c.query(%*[["SELECT id FROM jobs WHERE run_id = ? AND key = ?", req.run_id, jobKey]])
   let jobId = jr["results"][0]{"values"}[0][0].getStr
-  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, profile, queued_at) " &
+  # OR IGNORE: the same call twice (two executors met the same run during a rollout, or one asked again after a lost answer) is one step, not a crash of the core
+  discard c.execute(%*[["INSERT OR IGNORE INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, profile, queued_at) " &
     "VALUES (?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
     schema.newId(), req.run_id, jobId, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, profile, now]])
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
@@ -607,13 +608,19 @@ proc serveExecutorChannel*(co: Core; port: int) {.thread.} =
       let body = conn.receive()
       if body.len == 0: continue
       let req = Protobuf.decode(cast[seq[byte]](body), ExecutorRequest)
-      let resp = case req.body.kind
+      # an error in one request is answered as an error of that request; it must not end the core (a REP socket also needs its answer to go on)
+      let resp = try:
+        case req.body.kind
         of ExecutorRequestBodyKind.lease: handleLease(c, co.profileId, req.body.lease)
         of ExecutorRequestBodyKind.call: handleCall(c, co, req.body.call)
         of ExecutorRequestBodyKind.finish: handleFinish(c, req.body.finish)
         of ExecutorRequestBodyKind.finish_run_id, ExecutorRequestBodyKind.notSet:
           ExecutorResponse(header: Header(protocol: 1),
             body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error")))
+      except CatchableError as e:
+        stderr.writeLine "core: executor channel: " & e.msg
+        ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+          kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "internal", detail: e.msg)))
       let outb = Protobuf.encode(resp)
       var s = newString(outb.len)
       if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)
