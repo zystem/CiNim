@@ -209,10 +209,6 @@ when defined(shimLogging):
       if seqNo > 0 and seqNo <= upto: removeFile(f)
     0
 
-func items(n: JsonNode): seq[JsonNode] =
-  ## the elements of a JSON array that may be missing (nil) or something else: none then
-  if n != nil and n.kind == JArray: n.elems else: @[]
-
 proc artifactTool(args: seq[string]): int =
   ## Run by the job controller through exec when the shim could not hand the artifacts to the core itself (the spool fallback, D-33), and only when the core orders it:
   ## `cicd-shim --read-artifact PATH --workspace DIR --offset N --length L` writes that block of the file as base64 to stdout (the exec channel carries text);
@@ -465,8 +461,9 @@ proc main(): int =
       if o{"timeout"} != nil and timeoutSeconds == 0: timeoutSeconds = o["timeout"].getInt
       if o{"metrics"} != nil: appDecl = parseDeclaration($o["metrics"])
       if o{"artifacts"} != nil:
-        for p in items(o["artifacts"]{"upload"}): artUpload.add p.getStr         # a list that is not declared is nil: `items` makes it empty
-        for p in items(o["artifacts"]{"download"}): artDownload.add p.getStr
+        let decl = declaredArtifacts(o)
+        artUpload = decl.upload
+        artDownload = decl.download
       if o{"mask"} != nil:
         maskRuntime = o["mask"]{"runtime"}.getBool(true)
         maskVariants = o["mask"]{"variants"}.getBool(true)

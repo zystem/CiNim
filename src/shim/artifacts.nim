@@ -117,3 +117,15 @@ proc readManifest*(path: string): seq[ManifestFile] =
     for f in parseJson(readFile(path)):
       result.add ManifestFile(path: f{"path"}.getStr, size: f{"size"}.getBiggestInt, sha256: f{"sha256"}.getStr)
   except CatchableError: discard
+
+proc declaredArtifacts*(opts: JsonNode): tuple[upload, download: seq[string]] =
+  ## the `artifacts` of the step's options; a list that is not declared (nil) is none. (`for x in items(node)` over a nil node is a segmentation fault: the
+  ## elements are taken from `.elems` only when the node is an array.)
+  if opts == nil or opts.kind != JObject: return
+  let a = opts{"artifacts"}
+  if a == nil or a.kind != JObject: return
+  for key in ["upload", "download"]:
+    let l = a{key}
+    if l != nil and l.kind == JArray:
+      for e in l.elems:
+        if e.kind == JString: (if key == "upload": result.upload.add e.getStr else: result.download.add e.getStr)

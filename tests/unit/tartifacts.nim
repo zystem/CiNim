@@ -1,5 +1,5 @@
 ## The shim's part of the artifacts (DAT-003): patterns, the files found, the hash, and the transfer against a small server of the test's own.
-import std/[unittest, os, strutils, tempfiles]
+import std/[unittest, os, strutils, tempfiles, json]
 import shim/artifacts
 
 suite "DAT-003 artifact patterns":
@@ -72,3 +72,16 @@ suite "DAT-003 blocks and the manifest":
     check back.len == 2 and back[0].path == "dist/a" and back[0].size == 3 and back[1].sha256 == "cd"
     writeFile(m, "{broken")
     check readManifest(m).len == 0
+
+suite "DAT-003 the declaration in the step's options":
+  test "DAT-003 an option with only an upload list (no download list) is read without a crash":
+    let d = declaredArtifacts(parseJson("""{"artifacts":{"upload":["dist/**"]},"timeout":5}"""))
+    check d.upload == @["dist/**"] and d.download.len == 0
+    let e = declaredArtifacts(parseJson("""{"artifacts":{"download":["app","dist"]}}"""))
+    check e.upload.len == 0 and e.download == @["app", "dist"]
+
+  test "DAT-003 no artifacts, or something that is not a declaration, declares nothing":
+    for j in ["""{}""", """{"artifacts":null}""", """{"artifacts":[]}""", """{"artifacts":{"upload":"x","download":5}}""", """{"artifacts":{"upload":[1,null]}}"""]:
+      let d = declaredArtifacts(parseJson(j))
+      check d.upload.len == 0 and d.download.len == 0
+    check declaredArtifacts(nil).upload.len == 0
