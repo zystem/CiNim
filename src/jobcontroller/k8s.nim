@@ -101,7 +101,7 @@ let volumeSettings = runvolume.volumeSettings(getEnv("CINIM_RUN_STORAGE", "off")
   ## the run volume of the namespace (STO-001); what a Pod gets of it is in runvolume.nim
 
 proc podBody(r: PodRequest): JsonNode =
-  let sec = podsec.podSecurity(buildSettings, r.build)
+  let sec = podsec.podSecurity(buildSettings, r.build, r.deploy)
   let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
   let vol = runvolume.podVolume(volumeSettings.withEnabled(r.runVolume), r.runId, r.image, shimMount, sec.containerCtx, sec.resources)
   result = %*{

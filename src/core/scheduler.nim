@@ -25,6 +25,7 @@ type
     victoriaLogsUrl*: string   ## DAT-001/log gateway stand-in (core/api.nim's log-window read)
     orgPrefix*, orgShard*: string   ## SHD-001: the names of the namespaces of the organisations
     buildOn*: bool             ## the shard has a build profile (A.13): a job may ask for `profile = "build"`
+    deployOn*: bool            ## the shard has a deploy profile (D-48): a job may ask for `profile = "deploy"`
 
 var stopServers*: Atomic[bool]
 var waitReasonSet: Atomic[bool]   ## some steps currently carry wait_reason = logs_unavailable (so clearing it is a write only on the open edge)
@@ -556,16 +557,17 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
   let cmd = if parts.len > 4: parts[4] else: ""
   let now = $getTime().toUnix()
   let profileId = profileOfRun(c, req.run_id, co.profileId)    # the profile of the run's organisation (SHD-007)
-  if profile == "build":
+  if profile in ["build", "deploy"]:
     # the build profile (D-42): a build Pod in the organisation's own namespace, made by its controller; the shard must allow it
     # and the run must belong to an organisation (the namespace that carries the admission policy)
     let fail = proc (detail: string): ExecutorResponse =
       ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
-    if not co.buildOn: return fail("profile \"build\" is not enabled on this shard (CINIM_BUILD)")
+    if profile == "build" and not co.buildOn: return fail("profile \"build\" is not enabled on this shard (CINIM_BUILD)")
+    if profile == "deploy" and not co.deployOn: return fail("profile \"deploy\" is not enabled on this shard (CINIM_DEPLOY)")
     let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
-    if ov == nil or ov.len == 0: return fail("profile \"build\" needs a run that belongs to an organisation")
+    if ov == nil or ov.len == 0: return fail("profile \"" & profile & "\" needs a run that belongs to an organisation")
   if hasArtifacts(opts) and not c.loadConfig().found:
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",

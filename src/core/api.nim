@@ -40,6 +40,7 @@ var coreRef: Core   ## set once at startup (main.nim); read-only after that, one
 let
   kube = inCluster()   ## the Pod's ServiceAccount; not available outside a cluster, and the organisation then is a record only
   provisionOn = kube.available and getEnv("CINIM_PROVISION", "auto") != "off"
+  deployOn = getEnv("CINIM_DEPLOY", "off") == "on"    ## the shard has a deploy profile (D-48): the namespace of every organisation gets the policies of its Pods
   buildOn = getEnv("CINIM_BUILD", "off") == "on"      ## the shard has a build profile: the namespace of every organisation allows build Pods (A.13, D-42)
   bootstrapTtl = parseInt(getEnv("CINIM_CONTROLLER_BOOTSTRAP_TTL", "86400"))   ## seconds a bootstrap token of a controller stays good
 
@@ -71,6 +72,12 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
     if raw.len > 0: buildIngress = parseJson(raw)
   except JsonParsingError:
     discard
+  var deployEgress: JsonNode
+  try:
+    let raw = getEnv("CINIM_DEPLOY_EGRESS")
+    if raw.len > 0: deployEgress = parseJson(raw)
+  except JsonParsingError:
+    discard
   var buildInternet: JsonNode
   try:
     let raw = getEnv("CINIM_BUILD_INTERNET")
@@ -83,6 +90,7 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
                   build: buildOn, buildEgress: buildEgress, buildCaps: getEnv("CINIM_BUILD_CAPS"), buildMemoryLimit: getEnv("CINIM_BUILD_MEMORY_LIMIT"),
                   stepEphemeralLimit: getEnv("CINIM_STEP_EPHEMERAL_LIMIT"), buildEphemeralLimit: getEnv("CINIM_BUILD_EPHEMERAL_LIMIT"),
                   buildSeccomp: getEnv("CINIM_BUILD_SECCOMP"), buildIngress: buildIngress,
+                  deploy: deployOn, deployEgress: deployEgress, deployKubeApiServer: getEnv("CINIM_DEPLOY_KUBE_APISERVER") == "true",
                   runStorage: getEnv("CINIM_RUN_STORAGE", "off") == "on", runStorageSize: getEnv("CINIM_RUN_STORAGE_SIZE"),
                   runStorageClass: getEnv("CINIM_RUN_STORAGE_CLASS"), runStorageAccess: getEnv("CINIM_RUN_STORAGE_ACCESS"),
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),

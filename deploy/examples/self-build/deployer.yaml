@@ -1,0 +1,28 @@
+# The credential that the deploy step of self-build.lua (profile = "deploy", D-48) works with: a ServiceAccount that may do one thing, change the image
+# of the core and the executor of this shard. Nothing is given to the platform: the step gets the token as a step secret, and what it may do is
+# what this Role says. Apply it in the namespace of the shard (cinim-<shard>), then make the secrets of the organisation that runs the pipeline:
+#
+#   kubectl -n cinim-001 create token cinim-deployer --duration=8760h         # the token; PUT it as the step secret DEPLOY_TOKEN
+#   kubectl -n cinim-001 get configmap kube-root-ca.crt -o jsonpath='{.data.ca\.crt}'        # the CA of the API server; PUT it as DEPLOY_CA
+#   PUT /api/v1/organizations/<slug>/secrets/DEPLOY_TOKEN   {"value": "<the token>"}      (docs/secrets-masking.md)
+#
+# A token of one year is long for a credential: renew it (the same two calls) before it ends, or give a shorter life and a job that renews it.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: cinim-deployer}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cinim-deployer}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [cinim-core, cinim-executor]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: cinim-deployer}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cinim-deployer}
+subjects:
+  - {kind: ServiceAccount, name: cinim-deployer}

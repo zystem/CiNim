@@ -342,10 +342,11 @@ local function artifacts_json(a)
 end
 
 -- The execution profile of a job (RUN-004): "" is the organisation's ordinary one, "build" the build profile (A.13), whose steps run
--- as build Pods in the organisation's own namespace (D-42). Core refuses a profile that the shard does not have.
+-- as build Pods in the organisation's own namespace (D-42), and "deploy" the deploy profile (D-48): an ordinary step that may reach the
+-- targets of a deployment (the Kubernetes API server, what the operator lists). Core refuses a profile that the shard does not have.
 local function norm_profile(v)
   if v == nil or v == "default" then return "" end
-  if v ~= "build" then error("ci.job: profile must be \"default\" or \"build\"", 3) end
+  if v ~= "build" and v ~= "deploy" then error("ci.job: profile must be \"default\", \"build\" or \"deploy\"", 3) end
   return v
 end
 

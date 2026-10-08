@@ -32,6 +32,9 @@ type
     buildCaps*, buildMemoryLimit*: string       ## what the controller keeps of the capabilities of a build Pod (comma separated) and its memory limit; "" is its default
     egressOpen*, ingressOpen*: bool             ## the simple mode for a small organisation (SHD-009): its step Pods may reach any address / be reached from any;
                                                 ## the default is closed both ways, with the openings of the build profile
+    deploy*: bool                               ## the shard has the deploy profile (D-48): a step with `profile = "deploy"` is an ordinary Pod that may reach what `deployEgress` lists
+    deployEgress*: JsonNode                     ## NetworkPolicy egress rules of the deploy Pods (an array, like buildEgress), or the string "all"; nil: closed
+    deployKubeApiServer*: bool                  ## also a CiliumNetworkPolicy that lets the deploy Pods reach the Kubernetes API server (the entity `kube-apiserver`): a NetworkPolicy cannot name it under Cilium
     runStorage*: bool                           ## STO-001: the steps of a run share one volume that the organisation's controller makes (a claim per run)
     runStorageSize*, runStorageClass*, runStorageAccess*: string   ## its request ("" = the controller's 5Gi), class ("" = the cluster's default), `ReadWriteOnce` or `ReadWriteMany`
     buildSeccomp*: string                       ## `RuntimeDefault` (Kaniko) or `Localhost` (rootless BuildKit and Buildah, deploy/seccomp); "" is the controller's default
@@ -202,6 +205,23 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-egress", ns),
                   "spec": {"podSelector": builds, "policyTypes": ["Egress"], "egress": cfg.buildEgress}}
 
+  # the deploy profile (D-48): an ordinary, non-root step that may reach the targets of a deployment: the Kubernetes API server, a registry, a cluster of its own.
+  # The other steps of the organisation get none of this, and nor do the build Pods.
+  let deploys = %*{"matchLabels": {"cinim.io/profile": "deploy"}}
+  if cfg.deploy and not cfg.egressOpen:
+    if cfg.deployEgress != nil and cfg.deployEgress.kind == JString and cfg.deployEgress.getStr == "all":
+      result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-deploy-egress", ns),
+                    "spec": {"podSelector": deploys, "policyTypes": ["Egress"], "egress": [{}]}}
+    else:
+      if cfg.deployEgress != nil and cfg.deployEgress.kind == JArray and cfg.deployEgress.len > 0:
+        result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-deploy-egress", ns),
+                      "spec": {"podSelector": deploys, "policyTypes": ["Egress"], "egress": cfg.deployEgress}}
+      if cfg.deployKubeApiServer:
+        # Cilium sees the API server at the addresses of the control-plane nodes, which have an identity of their own that `ipBlock` does not select
+        # (measured, docs/deployment.md); only its own policy can name it
+        result.add %*{"apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy", "metadata": meta(cfg, slug, "allow-deploy-kube-apiserver", ns),
+                      "spec": {"endpointSelector": deploys, "egress": [{"toEntities": ["kube-apiserver"]}]}}
+
 func ingressObject(cfg: ProvisionConfig; slug: string): JsonNode =
   let base = cfg.basePath.strip(leading = false, trailing = true, chars = {'/'})
   var rule = %*{"http": {"paths": [{"path": base & "/" & slug, "pathType": "Prefix",
@@ -251,7 +271,7 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bo
       {"type": "Container", "default": {"memory": "1Gi", "ephemeral-storage": (if cfg.stepEphemeralLimit.len > 0: cfg.stepEphemeralLimit else: "1Gi")},
       "defaultRequest": {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "64Mi"}, "max": {"memory": "32Gi"}}]}})
   for p in networkPolicies(cfg, slug):
-    result.steps.add step("network policy " & p["metadata"]["name"].getStr, "NetworkPolicy", ns, p["metadata"]["name"].getStr, p)
+    result.steps.add step("network policy " & p["metadata"]["name"].getStr, p["kind"].getStr, ns, p["metadata"]["name"].getStr, p)
   if cfg.multi and active:
     result.steps.add Step(name: "ingress", kind: "Ingress", namespace: cfg.shardNamespace, objectName: ingressName(slug), obj: ingressObject(cfg, slug))
 

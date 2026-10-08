@@ -148,6 +148,14 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     check r.code == "ok"
     check j.entries[0].payload == "job-1\tkaniko\tbuild\t\tbuild"
     check j.entries[1].payload == "job-2\ta\t\t\tplain"       # "default" is the ordinary profile: the field is empty
+  test "D-48: a job may ask for the deploy profile too":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, """return ci.pipeline({ main = function(run)
+      ci.job({image = "alpine/k8s", profile = "deploy"}, function(j) j:sh("kubectl version") end)
+      return "ok" end })""", fakeHost)
+    check r.code == "ok"
+    check j.entries[0].payload == "job-1\talpine/k8s\tdeploy\t\tkubectl version"
   test "an unknown profile is a script error":
     var sb = newSandbox()
     var j = Journal()

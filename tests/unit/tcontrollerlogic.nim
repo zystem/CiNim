@@ -96,6 +96,10 @@ suite "creating Pods":
   test "a step of the build profile is a build request, any other is not (D-42)":
     check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", profile: "build")).build
     check not buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x")).build
+  test "a step of the deploy profile is a deploy request, any other is not (D-48)":
+    check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", profile: "deploy")).deploy
+    check not buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", profile: "deploy")).build
+    check not buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x")).deploy
   test "no core addresses -> no log streaming flags":
     check not buildRequest(defaultConfig(), req()).logging
   test "the row is written before the Pod exists":

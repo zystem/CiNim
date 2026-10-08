@@ -15,6 +15,7 @@ type
     secrets*: seq[string]        ## the names of the step's secrets: the Pod's environment holds a placeholder for each, the shim fetches the values from core
     env*: seq[(string, string)]  ## plain environment of the step: the run's launch parameters (VAR-002); never a secret
     build*: bool                 ## a step of the build profile: the adapter makes a build Pod of it (podsec.nim, D-42)
+    deploy*: bool                ## a step of the deploy profile: an ordinary Pod with the label that the network policies of a deployment select (D-48)
     runVolume*: bool             ## the step shares the run's volume (STO-001, runvolume.nim); the shim is told where the workspace and the state are
 
   PodSummary* = object

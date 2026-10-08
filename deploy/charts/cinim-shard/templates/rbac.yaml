@@ -28,6 +28,12 @@ rules:
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [rolebindings]
     verbs: [create, delete]
+{{- if and .Values.deploy.enabled .Values.deploy.kubeApiServer }}
+  # the deploy profile (D-48) reaches the API server through a CiliumNetworkPolicy that the core makes in the namespace of each organisation
+  - apiGroups: [cilium.io]
+    resources: [ciliumnetworkpolicies]
+    verbs: [create, delete]
+{{- end }}
   # giving the step role away is allowed for that role only
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [clusterroles]

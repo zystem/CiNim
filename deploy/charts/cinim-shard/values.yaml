@@ -98,6 +98,16 @@ build:
   memoryLimit: 4Gi
   ephemeralStorageLimit: 10Gi         # the ephemeral-storage limit of a build Pod (the request is 1Gi)
 
+# The deploy profile (D-48): a job asks for it with `profile = "deploy"`. Its steps are ordinary Pods in every respect of security (non-root, restricted), but
+# unlike the other steps they may reach what `egress` lists: a list of NetworkPolicy egress rules (a cluster's address, a registry), or the string `all`.
+# `kubeApiServer: true` also lets them reach the Kubernetes API server of this cluster, with a CiliumNetworkPolicy (Cilium sees the API server at the
+# addresses of the control-plane nodes, which a NetworkPolicy cannot name); the core then needs the right to make those (rbac, admission policy). What a step
+# may do there is decided by the credential it is given (a token as a step secret), not by the platform. See docs/deployment.md.
+deploy:
+  enabled: false
+  egress: []
+  kubeApiServer: false
+
 # The REST API (IAM-003). With `enabled` every route but /metrics and /healthz wants `Authorization: Bearer <token>`. The first administrator token is made by
 # the core at its first start and written to its log once (`kubectl logs deploy/cinim-core | grep "FIRST START"`); it may only be changed (`POST
 # /api/v1/token:rotate`) before anything else. Nothing is generated at render time. To give a token yourself, from your secret store, set `adminToken`

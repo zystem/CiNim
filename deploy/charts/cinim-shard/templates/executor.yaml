@@ -9,6 +9,8 @@ metadata:
     {{- include "cinim-shard.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  strategy:
+    type: Recreate        # one executor at a time: two on one run during a rollout cause trouble
   selector:
     matchLabels:
       app.kubernetes.io/name: cinim-executor

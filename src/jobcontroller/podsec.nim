@@ -11,6 +11,7 @@ import std/[json, strutils, sequtils]
 const
   buildLabel* = "cinim.io/profile"
   buildProfile* = "build"
+  deployProfile* = "deploy"
   userNsProfile* = "profiles/cinim-userns.json"       ## relative to the kubelet's seccomp directory, as `localhostProfile` wants it
   defaultBuildEphemeral* = "10Gi"
   defaultBuildCaps* = "CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP"
@@ -36,14 +37,16 @@ func buildSettings*(enabled: string; caps, memoryLimit, seccomp: string; ephemer
                 ephemeralLimit: (if ephemeralLimit.len > 0: ephemeralLimit else: defaultBuildEphemeral),
                 localhost: seccomp == "Localhost")
 
-func podSecurity*(b: BuildSettings; build: bool): PodSecurity =
-  ## a step that asks for the build profile on a shard without one is an ordinary Pod (the core refuses it earlier)
+func podSecurity*(b: BuildSettings; build: bool; deploy = false): PodSecurity =
+  ## a step that asks for the build profile on a shard without one is an ordinary Pod (the core refuses it earlier). A step of the deploy profile
+  ## (D-48) is an ordinary Pod in every respect of security, and differs by one label, which the network policies of its namespace select:
+  ## only a deploy Pod may reach the targets of a deployment.
   if not (build and b.enabled):
     return PodSecurity(
       podCtx: %*{"runAsNonRoot": true, "runAsUser": 1000, "fsGroup": 1000, "seccompProfile": {"type": "RuntimeDefault"}},
       containerCtx: %*{"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
       resources: %*{"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "128Mi"}},
-      hostUsers: true, labels: newJObject())
+      hostUsers: true, labels: (if deploy and not build: %*{buildLabel: deployProfile} else: newJObject()))
   let resources = %*{"requests": {"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "1Gi"},
                      "limits": {"memory": b.memoryLimit, "ephemeral-storage": b.ephemeralLimit}}
   let labels = %*{buildLabel: buildProfile}

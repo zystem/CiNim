@@ -12,6 +12,12 @@ suite "D-42 the Pod of a step":
     check s.podCtx["runAsNonRoot"].getBool and s.podCtx["runAsUser"].getInt == 1000
     check not s.containerCtx["allowPrivilegeEscalation"].getBool and s.containerCtx["capabilities"]["drop"][0].getStr == "ALL"
     check s.hostUsers and s.labels.len == 0
+  test "D-48 a deploy step is an ordinary Pod in every respect of security, with the one label that the policies of a deployment select":
+    let s = podSecurity(kaniko, false, deploy = true)
+    check s.labels["cinim.io/profile"].getStr == "deploy" and s.hostUsers
+    check s.podCtx["runAsNonRoot"].getBool and s.podCtx["runAsUser"].getInt == 1000
+    check not s.containerCtx["allowPrivilegeEscalation"].getBool and s.containerCtx["capabilities"]["drop"][0].getStr == "ALL"
+    check podSecurity(kaniko, false).labels.len == 0
   test "a build step on a shard without the build profile is an ordinary Pod":
     check podSecurity(buildSettings("off", "", "", ""), true).labels.len == 0
     check podSecurity(buildSettings("", "", "", ""), true).podCtx["runAsNonRoot"].getBool

@@ -37,6 +37,7 @@ func collectionPath*(kind, namespace: string): string =
   of "RoleBinding": "/apis/rbac.authorization.k8s.io/v1" & ns & "/rolebindings"
   of "NetworkPolicy": "/apis/networking.k8s.io/v1" & ns & "/networkpolicies"
   of "Ingress": "/apis/networking.k8s.io/v1" & ns & "/ingresses"
+  of "CiliumNetworkPolicy": "/apis/cilium.io/v2" & ns & "/ciliumnetworkpolicies"
   else: raise newException(ValueError, "the core does not handle objects of kind " & kind)
 
 func objectPath*(kind, namespace, name: string): string =

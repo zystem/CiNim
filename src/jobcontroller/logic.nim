@@ -78,7 +78,7 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
-             spoolBytes: spool, build: r.profile == "build", runVolume: cfg.runVolumes, env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
+             spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", runVolume: cfg.runVolumes, env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds

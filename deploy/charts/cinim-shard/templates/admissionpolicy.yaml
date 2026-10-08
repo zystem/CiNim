@@ -27,6 +27,12 @@ spec:
         apiVersions: ["*"]
         operations: [CREATE, UPDATE, DELETE]
         resources: [rolebindings]
+{{- if and .Values.deploy.enabled .Values.deploy.kubeApiServer }}
+      - apiGroups: [cilium.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [ciliumnetworkpolicies]
+{{- end }}
   matchConditions:
     - name: from-the-core-of-this-shard
       expression: 'request.userInfo.username == {{ include "cinim-shard.coreUser" . | quote }}'

@@ -192,6 +192,40 @@ public address needs no rule; one on a private address (in the cluster, in the L
 closed every address but those. The internet rule is an `ipBlock` over all addresses minus the private ranges: with a network plugin that does
 not count pods and nodes as private addresses (Cilium does not) keep the cluster's own ranges in `build.internet.except`.
 
+## Deploying from a pipeline (the deploy profile)
+
+A job asks for it with `profile = "deploy"` (D-48). Its steps are ordinary Pods in every respect of security (non-root, `restricted`, no user namespace), and differ from the other
+steps of the organisation by a label, `cinim.io/profile=deploy`, which selects the network policies below. By default every step is closed (SEC-003): DNS and the platform's collector
+and nothing else, and a build Pod additionally reaches the internet and `build.egress`. A deploy Pod reaches only what the operator lists, so that a step that publishes or rolls out has a way
+to its target and an ordinary step has none. What the step may *do* there is not decided by the platform but by the credential it is given, as a step secret (docs/secrets-masking.md):
+a token of a ServiceAccount, a kubeconfig, an API key of a registry.
+
+```yaml
+deploy:
+  enabled: true
+  kubeApiServer: true      # the Kubernetes API server of this cluster, with a CiliumNetworkPolicy
+  egress:                  # NetworkPolicy egress rules for the rest: another cluster, a registry, an artifact store (or the string `all`)
+    - to: [{ipBlock: {cidr: 203.0.113.0/24}}]
+      ports: [{protocol: TCP, port: 6443}]
+```
+
+**The API server under Cilium.** From a Pod of the organisation the cluster's own API server (`kubernetes.default.svc`) cannot be reached through the default-deny policy, and a NetworkPolicy
+cannot open it. Measured on the TESTING cluster (Cilium, `kubeProxyReplacement`): `helm` and `kubectl` from a build step timed out (`dial tcp 100.80.0.1:443: i/o timeout`); an `ipBlock` rule on the addresses of the three
+control-plane nodes, port 6443, changed nothing, because Cilium sees the API server at the addresses of the nodes and gives them an identity of their own that `ipBlock` does not select; a
+`CiliumNetworkPolicy` with the entity `kube-apiserver` for the Pods of the profile let `kubectl get deployments` list them and `helm` reach the API (it was then refused only for a right the token did not have).
+With `deploy.kubeApiServer: true` the core makes that policy in the namespace of every organisation (`allow-deploy-kube-apiserver`); it needs the right to make `ciliumnetworkpolicies` there
+(the chart adds it to the core's ClusterRole and to its admission policy only then, T-45). On a cluster without Cilium leave the flag off and list the API server's address in `deploy.egress`. The Pods of the
+other profiles stay closed: the policy selects the label.
+
+The example is `deploy/examples/self-build`: `deployer.yaml` is a ServiceAccount that may only patch the Deployments `cinim-core` and `cinim-executor` of the shard, and the fourth step of
+`self-build.lua` (`DEPLOY=true`) uses its token, kept as the step secrets `DEPLOY_TOKEN` and `DEPLOY_CA`, to give both the new image and the core the new controller image. The controllers of the organisations that
+exist are not changed by that (the core never changes an object it has made): delete the Deployment `cinim-job-controller` of an organisation and the next pass of the reconciliation makes it again from the new image.
+
+Checked on the TESTING cluster, through the API alone: with `deploy.enabled` and `deploy.kubeApiServer` the core made `allow-deploy-kube-apiserver` in the namespace of a new organisation; the run of `self-build.lua` with `BUILD=false`,
+`DEPLOY=true` and the tag of the previous build ran the fourth step as an ordinary Pod (non-root), the step fetched `DEPLOY_TOKEN` and `DEPLOY_CA`, patched the executor and the core, and the cluster ran the other images a few seconds
+later (the core's `CINIM_CONTROLLER_IMAGE` too). The run was then ended by the older executor, which replayed the script and did not know the profile: a rollout to a version that does not know what the script uses ends the run, so a pipeline that
+rolls out its own platform should not be replayed by an older executor. Not checked: the whole chain, build then deploy in one run, because the build takes the source from the repository's main branch, which did not yet hold this change; a cluster without Cilium.
+
 ## CiNim builds itself
 
 `deploy/examples/self-build/self-build.lua` is a pipeline of three build steps that share the run's volume: the first clones the source into `/cicd/workspace`

@@ -28,6 +28,7 @@
     "secrets": {"type": "object", "properties": {"keySecret": {"type": "string"}, "kekd": {"type": "object", "properties": {"url": {"type": "string"}, "tlsSecret": {"type": "string"}}}}},
     "auth": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "adminToken": {"type": "string"}, "adminTokenSecret": {"type": "string"}}},
     "steps": {"type": "object", "properties": {"ephemeralStorageLimit": {"type": "string"}}},
+    "deploy": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "kubeApiServer": {"type": "boolean"}, "egress": {"type": ["array", "string"]}}},
     "runStorage": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "size": {"type": "string"}, "storageClass": {"type": "string"},
       "accessMode": {"enum": ["ReadWriteOnce", "ReadWriteMany"]},
       "retention": {"type": "object", "properties": {"succeeded": {"type": "integer"}, "failed": {"type": "integer"}}}}},

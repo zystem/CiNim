@@ -89,7 +89,7 @@ proc main() =
       stderr.writeLine "core: the transport key " & (certs / "curve" / f) & " is missing (CINIM_CERTS; in a cluster the Secret named by curve.secretName)"
       quit 2
   let co = Core(rqliteUrl: rqliteUrl, profileId: profileId, namespace: namespace, certs: certs,
-                orgPrefix: getEnv("CINIM_NAMESPACE_PREFIX", "cinim"), orgShard: shardName, buildOn: getEnv("CINIM_BUILD", "off") == "on",
+                orgPrefix: getEnv("CINIM_NAMESPACE_PREFIX", "cinim"), orgShard: shardName, buildOn: getEnv("CINIM_BUILD", "off") == "on", deployOn: getEnv("CINIM_DEPLOY", "off") == "on",
                 victoriaLogsUrl: victoriaLogsUrl)
   echo "core: profile=", profileId, " namespace=", namespace
 
