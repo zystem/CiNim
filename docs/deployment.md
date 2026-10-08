@@ -287,6 +287,10 @@ REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/i
 
 A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
 
+## Object storage for artifacts (Garage)
+
+`deploy/examples/garage/garage.yaml` runs Garage v2.4.1 (D-46) in the shard's namespace: one StatefulSet pod on an 8 GiB volume, the Service `garage` (S3 on 3900, admin API on 3903). Its secrets are made on the volume at the first start, and a sidecar makes the layout, the bucket `cinim-artifacts` and the access key `cinim` (idempotent). `kubectl -n <ns> apply -f deploy/examples/garage/garage.yaml`; change the volume size in the file first if the cluster is small (the test cluster could not give 20 GiB). The key is read with `kubectl -n <ns> exec garage-0 -c init -- cat /var/lib/garage/secrets/cinim-s3` (the platform will keep it sealed in its database once the core talks to the store). Checked: a PUT and a GET with SigV4 from another Pod (`curl --aws-sigv4 aws:amz:garage:s3`) and an anonymous GET refused (403).
+
 ## Reconciliation and retention
 
 At start and every `organizations.reconcileInterval` seconds (300) the core compares the organisations in its database with their Kubernetes objects

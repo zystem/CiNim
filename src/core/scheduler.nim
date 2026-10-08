@@ -29,6 +29,8 @@ type
 var stopServers*: Atomic[bool]
 var waitReasonSet: Atomic[bool]   ## some steps currently carry wait_reason = logs_unavailable (so clearing it is a write only on the open edge)
 
+const maxFailMessage* = 2000
+
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
   ## the execution profile's settings (set through the API/UI, D-27, D-29); defaults when the row is missing
   result = defaultSettings()
@@ -64,7 +66,7 @@ proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId 
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, '') " &
+  let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
@@ -72,6 +74,7 @@ proc getRun*(co: Core; runId: string): JsonNode =
   result = %*{"id": row[0].getStr, "organization": row[5].getStr, "project_id": row[1].getStr, "state": row[2].getStr,
               "created_at": row[3].getStr, "updated_at": row[4].getStr}
   if row[7].getStr.len > 0: result["trigger_id"] = %row[7].getStr
+  if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
   if row[6].getStr.len > 0:
     result["params"] = (try: parseJson(row[6].getStr) except JsonParsingError: newJObject())
   # RUN-015: a queued step that waits for the log circuit says so (API shows the reason)
@@ -580,11 +583,14 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
 
 proc handleFinish(c: var RqClient; req: FinishRun): ExecutorResponse =
   let now = $getTime().toUnix()
-  discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1 WHERE id = ?",
+  # why a run did not succeed is kept with it (the API shows it as `failure`): the script's error, the parameter that was refused, the limit
+  discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = ?, fail_message = ? WHERE id = ?",
     protoName(case req.state
               of RUN_STATE_SUCCEEDED: rsSucceeded
               of RUN_STATE_FAILED: rsFailed
-              else: rsInfrastructureError), now, req.run_id]])
+              else: rsInfrastructureError), now,
+    (if req.state == RUN_STATE_SUCCEEDED: "" else: req.code[0 ..< min(req.code.len, 64)]),
+    (if req.state == RUN_STATE_SUCCEEDED: "" else: req.message[0 ..< min(req.message.len, maxFailMessage)]), req.run_id]])
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.result,
     result: HostResult(suspended: false)))
 

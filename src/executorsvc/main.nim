@@ -65,7 +65,7 @@ proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: s
   if r.status != esSuspended:
     discard s.rpc(ExecutorRequest(header: Header(protocol: 1),
       body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.finish,
-        finish: FinishRun(run_id: runId, state: finalState, message: r.message))))
+        finish: FinishRun(run_id: runId, state: finalState, message: r.message, code: r.code))))
     echo "executor: run ", runId, " finished ", r.code
   else:
     echo "executor: run ", runId, " suspended (", r.message, ")"

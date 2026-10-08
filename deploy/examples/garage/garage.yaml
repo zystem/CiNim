@@ -1,0 +1,126 @@
+# Garage (https://garagehq.deuxfleurs.fr), a small S3-compatible object store, for run artifacts and caches (spec 6.5, 6.8): one node on one volume.
+#   kubectl -n <shard namespace> apply -f garage.yaml
+# The node is made ready by a sidecar (`init`) that talks to Garage's admin API: it assigns the node a layout, makes the bucket `cinim-artifacts` and an
+# access key `cinim`, and gives the key read, write and owner rights on the bucket. It is safe to run again (it only makes what is missing).
+# The secrets are made on the volume at the first start (nobody types or renders them, so a re-render of the manifest changes nothing):
+#   /var/lib/garage/secrets/{rpc_secret,admin_token}     the node's own
+#   /var/lib/garage/secrets/cinim-s3                       the access key id and secret of the platform's key, mode 600
+# Read the key (the test cluster only; the platform will keep it sealed in its own database, D-45):
+#   kubectl -n <ns> exec garage-0 -c init -- cat /var/lib/garage/secrets/cinim-s3
+# The S3 endpoint inside the cluster: http://garage:3900, region `garage`, path-style addressing. One node means replication_factor 1: the volume is the
+# only copy, so back the volume up (or run three nodes, which needs three zones and the layout of every node) before anything here matters.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: garage}
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "sqlite"
+    replication_factor = 1
+    rpc_bind_addr = "[::]:3901"
+    rpc_secret_file = "/var/lib/garage/secrets/rpc_secret"
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "[::]:3900"
+    [admin]
+    api_bind_addr = "[::]:3903"
+    admin_token_file = "/var/lib/garage/secrets/admin_token"
+  init.sh: |
+    #!/bin/sh
+    # Makes the layout, the bucket and the key through the admin API; idempotent. busybox only (wget, sed, tr).
+    set -eu
+    API=http://127.0.0.1:3903
+    TOKEN=$(cat /var/lib/garage/secrets/admin_token)
+    BUCKET=${BUCKET:-cinim-artifacts}
+    KEYNAME=${KEYNAME:-cinim}
+    CAPACITY=${CAPACITY:-7000000000}
+    get()  { wget -qO- --header="Authorization: Bearer $TOKEN" "$API$1"; }
+    post() { wget -qO- --header="Authorization: Bearer $TOKEN" --header="Content-Type: application/json" --post-data="$2" "$API$1"; }
+    until get /v2/GetClusterStatus >/dev/null 2>&1; do sleep 2; done
+    status=$(get /v2/GetClusterStatus)
+    if ! echo "$status" | tr -d ' \n' | grep -q '"role":{'; then
+      id=$(echo "$status" | tr -d ' \n' | sed -n 's/.*"nodes":\[{"id":"\([0-9a-f]*\)".*/\1/p')
+      version=$(echo "$status" | tr -d ' \n' | sed -n 's/.*"layoutVersion":\([0-9]*\).*/\1/p')
+      post /v2/UpdateClusterLayout "{\"roles\":[{\"id\":\"$id\",\"zone\":\"dc1\",\"capacity\":$CAPACITY,\"tags\":[]}]}" >/dev/null
+      post /v2/ApplyClusterLayout "{\"version\":$((version + 1))}" >/dev/null
+      echo "garage: layout applied for node $id ($CAPACITY bytes)"
+    fi
+    keyfile=/var/lib/garage/secrets/cinim-s3
+    if [ ! -s "$keyfile" ]; then
+      key=$(post /v2/CreateKey "{\"name\":\"$KEYNAME\"}" | tr -d ' \n')
+      kid=$(echo "$key" | sed -n 's/.*"accessKeyId":"\([^"]*\)".*/\1/p')
+      sec=$(echo "$key" | sed -n 's/.*"secretAccessKey":"\([^"]*\)".*/\1/p')
+      [ -n "$kid" ] && [ -n "$sec" ] || { echo "garage: no key in the answer"; exit 1; }
+      (umask 077; printf 'accessKeyId=%s\nsecretAccessKey=%s\n' "$kid" "$sec" > "$keyfile")
+      echo "garage: key $KEYNAME made ($kid)"
+    fi
+    kid=$(sed -n 's/^accessKeyId=//p' "$keyfile")
+    if ! get "/v2/GetBucketInfo?globalAlias=$BUCKET" >/dev/null 2>&1; then
+      post /v2/CreateBucket "{\"globalAlias\":\"$BUCKET\"}" >/dev/null
+      echo "garage: bucket $BUCKET made"
+    fi
+    bid=$(get "/v2/GetBucketInfo?globalAlias=$BUCKET" | tr -d ' \n' | sed -n 's/^{"id":"\([0-9a-f]*\)".*/\1/p')
+    post /v2/AllowBucketKey "{\"bucketId\":\"$bid\",\"accessKeyId\":\"$kid\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}" >/dev/null
+    echo "garage: ready, bucket $BUCKET, key $kid"
+    exec sleep 2147483647
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: garage}
+spec:
+  serviceName: garage
+  replicas: 1
+  selector: {matchLabels: {app: garage}}
+  template:
+    metadata: {labels: {app: garage}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: {type: RuntimeDefault}}
+      initContainers:
+        - name: secrets       # the node's own secrets, once, on the volume
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /var/lib/garage/secrets /var/lib/garage/meta /var/lib/garage/data
+              for f in rpc_secret admin_token; do
+                [ -s /var/lib/garage/secrets/$f ] || (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /var/lib/garage/secrets/$f)
+              done
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: data, mountPath: /var/lib/garage}]
+      containers:
+        - name: garage
+          image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+          command: ["/garage", "-c", "/etc/garage/garage.toml", "server"]
+          ports: [{name: s3, containerPort: 3900}, {name: rpc, containerPort: 3901}, {name: admin, containerPort: 3903}]
+          readinessProbe: {tcpSocket: {port: 3900}, periodSeconds: 5}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/garage}
+            - {name: config, mountPath: /etc/garage, readOnly: true}
+        - name: init
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          command: ["sh", "/scripts/init.sh"]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 5m, memory: 8Mi}, limits: {memory: 32Mi}}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/garage}
+            - {name: config, mountPath: /scripts, readOnly: true}
+      volumes:
+        - name: config
+          configMap: {name: garage, items: [{key: garage.toml, path: garage.toml}, {key: init.sh, path: init.sh}]}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 8Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: garage}
+spec:
+  selector: {app: garage}
+  ports: [{name: s3, port: 3900, targetPort: 3900}, {name: admin, port: 3903, targetPort: 3903}]

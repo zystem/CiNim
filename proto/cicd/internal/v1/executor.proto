@@ -39,7 +39,8 @@ message HostResult {
 message FinishRun {
   string run_id = 1;
   RunState state = 2;                // terminal state: SUCCEEDED, FAILED, INFRASTRUCTURE_ERROR
-  string message = 3;                 // script_error/limit code and detail when not SUCCEEDED
+  string message = 3;                 // the detail when not SUCCEEDED: the script's error, the parameter that was refused, the limit that was hit
+  string code = 4;                    // script_error, script_nondeterminism, instruction_limit, ... (replay.nim ExecResult.code); "" when SUCCEEDED
 }
 
 message ExecutorRequest {
