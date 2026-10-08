@@ -73,6 +73,8 @@ organisation does not have is refused when it is submitted, before anything runs
 The name follows the rules of an environment variable (capital letters, digits, `_`; not `PATH`, `LD_*`, `CICD_*`...), the value is at most 8 KiB. A secret is for
 a run of an organisation; a run of the shard's default tenant has none.
 
+The master key can also be kept on a hardware token (a SmartCard-HSM); how to prepare the card and the key is in docs/hardware-key.md, the provider that uses it is not built yet.
+
 The master key is a file of 64 hexadecimal digits (`secrets.keySecret` in the chart, `CINIM_SECRETS_KEY_FILE`), or, when none is given, derived from the core's CURVE
 key. **Keep it apart from the database backup** and back it up too: a database restored without it holds nothing readable (GitLab and Drone say the same of their
 keys). The core stores a check value and refuses to serve secrets when started with another key, instead of writing new secrets next to ones it cannot read.

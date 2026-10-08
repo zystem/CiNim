@@ -225,6 +225,13 @@ talosctl -n <node> read /var/lib/kubelet/seccomp/profiles/cinim-userns.json
 A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhostProfile: profiles/cinim-userns.json}}`. Regenerate the files with
 `tools/build-test/seccomp-userns.py <Docker's default.json> > deploy/seccomp/cinim-userns.json` after a change of the capability list.
 
+## The master key of the step secrets
+
+The step secrets (docs/secrets-masking.md) are sealed in the database with data keys that a master key wraps. **Back the master key up apart from the database** and keep it
+apart from it: a database restored without it holds nothing readable. It is a file of 64 hexadecimal digits (`secrets.keySecret`, `CINIM_SECRETS_KEY_FILE`) or, when none
+is given, it is derived from the core's CURVE key (`curve.secretName`), which then also has to be kept: a changed CURVE key loses the secrets. To keep the master key on
+a SmartCard-HSM instead, see docs/hardware-key.md (the hardware, the key and the backup; the provider that uses it is planned).
+
 ## API tokens
 
 Every route of the REST API but `/metrics` and `/healthz` wants `Authorization: Bearer <token>` (IAM-003, D-44; the Helm value `auth.enabled`, on by
