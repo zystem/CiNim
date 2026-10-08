@@ -1,0 +1,17 @@
+{{- if .Values.auth.enabled }}
+{{- /* IAM-003: the token of the shard's administrator, from which the first API tokens are made. Given in values (auth.adminToken), or generated at
+the first install and kept by the lookup at every upgrade, so that it does not change under the people who use it. Read it with:
+kubectl -n <ns> get secret cinim-admin-token -o jsonpath='{.data.token}' | base64 -d */ -}}
+{{- $existing := lookup "v1" "Secret" (include "cinim-shard.ns" .) "cinim-admin-token" }}
+{{- $token := .Values.auth.adminToken }}
+{{- if and (not $token) $existing }}{{ $token = index $existing.data "token" | b64dec }}{{ end }}
+{{- if not $token }}{{ $token = randAlphaNum 48 }}{{ end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cinim-admin-token
+  namespace: {{ include "cinim-shard.ns" . }}
+type: Opaque
+stringData:
+  token: {{ $token | quote }}
+{{- end }}

@@ -225,6 +225,23 @@ talosctl -n <node> read /var/lib/kubelet/seccomp/profiles/cinim-userns.json
 A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhostProfile: profiles/cinim-userns.json}}`. Regenerate the files with
 `tools/build-test/seccomp-userns.py <Docker's default.json> > deploy/seccomp/cinim-userns.json` after a change of the capability list.
 
+## API tokens
+
+Every route of the REST API but `/metrics` and `/healthz` wants `Authorization: Bearer <token>` (IAM-003, D-44; the Helm value `auth.enabled`, on by
+default). The administrator's token is made at the first install and kept in the Secret `cinim-admin-token` (or given as `auth.adminToken`):
+
+```bash
+ADMIN=$(kubectl -n cinim-001 get secret cinim-admin-token -o jsonpath='{.data.token}' | base64 -d)
+# a token for the CI of one organisation: it may start and read the runs of acme and do nothing else; it expires in 90 days
+curl -X POST .../api/v1/tokens -H "Authorization: Bearer $ADMIN" -d '{"name": "acme-ci", "scope": "org:acme", "ttl_seconds": 7776000}'
+curl .../api/v1/tokens -H "Authorization: Bearer $ADMIN"          # the list, without secrets and hashes
+curl -X DELETE .../api/v1/tokens/<id> -H "Authorization: Bearer $ADMIN"
+```
+
+The token is in the answer once and only its hash is kept. The Kubernetes API server proxy (`kubectl proxy`, `/api/v1/namespaces/.../services/.../proxy`)
+takes the `Authorization` header for itself, so reach the core through the Ingress or `kubectl port-forward svc/cinim-core 8080:80`. With
+`auth.enabled: false` the API is open (development only).
+
 ## The simple mode: a small organisation, open egress or ingress
 
 By default the step Pods are closed both ways. For a small organisation or an easy case, `network.egress: open` lets every step Pod reach any

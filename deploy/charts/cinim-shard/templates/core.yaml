@@ -65,6 +65,14 @@ spec:
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
             - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"
             {{- end }}
+            {{- if .Values.auth.enabled }}
+            # IAM-003: without it the API is open
+            - name: CINIM_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cinim-admin-token
+                  key: token
+            {{- end }}
             # the reconciliation of the organisations with their objects and the retention of a switched-off one (SHD-008)
             - {name: CINIM_ORG_RECONCILE_INTERVAL, value: {{ int64 .Values.organizations.reconcileInterval | quote }}}
             # int64: Helm reads a YAML integer as a float, and 1209600 would be printed as 1.2096e+06
@@ -86,11 +94,11 @@ spec:
             - {name: tmp, mountPath: /tmp}
           readinessProbe:
             httpGet:
-              path: /api/v1/components
+              path: /healthz
               port: http
           livenessProbe:
             httpGet:
-              path: /api/v1/components
+              path: /healthz
               port: http
             periodSeconds: 20
             failureThreshold: 6

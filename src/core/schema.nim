@@ -20,6 +20,11 @@ const ddl = [
        state TEXT NOT NULL DEFAULT 'active', settings TEXT NOT NULL DEFAULT '{}', plan TEXT NOT NULL DEFAULT '',
        created_at TEXT NOT NULL)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
+  # the API tokens (IAM-003, core/apiauth.nim): only the SHA-256 of the secret is kept; scope is `admin` or `org:<slug>`; 0 means never / not yet
+  """CREATE TABLE IF NOT EXISTS api_tokens (
+       id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
+       created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER NOT NULL DEFAULT 0,
+       revoked_at INTEGER NOT NULL DEFAULT 0)""",
   # the identity of the job controller of an organisation's namespace (IAM-003, common/ctrlauth.nim): a generation, no secrets
   """CREATE TABLE IF NOT EXISTS controller_credentials (
        namespace TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1, confirmed INTEGER NOT NULL DEFAULT 0,

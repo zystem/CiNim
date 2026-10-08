@@ -1,14 +1,14 @@
 ## REST API of core (9.1): runs (POST /api/v1/runs, GET /api/v1/runs/{id} with the steps' attempts, states and the reason each
 ## ended the way it did), the bare step-log read (GET /api/v1/runs/{id}/steps/{seq}/log; from/around/search/tail/download are later
 ## slices, DAT-007), the launch gate, the execution profile's settings (GET/PUT /api/v1/profile, docs/settings.md), the component
-## list (/api/v1/components) and Prometheus metrics (/metrics, docs/metrics.md). No auth yet (OIDC/RBAC are not implemented yet); `project_id`
+## list (/api/v1/components) and Prometheus metrics (/metrics, docs/metrics.md). Bearer tokens (apiauth.nim, IAM-003; OIDC/RBAC are not implemented yet); `project_id`
 ## and `script` (Lua source) are accepted directly in the body since there is no directory, no repositories and no blob storage yet.
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth
 import ../common/ctrlauth
 import ../common/rqlite
 
@@ -25,6 +25,12 @@ let
   orgShard = getEnv("CINIM_SHARD", "001")                  ## the name of this shard: digits only (SHD-001)
   orgPrefix = getEnv("CINIM_NAMESPACE_PREFIX", "cinim")    ## the namespace prefix (SHD-001)
   metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
+
+let adminToken = getEnv("CINIM_ADMIN_TOKEN")   ## the shard administrator's token from a Secret of the chart; empty: the API is open (development)
+
+proc unauthorized(why: string) =
+  reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "unauthorized", "detail": "a valid API token is required (" & why & ")"}),
+    ["Content-Type: application/problem+json", "WWW-Authenticate: Bearer"])
 
 var coreRef: Core   ## set once at startup (main.nim); read-only after that, one HTTP thread pool
 
@@ -118,6 +124,50 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http404, "not_found", "metrics are turned off")
           return
         reply(Http200, coreRef.renderCoreMetrics(), ["Content-Type: text/plain; version=0.0.4; charset=utf-8"])
+        return
+      if path == "/healthz":
+        # the probes of the Pod: alive, and says nothing else, so that it needs no token
+        jsonOk(Http200, %*{"status": "ok"})
+        return
+      # IAM-003: every route but /metrics and /healthz wants a token. An administrator may use all of them; a token of an organisation, only the runs of
+      # that organisation (checked where the run is known)
+      var who = Principal(ok: true, admin: true, name: "open API")
+      if adminToken.len > 0:
+        var ac = newRq(coreRef.rqliteUrl)
+        who = authenticate(ac, adminToken, bearerOf(getRequest()), getTime().toUnix())
+        if not who.ok:
+          unauthorized(who.why)
+          return
+        if not who.admin and not path.startsWith(base):
+          problem(Http403, "forbidden", "this token is for the runs of one organisation only")
+          return
+      if path == "/api/v1/tokens" or path.startsWith("/api/v1/tokens/"):
+        var c = newRq(coreRef.rqliteUrl)
+        let tmeth = getMethod()
+        if tmeth == "POST" and path == "/api/v1/tokens":
+          let j = try: parseJson(getBody()) except JsonParsingError: nil
+          if j == nil or j.kind != JObject or not j.hasKey("scope") or j["scope"].kind != JString or not validScope(j["scope"].getStr):
+            problem(Http400, "invalid_request", "scope is required: `admin` or `org:<slug>`")
+            return
+          let ttl = j{"ttl_seconds"}.getBiggestInt(0)
+          if j.hasKey("ttl_seconds") and ttl < 0:
+            problem(Http400, "invalid_request", "ttl_seconds must be a positive number of seconds, or left out for a token that does not expire")
+            return
+          let now = getTime().toUnix()
+          let name = j{"name"}.getStr("")
+          let made = c.createApiToken(name, j["scope"].getStr, (if ttl > 0: now + ttl else: 0), now)
+          # the token is shown here and never again: only its hash is kept
+          jsonOk(Http201, %*{"id": made.id, "token": made.token, "name": name, "scope": j["scope"].getStr, "expires_at": (if ttl > 0: now + ttl else: 0)})
+        elif tmeth == "GET" and path == "/api/v1/tokens":
+          jsonOk(Http200, %*{"tokens": c.listApiTokens()})
+        elif tmeth == "DELETE" and path.startsWith("/api/v1/tokens/"):
+          let id = path["/api/v1/tokens/".len .. ^1]
+          if not c.revokeApiToken(id, getTime().toUnix()):
+            problem(Http404, "not_found", "no such token, or it is revoked already")
+            return
+          jsonOk(Http200, %*{"id": id, "revoked": true})
+        else:
+          problem(Http404, "not_found", "no such route")
         return
       if path == "/api/v1/components":
         jsonOk(Http200, componentsJson())
@@ -388,6 +438,9 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
+        if not who.admin and (not j.hasKey("organization") or j["organization"].getStr != who.org):
+          problem(Http403, "forbidden", "this token may start runs of the organisation " & who.org & " only")
+          return
         var tenant = "t1"
         var profile = ""
         var orgSlug = ""
@@ -424,6 +477,11 @@ proc onRequest() {.raises: [], gcsafe.} =
             except ValueError:
               problem(Http400, "invalid_request", k & " must be an integer")
               return
+        if not who.admin:
+          let owner = coreRef.getRun(parts[0])
+          if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+            problem(Http404, "not_found", "no log stream for this step yet")      # not 403: another organisation's runs are not even confirmed
+            return
         let log = coreRef.getStepLog(parts[0], seq, max(0, fromLine), (if limit < 1: maxWindow else: limit))
         if log == nil:
           problem(Http404, "not_found", "no log stream for this step yet")
@@ -431,6 +489,9 @@ proc onRequest() {.raises: [], gcsafe.} =
         jsonOk(Http200, log)
       elif meth == "GET" and rest.len > 0:
         let run = coreRef.getRun(rest)
+        if run != nil and not who.mayUseOrg(run{"organization"}.getStr):
+          problem(Http404, "not_found", "no such run")
+          return
         if run == nil:
           problem(Http404, "not_found", "no such run")
           return
@@ -443,5 +504,7 @@ proc onRequest() {.raises: [], gcsafe.} =
 
 proc serveApi*(co: Core; port: int) =
   coreRef = co
+  if adminToken.len == 0:
+    stderr.writeLine "core: CINIM_ADMIN_TOKEN is not set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"
   let s = newHttpServer(onRequest)
   s.start(port, 64)
