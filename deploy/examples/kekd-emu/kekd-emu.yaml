@@ -1,0 +1,30 @@
+# The emulator of the key service (tools/kekd-emu), for trying the core's behaviour with a master key that lives elsewhere without a card.
+# NOT for production: plain HTTP, a key in memory that is new at every start. Set `image` to where you pushed the `kekd-emu` target of tools/image/Dockerfile.kaniko.
+#   kubectl -n <shard namespace> apply -f kekd-emu.yaml
+#   helm upgrade ... --set secrets.kekd.url=http://kekd-emu:8443
+# Then make it misbehave: kubectl -n <ns> exec deploy/kekd-emu -- ... is not possible (the image has no shell); use a port-forward:
+#   kubectl -n <ns> port-forward svc/kekd-emu 8443:8443 &  curl -X POST localhost:8443/emu/fault -d '{"mode":"fDown"}'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: kekd-emu}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: kekd-emu}}
+  template:
+    metadata: {labels: {app: kekd-emu}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: kekd-emu
+          image: registry.example.com/cinim-kekd-emu:dev
+          ports: [{containerPort: 8443}]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: kekd-emu}
+spec:
+  selector: {app: kekd-emu}
+  ports: [{port: 8443, targetPort: 8443}]

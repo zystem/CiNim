@@ -40,8 +40,11 @@ suite "the master key":
     let b = derivedKek("core-secret-B")
     let dek = keyOf(0x55)
     let w = a.wrap(dek, "cinim/dek/v1|t1")
-    check a.unwrap(w, "cinim/dek/v1|t1").ok and a.unwrap(w, "cinim/dek/v1|t1").plain == dek
-    check not b.unwrap(w, "cinim/dek/v1|t1").ok and not a.unwrap(w, "cinim/dek/v1|t2").ok
+    check w.ok
+    check a.unwrap(w.wrapped, "cinim/dek/v1|t1").ok and a.unwrap(w.wrapped, "cinim/dek/v1|t1").plain == dek
+    let wrongKey = b.unwrap(w.wrapped, "cinim/dek/v1|t1")
+    check not wrongKey.ok and not wrongKey.retry                 # refused for good: waiting does not help
+    check not a.unwrap(w.wrapped, "cinim/dek/v1|t2").ok
   test "a key file holds 64 hex digits and nothing else":
     writeFile(getTempDir() / "kek-good", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n")
     writeFile(getTempDir() / "kek-short", "0011")

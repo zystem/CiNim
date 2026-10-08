@@ -230,7 +230,7 @@ A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhos
 The step secrets (docs/secrets-masking.md) are sealed in the database with data keys that a master key wraps. **Back the master key up apart from the database** and keep it
 apart from it: a database restored without it holds nothing readable. It is a file of 64 hexadecimal digits (`secrets.keySecret`, `CINIM_SECRETS_KEY_FILE`) or, when none
 is given, it is derived from the core's CURVE key (`curve.secretName`), which then also has to be kept: a changed CURVE key loses the secrets. To keep the master key on
-a SmartCard-HSM instead, see docs/hardware-key.md (the hardware, the key and the backup; the provider that uses it is planned).
+a SmartCard-HSM instead, see docs/hardware-key.md (the hardware, the key and the backup; the core already speaks to a key service, the service for the card is planned).
 
 ## API tokens
 

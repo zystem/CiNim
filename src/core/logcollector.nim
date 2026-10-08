@@ -186,7 +186,7 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
   let vk = vaultKek()
   if names.len > 0 and not vk.ready: return refuse("secrets_unavailable", "core's secrets are not available")
   let got = c.getSecrets(vk.kek, v[0][2].getStr, names)
-  if not got.ok: return refuse("unknown_secret", got.error)
+  if not got.ok: return refuse(if got.retry: "secrets_unavailable" else: "unknown_secret", got.error)
   result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
   for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)
 

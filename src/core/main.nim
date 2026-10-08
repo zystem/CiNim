@@ -141,6 +141,7 @@ proc main() =
   joinThread(stepReportThread)
   joinThread(logIngestThread)
   joinThread(watchdogThread)
+  joinVault()
   if not launchGateOff: joinThread(gateThread)
   if routerUrl.len > 0: joinThread(routerThread)
   joinReconciler()

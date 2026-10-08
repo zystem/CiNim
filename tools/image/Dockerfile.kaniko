@@ -29,6 +29,7 @@ RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm" -o:/out/core-static src/core/main.nim; \
     nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/executor-static src/executorsvc/main.nim; \
     nim c -d:release -d:k8sPrefix=/opt/k8s -d:k8sStatic $F --dynlibOverride:sqlite3 --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm" -o:/out/controller-static src/jobcontroller/main.nim; \
+    nim c -d:release $F --passL:"-L/opt/zmq/lib -lsodium -lm" -o:/out/kekd-emu tools/kekd-emu/main.nim; \
     strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null; \
     cp /etc/ssl/certs/ca-certificates.crt /out/; ls -l /out
 
@@ -48,3 +49,10 @@ COPY --from=build /out/cicd-shim /cicd-shim
 ENV CINIM_SHIM_BIN=/cicd-shim
 USER 65532:65532
 ENTRYPOINT ["/controller"]
+
+# the emulator of the key service (tools/kekd-emu): for developing and testing the core without a card. NOT for production.
+FROM scratch AS kekd-emu
+COPY --from=build /out/kekd-emu /kekd-emu
+USER 65532:65532
+EXPOSE 8443
+ENTRYPOINT ["/kekd-emu"]

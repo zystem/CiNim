@@ -25,7 +25,7 @@
               "ingress": {"oneOf": [{"type": "array", "items": {"type": "object"}}, {"const": "all"}]},
               "capabilities": {"type": "array", "items": {"enum": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETFCAP", "SETGID", "SETUID"]}},
               "memoryLimit": {"type": "string"}, "ephemeralStorageLimit": {"type": "string"}}},
-    "secrets": {"type": "object", "properties": {"keySecret": {"type": "string"}}},
+    "secrets": {"type": "object", "properties": {"keySecret": {"type": "string"}, "kekd": {"type": "object", "properties": {"url": {"type": "string"}, "tlsSecret": {"type": "string"}}}}},
     "auth": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "adminToken": {"type": "string"}, "adminTokenSecret": {"type": "string"}}},
     "steps": {"type": "object", "properties": {"ephemeralStorageLimit": {"type": "string"}}},
     "organizations": {"type": "object", "properties": {"reconcileInterval": {"type": "integer", "minimum": 10}, "retention": {"type": "integer", "minimum": -1}}},

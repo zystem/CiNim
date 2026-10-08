@@ -65,7 +65,15 @@ spec:
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
             - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"
             {{- end }}
-            {{- if .Values.secrets.keySecret }}
+            {{- if .Values.secrets.kekd.url }}
+            # the master key of the step secrets lives on a token behind a key service (docs/hardware-key.md, core/kekclient.nim)
+            - {name: CINIM_KEKD_URL, value: {{ .Values.secrets.kekd.url | quote }}}
+            {{- if .Values.secrets.kekd.tlsSecret }}
+            - {name: CINIM_KEKD_CA, value: /etc/cinim-kekd/ca.crt}
+            - {name: CINIM_KEKD_CERT, value: /etc/cinim-kekd/tls.crt}
+            - {name: CINIM_KEKD_KEY, value: /etc/cinim-kekd/tls.key}
+            {{- end }}
+            {{- else if .Values.secrets.keySecret }}
             # the master key of the step secrets (core/secretvault.nim); without one it is derived from the CURVE key
             - {name: CINIM_SECRETS_KEY_FILE, value: /etc/cinim-secrets/key}
             {{- end }}
@@ -101,6 +109,9 @@ spec:
             {{- if .Values.secrets.keySecret }}
             - {name: secrets-key, mountPath: /etc/cinim-secrets, readOnly: true}
             {{- end }}
+            {{- if and .Values.secrets.kekd.url .Values.secrets.kekd.tlsSecret }}
+            - {name: kekd-tls, mountPath: /etc/cinim-kekd, readOnly: true}
+            {{- end }}
             - {name: tmp, mountPath: /tmp}
           readinessProbe:
             httpGet:
@@ -131,6 +142,12 @@ spec:
               - {key: core.key, path: core.key}
               - {key: client.pub, path: client.pub}
               - {key: client.key, path: client.key}
+        {{- if and .Values.secrets.kekd.url .Values.secrets.kekd.tlsSecret }}
+        - name: kekd-tls
+          secret:
+            secretName: {{ .Values.secrets.kekd.tlsSecret }}
+            defaultMode: 0440
+        {{- end }}
         {{- if .Values.secrets.keySecret }}
         - name: secrets-key
           secret:

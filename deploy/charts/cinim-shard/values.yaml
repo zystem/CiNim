@@ -115,6 +115,12 @@ auth:
 # anyway; changing that key then loses the secrets. The core refuses to serve secrets when its key is not the one that sealed what the database holds.
 secrets:
   keySecret: ""
+  # The master key on a token that another machine holds (docs/hardware-key.md): the address of its key service, and a Secret with ca.crt, tls.crt and tls.key
+  # for mutual TLS (https). When `kekd.url` is set it is used instead of `keySecret`. The core starts without waiting for the service and asks again every
+  # 15 s; the secrets answer `secrets_unavailable` until it is there.
+  kekd:
+    url: ""
+    tlsSecret: ""
 
 # Step Pods (the LimitRange of an organisation's namespace). A Pod that asks for no ephemeral storage gets a request of 64Mi (so it is not the
 # first one the kubelet evicts when the node runs short of it) and this limit; a Pod that uses more than its limit is evicted and the step has failed.

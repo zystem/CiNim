@@ -9,18 +9,14 @@
 ##
 ## `KekProvider` is the seam for a key that lives elsewhere (a PKCS#11 token behind p11-kit or a YubiHSM connector, Vault or OpenBao Transit, a cloud KMS):
 ## the vault only asks it to wrap and unwrap a data key. Built so far: `fileKek` and `derivedKek`.
-import std/[strutils, json, atomics]
+import std/[strutils, json, atomics, locks]
+import std/times
 import crunchy
 import ../common/[rqlite, ctrlauth, sodiumaead]
+import kekprovider, dekcache
+export kekprovider
 
 const formatTag = "v2."      ## the format of a sealed text: the algorithm is named by it, so that another can follow
-
-type
-  KekProvider* = object
-    ## wraps and unwraps a data key; `id` says which key it is (kept with the wrapped key)
-    id*: string
-    wrap*: proc (plain: seq[byte]; aad: string): string {.gcsafe.}
-    unwrap*: proc (wrapped: string; aad: string): tuple[ok: bool, plain: seq[byte]] {.gcsafe.}
 
 func toHex(a: openArray[byte]): string =
   const digits = "0123456789abcdef"
@@ -54,13 +50,13 @@ proc unseal*(key: openArray[byte]; sealed, aad: string): tuple[ok: bool, plain: 
 proc kekFromBytes(id: string; key: seq[byte]): KekProvider =
   let k = key
   KekProvider(id: id,
-    wrap: proc (plain: seq[byte]; aad: string): string {.gcsafe.} =
-      var s = newString(plain.len)
-      if plain.len > 0: copyMem(addr s[0], unsafeAddr plain[0], plain.len)
-      seal(k, s, aad),
-    unwrap: proc (wrapped: string; aad: string): tuple[ok: bool, plain: seq[byte]] {.gcsafe.} =
+    wrap: proc (plain: seq[byte]; aad: string): WrapResult {.gcsafe.} =
+      var t = newString(plain.len)
+      if plain.len > 0: copyMem(addr t[0], unsafeAddr plain[0], plain.len)
+      (true, false, "", seal(k, t, aad)),
+    unwrap: proc (wrapped: string; aad: string): UnwrapResult {.gcsafe.} =
       let u = unseal(k, wrapped, aad)
-      if not u.ok: return
+      if not u.ok: return refused("the key is not the one that wrapped this")
       result.ok = true
       for ch in u.plain: result.plain.add byte(ch))
 
@@ -85,38 +81,70 @@ func valueAad(tenant, name: string; version: int): string = "cinim/secret/v1|" &
 const checkAad = "cinim/kek-check/v1"
 const checkText = "cinim secrets key check"
 
-proc ensureKeyCheck*(c: var RqClient; kek: KekProvider): tuple[ok: bool, error: string] =
+var
+  kekReport*: proc (up: bool) {.gcsafe.}      ## told whether the master key answered (the component `kekd` in /api/v1/components); set by vaultsetup.nim
+  vaultErrorText: string
+  vaultErrorLock: Lock
+initLock(vaultErrorLock)
+
+proc setVaultError*(text: string) =
+  withLock vaultErrorLock: vaultErrorText = text
+
+proc vaultError*(): string =
+  withLock vaultErrorLock: result = if vaultErrorText.len > 0: vaultErrorText else: "the secrets are not set up"
+
+proc told(up: bool) =
+  if kekReport != nil: kekReport(up)
+
+var deks = initDekCache(600.0)          ## see core/dekcache.nim; the time can be set with `setDekCacheSeconds`
+
+proc setDekCacheSeconds*(seconds: float) =
+  deks.ttl = seconds
+
+proc ensureKeyCheck*(c: var RqClient; kek: KekProvider): tuple[ok, retry: bool, error: string] =
   ## the first start stores a value sealed under the key; a later start with another key finds that it cannot read it
   let r = c.query(%*[["SELECT value FROM vault_meta WHERE key = 'kek_check'"]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0:
     let w = kek.wrap(@(checkText.toOpenArrayByte(0, checkText.high)), checkAad)
-    discard c.execute(%*[["INSERT OR IGNORE INTO vault_meta (key, value) VALUES ('kek_check', ?)", w]])
-    return (true, "")
+    if not w.ok: return (false, w.retry, "the key of the secrets (" & kek.id & ") cannot be used: " & w.error)
+    discard c.execute(%*[["INSERT OR IGNORE INTO vault_meta (key, value) VALUES ('kek_check', ?)", w.wrapped]])
+    return (true, false, "")
   let u = kek.unwrap(vals[0][0].getStr, checkAad)
   if not u.ok:
-    return (false, "the key of the secrets (" & kek.id & ") is not the one that sealed the secrets in this database: restore the key, or the secrets cannot be read")
-  (true, "")
+    if u.retry: return (false, true, "the key of the secrets (" & kek.id & ") does not answer: " & u.error)
+    return (false, false, "the key of the secrets (" & kek.id & ") is not the one that sealed the secrets in this database: restore the key, or the secrets cannot be read")
+  (true, false, "")
 
-proc dekFor(c: var RqClient; kek: KekProvider; tenant: string; create: bool): tuple[ok: bool, dek: seq[byte]] =
+proc dekFor(c: var RqClient; kek: KekProvider; tenant: string; create: bool): tuple[ok, retry: bool, dek: seq[byte], error: string] =
+  let now = epochTime()
+  let cached = deks.get(tenant, now)
+  if cached.found: return (true, false, cached.dek, "")
   let r = c.query(%*[["SELECT wrapped FROM org_keys WHERE tenant_id = ?", tenant]])
   let vals = r["results"][0]{"values"}
+  var wrapped = ""
   if vals != nil and vals.len > 0:
-    let u = kek.unwrap(vals[0][0].getStr, dekAad(tenant))
-    return (u.ok, u.plain)
-  if not create: return
-  let dek = randomBytes(keyBytes)
-  let w = kek.wrap(dek, dekAad(tenant))
-  discard c.execute(%*[["INSERT OR IGNORE INTO org_keys (tenant_id, wrapped, created_at) VALUES (?, ?, strftime('%s','now'))", tenant, w]])
-  # another writer may have been first: read what is stored, that is the key
-  let again = c.query(%*[["SELECT wrapped FROM org_keys WHERE tenant_id = ?", tenant]])
-  let u = kek.unwrap(again["results"][0]{"values"}[0][0].getStr, dekAad(tenant))
-  (u.ok, u.plain)
+    wrapped = vals[0][0].getStr
+  elif not create:
+    return (false, false, @[], "the organisation has no data key")
+  else:
+    let dek = randomBytes(keyBytes)
+    let w = kek.wrap(dek, dekAad(tenant))
+    told(w.ok or not w.retry)
+    if not w.ok: return (false, w.retry, @[], "the key of the secrets cannot wrap: " & w.error)
+    discard c.execute(%*[["INSERT OR IGNORE INTO org_keys (tenant_id, wrapped, created_at) VALUES (?, ?, strftime('%s','now'))", tenant, w.wrapped]])
+    # another writer may have been first: read what is stored, that is the key
+    wrapped = c.query(%*[["SELECT wrapped FROM org_keys WHERE tenant_id = ?", tenant]])["results"][0]{"values"}[0][0].getStr
+  let u = kek.unwrap(wrapped, dekAad(tenant))
+  told(u.ok or not u.retry)                # a refusal is an answer; only a silence or a locked token is "down"
+  if not u.ok: return (false, u.retry, @[], "the data key cannot be opened: " & u.error)
+  deks.put(tenant, u.plain, now)
+  (true, false, u.plain, "")
 
-proc putSecret*(c: var RqClient; kek: KekProvider; tenant, name, value: string; now: int64): tuple[ok: bool, version: int, error: string] =
+proc putSecret*(c: var RqClient; kek: KekProvider; tenant, name, value: string; now: int64): tuple[ok, retry: bool, version: int, error: string] =
   ## a new value is a new version of the secret
   let d = dekFor(c, kek, tenant, create = true)
-  if not d.ok: return (false, 0, "the organisation's data key cannot be read with the key of the secrets")
+  if not d.ok: return (false, d.retry, 0, d.error)
   let cur = c.query(%*[["SELECT version FROM step_secrets WHERE tenant_id = ? AND name = ?", tenant, name]])
   let cv = cur["results"][0]{"values"}
   let version = (if cv != nil and cv.len > 0: cv[0][0].getInt else: 0) + 1
@@ -124,19 +152,19 @@ proc putSecret*(c: var RqClient; kek: KekProvider; tenant, name, value: string; 
   discard c.execute(%*[["INSERT INTO step_secrets (tenant_id, name, version, updated_at, value_enc) VALUES (?, ?, ?, ?, ?) " &
                         "ON CONFLICT(tenant_id, name) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at, value_enc = excluded.value_enc",
                         tenant, name, version, now, sealed]])
-  (true, version, "")
+  (true, false, version, "")
 
-proc getSecrets*(c: var RqClient; kek: KekProvider; tenant: string; names: seq[string]): tuple[ok: bool, values: seq[(string, string)], error: string] =
-  ## the current values of the named secrets of an organisation, decrypted; not ok when a name is unknown or a value cannot be read
-  if names.len == 0: return (true, @[], "")
+proc getSecrets*(c: var RqClient; kek: KekProvider; tenant: string; names: seq[string]): tuple[ok, retry: bool, values: seq[(string, string)], error: string] =
+  ## the current values of the named secrets of an organisation, decrypted; `retry` when the master key does not answer now
+  if names.len == 0: return (true, false, @[], "")
   let d = dekFor(c, kek, tenant, create = false)
-  if not d.ok: return (false, @[], "the organisation has no readable data key")
+  if not d.ok: return (false, d.retry, @[], d.error)
   for n in names:
     let r = c.query(%*[["SELECT version, value_enc FROM step_secrets WHERE tenant_id = ? AND name = ?", tenant, n]])
     let v = r["results"][0]{"values"}
-    if v == nil or v.len == 0 or v[0][1].getStr.len == 0: return (false, @[], "the organisation has no secret " & n)
+    if v == nil or v.len == 0 or v[0][1].getStr.len == 0: return (false, false, @[], "the organisation has no secret " & n)
     let u = unseal(d.dek, v[0][1].getStr, valueAad(tenant, n, v[0][0].getInt))
-    if not u.ok: return (false, @[], "the secret " & n & " cannot be read")
+    if not u.ok: return (false, false, @[], "the secret " & n & " cannot be read")
     result.values.add (n, u.plain)
   result.ok = true
 

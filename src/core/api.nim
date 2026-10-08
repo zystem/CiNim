@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault
+import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -33,11 +33,6 @@ let
 proc unauthorized(why: string) =
   reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "unauthorized", "detail": "a valid API token is required (" & why & ")"}),
     ["Content-Type: application/problem+json", "WWW-Authenticate: Bearer"])
-
-var
-  apiKek: KekProvider              ## the master key of the secrets (core/secretvault.nim); set at start, read-only after
-  vaultReady = false
-  vaultError = "the secrets are not set up"
 
 var coreRef: Core   ## set once at startup (main.nim); read-only after that, one HTTP thread pool
 
@@ -420,8 +415,10 @@ proc onRequest() {.raises: [], gcsafe.} =
         if nameProblem.len > 0:
           problem(Http400, "invalid_name", nameProblem)
           return
-        if not vaultReady:
-          problem(Http503, "secrets_unavailable", vaultError)
+        let vk = vaultKek()
+        if not vk.ready:
+          reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": vaultError()}),
+                ["Content-Type: application/problem+json", "Retry-After: 15"])
           return
         if smeth == "PUT":
           if org.state != "active":
@@ -436,9 +433,13 @@ proc onRequest() {.raises: [], gcsafe.} =
           if valueProblem.len > 0:
             problem(Http400, "invalid_value", valueProblem)
             return
-          let put = c.putSecret(apiKek, org.id, secName, value, getTime().toUnix())
+          let put = c.putSecret(vk.kek, org.id, secName, value, getTime().toUnix())
           if not put.ok:
-            problem(Http500, "secrets_unavailable", put.error)
+            if put.retry:
+              reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": put.error}),
+                    ["Content-Type: application/problem+json", "Retry-After: 15"])
+            else:
+              problem(Http500, "secrets_error", put.error)
             return
           jsonOk(Http200, %*{"organization": slug, "name": secName, "version": put.version})
         elif smeth == "DELETE":
@@ -582,32 +583,16 @@ proc onRequest() {.raises: [], gcsafe.} =
       problem(Http500, "internal", e.msg)
 
 
-proc setupVault(co: Core) =
-  ## the master key: the operator's file (`CINIM_SECRETS_KEY_FILE`) or, without one, derived from the core's CURVE key; a key that does not open what the database
-  ## already holds is a reason to refuse secrets, not to write new ones next to unreadable old ones
-  let keyFile = getEnv("CINIM_SECRETS_KEY_FILE")
-  if keyFile.len > 0:
-    let k = fileKek(keyFile)
-    if not k.ok:
-      vaultError = "the key of the secrets: " & k.error
-      stderr.writeLine "core: " & vaultError
-      return
-    apiKek = k.kek
-  else:
-    apiKek = derivedKek(coreSecret(co.certs))
-  var c = newRq(co.rqliteUrl)
-  let chk = c.ensureKeyCheck(apiKek)
-  if not chk.ok:
-    vaultError = chk.error
-    stderr.writeLine "core: " & vaultError
-    return
-  vaultReady = true
-  activateVault(apiKek)
-  echo "core: the secrets are sealed with the key ", apiKek.id
+var vaultThread: Thread[tuple[rqliteUrl, certs: string, stop: ptr Atomic[bool]]]
+var vaultThreadRunning = false
+
+proc joinVault*() =
+  if vaultThreadRunning: joinThread(vaultThread)
 
 proc serveApi*(co: Core; port: int) =
   coreRef = co
-  setupVault(co)
+  createThread(vaultThread, runVaultSetup, (co.rqliteUrl, co.certs, addr stopServers))
+  vaultThreadRunning = true
   if authOn and adminToken.len == 0:
     # the first start: the first administrator token, once, in the log (as TeamCity writes its super user token); it has to be changed at first use
     var c = newRq(co.rqliteUrl)
