@@ -98,12 +98,15 @@ build:
   memoryLimit: 4Gi
   ephemeralStorageLimit: 10Gi         # the ephemeral-storage limit of a build Pod (the request is 1Gi)
 
-# The REST API (IAM-003). With `enabled` every route but /metrics wants `Authorization: Bearer <token>`. The administrator's token is in the Secret
-# `cinim-admin-token`: generated at the first install, or the value of `adminToken`; the administrator makes tokens for people and for the
-# organisations (`POST /api/v1/tokens`, scope `admin` or `org:<slug>`). `enabled: false` leaves the API open (development only).
+# The REST API (IAM-003). With `enabled` every route but /metrics and /healthz wants `Authorization: Bearer <token>`. The administrator's token is, in
+# this order: `adminToken` (a value from your secret store; the chart makes the Secret `cinim-admin-token` of it), the key `token` of the existing Secret
+# `adminTokenSecret`, or, when neither is given, derived by the core from its own CURVE key, so that it is the same at every render (helmfile,
+# `helm template`) and is read with `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token`. The administrator makes the tokens for people and
+# for organisations (`POST /api/v1/tokens`, scope `admin` or `org:<slug>`). `enabled: false` leaves the API open (development only).
 auth:
   enabled: true
   adminToken: ""
+  adminTokenSecret: ""
 
 # Step Pods (the LimitRange of an organisation's namespace). A Pod that asks for no ephemeral storage gets a request of 64Mi (so it is not the
 # first one the kubelet evicts when the node runs short of it) and this limit; a Pod that uses more than its limit is evicted and the step has failed.

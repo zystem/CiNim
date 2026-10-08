@@ -34,6 +34,12 @@ proc secretHash*(secret: string): string =
   ## what is stored: the SHA-256 of the secret, hex
   toHex(sha256(secret))
 
+proc derivedAdminToken*(master: string): string =
+  ## The administrator's token when nobody has given one: HMAC-SHA256 of a fixed text under the core's own secret key (the CURVE `core` key, which is in a
+  ## Secret that the operator already holds). It is the same at every install and upgrade of the same keys, so that a chart rendered with
+  ## `helm template` (helmfile, Argo CD) does not make a new one each time; it changes with the keys. `core admin-token` prints it.
+  "cnm_admin_" & toHex(hmacSha256(master, "cinim/api/admin/v1"))
+
 proc randomHex(n: int): string =
   var buf = newSeq[byte](n)
   if not urandom(buf): raise newException(OSError, "no source of randomness")

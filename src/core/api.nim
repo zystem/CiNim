@@ -26,7 +26,15 @@ let
   orgPrefix = getEnv("CINIM_NAMESPACE_PREFIX", "cinim")    ## the namespace prefix (SHD-001)
   metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
 
-let adminToken = getEnv("CINIM_ADMIN_TOKEN")   ## the shard administrator's token from a Secret of the chart; empty: the API is open (development)
+proc resolveAdminToken*(): string =
+  ## the shard administrator's token (IAM-003): the one given in `CINIM_ADMIN_TOKEN`; else, with `CINIM_AUTH=on`, the one derived from the core's secret key;
+  ## else "" and the API is open (development)
+  let given = getEnv("CINIM_ADMIN_TOKEN")
+  if given.len > 0: return given
+  if getEnv("CINIM_AUTH") == "on": return derivedAdminToken(coreSecret(getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")))
+  ""
+
+let adminToken = resolveAdminToken()
 
 proc unauthorized(why: string) =
   reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "unauthorized", "detail": "a valid API token is required (" & why & ")"}),
@@ -505,6 +513,6 @@ proc onRequest() {.raises: [], gcsafe.} =
 proc serveApi*(co: Core; port: int) =
   coreRef = co
   if adminToken.len == 0:
-    stderr.writeLine "core: CINIM_ADMIN_TOKEN is not set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"
+    stderr.writeLine "core: neither CINIM_ADMIN_TOKEN nor CINIM_AUTH=on is set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"
   let s = newHttpServer(onRequest)
   s.start(port, 64)

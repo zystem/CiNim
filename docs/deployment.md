@@ -228,10 +228,12 @@ A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhos
 ## API tokens
 
 Every route of the REST API but `/metrics` and `/healthz` wants `Authorization: Bearer <token>` (IAM-003, D-44; the Helm value `auth.enabled`, on by
-default). The administrator's token is made at the first install and kept in the Secret `cinim-admin-token` (or given as `auth.adminToken`):
+default). The administrator's token is the one you give (`auth.adminToken`, or `auth.adminTokenSecret` naming a Secret with the key `token`) or, when you
+give none, one that the core derives from its own CURVE key: it is the same at every install and at every render of the chart (a random one would be a
+new one at each `helm template`, which is how helmfile and Argo CD render), and it changes only with the keys. Read it from the core:
 
 ```bash
-ADMIN=$(kubectl -n cinim-001 get secret cinim-admin-token -o jsonpath='{.data.token}' | base64 -d)
+ADMIN=$(kubectl -n cinim-001 exec deploy/cinim-core -- /core admin-token)
 # a token for the CI of one organisation: it may start and read the runs of acme and do nothing else; it expires in 90 days
 curl -X POST .../api/v1/tokens -H "Authorization: Bearer $ADMIN" -d '{"name": "acme-ci", "scope": "org:acme", "ttl_seconds": 7776000}'
 curl .../api/v1/tokens -H "Authorization: Bearer $ADMIN"          # the list, without secrets and hashes

@@ -7,6 +7,11 @@ import std/[times, os, strutils, posix, atomics, uri]
 import common/rqlite
 import schema, scheduler, api, logcollector, logcircuit, loggate, routerclient, orgrules
 
+if paramCount() >= 1 and paramStr(1) == "admin-token":
+  # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token`: the administrator's token of the shard (IAM-003, core/apiauth.nim)
+  echo resolveAdminToken()
+  quit 0
+
 let
   rqliteUrl = getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001")
   namespace = getEnv("CINIM_NAMESPACE", "cinim")

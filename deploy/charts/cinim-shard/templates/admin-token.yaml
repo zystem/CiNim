@@ -1,11 +1,6 @@
-{{- if .Values.auth.enabled }}
-{{- /* IAM-003: the token of the shard's administrator, from which the first API tokens are made. Given in values (auth.adminToken), or generated at
-the first install and kept by the lookup at every upgrade, so that it does not change under the people who use it. Read it with:
-kubectl -n <ns> get secret cinim-admin-token -o jsonpath='{.data.token}' | base64 -d */ -}}
-{{- $existing := lookup "v1" "Secret" (include "cinim-shard.ns" .) "cinim-admin-token" }}
-{{- $token := .Values.auth.adminToken }}
-{{- if and (not $token) $existing }}{{ $token = index $existing.data "token" | b64dec }}{{ end }}
-{{- if not $token }}{{ $token = randAlphaNum 48 }}{{ end }}
+{{- if and .Values.auth.enabled .Values.auth.adminToken }}
+{{- /* IAM-003: the administrator's token as the operator gave it (auth.adminToken, from a secret store of yours): the same at every render, so it
+works with helmfile and `helm template`. Without it the core derives the token from its CURVE key, `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token`. */ -}}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -13,5 +8,5 @@ metadata:
   namespace: {{ include "cinim-shard.ns" . }}
 type: Opaque
 stringData:
-  token: {{ $token | quote }}
+  token: {{ .Values.auth.adminToken | quote }}
 {{- end }}
