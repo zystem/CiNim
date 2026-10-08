@@ -30,7 +30,13 @@ end)
 * A job's declaration and a step's are added together, as for secrets.
 * A path is one artifact of a run: a retry of the step puts it again.
 
-How it works: the step's shim has no key. It asks core (with its step credential, as for secrets) for URLs, one per file, good for 15 minutes to put and 5 to get; core signs them (SigV4, `UNSIGNED-PAYLOAD`) for the object `<organisation>/<run>/<path>` and only for what the step's own options declared. After the upload the shim says it is done, and core asks the store (HEAD) for the size before it marks the artifact `stored`; only then is it listed.
+How it works: the step's shim has no key and no address of the store. It sends the files to the core over the authenticated channel `ArtifactIngest` (port 19744, ZeroMQ with CURVE), the way it sends its log, in blocks, each answered, with the step's own credential (as for its secrets). A file of at most 8 MiB is one request; a bigger one is a multipart upload of the store: the core starts it, takes the blocks of 8 MiB one by one and passes each to the store, and completes it. Nothing is kept in the core between the requests but the row of the artifact (state `uploading`, the store's upload id), so a core that restarts in the middle loses nothing and the shim sends the block again. An artifact is `stored` and listed only when the store itself says the object is there with the announced size. Downloading is the reverse: `get_list`, then blocks of 4 MiB (ranged reads), each file checked against the SHA-256 recorded at upload. The core allows only what the step's own options declared, in the step's own run, while its attempt is running.
+
+Limits: 2 GiB per artifact, 10 GiB per run, 1000 files per step, 8 MiB per message.
+
+## When the core cannot be reached (the spool fallback)
+
+Before the first block the shim writes a **manifest** of the files it has to deliver (`/cicd/spool/artifacts.manifest`). If the core does not answer for the whole patience (60 s), the shim ends with the reason `artifacts_undelivered` (exit code 76): the command's own result stands (as `logs_undelivered` does for a log), and the Pod, with its workspace, is kept by the controller like a Pod whose log was not delivered. The shim has two tools for the controller, run through `exec` like the spool tools of the log: `cicd-shim --read-artifact PATH --workspace DIR --offset N --length L` (a block as base64) and `cicd-shim --ack-artifacts SPOOLDIR` (removes the manifest). The requests to ArtifactIngest are the same whoever sends them, and the controller already holds the step's credential (`StartStep.step_token`). The controller does nothing on its own: **when the core is available again and orders it**, it reads the manifest and the blocks out of the Pod and delivers them as the shim would have, then acknowledges. **Built so far: the shim's side (the manifest, the two tools, the exit code and its place in the Pod verdict); the controller's drain and the core's order are not built.** Until then a kept Pod is read by hand.
 
 ## Reading them
 
@@ -43,8 +49,12 @@ An organisation's token sees its own runs only.
 
 ## Network
 
-A step Pod reaches the store on port 3900 of the Pods labelled `app: garage` in the shard's namespace (a NetworkPolicy of the organisation, `allow-dns-and-collector`). A store elsewhere needs a policy of the operator's own. The shim speaks plain `http://` to the store (it is a static binary without TLS); an `https://` endpoint is signed fine by core, but a step cannot use it yet.
+A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artifacts) and DNS, and nothing else: the object store is not reachable from a step Pod and needs no NetworkPolicy of its own. The store has to be reachable from the core, with a plain `http://` or an `https://` endpoint (the core talks to it with its own HTTP client).
+
+## Moving the storage module out of the core
+
+What the core asks of a store is `ObjectBackend` (`src/core/storagebackend.nim`): eight operations (put an object, create / upload a part of / complete / abort a multipart upload, read a range, size, delete), none of which keeps state between calls. Built: `S3Backend` (`src/core/s3backend.nim`), in the core's process. To run the storage module as a separate service, write a `RemoteBackend` that sends the same eight operations as requests over ZeroMQ with CURVE, and a service that answers them with an `S3Backend`. The core stays in charge: the settings and the key are the core's (sealed in its database, `PUT /api/v1/storage`) and are sent to the service with a request or when it connects, the service keeps nothing, and `ArtifactIngest` may be served by that service too, with the shims pointed to it by `--artifact-addr` (the step credential would then be checked against a key the core derives for it, not the core's own). Nothing in a step, a shim or a script changes.
 
 ## Not built
 
-Multipart upload (a file is one PUT), artifacts between runs and download by another run (`ci.run`, cache: DAT-004), retention and a sweeper of the objects (the rows of a deleted organisation go, its objects stay), a quota per organisation, expiry, ACL, provenance, the `JobArtifact.upload/download` calls of the API v1 signatures (the `artifacts` option stands in for them), downloading from the UI.
+The storage module as a separate service (the seam is there, above), the controller's drain of a kept Pod, parallel uploads (the ingest is one thread: a big upload delays another step's request by a block), artifacts between runs and download by another run (`ci.run`, cache: DAT-004), retention and a sweeper of the objects (the rows of a deleted organisation go, its objects stay), a quota per organisation, expiry, ACL, provenance, the `JobArtifact.upload/download` calls of the API v1 signatures (the `artifacts` option stands in for them), downloading from the UI.
