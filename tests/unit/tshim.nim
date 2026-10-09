@@ -55,6 +55,9 @@ suite "RUN-010 runner shim":
     for d in ["workspace", "state"]:
       check dirExists(root / d) and fpOthersWrite in getFilePermissions(root / d) and fpOthersExec in getFilePermissions(root / d)
     check execCmd(shimExe & " --prepare-volume " & root & " workspace") == 0              # again: nothing breaks
+    setFilePermissions(root / "state", {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    check execCmd(shimExe & " --prepare-volume " & root & " state") == 0                   # not open: made open
+    check fpOthersWrite in getFilePermissions(root / "state")
     check execCmd(shimExe & " --prepare-volume " & root & " ../escape 2>/dev/null") == 2
     check execCmd(shimExe & " --prepare-volume " & root & " /abs 2>/dev/null") == 2
     check not dirExists(root.parentDir / "escape")

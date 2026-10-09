@@ -225,9 +225,12 @@ proc prepareVolume(args: seq[string]): int =
       stderr.writeLine "cicd-shim: --prepare-volume: " & sub & " is not a relative path inside the volume"
       return 2
     let dir = args[1] / sub
+    let open = {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite, fpOthersExec}
     try:
       createDir(dir)
-      setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite, fpOthersExec})
+      # a directory that an earlier step made (a build Pod is root of a user namespace, an ordinary step another user) is already open and is not
+      # this user's to change: only a directory that is not open yet needs the change
+      if getFilePermissions(dir) * open != open: setFilePermissions(dir, open)
     except CatchableError as e:
       stderr.writeLine "cicd-shim: --prepare-volume: " & dir & ": " & e.msg
       return 1
