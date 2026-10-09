@@ -1656,6 +1656,17 @@ The same harness runs in a cluster as a Job (`deploy/examples/soak72`), from an 
 
 **The first soak in a cluster (a Job on the second test cluster, a single node of 8 CPUs, 7 October 20:01 UTC, ended by the eviction after 34.2 h).** The release run, which is the one NFR-013 measures: RSS 13.40 MB after the one-hour warm-up and 13.41 MB at 34.2 h, **growth 0.09 %** against the limit of 2 %, the maximum 13.45 MB, the samples at 6, 12 and 24 h within 30 KB of each other; 63 445 888 transport requests (ZeroMQ with CURVE, half of them on new connections) and 814 758 Lua calls with **no failure**. The ASan/LSan hours 1 and 2 ended with exit 0 and no sanitizer report; hour 3 is the crash at start above. That is **not the 72 h acceptance run** (it is cut short, 34.2 of 72 h), and it is run again with the corrected `run72.sh`.
 
+**All the soak runs so far.** None has reached the 72 hours of NFR-013; every one ended for a reason outside the platform, and none shows a leak. The first three ran on the soak host (a container on a Proxmox machine that has reset itself four times in ten days: 29 September, 4, 6 and 9 October; `last` marks each earlier session `crash`), the fourth in a cluster.
+
+| Start (UTC) | Where | Length | RSS growth after the 1 h warm-up | Requests (ZeroMQ) / Lua calls | Failures | Ended by |
+|:---|:---|---:|---:|---:|---:|:---|
+| 2 Oct 20:12 | soak host | 43.6 h | −0.61 % | 78.6 million / 1.59 million | 0 | reset of the host (4 Oct 15:45) |
+| 5 Oct 22:29 | soak host | 19.7 h | −0.86 % | 39.7 million / 0.84 million | 0 | reset of the host (6 Oct 18:12) |
+| 7 Oct 09:34 | soak host | 50.7 h | 0.00 % | 93.3 million / 1.87 million | 0 | reset of the host (9 Oct 12:17) |
+| 7 Oct 20:01 | second test cluster | 34.2 h | +0.09 % | 63.4 million / 0.81 million | 0 | eviction of the Pod, the disk of the node full (the ASan crash at start above) |
+
+The limit is 2 %. The fifth run, in the cluster on the corrected `run72.sh`, started on 9 October at 17:17 UTC and is due on 12 October; **it is the acceptance run** for NFR-013, and the soak host is no longer used for it. A run on the soak host started on 9 October at 12:20 UTC was stopped by a `systemctl stop` after 2 h.
+
 **The leak in the transport binding.** An RSS growth of about 25 MiB/hour appeared in the ZeroMQ path. It was not libzmq, CURVE, malloc arenas or `REQ_RELAXED`: splitting the harness into server and client processes showed a flat server (+0.11% in 20 minutes) and a growing client; a bare libzmq with the same pattern (also with four threads, a context per connection) was flat; `heaptrack` under `-d:useMalloc` showed the whole leak as one allocation per connection, `result.sockaddr = address` in `connect()`: the binding's custom `=destroy` did not destroy the `sockaddr` field (about 30 bytes per connection). The one-line fix with a regression test was merged upstream (nim-lang/nim-zmq#59) and reaches the dependency branch through upstream master. After it, 313 000 connections in 10 minutes moved the client's RSS from 7.81 to 7.76 MB. The 72-hour acceptance run of NFR-013 on the final build is the measurement that closes this item.
 
 ## A.13 Container image builds in a restricted namespace
