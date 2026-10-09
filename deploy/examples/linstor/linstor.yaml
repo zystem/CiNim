@@ -1,0 +1,76 @@
+# LINSTOR (Piraeus Operator v2.12) as a ReadWriteMany storage class for the tests of the run volume (STO-001). The operator is installed with Helm:
+#   kubectl create namespace piraeus-datastore
+#   kubectl label namespace piraeus-datastore pod-security.kubernetes.io/enforce=privileged
+#   helm install piraeus-operator https://github.com/piraeusdatastore/piraeus-operator/releases/download/v2.12.0/piraeus-2.12.0.tgz -n piraeus-datastore --wait
+# then this file: kubectl apply -f deploy/examples/linstor/linstor.yaml
+#
+# What the nodes need (Talos): the system extension siderolabs/drbd in the image of the installer, the modules `drbd` (parameter usermode_helper=disabled),
+# `drbd_transport_tcp` and `dm_thin_pool` in `machine.kernel.modules` (the satellite cannot load a module on Talos), and a disk of its own on each node,
+# here /dev/sdc, that nothing else uses. RWX: the CSI driver exports a replicated volume over NFS (NFS-Ganesha, made highly available by DRBD Reactor);
+# it needs two replicas, and a third node holds the tiebreaker.
+apiVersion: piraeus.io/v1
+kind: LinstorCluster
+metadata:
+  name: linstorcluster
+spec: {}
+---
+# Talos: no module loader and no systemd in the satellite; LVM keeps its metadata under /var, because /etc is read-only
+# (https://github.com/piraeusdatastore/piraeus-operator, docs/how-to/talos.md)
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: talos-loader-override
+spec:
+  podTemplate:
+    spec:
+      initContainers:
+        - name: drbd-shutdown-guard
+          $patch: delete
+        - name: drbd-module-loader
+          $patch: delete
+      volumes:
+        - name: run-systemd-system
+          $patch: delete
+        - name: run-drbd-shutdown-guard
+          $patch: delete
+        - name: systemd-bus-socket
+          $patch: delete
+        - name: lib-modules
+          $patch: delete
+        - name: usr-src
+          $patch: delete
+        - name: etc-lvm-backup
+          hostPath:
+            path: /var/etc/lvm/backup
+            type: DirectoryOrCreate
+        - name: etc-lvm-archive
+          hostPath:
+            path: /var/etc/lvm/archive
+            type: DirectoryOrCreate
+---
+# the storage pool: an LVM thin pool on the whole disk /dev/sdc of every satellite
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: storage-pool
+spec:
+  storagePools:
+    - name: pool1
+      lvmThinPool: {}
+      source:
+        hostDevices:
+          - /dev/sdc
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: linstor-rwx
+provisioner: linstor.csi.linbit.com
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+reclaimPolicy: Delete
+parameters:
+  linstor.csi.linbit.com/storagePool: pool1
+  linstor.csi.linbit.com/placementCount: "2"
+  linstor.csi.linbit.com/allowRemoteVolumeAccess: "true"
+  csi.storage.k8s.io/fstype: ext4

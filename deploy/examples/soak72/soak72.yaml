@@ -38,7 +38,7 @@ spec:
           env:
             - {name: SOAK_CERTS, value: /cinim/tests/certs}
           resources:
-            requests: {cpu: "2", memory: 512Mi}
+            requests: {cpu: "2", memory: 512Mi, ephemeral-storage: 64Mi}      # a request, so that the kubelet does not choose this Pod first when the node runs short of disk
             limits: {cpu: "4", memory: 2Gi}
           volumeMounts: [{name: out, mountPath: /out}]
       volumes:

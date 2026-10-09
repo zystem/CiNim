@@ -349,6 +349,13 @@ they spread. An init container (`cicd-shim --prepare-volume`, from the step's ow
 the kubelet would make a missing `subPath` as root and a step that is not root could not write there; the directories are open to every user of the run, since a build Pod is
 root of its user namespace while an ordinary step is user 1000.
 
+**`ReadWriteMany` and the build profile.** A class that gives `ReadWriteMany` as an NFS export (LINSTOR's `linstor-rwx` does: the CSI driver exports a replicated volume with NFS-Ganesha,
+`deploy/examples/linstor`) works for the ordinary steps of a run and **not for a build step**. A build Pod runs in a user namespace of its own (`hostUsers: false`, D-42), and the container runtime then mounts
+every volume as an idmapped mount, which NFS does not support: the Pod stays in `Init:StartError` with `failed to set MOUNT_ATTR_IDMAP ... maybe the filesystem used doesn't support idmapped mounts`, and the run ends
+as an infrastructure error. So: **an organisation whose pipelines have build steps (and so the self-build) uses a block, `ReadWriteOnce` class for the run volume**; `ReadWriteMany` fits pipelines that only have ordinary steps, where it is the way
+for steps on different nodes to share one workspace (parallel jobs, `ci.parallel`, which is not built yet). The class is a value of the shard (`runStorage.storageClass`), not of a run, so a shard has one of the two; a choice per run or per organisation
+is not built.
+
 When the run is over and `retention` seconds have passed, the claim is deleted: the core names the run in the poll of the organisation's controller, again and again, until the controller
 answers that the claim is gone (`runs.storage_released`; a run that never had a volume counts as released). So a lost answer or a restarted controller costs nothing, and a claim
 is not left behind by a controller that was not there at the end of a run. The namespace's quota counts the claims (50) and their size (500 Gi).
@@ -358,7 +365,7 @@ and a variable to `$CICD_ENV`; the second (user 1000, another Pod) read both fil
 file of its own; the last step (user 1000) read the file of the build step. The directories of the volume were `drwxrwxrwx` owned by user 1000, and `$CICD_WORKSPACE` was `/cicd/workspace`. The run succeeded, and the claim was deleted a few seconds
 after the controller removed the last Pod. A run whose step exited with 3 kept its claim (the retention for a failed run is a day). The first claim on a node showed one failed provisioning
 (`VolumeBinding`) that the scheduler retried by itself; on a cluster whose node disks had no room left for a claim the Pod waited in `Pending` (the scheduler does not know DirectPV's free space) until it chose
-a node with room or `start_timeout` ended the attempt and the step was repeated. The same run, with the working directory change of the shim (every step printed `pwd` as `/cicd/workspace` and used relative paths), succeeded on the second test cluster (k3s, `local-path`, `ReadWriteOnce`), build step included. Not checked: `ReadWriteMany`, the parallel steps of one run (`ci.parallel` is not built, so the pod affinity of `ReadWriteOnce` was only
+a node with room or `start_timeout` ended the attempt and the step was repeated. The same run, with the working directory change of the shim (every step printed `pwd` as `/cicd/workspace` and used relative paths), succeeded on the second test cluster (k3s, `local-path`, `ReadWriteOnce`), build step included. Checked with `ReadWriteMany` (LINSTOR over NFS, two replicas and a tiebreaker): the first two, ordinary, steps of a run shared files and `$CICD_ENV` as on `ReadWriteOnce`, the third, a build step, did not start (above). Not checked: the parallel steps of one run (`ci.parallel` is not built, so the pod affinity of `ReadWriteOnce` was only
 checked for being accepted), a class without `fsGroup` support, a controller restarted while a run was going.
 
 A step's command starts in `/cicd/workspace` (the shim changes to it before the command runs; the working directory of the image is not used), so relative paths mean files on the shared volume. If the directory is missing the command starts in the image's own directory.
