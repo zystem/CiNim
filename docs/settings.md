@@ -11,8 +11,7 @@ steps that start after the change. Every organisation has a profile of its own (
 | `log_hold_timeout` | 10..86400 s | 600 | how long a finished step waits for the log to be delivered and for the core's answer. After that: `logs_undelivered`, the command's result is kept |
 | `liveness_timeout` | 30..3600 s | 300 | one timeout for two cases: the Pod did not start within this time (reason `start_timeout`) or the shim has been silent this long (reason `outcome_unknown`). In both cases the core finishes the step and removes the Pod; the step is not repeated. The count runs from the last sign of life or from the start of the core, whichever is later: a restart of the core does not kill steps |
 
-The job controller's environment variables `CINIM_LOG_SPOOL_BYTES` and `CINIM_LOG_HOLD_TIMEOUT` remain defaults for the case when the core
-did not pass the profile's setting; normally the profile applies.
+The core's environment variables `CINIM_LOG_SPOOL_BYTES` and `CINIM_LOG_HOLD_TIMEOUT` are the defaults for the case when the profile does not set them; the core sends them to the controllers with every answer to a poll (D-49), and normally the profile applies.
 
 ## How they relate
 
@@ -27,10 +26,10 @@ did not pass the profile's setting; normally the profile applies.
 
 ## Job controller environment
 
-| Variable | Default | What it does |
-|---|---|---|
-| `CINIM_POD_RETENTION_READ` | 0 | seconds a finished step Pod is kept when core has its result and its log was delivered (nothing is left in it that the platform does not have); 0 removes it at once. Raise it to look at Pods with `kubectl` |
-| `CINIM_POD_RETENTION_UNREAD` | 1209600 (14 days) | seconds a Pod is kept, a success or not, when core could not read from it what it needs: its log was not delivered or its end is unknown (the node was lost, the shim went silent). Core shows an alert for each such Pod (`GET /api/v1/alerts`, `cinim_unread_pods`) until the controller removes it |
+What a controller needs to **find the core and prove who it is**, and nothing else (D-49): `CINIM_NAMESPACE` (the namespace it serves), `CINIM_CORE_ADDR` (the core's ControllerAttach), `CINIM_CERTS` (its transport keys),
+`CINIM_BOOTSTRAP_FILE` (the one-time token), `CINIM_STATE_DIR` (its state), `CINIM_SHIM_BIN`, `CINIM_KUBECONFIG` (outside a cluster). The core makes them in the Deployment of an organisation. Everything else a controller works by,
+the build profile, the run volume, the addresses of the core that a step's shim dials, the default spool and log wait, and how long a finished Pod is kept, comes from the core in every answer to the controller's poll
+(`ControllerConfig`, see the core's environment below) and is applied to the next Pod it makes.
 
 ## Core environment for the `multi` mode
 
@@ -70,6 +69,10 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_DEPLOY` | `off` | `on` turns the deploy profile on (D-48; the Helm value `deploy.enabled`): a job may ask for `profile = "deploy"`, and the namespace of every organisation gets the policies of its Pods |
 | `CINIM_DEPLOY_EGRESS` | empty | a JSON array of NetworkPolicy egress rules that deploy Pods may use beyond DNS and the collector (the Helm value `deploy.egress`), or the string `all` |
 | `CINIM_DEPLOY_KUBE_APISERVER` | `false` | `true`: also a CiliumNetworkPolicy that lets deploy Pods reach the Kubernetes API server (the Helm value `deploy.kubeApiServer`); the core needs the right to make those |
+| `CINIM_COLLECTOR_ADDR`, `CINIM_STEPREPORT_ADDR`, `CINIM_ARTIFACTINGEST_ADDR`, `CINIM_LOGINGEST_ADDR` | the core's Service in its namespace (`tcp://cinim-core.<ns>.svc:19743`, `19742`, `19744`; the controller's own LogIngest follows the collector's) | the addresses of the core's channels that the controller gives the shim of a step and uses itself to hand over a spool. In a cluster they need not be set; a core outside a cluster is told with them where the Pods reach it, otherwise there is no log streaming. Sent to the controllers in every poll answer |
+| `CINIM_LOG_SPOOL_BYTES`, `CINIM_LOG_HOLD_TIMEOUT` | 10485760, 600 | the default spool of a step and the default wait for the log, for a profile that does not set its own (see above); sent in every poll answer |
+| `CINIM_POD_RETENTION_READ` | 0 | (core) seconds a finished step Pod is kept when core has its result and its log was delivered (nothing is left in it that the platform does not have); 0 removes it at once. Raise it to look at Pods with `kubectl` |
+| `CINIM_POD_RETENTION_UNREAD` | 1209600 (14 days) | (core) seconds a Pod is kept, a success or not, when core could not read from it what it needs: its log was not delivered or its end is unknown (the node was lost, the shim went silent). Core shows an alert for each such Pod (`GET /api/v1/alerts`, `cinim_unread_pods`) until the controller removes it |
 | `CINIM_BUILD*`, `CINIM_RUN_STORAGE*` (the controller) | | **not** the environment of the controller: the core sends the build profile (`CINIM_BUILD`, `_SECCOMP`, `_CAPS`, `_MEMORY_LIMIT`, `_EPHEMERAL_LIMIT`) and the run volume (`CINIM_RUN_STORAGE`, `_SIZE`, `_CLASS`, `_ACCESS`) in every answer to the controller's poll (`ControllerConfig`), and the controller applies them to the next Pod and claim it makes. Changing one does not make a new Pod of the controller |
 | `CINIM_RUN_STORAGE`, `CINIM_RUN_STORAGE_SIZE`, `CINIM_RUN_STORAGE_CLASS`, `CINIM_RUN_STORAGE_ACCESS` | `off`, `5Gi`, the default class, `ReadWriteOnce` | the run volume (STO-001; the Helm values `runStorage.enabled`, `size`, `storageClass`, `accessMode`): `on` makes the controller of an organisation make a claim per run and mount it in the Pod of every step (`/cicd/workspace`, `/cicd/state`); with `ReadWriteOnce` the Pods of a run are kept on one node. The core sends them to the controllers in every poll answer |
 | `CINIM_STORAGE_RETENTION_SUCCEEDED`, `CINIM_STORAGE_RETENTION_FAILED` | 0, 86400 | seconds after the end of a run before the core tells the controller to delete the run's volume (STO-006): at once for a run that succeeded, a day for one that did not, to look at what it left; a negative value never (the Helm values `runStorage.retention.succeeded`, `.failed`) |

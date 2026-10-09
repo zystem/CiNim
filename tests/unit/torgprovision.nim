@@ -48,7 +48,10 @@ suite "SHD-007 the objects of an organisation":
     for e in c["env"]: env[e["name"].getStr] = e["value"].getStr
     check env["CINIM_NAMESPACE"] == "cinim-001-acme"
     check env["CINIM_CORE_ADDR"] == "tcp://cinim-core.cinim-001.svc:19740"
-    check env["CINIM_COLLECTOR_ADDR"] == "tcp://cinim-core.cinim-001.svc:19743" and env["CINIM_STEPREPORT_ADDR"] == "tcp://cinim-core.cinim-001.svc:19742"
+    # what the controller needs to find the core and prove itself; the addresses for the shim and the policy come in the answers to its poll (D-49)
+    for name in ["CINIM_COLLECTOR_ADDR", "CINIM_STEPREPORT_ADDR", "CINIM_ARTIFACTINGEST_ADDR", "CINIM_LOGINGEST_ADDR", "CINIM_LOG_SPOOL_BYTES", "CINIM_LOG_HOLD_TIMEOUT",
+                 "CINIM_POD_RETENTION_READ", "CINIM_POD_RETENTION_UNREAD"]:
+      check name notin env
     check d["spec"]["strategy"]["type"].getStr == "Recreate"
     var claim = ""
     for v in d["spec"]["template"]["spec"]["volumes"]:
@@ -167,11 +170,6 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
             for p in r["ports"]: ports.add p["port"].getInt
     check 19744 in ports and 19742 in ports and 19743 in ports
     check not toStore
-    var env = initTable[string, string]()
-    for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps:
-      if st.kind == "Deployment":
-        for e in st.obj["spec"]["template"]["spec"]["containers"][0]["env"]: env[e["name"].getStr] = e["value"].getStr
-    check env["CINIM_ARTIFACTINGEST_ADDR"].endswith(":19744")
   test "without an internet setting a build Pod may reach DNS, the collector and what the operator opened, nothing else":
     var closed, opened: seq[string]
     for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps:

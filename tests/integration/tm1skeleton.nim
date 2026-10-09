@@ -292,7 +292,7 @@ suite "walking skeleton end to end":
         var coreEnv = @[("CINIM_RQLITE_URL", rqliteUrl), ("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
           ("CINIM_CONTROLLER_PORT", $controllerPort), ("CINIM_EXECUTOR_PORT", $executorPort),
           ("CINIM_STEPREPORT_PORT", $stepReportPort), ("CINIM_LOGINGEST_PORT", $logIngestPort),
-          ("CINIM_API_PORT", $apiPort)]
+          ("CINIM_API_PORT", $apiPort), ("CINIM_LOG_HOLD_TIMEOUT", "20")]
         if logsReady: coreEnv.add [("CINIM_VLAGENT_URL", vlagentUrl), ("CINIM_VICTORIALOGS_URL", victoriaLogsUrl)]
         else: coreEnv.add ("CINIM_LAUNCH_GATE", "off")   # no log circuit in this setup: RUN-015 would (rightly) keep every step queued
         core = spawn(buildDir / "core", buildDir / "core.log", svcEnv(coreEnv))
@@ -302,11 +302,9 @@ suite "walking skeleton end to end":
       var jcEnv = @[("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
         ("CINIM_CORE_ADDR", "tcp://" & host & ":" & $controllerPort),
         ("CINIM_SHIM_BIN", buildDir / (if staticShim.len > 0: "cicd-shim-logging" else: "cicd-shim")),
-        ("CINIM_STATE_DIR", buildDir / "ctrl-state"),   # the controller's sqlite state stays under build/, not in the working directory
-        ("CINIM_LOG_HOLD_TIMEOUT", "20")]   # short, so the logs_undelivered scenario below does not take 10 minutes
-      if remoteCore:   # the Pod's shim dials these (cluster-reachable), see the remoteCore comment above
-        jcEnv.add ("CINIM_COLLECTOR_ADDR", "tcp://" & host & ":" & $logIngestPort)
-        jcEnv.add ("CINIM_STEPREPORT_ADDR", "tcp://" & host & ":" & $stepReportPort)
+        ("CINIM_STATE_DIR", buildDir / "ctrl-state")]   # the controller's sqlite state stays under build/, not in the working directory
+      # The addresses the Pod's shim dials and the other policy of the controller (the log wait: short, so that the logs_undelivered scenario below does not take 10 minutes)
+      # are the core's to give (D-49); a remote core gives those of its Service in the cluster, which is what the Pods reach.
       if kubeconfig.len > 0: jcEnv.add ("CINIM_KUBECONFIG", kubeconfig)
       jobctl = spawn(buildDir / "jobcontroller", buildDir / "jobcontroller.log", svcEnv(jcEnv))
       execsvc = spawn(buildDir / "executorsvc", buildDir / "executorsvc.log", svcEnv({

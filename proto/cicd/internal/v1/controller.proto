@@ -135,6 +135,15 @@ message ControllerConfig {
   string run_storage_size = 8;
   string run_storage_class = 9;          // "" = the cluster's default class
   string run_storage_access = 10;        // ReadWriteOnce or ReadWriteMany
+  // what the controller needs of the core's own addresses and of its policy; none of it is the environment of the controller's Pod (D-49)
+  string collector_addr = 11;            // the core's LogIngest, as the shim in a step Pod reaches it ("" = no log streaming)
+  string step_report_addr = 12;          // the core's StepReport, the same
+  string artifact_addr = 13;             // the core's ArtifactIngest, the same ("" = a step with artifacts fails)
+  string log_ingest_addr = 14;           // where the controller itself hands the blocks it pulled out of a Pod's spool (empty: the collector's)
+  uint64 log_spool_bytes = 15;           // the default size of a step's spool on the Pod (a profile's own setting wins, StartStep)
+  uint32 log_hold_timeout_seconds = 16;  // the default wait for log delivery (a profile's own setting wins)
+  uint32 pod_retention_read_seconds = 17;    // how long a finished Pod is kept when the core has its result and its log (0: removed at once)
+  uint32 pod_retention_unread_seconds = 18;  // ... when the core could not read it (the log not delivered, the end unknown)
 }
 
 message PollResponse {

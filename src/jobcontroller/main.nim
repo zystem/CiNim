@@ -18,27 +18,10 @@ let
   ns = getEnv("CINIM_NAMESPACE", "cinim")
   coreAddr = getEnv("CINIM_CORE_ADDR", "tcp://127.0.0.1:19740")
   certs = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
-  # Addresses the shim (running inside the step Pod, on the cluster network) uses to reach core's
-  # LogIngest/StepReport - NOT necessarily the same host:port job-controller itself uses for
-  # ControllerAttach above, since that can be a loopback port-forward during local dev/testing while
-  # the Pod needs a cluster-reachable address.
-  collectorAddr = getEnv("CINIM_COLLECTOR_ADDR", "")
-  # where *this* process reaches core's LogIngest, to hand over the blocks it pulled out of a Pod's spool (the exec fallback,
-  # D-29); defaults to the address the shims use
-  logIngestAddr = getEnv("CINIM_LOGINGEST_ADDR", getEnv("CINIM_COLLECTOR_ADDR", ""))
-  stepReportAddr = getEnv("CINIM_STEPREPORT_ADDR", "")
-  artifactAddr = getEnv("CINIM_ARTIFACTINGEST_ADDR", "")
   shimBinPath = getEnv("CINIM_SHIM_BIN", "build/cicd-shim")
-  # D-27: the step's log is spooled on the Pod's ephemeral storage until core has it. Both are per-profile
-  # settings in the end (log_spool_bytes, log_hold_timeout); until execution profiles carry them, environment defaults.
-  logSpoolBytes = parseInt(getEnv("CINIM_LOG_SPOOL_BYTES", $(10 * 1024 * 1024)))
-  logHoldTimeout = parseInt(getEnv("CINIM_LOG_HOLD_TIMEOUT", "600"))
   # the controller's own memory (sqlite): which Pods it made and whether their end was reported - what a restarted
   # controller adopts (D-29). Keep it on a volume that survives a restart of the controller.
   stateDir = getEnv("CINIM_STATE_DIR", getCurrentDir() / "state")
-  # how long a finished step Pod is kept after core has its result (to look at it with kubectl), by outcome
-  retentionRead = parseInt(getEnv("CINIM_POD_RETENTION_READ", "0"))     # a Pod whose result and log are both read has nothing to show: removed at once
-  retentionUnread = parseInt(getEnv("CINIM_POD_RETENTION_UNREAD", $(14 * 86400)))    # a Pod core could not read (log undelivered, end unknown): 14 days, and an alert
   # load_kube_config() (kubernetes-client/c) always dials whatever "current-context" says in the file, with
   # no per-call override - it silently follows the shared ~/.kube/config if this is left empty, which drifts
   # under other unrelated work in this environment. CINIM_KUBECONFIG pins a specific file/context so this
@@ -48,6 +31,8 @@ let
   # that core gives in exchange is kept next to the state and sent in every poll
   bootstrapFile = getEnv("CINIM_BOOTSTRAP_FILE", "")
 const pollIntervalMs = 1000
+
+var logIngestAddr = ""      ## where *this* process reaches the core's LogIngest, to hand over the blocks it pulled out of a Pod's spool (the exec fallback, D-29); the core says in every answer to a poll (D-49)
 
 proc connectCore(): ZConnection =
   let serverPub = loadPublicKey(certs, "core")
@@ -69,7 +54,7 @@ proc deliverToCore(runId: string; seq, attempt: int; frames: seq[Frame]): uint64
   ## core acknowledged, 0 if none.
   echo "jobcontroller: handing ", frames.len, " spooled block(s) of ", runId, "/", seq, " attempt ", attempt, " to core"
   if logIngestAddr.len == 0:
-    stderr.writeLine "jobcontroller: no LogIngest address (CINIM_LOGINGEST_ADDR / CINIM_COLLECTOR_ADDR): the blocks are not delivered"
+    stderr.writeLine "jobcontroller: the core gave no LogIngest address: the blocks are not delivered"
     return 0
   try:
     let conn = connectReq(logIngestAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"),
@@ -140,17 +125,11 @@ proc keptPods(st: CtrlState; cfg: Config; limit: int): seq[KeptPod] =
 proc main() =
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   let k = connectK8s(ns, kubeconfig)
-  let withLogs = collectorAddr.len > 0 and stepReportAddr.len > 0
-  k.ensureShimAssets(shimBinPath, certs, withCerts = withLogs)
+  # the shim of a step reaches the core with the controller's transport keys, which it gets as a Secret of the namespace; whether the steps stream their logs is the core's to say
+  # (the addresses in ControllerConfig), so the Secret is made whenever the keys are there
+  k.ensureShimAssets(shimBinPath, certs, withCerts = fileExists(certs / "curve" / "client.key"))
   let be = backendOf(k)
   var cfg = defaultConfig()
-  cfg.collectorAddr = collectorAddr
-  cfg.stepReportAddr = stepReportAddr
-  cfg.artifactAddr = artifactAddr
-  cfg.logSpoolBytes = logSpoolBytes
-  cfg.logHoldTimeout = logHoldTimeout
-  cfg.retentionRead = retentionRead
-  cfg.retentionUnread = retentionUnread
   let st = openState(stateDir / "controller.sqlite")
   let adopted = st.active()
   echo "jobcontroller: state in ", stateDir, ", adopted ", adopted.len, " step Pod(s) from the previous run"
@@ -206,6 +185,14 @@ proc main() =
                             c.run_storage_enabled, c.run_storage_size, c.run_storage_class, c.run_storage_access)
       applyShardSettings(s)
       cfg.runVolumes = s.volume.enabled
+      cfg.collectorAddr = c.collector_addr
+      cfg.stepReportAddr = c.step_report_addr
+      cfg.artifactAddr = c.artifact_addr
+      logIngestAddr = if c.log_ingest_addr.len > 0: c.log_ingest_addr else: c.collector_addr
+      cfg.logSpoolBytes = int(c.log_spool_bytes)
+      cfg.logHoldTimeout = int(c.log_hold_timeout_seconds)
+      cfg.retentionRead = int(c.pod_retention_read_seconds)
+      cfg.retentionUnread = int(c.pod_retention_unread_seconds)
     afterPoll(st, round.transitions, int64(now))
     released.setLen(0)
     handBack.setLen(0)

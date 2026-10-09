@@ -95,9 +95,6 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
   var env = @[
     %*{"name": "CINIM_NAMESPACE", "value": ns},
     %*{"name": "CINIM_CORE_ADDR", "value": coreAddress(cfg, 19740)},
-    %*{"name": "CINIM_COLLECTOR_ADDR", "value": coreAddress(cfg, 19743)},
-    %*{"name": "CINIM_STEPREPORT_ADDR", "value": coreAddress(cfg, 19742)},
-    %*{"name": "CINIM_ARTIFACTINGEST_ADDR", "value": coreAddress(cfg, 19744)},
     %*{"name": "CINIM_CERTS", "value": "/etc/cinim"},
     %*{"name": "CINIM_STATE_DIR", "value": "/state"},
     %*{"name": "CINIM_BOOTSTRAP_FILE", "value": "/etc/cinim/bootstrap/token"}]

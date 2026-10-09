@@ -64,10 +64,14 @@ suite "SHD-007 runs and controllers per organisation":
       putEnv("CINIM_BUILD_SECCOMP", "Localhost")
       putEnv("CINIM_RUN_STORAGE", "on")
       putEnv("CINIM_RUN_STORAGE_SIZE", "3Gi")
+      putEnv("CINIM_COLLECTOR_ADDR", "tcp://core.test:19743")
+      putEnv("CINIM_POD_RETENTION_UNREAD", "3600")
       let resp = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-cfg-" & sfx, namespace: nsA, free_pod_slots: 0))
       check resp.config.present and resp.config.build_enabled and resp.config.build_seccomp == "Localhost"
       check resp.config.run_storage_enabled and resp.config.run_storage_size == "3Gi" and resp.config.run_storage_class == ""
-      delEnv("CINIM_BUILD"); delEnv("CINIM_BUILD_SECCOMP"); delEnv("CINIM_RUN_STORAGE"); delEnv("CINIM_RUN_STORAGE_SIZE")
+      check resp.config.collector_addr == "tcp://core.test:19743" and resp.config.log_ingest_addr == "tcp://core.test:19743"
+      check resp.config.log_spool_bytes == 10485760 and resp.config.log_hold_timeout_seconds == 600 and resp.config.pod_retention_unread_seconds == 3600
+      delEnv("CINIM_BUILD"); delEnv("CINIM_BUILD_SECCOMP"); delEnv("CINIM_RUN_STORAGE"); delEnv("CINIM_RUN_STORAGE_SIZE"); delEnv("CINIM_COLLECTOR_ADDR"); delEnv("CINIM_POD_RETENTION_UNREAD")
       let plain = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-cfg2-" & sfx, namespace: nsA, free_pod_slots: 0))
       check plain.config.present and not plain.config.build_enabled and not plain.config.run_storage_enabled
     test "a controller of a namespace without a profile gets nothing":

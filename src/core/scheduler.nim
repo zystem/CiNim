@@ -394,7 +394,10 @@ proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
   ControllerConfig(present: true, build_enabled: s.buildEnabled, build_seccomp: s.buildSeccomp, build_caps: s.buildCaps,
                    build_memory_limit: s.buildMemoryLimit, build_ephemeral_limit: s.buildEphemeralLimit,
                    run_storage_enabled: s.runStorageEnabled, run_storage_size: s.runStorageSize,
-                   run_storage_class: s.runStorageClass, run_storage_access: s.runStorageAccess)
+                   run_storage_class: s.runStorageClass, run_storage_access: s.runStorageAccess,
+                   collector_addr: s.collectorAddr, step_report_addr: s.stepReportAddr, artifact_addr: s.artifactAddr, log_ingest_addr: s.logIngestAddr,
+                   log_spool_bytes: uint64(s.logSpoolBytes), log_hold_timeout_seconds: uint32(s.logHoldTimeout),
+                   pod_retention_read_seconds: uint32(max(s.podRetentionRead, 0)), pod_retention_unread_seconds: uint32(max(s.podRetentionUnread, 0)))
 
 proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest): PollResponse =
   # Who is asking (IAM-003, T-46): a namespace that has a controller identity is served only against its credential, or against the
