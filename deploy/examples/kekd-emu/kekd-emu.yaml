@@ -1,9 +1,30 @@
 # The emulator of the key service (tools/kekd-emu), for trying the core's behaviour with a master key that lives elsewhere without a card.
-# NOT for production: plain HTTP, a key in memory that is new at every start. Set `image` to where you pushed the `kekd-emu` target of tools/image/Dockerfile.kaniko.
+# NOT for production: plain HTTP, and the key is kept in the Secret `kekd-emu-key` in plain (made at the first start, read at every later one, so that a restart of the
+# Pod does not change the key that sealed the secrets of a shard; delete the Secret to get a new key, and every secret sealed with the old one is lost).
+# Set `image` to where you pushed the `kekd-emu` target of tools/image/Dockerfile.kaniko.
 #   kubectl -n <shard namespace> apply -f kekd-emu.yaml
 #   helm upgrade ... --set secrets.kekd.url=http://kekd-emu:8443
 # Then make it misbehave: kubectl -n <ns> exec deploy/kekd-emu -- ... is not possible (the image has no shell); use a port-forward:
 #   kubectl -n <ns> port-forward svc/kekd-emu 8443:8443 &  curl -X POST localhost:8443/emu/fault -d '{"mode":"fDown"}'
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: kekd-emu}
+---
+# to read and make its own Secret and nothing else: `get` on that one name, and `create` (a create cannot be limited by name)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: kekd-emu}
+rules:
+  - {apiGroups: [""], resources: [secrets], verbs: [create]}
+  - {apiGroups: [""], resources: [secrets], resourceNames: [kekd-emu-key], verbs: [get]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: kekd-emu}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: kekd-emu}
+subjects:
+  - {kind: ServiceAccount, name: kekd-emu}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: kekd-emu}
@@ -13,11 +34,12 @@ spec:
   template:
     metadata: {labels: {app: kekd-emu}}
     spec:
-      automountServiceAccountToken: false
+      serviceAccountName: kekd-emu
       securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
       containers:
         - name: kekd-emu
           image: registry.example.com/cinim-kekd-emu:dev
+          args: ["--key-secret", "kekd-emu-key"]
           ports: [{containerPort: 8443}]
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}

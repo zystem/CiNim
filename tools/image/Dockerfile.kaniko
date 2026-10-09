@@ -29,7 +29,7 @@ RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm" -o:/out/core-static src/core/main.nim; \
     nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/executor-static src/executorsvc/main.nim; \
     nim c -d:release -d:k8sPrefix=/opt/k8s -d:k8sStatic $F --dynlibOverride:sqlite3 --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm" -o:/out/controller-static src/jobcontroller/main.nim; \
-    nim c -d:release $F --passL:"-L/opt/zmq/lib -lsodium -lm" -o:/out/kekd-emu tools/kekd-emu/main.nim; \
+    nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lsodium -lssl -lcrypto -lm" -o:/out/kekd-emu tools/kekd-emu/main.nim; \
     strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null; \
     cp /etc/ssl/certs/ca-certificates.crt /out/; ls -l /out
 
