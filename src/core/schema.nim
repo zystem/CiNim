@@ -130,6 +130,7 @@ proc migrate*(c: var RqClient) =
       ("step_secrets", "value_enc", "TEXT NOT NULL DEFAULT ''"),      # the sealed value (core/secretvault.nim)     # the first administrator token: it may only be changed (IAM-003)     # JSON: the containers' states, the Pod's conditions, node, events (RUN-017)
       ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
       ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
+      ("organizations", "controller_spec", "TEXT NOT NULL DEFAULT ''"),   # the fingerprint of the controller's Deployment that the core made last (SHD-008); "" = not recorded
       ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
       ("artifacts", "upload_id", "TEXT NOT NULL DEFAULT ''"),     # the store's id of a multipart upload that is under way
       ("runs", "fail_code", "TEXT NOT NULL DEFAULT ''"), ("runs", "fail_message", "TEXT NOT NULL DEFAULT ''"),   # why the run did not succeed (executor's FinishRun)
@@ -221,15 +222,19 @@ proc startRetention*(c: var RqClient; slug: string; at: int64) =
 type OrganizationFull* = object
   slug*, name*, state*, egress*, ingress*: string   ## egress and ingress: the network mode asked for at creation, "" = the shard's default
   disabledAt*: int64
+  controllerSpec*: string      ## the fingerprint of the controller's Deployment as the core last made it; "" = not recorded yet
+
+proc setControllerSpec*(c: var RqClient; slug, spec: string) =
+  discard c.execute(%*[["UPDATE organizations SET controller_spec = ? WHERE slug = ?", spec, slug]])
 
 proc listOrganizationsFull*(c: var RqClient): seq[OrganizationFull] =
   ## everything the reconciliation (SHD-008) needs to make an organisation's objects again
-  let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at FROM organizations ORDER BY slug"]])
+  let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at, controller_spec FROM organizations ORDER BY slug"]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for v in vals:
       result.add OrganizationFull(slug: v[0].getStr, name: v[1].getStr, state: v[2].getStr, egress: v[3].getStr, ingress: v[4].getStr,
-                                  disabledAt: v[5].getBiggestInt)
+                                  disabledAt: v[5].getBiggestInt, controllerSpec: v[6].getStr)
 
 proc organizationRow*(c: var RqClient; slug: string): tuple[id, state: string] =
   ## ("", "") if the shard has no such organisation

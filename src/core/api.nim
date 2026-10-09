@@ -393,6 +393,7 @@ proc onRequest() {.raises: [], gcsafe.} =
                    except RqError:
                      problem(Http409, "slug_exists", "this shard already has an organisation with that slug")
                      return
+          if provisionOn: c.setControllerSpec(slug, controllerSpecHash(netNow, slug))       # the reconciliation then leaves this controller alone until the settings change
           jsonOk(Http201, %*{"id": id, "slug": slug, "name": j{"name"}.getStr, "namespace": namespaceName(orgPrefix, orgShard, slug),
                              "url": orgUrl(cfg.publicBase, slug), "provisioned": provisionOn,
                              "network": {"egress": (if egressNow: "open" else: "restricted"), "ingress": (if ingressNow: "open" else: "closed")}, "kubernetes": provisioned,

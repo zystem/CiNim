@@ -3,6 +3,7 @@
 ## ever deleted except by `disable` (the Ingress and the controller) and `purge` (the namespace and, with it, everything in it), both
 ## on the explicit request of an administrator. The objects are plain JSON: the tests compare them, the API server validates them.
 import std/[json, os, strutils]
+import crunchy
 import kubeapi, orgrules
 
 const
@@ -141,6 +142,21 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
              {"name": "bootstrap", "secret": {"secretName": bootstrapSecretName, "defaultMode": 288}},
              {"name": "state", "persistentVolumeClaim": {"claimName": stateClaimName}},
              {"name": "tmp", "emptyDir": {}}]}}}}
+
+proc fingerprint(text: string): string =
+  ## the first 24 hexadecimal digits of the SHA-256 of a text
+  const digits = "0123456789abcdef"
+  for b in sha256(text):
+    result.add digits[int(b shr 4)]
+    result.add digits[int(b and 15)]
+  result.setLen 24
+
+proc controllerSpecHash*(cfg: ProvisionConfig; slug: string): string =
+  ## What the controller's Deployment should be, as a short fingerprint (the SHA-256 of the object): its image, its settings (the core's settings that reach it as environment),
+  ## its resources. The core keeps the fingerprint of the Deployment it last made for an organisation, and the reconciliation (SHD-008) makes the Deployment again when the
+  ## fingerprint it would make now is another one, e.g. after `helm upgrade` has given the core a new controller image.
+  if cfg.controllerImage.len == 0: return ""
+  fingerprint($controllerDeployment(cfg, slug))
 
 func stateClaim(cfg: ProvisionConfig; slug: string): JsonNode =
   result = %*{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": meta(cfg, slug, stateClaimName, orgNamespace(cfg, slug)),

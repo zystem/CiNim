@@ -45,7 +45,7 @@ proc api(f: Cluster): KubeApi =
     else: (500, "{}"))
 
 type Rec = ref object
-  tokens, started, forgotten: seq[string]
+  tokens, started, forgotten, specs: seq[string]     ## specs: "slug=fingerprint" for every recorded fingerprint of a controller
 
 proc hooksFor(r: Rec): Hooks =
   result.token = proc (namespace: string; rotate: bool): string =
@@ -53,12 +53,13 @@ proc hooksFor(r: Rec): Hooks =
     "TOKEN"
   result.startRetention = proc (slug: string; at: int64) = r.started.add slug
   result.forget = proc (slug, namespace: string) = r.forgotten.add slug & "@" & namespace
+  result.setControllerSpec = proc (slug, spec: string) = r.specs.add slug & "=" & spec
 
 let curve = CurveKeys(corePub: "CP", clientPub: "LP", clientKey: "LK")
 
-proc maker(build = false; multi = false): ConfigMaker =
+proc maker(build = false; multi = false; image = "reg/ctl:1"): ConfigMaker =
   result = proc (egress, ingress: string): ProvisionConfig =
-    ProvisionConfig(prefix: "cinim", shard: "001", shardNamespace: "cinim-001", controllerImage: "reg/ctl:1", build: build,
+    ProvisionConfig(prefix: "cinim", shard: "001", shardNamespace: "cinim-001", controllerImage: image, build: build,
                     egressOpen: egress == "open", ingressOpen: ingress == "open", multi: multi, host: "ci.example.com", basePath: "/")
 
 proc org(slug: string; state = "active"; disabledAt = 0'i64; egress = ""; ingress = ""): OrganizationFull =
@@ -70,6 +71,78 @@ proc made(f: Cluster; mk: ConfigMaker; slug: string; active = true) =
   f.calls.setLen 0
 
 proc ns(slug: string): string = "/api/v1/namespaces/cinim-001-" & slug
+
+proc specOf(mk: ConfigMaker; slug: string): string = controllerSpecHash(mk("", ""), slug)
+
+suite "SHD-008 the controller follows the settings of the core":
+  let dep = "/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller"
+  test "an organisation without a fingerprint is given the current one, and its controller is left as it is":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    let rec = Rec()
+    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    check r.orgs[0].error == "" and not r.orgs[0].controllerReplaced
+    check "DELETE " & dep notin f.calls
+    check rec.specs == @["acme=" & specOf(mk, "acme")]
+  test "the same fingerprint: nothing is replaced and nothing is recorded again":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    let rec = Rec()
+    var o = org("acme")
+    o.controllerSpec = specOf(mk, "acme")
+    let r = reconcilePass(api(f), mk, curve, @[o], hooksFor(rec), 1000, 100)
+    check not r.orgs[0].controllerReplaced and "DELETE " & dep notin f.calls and rec.specs.len == 0
+  test "another fingerprint (a new controller image): the Deployment is deleted and made again with the new image, and the new fingerprint is recorded":
+    let f = Cluster()
+    let old = maker()
+    f.made(old, "acme")
+    check f.objects[dep]["spec"]["template"]["spec"]["containers"][0]["image"].getStr == "reg/ctl:1"
+    let fresh = maker(image = "reg/ctl:2")
+    let rec = Rec()
+    var o = org("acme")
+    o.controllerSpec = specOf(old, "acme")
+    let r = reconcilePass(api(f), fresh, curve, @[o], hooksFor(rec), 1000, 100)
+    check r.orgs[0].error == "" and r.orgs[0].controllerReplaced and r.orgs[0].created == @["controller"]
+    check f.calls.find("DELETE " & dep) < f.calls.find("POST /apis/apps/v1/namespaces/cinim-001-acme/deployments")
+    check f.objects[dep]["spec"]["template"]["spec"]["containers"][0]["image"].getStr == "reg/ctl:2"
+    check rec.specs == @["acme=" & specOf(fresh, "acme")] and specOf(fresh, "acme") != specOf(old, "acme")
+  test "a setting that reaches the controller as environment changes the fingerprint too":
+    let a = maker(build = false)
+    let b = maker(build = true)
+    check specOf(a, "acme") != specOf(b, "acme")
+    check specOf(a, "acme") == specOf(a, "acme") and specOf(a, "acme") != specOf(a, "other")
+  test "a controller that is not there is made, not counted as replaced":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    f.objects.del dep
+    let rec = Rec()
+    var o = org("acme")
+    o.controllerSpec = "00000000000000000000dead"
+    let r = reconcilePass(api(f), mk, curve, @[o], hooksFor(rec), 1000, 100)
+    check not r.orgs[0].controllerReplaced and r.orgs[0].created == @["controller"] and rec.specs == @["acme=" & specOf(mk, "acme")]
+  test "a switched-off organisation has no controller to replace":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", active = false)
+    var o = org("acme", state = "disabled", disabledAt = 900)
+    o.controllerSpec = "00000000000000000000dead"
+    let r = reconcilePass(api(f), mk, curve, @[o], hooksFor(Rec()), 1000, -1)
+    check not r.orgs[0].controllerReplaced and "DELETE " & dep notin f.calls
+  test "a refusal to delete the Deployment is told and nothing else is done to that organisation":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    let denying = KubeApi(transport: proc (meth, path, body: string): tuple[code: int, body: string] =
+      if meth == "DELETE" and path == dep: return (403, $(%*{"message": "forbidden: delete"}))
+      api(f).transport(meth, path, body))
+    var o = org("acme")
+    o.controllerSpec = "00000000000000000000dead"
+    let rec = Rec()
+    let r = reconcilePass(denying, mk, curve, @[o], hooksFor(rec), 1000, 100)
+    check r.orgs[0].error.contains("replacing the controller") and rec.specs.len == 0
 
 suite "SHD-008 reconciliation":
   test "an organisation whose objects are all there: nothing is made, nothing is deleted":

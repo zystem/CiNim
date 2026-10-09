@@ -26,10 +26,12 @@ type
     token*: proc (namespace: string; rotate: bool): string {.gcsafe.}           ## the bootstrap token of a namespace's controller; a new generation first when `rotate`
     startRetention*: proc (slug: string; at: int64) {.gcsafe.}
     forget*: proc (slug, namespace: string) {.gcsafe.}                          ## the rows of a deleted organisation
+    setControllerSpec*: proc (slug, spec: string) {.gcsafe.}                    ## record the fingerprint of the controller's Deployment as it is now; nil: not kept
 
   OrgReport* = object
     slug*, state*: string
     created*: seq[string]          ## what was missing and has been made
+    controllerReplaced*: bool      ## the controller's Deployment was another one than the core makes now (a new image, new settings) and has been made again
     identityRenewed*: bool
     error*: string
 
@@ -73,10 +75,24 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: 
       if not r.ok:
         result.error = r.failedStep & ": " & r.error
         return
+  # The controller follows the core's settings (SHD-008): the core never changes an object, but it may delete the Deployment of the controller and make it again from what it
+  # holds now, which is what an upgrade of the shard needs (a new controller image, new build or storage settings reach only the controllers made after it). The state of a
+  # controller is on its volume and the Pods of its steps are adopted by the new one (D-29), so a step that is running does not notice. An organisation without a fingerprint
+  # (made before it was kept) is given the current one as it stands; its controller is then replaced when the fingerprint changes.
+  let want = if active: controllerSpecHash(cfg, o.slug) else: ""
+  if want.len > 0 and nsGot.found and o.controllerSpec.len > 0 and o.controllerSpec != want:
+    let gone = k.remove("Deployment", ns, controllerName)
+    if gone.outcome == oFailed:
+      result.error = "replacing the controller: " & gone.detail
+      return
+    result.controllerReplaced = gone.outcome == oDeleted
   let r = provision(k, cfg, o.slug, curve, token, active)
   for s in r.steps:
     if s.outcome == oCreated: result.created.add s.name
-  if not r.ok: result.error = r.failedStep & ": " & r.error
+  if not r.ok:
+    result.error = r.failedStep & ": " & r.error
+  elif want.len > 0 and want != o.controllerSpec and hooks.setControllerSpec != nil:
+    hooks.setControllerSpec(o.slug, want)
 
 proc namespaceAlerts(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; shard: string): tuple[alerts: seq[Alert], error: string] =
   let l = k.listNamespaces("cinim.io/shard=" & shard)
@@ -135,7 +151,8 @@ proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[Org
 func toJson*(p: PassResult): JsonNode =
   var orgs = newJArray()
   for o in p.orgs:
-    orgs.add %*{"slug": o.slug, "state": o.state, "created": o.created, "identity_renewed": o.identityRenewed, "error": o.error}
+    orgs.add %*{"slug": o.slug, "state": o.state, "created": o.created, "controller_replaced": o.controllerReplaced,
+                "identity_renewed": o.identityRenewed, "error": o.error}
   var alerts = newJArray()
   for a in p.alerts:
     alerts.add %*{"code": a.code, "namespace": a.namespace, "organization": a.organization, "detail": a.detail}
@@ -180,6 +197,9 @@ proc runPass*(e: PassEnv; kube: KubeApi): PassResult =
         startRetention: proc (slug: string; at: int64) =
           var db = newRq(e.rqliteUrl)
           db.startRetention(slug, at),
+        setControllerSpec: proc (slug, spec: string) =
+          var db = newRq(e.rqliteUrl)
+          db.setControllerSpec(slug, spec),
         forget: proc (slug, namespace: string) =
           var db = newRq(e.rqliteUrl)
           db.deleteCredentialRow(namespace)
@@ -201,6 +221,7 @@ proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.
           if r.error.len > 0: stderr.writeLine "core: reconciliation: " & r.error
           for o in r.orgs:
             if o.created.len > 0: echo "core: reconciliation made again for ", o.slug, ": ", o.created.join(", ")
+            if o.controllerReplaced: echo "core: the controller of ", o.slug, " was made again: its Deployment was not what the core makes now"
             if o.error.len > 0: stderr.writeLine "core: reconciliation of " & o.slug & ": " & o.error
           for s in r.purged: echo "core: the retention of the organisation ", s, " is over, deleted"
         except CatchableError as e:

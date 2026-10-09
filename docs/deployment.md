@@ -385,11 +385,12 @@ GET  /api/v1/organizations:reconcile      # the last pass: what was made again, 
 POST /api/v1/organizations:reconcile      # run a pass now
 ```
 
-**Upgrading the controller of an existing organisation.** `helm upgrade` changes what the core makes for new organisations (its image, `CINIM_BUILD*`),
-not the Deployment that an organisation already has: the core creates objects and never changes them. To move an organisation to the new controller
-image, delete its Deployment (`kubectl -n <prefix>-<shard>-<org> delete deployment cinim-job-controller`); the next pass of the reconciliation makes it again
-from the current settings. The controller replaces the ConfigMap that carries the shim at every start, so the new image brings its shim to the Pods
-of the steps that start after that.
+**Upgrading the controller of an existing organisation.** The core keeps, for every active organisation, a fingerprint of the controller's Deployment as it made it last (the SHA-256 of
+the object: the image, the settings that reach the controller as environment, the resources). At every pass of the reconciliation it makes the object it would make now, and when the fingerprint is
+another one (after `helm upgrade` gave the core a new controller image, or new `build.*`, `runStorage.*` or `deploy.*` settings) it **deletes the Deployment and makes it again**, which needs no
+right that the core does not have. The state of a controller is on its volume and the Pods of the steps that are running are adopted by the new one (D-29), so a running step does not notice. An organisation
+made before the fingerprint was kept is given the current one as it stands at the first pass (its controller is not touched then); delete the Deployment by hand once if that one is out of date. `GET /api/v1/organizations:reconcile` says
+which controllers were replaced (`controller_replaced`). The controller replaces the ConfigMap that carries the shim at every start, so the new image brings its shim to the Pods of the steps that start after that.
 
 A switched-off organisation is kept `organizations.retention` seconds (14 days) from the moment it was switched off, then deleted for good: its namespace
 with the volumes and its record. `0` deletes it at once and a negative value never; `DELETE ?purge=true&force=true` deletes it earlier.
