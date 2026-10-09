@@ -10,7 +10,7 @@ import crunchy
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, spoolwire]
-import backend, ctrlstate, logic, k8s, podverdict
+import backend, ctrlstate, logic, k8s, podverdict, shardsettings
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -38,7 +38,6 @@ let
   stateDir = getEnv("CINIM_STATE_DIR", getCurrentDir() / "state")
   # how long a finished step Pod is kept after core has its result (to look at it with kubectl), by outcome
   retentionRead = parseInt(getEnv("CINIM_POD_RETENTION_READ", "0"))     # a Pod whose result and log are both read has nothing to show: removed at once
-  runVolumes = getEnv("CINIM_RUN_STORAGE", "off") == "on"    # STO-001: the steps of a run share a volume (the size, class and access mode are read in k8s.nim)
   retentionUnread = parseInt(getEnv("CINIM_POD_RETENTION_UNREAD", $(14 * 86400)))    # a Pod core could not read (log undelivered, end unknown): 14 days, and an alert
   # load_kube_config() (kubernetes-client/c) always dials whatever "current-context" says in the file, with
   # no per-call override - it silently follows the shared ~/.kube/config if this is left empty, which drifts
@@ -152,7 +151,6 @@ proc main() =
   cfg.logHoldTimeout = logHoldTimeout
   cfg.retentionRead = retentionRead
   cfg.retentionUnread = retentionUnread
-  cfg.runVolumes = runVolumes
   let st = openState(stateDir / "controller.sqlite")
   let adopted = st.active()
   echo "jobcontroller: state in ", stateDir, ", adopted ", adopted.len, " step Pod(s) from the previous run"
@@ -201,6 +199,13 @@ proc main() =
         try: removeFile(credentialPath()) except OSError: discard
       sleep int(max(resp.poll_after_ms, 1000'u32))
       continue
+    if resp.config.present:
+      # the settings of the shard, in every answer: what the next Pod and claim are made by (a step is never started before the first answer)
+      let c = resp.config
+      let s = shardSettings(c.build_enabled, c.build_seccomp, c.build_caps, c.build_memory_limit, c.build_ephemeral_limit,
+                            c.run_storage_enabled, c.run_storage_size, c.run_storage_class, c.run_storage_access)
+      applyShardSettings(s)
+      cfg.runVolumes = s.volume.enabled
     afterPoll(st, round.transitions, int64(now))
     released.setLen(0)
     handBack.setLen(0)

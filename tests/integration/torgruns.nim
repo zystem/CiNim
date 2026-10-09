@@ -59,6 +59,17 @@ suite "SHD-007 runs and controllers per organisation":
       for cmd in forA.commands:
         if cmd.body.kind == CommandBodyKind.start: runsA.add cmd.body.start.step.run_id
       check ra in runsA and rb notin runsA
+    test "every answer to a poll carries the settings of the shard, from the core's own environment (ControllerConfig)":
+      putEnv("CINIM_BUILD", "on")
+      putEnv("CINIM_BUILD_SECCOMP", "Localhost")
+      putEnv("CINIM_RUN_STORAGE", "on")
+      putEnv("CINIM_RUN_STORAGE_SIZE", "3Gi")
+      let resp = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-cfg-" & sfx, namespace: nsA, free_pod_slots: 0))
+      check resp.config.present and resp.config.build_enabled and resp.config.build_seccomp == "Localhost"
+      check resp.config.run_storage_enabled and resp.config.run_storage_size == "3Gi" and resp.config.run_storage_class == ""
+      delEnv("CINIM_BUILD"); delEnv("CINIM_BUILD_SECCOMP"); delEnv("CINIM_RUN_STORAGE"); delEnv("CINIM_RUN_STORAGE_SIZE")
+      let plain = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-cfg2-" & sfx, namespace: nsA, free_pod_slots: 0))
+      check plain.config.present and not plain.config.build_enabled and not plain.config.run_storage_enabled
     test "a controller of a namespace without a profile gets nothing":
       let r = co.createRun("p", "return 1", orgA, profA)
       c.addStep(r, profA)

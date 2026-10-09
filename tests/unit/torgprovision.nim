@@ -144,59 +144,18 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
       check st.obj["metadata"]["labels"]{"cinim.io/profile"} == nil     # that label marks a build Pod, which only the controller makes
       if st.kind == "Deployment": check st.obj["spec"]["template"]["metadata"]["labels"]{"cinim.io/profile"} == nil
     check namespaces == 1 and deployments == 1
-  test "the controller is told that the shard has a build profile, and how a build Pod is made":
+  test "the settings of the shard do not reach the controller as environment (they come in the answers to its poll): its Deployment is the same whatever they are":
     var c = buildCfg()
-    c.buildSeccomp = "Localhost"
-    c.buildCaps = "CHOWN,SETUID"
-    c.buildMemoryLimit = "8Gi"
     var env = initTable[string, string]()
     for st in organizationSteps(c, "acme", curve, "BT").steps:
       if st.kind == "Deployment":
         for e in st.obj["spec"]["template"]["spec"]["containers"][0]["env"]: env[e["name"].getStr] = e["value"].getStr
-    check env["CINIM_BUILD"] == "on" and env["CINIM_BUILD_SECCOMP"] == "Localhost" and env["CINIM_BUILD_CAPS"] == "CHOWN,SETUID"
-    check env["CINIM_BUILD_MEMORY_LIMIT"] == "8Gi" and env["CINIM_NAMESPACE"] == "cinim-001-acme" and "CINIM_STEP_SECURITY" notin env
-  test "D-48 the deploy Pods get their own egress and a Cilium policy for the API server; no other Pod does":
-    proc kindsAndNames(c: ProvisionConfig): seq[string] =
+    check env["CINIM_NAMESPACE"] == "cinim-001-acme" and "CINIM_STEP_SECURITY" notin env
+    for name in env.keys: check not name.startsWith("CINIM_BUILD") and not name.startsWith("CINIM_RUN_STORAGE")
+    proc deployment(c: ProvisionConfig): string =
       for st in organizationSteps(c, "acme", curve, "BT").steps:
-        if st.kind in ["NetworkPolicy", "CiliumNetworkPolicy"]: result.add st.kind & "/" & st.objectName
-    var c = cfg()
-    check "NetworkPolicy/allow-deploy-egress" notin kindsAndNames(c) and "CiliumNetworkPolicy/allow-deploy-kube-apiserver" notin kindsAndNames(c)
-    c.deploy = true
-    check kindsAndNames(c) == kindsAndNames(cfg())                                   # nothing to open yet
-    c.deployEgress = parseJson("""[{"to": [{"ipBlock": {"cidr": "203.0.113.5/32"}}], "ports": [{"protocol": "TCP", "port": 443}]}]""")
-    c.deployKubeApiServer = true
-    var seen = 0
-    for st in organizationSteps(c, "acme", curve, "BT").steps:
-      if st.objectName == "allow-deploy-egress":
-        inc seen
-        check st.kind == "NetworkPolicy" and st.obj["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "deploy"
-        check st.obj["spec"]["egress"][0]["ports"][0]["port"].getInt == 443
-      if st.objectName == "allow-deploy-kube-apiserver":
-        inc seen
-        check st.kind == "CiliumNetworkPolicy" and st.obj["apiVersion"].getStr == "cilium.io/v2"
-        check st.obj["spec"]["endpointSelector"]["matchLabels"]["cinim.io/profile"].getStr == "deploy"
-        check st.obj["spec"]["egress"][0]["toEntities"][0].getStr == "kube-apiserver"
-    check seen == 2
-    c.deployEgress = %"all"
-    c.deployKubeApiServer = false
-    for st in organizationSteps(c, "acme", curve, "BT").steps:
-      if st.objectName == "allow-deploy-egress": check st.obj["spec"]["egress"][0].len == 0      # {} = every address
-    c.egressOpen = true                                                               # the simple mode already opens everything
-    check "NetworkPolicy/allow-deploy-egress" notin kindsAndNames(c)
-  test "STO-001 the controller is told to make a volume per run, and how big, of which class and with which access":
-    proc envOf(c: ProvisionConfig): Table[string, string] =
-      for st in organizationSteps(c, "acme", curve, "BT").steps:
-        if st.kind == "Deployment":
-          for e in st.obj["spec"]["template"]["spec"]["containers"][0]["env"]: result[e["name"].getStr] = e["value"].getStr
-    var c = cfg()
-    check "CINIM_RUN_STORAGE" notin envOf(c)
-    c.runStorage = true
-    check envOf(c)["CINIM_RUN_STORAGE"] == "on" and "CINIM_RUN_STORAGE_SIZE" notin envOf(c)
-    c.runStorageSize = "20Gi"
-    c.runStorageClass = "fast"
-    c.runStorageAccess = "ReadWriteMany"
-    let e = envOf(c)
-    check e["CINIM_RUN_STORAGE_SIZE"] == "20Gi" and e["CINIM_RUN_STORAGE_CLASS"] == "fast" and e["CINIM_RUN_STORAGE_ACCESS"] == "ReadWriteMany"
+        if st.kind == "Deployment": return $st.obj
+    check deployment(buildCfg()) == deployment(cfg())              # a build profile or not
   test "DAT-003 a step Pod reaches the core's artifact port and not the object store":
     var ports: seq[int]
     var toStore = false

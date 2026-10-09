@@ -386,8 +386,8 @@ POST /api/v1/organizations:reconcile      # run a pass now
 ```
 
 **Upgrading the controller of an existing organisation.** The core keeps, for every active organisation, a fingerprint of the controller's Deployment as it made it last (the SHA-256 of
-the object: the image, the settings that reach the controller as environment, the resources). At every pass of the reconciliation it makes the object it would make now, and when the fingerprint is
-another one (after `helm upgrade` gave the core a new controller image, or new `build.*`, `runStorage.*` or `deploy.*` settings) it **deletes the Deployment and makes it again**, which needs no
+the object: the image, its environment, its resources; the settings of the shard are not in it, they reach a controller in the answers to its poll). At every pass of the reconciliation it makes the object it would make now, and when the fingerprint is
+another one (after `helm upgrade` gave the core a new controller image or changed the shape of the Deployment) it **deletes the Deployment and makes it again**, which needs no
 right that the core does not have. The state of a controller is on its volume and the Pods of the steps that are running are adopted by the new one (D-29), so a running step does not notice. An organisation
 made before the fingerprint was kept is given the current one as it stands at the first pass (its controller is not touched then); delete the Deployment by hand once if that one is out of date. `GET /api/v1/organizations:reconcile` says
 which controllers were replaced (`controller_replaced`). The controller replaces the ConfigMap that carries the shim at every start, so the new image brings its shim to the Pods of the steps that start after that.

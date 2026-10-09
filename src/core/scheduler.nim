@@ -10,7 +10,7 @@ import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
-import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage
+import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
 
@@ -389,6 +389,13 @@ proc unwantedPods(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
 var releaseAskedAt {.threadvar.}: Table[string, float]     ## when the runs whose volume may go were last looked for, per profile (STO-006)
 var refusedLoggedAt {.threadvar.}: Table[string, float]    ## a controller that keeps being refused is said once a minute, not every poll
 
+proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
+  ## the settings of the shard as the wire carries them to a controller
+  ControllerConfig(present: true, build_enabled: s.buildEnabled, build_seccomp: s.buildSeccomp, build_caps: s.buildCaps,
+                   build_memory_limit: s.buildMemoryLimit, build_ephemeral_limit: s.buildEphemeralLimit,
+                   run_storage_enabled: s.runStorageEnabled, run_storage_size: s.runStorageSize,
+                   run_storage_class: s.runStorageClass, run_storage_access: s.runStorageAccess)
+
 proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest): PollResponse =
   # Who is asking (IAM-003, T-46): a namespace that has a controller identity is served only against its credential, or against the
   # bootstrap token once, in which case the credential is handed out and nothing else happens in this poll. A namespace without
@@ -475,7 +482,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   if epochTime() - releaseAskedAt.getOrDefault(profileId, 0.0) >= 10.0 or req.storage_released.len > 0:   # a few seconds' delay in deleting a volume costs nothing
     releaseAskedAt[profileId] = epochTime()
     release = releasableRuns(c, profileId, getTime().toUnix(), retentionFromEnv())
-  PollResponse(header: Header(protocol: 1), commands: commands, release_storage: release,
+  PollResponse(header: Header(protocol: 1), commands: commands, release_storage: release, config: controllerConfigOf(shardSettingsFromEnv()),
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)
 
 proc serveControllerAttach*(co: Core; port: int) {.thread.} =

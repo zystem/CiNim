@@ -108,11 +108,12 @@ suite "SHD-008 the controller follows the settings of the core":
     check f.calls.find("DELETE " & dep) < f.calls.find("POST /apis/apps/v1/namespaces/cinim-001-acme/deployments")
     check f.objects[dep]["spec"]["template"]["spec"]["containers"][0]["image"].getStr == "reg/ctl:2"
     check rec.specs == @["acme=" & specOf(fresh, "acme")] and specOf(fresh, "acme") != specOf(old, "acme")
-  test "a setting that reaches the controller as environment changes the fingerprint too":
+  test "the fingerprint is that of the image and of the shape of the Deployment: not of the settings of the shard, which come in the answers to the poll":
     let a = maker(build = false)
     let b = maker(build = true)
-    check specOf(a, "acme") != specOf(b, "acme")
+    check specOf(a, "acme") == specOf(b, "acme")              # a build profile or not: the controller is not made again
     check specOf(a, "acme") == specOf(a, "acme") and specOf(a, "acme") != specOf(a, "other")
+    check specOf(a, "acme") != specOf(maker(image = "reg/ctl:2"), "acme")
   test "a controller that is not there is made, not counted as replaced":
     let f = Cluster()
     let mk = maker()

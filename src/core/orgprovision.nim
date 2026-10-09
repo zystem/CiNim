@@ -29,16 +29,12 @@ type
     buildInternet*: JsonNode                    ## {"ports": [...], "except": [...]}: a build may reach public addresses on these ports, the private
                                                 ## ranges in `except` stay closed (package downloads: npm, deb, maven...); nil: no internet
     buildIngress*: JsonNode                     ## NetworkPolicy ingress rules of the build Pods (an array, like buildEgress), or the string "all"; nil: closed
-    stepEphemeralLimit*, buildEphemeralLimit*: string   ## ephemeral-storage of a step Pod without limits of its own (the LimitRange: request 64Mi, this limit, 1Gi) and of a build Pod (10Gi); "" is the default
-    buildCaps*, buildMemoryLimit*: string       ## what the controller keeps of the capabilities of a build Pod (comma separated) and its memory limit; "" is its default
+    stepEphemeralLimit*: string                 ## ephemeral-storage of a step Pod without limits of its own (the LimitRange: request 64Mi, this limit, 1Gi); "" is the default
     egressOpen*, ingressOpen*: bool             ## the simple mode for a small organisation (SHD-009): its step Pods may reach any address / be reached from any;
                                                 ## the default is closed both ways, with the openings of the build profile
     deploy*: bool                               ## the shard has the deploy profile (D-48): a step with `profile = "deploy"` is an ordinary Pod that may reach what `deployEgress` lists
     deployEgress*: JsonNode                     ## NetworkPolicy egress rules of the deploy Pods (an array, like buildEgress), or the string "all"; nil: closed
     deployKubeApiServer*: bool                  ## also a CiliumNetworkPolicy that lets the deploy Pods reach the Kubernetes API server (the entity `kube-apiserver`): a NetworkPolicy cannot name it under Cilium
-    runStorage*: bool                           ## STO-001: the steps of a run share one volume that the organisation's controller makes (a claim per run)
-    runStorageSize*, runStorageClass*, runStorageAccess*: string   ## its request ("" = the controller's 5Gi), class ("" = the cluster's default), `ReadWriteOnce` or `ReadWriteMany`
-    buildSeccomp*: string                       ## `RuntimeDefault` (Kaniko) or `Localhost` (rootless BuildKit and Buildah, deploy/seccomp); "" is the controller's default
 
   CurveKeys* = object                           ## what the controller of an organisation needs to reach the core (D-24)
     corePub*, clientPub*, clientKey*: string
@@ -105,17 +101,8 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
     %*{"name": "CINIM_CERTS", "value": "/etc/cinim"},
     %*{"name": "CINIM_STATE_DIR", "value": "/state"},
     %*{"name": "CINIM_BOOTSTRAP_FILE", "value": "/etc/cinim/bootstrap/token"}]
-  if cfg.runStorage:
-    env.add %*{"name": "CINIM_RUN_STORAGE", "value": "on"}     # the controller makes a claim per run and mounts it in the step Pods (jobcontroller/runvolume.nim)
-    if cfg.runStorageSize.len > 0: env.add %*{"name": "CINIM_RUN_STORAGE_SIZE", "value": cfg.runStorageSize}
-    if cfg.runStorageClass.len > 0: env.add %*{"name": "CINIM_RUN_STORAGE_CLASS", "value": cfg.runStorageClass}
-    if cfg.runStorageAccess.len > 0: env.add %*{"name": "CINIM_RUN_STORAGE_ACCESS", "value": cfg.runStorageAccess}
-  if cfg.build:
-    env.add %*{"name": "CINIM_BUILD", "value": "on"}     # the controller makes a build Pod of a step of the build profile (k8s.nim)
-    if cfg.buildSeccomp.len > 0: env.add %*{"name": "CINIM_BUILD_SECCOMP", "value": cfg.buildSeccomp}
-    if cfg.buildCaps.len > 0: env.add %*{"name": "CINIM_BUILD_CAPS", "value": cfg.buildCaps}
-    if cfg.buildMemoryLimit.len > 0: env.add %*{"name": "CINIM_BUILD_MEMORY_LIMIT", "value": cfg.buildMemoryLimit}
-    if cfg.buildEphemeralLimit.len > 0: env.add %*{"name": "CINIM_BUILD_EPHEMERAL_LIMIT", "value": cfg.buildEphemeralLimit}
+  # The settings of the shard (the build profile, the volume of a run) are not here: the controller gets them with every answer to its poll (ctrlconfig.nim), so that
+  # a change of one does not make a new Pod of the controller.
   %*{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta(cfg, slug, controllerName, ns, controllerName),
      "spec": {
        "replicas": 1,

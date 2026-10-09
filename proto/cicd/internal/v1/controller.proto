@@ -121,6 +121,22 @@ message Command {
   }
 }
 
+// The settings of the shard that the controller of an organisation works by: the build profile (D-42) and the volume of a run (STO-001). They come with every answer to a
+// poll and not as the environment of the controller's Pod, so that changing one needs no new Pod of the controller: it applies them to the next step it starts. An empty string
+// is the controller's own default.
+message ControllerConfig {
+  bool present = 1;                      // false: the answer carries none (a core that does not send them); the controller keeps what it has
+  bool build_enabled = 2;                // the shard has a build profile: a step that asks for it becomes a build Pod
+  string build_seccomp = 3;              // RuntimeDefault (Kaniko) or Localhost (rootless BuildKit and Buildah)
+  string build_caps = 4;                 // the capabilities a build Pod keeps, comma separated
+  string build_memory_limit = 5;
+  string build_ephemeral_limit = 6;      // the ephemeral-storage limit of a build Pod
+  bool run_storage_enabled = 7;          // the steps of a run share a volume
+  string run_storage_size = 8;
+  string run_storage_class = 9;          // "" = the cluster's default class
+  string run_storage_access = 10;        // ReadWriteOnce or ReadWriteMany
+}
+
 message PollResponse {
   Header header = 1;
   repeated Command commands = 2;
@@ -129,5 +145,6 @@ message PollResponse {
   Failure failure = 5;
   string issued_credential = 6;      // answer to a valid bootstrap_token: the credential to keep and to send in every later poll
   bool unauthorized = 7;             // the namespace has a controller identity and the poll did not prove it: nothing was done
+  ControllerConfig config = 9;       // the settings of the shard, in every answer (see ControllerConfig)
   repeated string release_storage = 8;  // STO-006: runs of this namespace that are over and whose retention has passed: the controller deletes the run volume of each and says so in `storage_released`
 }

@@ -53,6 +53,8 @@ A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artif
 
 ## Moving the storage module out of the core
 
+This is the rule of D-49 applied to the store: the core is the source of the settings of every permanent module, so the storage service is started with only the core's address and its transport keys; the store's endpoint, bucket and key are the core's (sealed in its database) and go to the service with the request or when it connects, never into the service's environment.
+
 What the core asks of a store is `ObjectBackend` (`src/core/storagebackend.nim`): eight operations (put an object, create / upload a part of / complete / abort a multipart upload, read a range, size, delete), none of which keeps state between calls. Built: `S3Backend` (`src/core/s3backend.nim`), in the core's process. To run the storage module as a separate service, write a `RemoteBackend` that sends the same eight operations as requests over ZeroMQ with CURVE, and a service that answers them with an `S3Backend`. The core stays in charge: the settings and the key are the core's (sealed in its database, `PUT /api/v1/storage`) and are sent to the service with a request or when it connects, the service keeps nothing, and `ArtifactIngest` may be served by that service too, with the shims pointed to it by `--artifact-addr` (the step credential would then be checked against a key the core derives for it, not the core's own). Nothing in a step, a shim or a script changes.
 
 ## Checked on the TESTING cluster

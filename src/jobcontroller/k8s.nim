@@ -3,7 +3,7 @@
 ## SEC-010 per-job projected tokens are deferred: the shim gets the shared CURVE "client" identity through a Secret.
 import std/[os, json, strutils, times, base64, atomics, sequtils]
 import ../common/[k8sbind, envname]
-import backend, podsec, runvolume
+import backend, podsec, runvolume, shardsettings
 
 type K8s* = object
   api: ptr apiClient_t
@@ -92,18 +92,16 @@ proc ensureShimAssets*(k: K8s; shimBinPath, certs: string; withCerts: bool) =
                      "client.key": readFile(certs / "curve" / "client.key"),
                      "core.pub": readFile(certs / "curve" / "core.pub")}}))
 
-let buildSettings = podsec.buildSettings(getEnv("CINIM_BUILD", "off"), getEnv("CINIM_BUILD_CAPS"), getEnv("CINIM_BUILD_MEMORY_LIMIT"),
-                                         getEnv("CINIM_BUILD_SECCOMP"), getEnv("CINIM_BUILD_EPHEMERAL_LIMIT"))
-  ## the build profile of the namespace (D-42); what a build Pod is is in podsec.nim
+var shard {.threadvar.}: ShardSettings
+  ## the settings of the shard (the build profile of D-42, what a build Pod is is in podsec.nim; the volume of a run, runvolume.nim): given by the core in every answer to a
+  ## poll (applyShardSettings), used by the Pod and the claim that the next step gets. The Pods are made by the thread that polls, which is the thread that applies them.
 
-let volumeSettings = runvolume.volumeSettings(getEnv("CINIM_RUN_STORAGE", "off"), getEnv("CINIM_RUN_STORAGE_SIZE"),
-                                              getEnv("CINIM_RUN_STORAGE_CLASS"), getEnv("CINIM_RUN_STORAGE_ACCESS"))
-  ## the run volume of the namespace (STO-001); what a Pod gets of it is in runvolume.nim
+proc applyShardSettings*(s: ShardSettings) = shard = s
 
 proc podBody(r: PodRequest): JsonNode =
-  let sec = podsec.podSecurity(buildSettings, r.build, r.deploy)
+  let sec = podsec.podSecurity(shard.build, r.build, r.deploy)
   let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
-  let vol = runvolume.podVolume(volumeSettings.withEnabled(r.runVolume), r.runId, r.image, shimMount, sec.containerCtx, sec.resources)
+  let vol = runvolume.podVolume(shard.volume.withEnabled(r.runVolume), r.runId, r.image, shimMount, sec.containerCtx, sec.resources)
   result = %*{
     "apiVersion": "v1", "kind": "Pod",
     "metadata": {"name": r.name, "labels": {"cicd.io/run": r.runId}},
@@ -244,7 +242,7 @@ proc backendOf*(k: K8s): Backend =
     execInPod: proc (name, container, command: string): tuple[ok: bool, output: string] =
       execInPod(kk, name, container, command),
     ensureRunVolume: proc (runId: string): CreateOutcome =
-      let raw = Generic_createNamespacedResource(kk.claims, kk.ns.cstring, ($claimBody(volumeSettings, runId)).cstring, nil)
+      let raw = Generic_createNamespacedResource(kk.claims, kk.ns.cstring, ($claimBody(shard.volume, runId)).cstring, nil)
       if raw == nil:
         stderr.writeLine "jobcontroller: create claim " & claimName(runId) & ": no response from the Kubernetes API client"
         return CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "no response from the Kubernetes API client")
