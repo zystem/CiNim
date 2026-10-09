@@ -236,6 +236,21 @@ too, because only build Pods reach the internet. Checked on the TESTING cluster 
 with a non-zero code fails the job and the run (`ignore_failure = true` returns the code to the script instead, PIP-018). The registry here is the plain
 in-cluster one of `deploy/registry`: its address is the one the Pods reach it at, which is not always the name the nodes pull from.
 
+### By the clock, every night
+
+The same script as a **schedule trigger** of the organisation (docs/triggers.md): the platform then builds its own images every night without anyone starting it. The trigger holds the
+script and its parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (UTC) and `"concurrency": "skip"`, so that a night is skipped while the last one is still running:
+
+```bash
+curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "self-build-nightly", "kind": "schedule", "schedule": "0 2 * * *",
+  "project_id": "cinim", "concurrency": "skip", "script": "<self-build.lua>", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
+```
+
+With no `TAG` the images are tagged `<date>-<commit>` (`20261009-eefb939`): the clone step writes `IMAGE_TAG` to `$CICD_ENV` and the later steps of the run read it, so a night's images are not the last night's.
+`DEPLOY` stays false: the images are built and pushed, and rolling the shard out to them is a decision (set `DEPLOY` true and give the organisation the secrets of the deploy step to roll out every night). Checked on the
+TESTING cluster: a trigger set for two minutes ahead fired by itself (`last_result: started`, the run carries `trigger_id`), the run took about five minutes with warm caches, all three steps succeeded and both images appeared under the
+tag of that day and the head of `main`; the trigger was then replaced by the nightly one.
+
 ## Examples of build Pods
 
 `deploy/examples/build-pods` has the namespace, the policy (the same text as the chart's) and one Pod per tool, and `test.sh` that builds an image

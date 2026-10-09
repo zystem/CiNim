@@ -7,6 +7,8 @@
 -- Submit it through the API:
 --   POST /api/v1/runs  {"project_id": "cinim", "organization": "<slug>", "script": "<this file>",
 --                       "params": {"REGISTRY": "<host:port the build Pods push to>", "TAG": "dev-1", "PULL_REGISTRY": "<the name the nodes pull from>"}}
+-- Or by the clock, as a trigger of the organisation (docs/triggers.md): the same script and parameters, `"kind": "schedule", "schedule": "0 2 * * *"`, `"concurrency": "skip"`. Leave TAG out
+-- and every run tags its images <date>-<commit> (the clone step writes IMAGE_TAG to $CICD_ENV, which the later steps of the run read), so that a night's images are not the last night's.
 -- The organisation needs the build profile (build.enabled) with a build.egress rule for the registry; for the deploy step the deploy profile
 -- (deploy.enabled, deploy.kubeApiServer) and the secrets DEPLOY_TOKEN and DEPLOY_CA (deployer.yaml). A step that exits non-zero fails the job and so the run (6.7).
 -- Parameters are plain environment variables of every step (VAR-002); the secrets are fetched by the shim and are never in the script.
@@ -17,7 +19,7 @@ local KUBECTL = "alpine/k8s:1.34.1"
 local function build(target, image)
   ci.job({image = KANIKO, profile = "build"}, function(j)
     j:sh("/kaniko/executor --dockerfile=/cicd/workspace/src/tools/image/Dockerfile.kaniko --context=dir:///cicd/workspace/src --target=" .. target ..
-         " --destination=$REGISTRY/" .. image .. ":$TAG --cache=true --cache-repo=$REGISTRY/cinim-cache" ..
+         " --destination=$REGISTRY/" .. image .. ":${TAG:-$IMAGE_TAG} --cache=true --cache-repo=$REGISTRY/cinim-cache" ..
          " --insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull")
   end)
 end
@@ -28,10 +30,10 @@ local ROLLOUT = [[
 set -eu
 printf '%s\n' "$DEPLOY_CA" > "$CICD_RUN_DIR/ca.crt"
 k="kubectl --server https://kubernetes.default.svc --certificate-authority $CICD_RUN_DIR/ca.crt --token $DEPLOY_TOKEN -n $NAMESPACE"
-pull="${PULL_REGISTRY:-$REGISTRY}"
-$k patch deployment cinim-executor -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"executor\",\"image\":\"$pull/cinim:$TAG\"}]}}}}"
-$k patch deployment cinim-core -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"core\",\"image\":\"$pull/cinim:$TAG\",\"env\":[{\"name\":\"CINIM_CONTROLLER_IMAGE\",\"value\":\"$pull/cinim-controller:$TAG\"}]}]}}}}"
-echo "rolled out $pull/cinim:$TAG"
+pull="${PULL_REGISTRY:-$REGISTRY}"; tag="${TAG:-$IMAGE_TAG}"
+$k patch deployment cinim-executor -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"executor\",\"image\":\"$pull/cinim:$tag\"}]}}}}"
+$k patch deployment cinim-core -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"core\",\"image\":\"$pull/cinim:$tag\",\"env\":[{\"name\":\"CINIM_CONTROLLER_IMAGE\",\"value\":\"$pull/cinim-controller:$tag\"}]}]}}}}"
+echo "rolled out $pull/cinim:$tag"
 ]]
 
 return ci.pipeline({
@@ -39,7 +41,7 @@ return ci.pipeline({
   params = {
     REGISTRY = ci.string{required = true, max_length = 200},                          -- host:port, as the build Pods reach the registry (plain HTTP)
     PULL_REGISTRY = ci.string{default = "", max_length = 200},                        -- the name the nodes pull the images from; empty: the same as REGISTRY
-    TAG = ci.string{default = "self", max_length = 100, pattern = "[%w%._%-]+"},      -- the tag of both images
+    TAG = ci.string{default = "", max_length = 100, pattern = "[%w%._%-]*"},          -- the tag of both images; empty: <date>-<commit>
     REPO = ci.string{default = "https://github.com/zystem/CiNim.git", max_length = 300},
     REF = ci.string{default = "main", max_length = 100, pattern = "[%w%._%-/]+"},     -- a branch or a tag
     NAMESPACE = ci.string{default = "cinim-001", max_length = 63},                    -- the namespace of the shard that is rolled out
@@ -49,7 +51,8 @@ return ci.pipeline({
   main = function(run)
     if run.params.BUILD then
       ci.job({image = GIT, profile = "build"}, function(j)
-        j:sh('git clone --depth 1 --branch "$REF" "$REPO" src && rm -rf src/.git && git --version && ls src | head -20')
+        j:sh('git clone --depth 1 --branch "$REF" "$REPO" src && ' ..
+           'echo "IMAGE_TAG=$(date -u +%Y%m%d)-$(git -C src rev-parse --short HEAD)" >> "$CICD_ENV" && rm -rf src/.git && ls src | head -20')
       end)
       build("core", "cinim")
       build("controller", "cinim-controller")
