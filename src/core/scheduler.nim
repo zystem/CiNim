@@ -9,7 +9,7 @@
 import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
+import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb
@@ -61,10 +61,10 @@ proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId 
   var c = newRq(co.rqliteUrl)
   result = newId()
   let now = $getTime().toUnix()
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at, profile_id, params, trigger_id) " &
-    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)", result, tenantId, projectId, protoName(rsRunning), now, now,
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)", result, tenantId, projectId, protoName(rsRunning), now, now,
     (if profileId.len > 0: profileId else: co.profileId), (if params.len > 0: toJson(params) else: ""),
-    (if triggerId.len > 0: %triggerId else: newJNull())]])
+    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
@@ -565,22 +565,24 @@ proc leaseStateOf(c: var RqClient; runId: string): LeaseState =
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0: LeaseState(attempt: vals[0][0].getInt, until: vals[0][1].getBiggestInt) else: LeaseState()
 
-proc takeRunLease*(c: var RqClient; master, runId, owner: string): string =
+proc takeRunLease*(c: var RqClient; master, runId, owner: string; versions: seq[int] = @[]): string =
   ## Lease a RUNNING run that is free (never leased, given back, or run out): a new attempt, and its token. "" if the run is not free, not RUNNING,
   ## or another executor took it in the meantime (the update is made only against the attempt that was read).
   let now = getTime().toUnix()
   let st = leaseStateOf(c, runId)
   if not canTake(st, now): return ""
   let r = c.execute(%*[["UPDATE runs SET lease_attempt = lease_attempt + 1, lease_until = ?, lease_owner = ? " &
-    "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state = ? RETURNING lease_attempt",
+    "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state = ? " &
+    (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "RETURNING lease_attempt",
     now + leaseTtlSeconds, owner, runId, st.attempt, now, protoName(rsRunning)]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: "" else: leaseToken(master, runId, vals[0][0].getInt)
 
-proc leaseCandidates*(c: var RqClient; only = ""): seq[string] =
+proc leaseCandidates*(c: var RqClient; only = ""; versions: seq[int] = @[]): seq[string] =
   ## RUNNING runs that nobody holds and that have no step still PENDING/STARTING/RUNNING: presumed suspended, ready to (re)lease
   ## (`only`: just that run, if it is one - for the tests)
-  let r = c.query(%*[["SELECT id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND (? = '' OR id = ?) AND id NOT IN " &
+  let r = c.query(%*[["SELECT id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND (? = '' OR id = ?) " &
+    (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND id NOT IN " &
     "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY created_at LIMIT 5",
     protoName(rsRunning), getTime().toUnix(), only, only, protoName(ssPending), protoName(ssStarting), protoName(ssRunning)]])
   let vals = r["results"][0]{"values"}
@@ -590,10 +592,12 @@ proc leaseCandidates*(c: var RqClient; only = ""): seq[string] =
 proc handleLease*(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
   discard registryTouch("executor", "executor-service", epochTime())
   let owner = if req.executor_id.len > 0: req.executor_id else: "executor"
+  # the versions of the host API this executor can run (PIP-001); one from before them knows version 1 only
+  let versions = if req.api_versions.len > 0: req.api_versions.mapIt(int(it)) else: @[1]
   var runId, token: string
   var rows: seq[Row]
-  for candidate in (if req.run_id.len > 0: @[req.run_id] else: leaseCandidates(c)):
-    token = takeRunLease(c, master, candidate, owner)
+  for candidate in (if req.run_id.len > 0: @[req.run_id] else: leaseCandidates(c, versions = versions)):
+    token = takeRunLease(c, master, candidate, owner, versions)
     if token.len == 0: continue
     # the journal is checked before the run goes to an executor (T-03): the core wrote it, the core vouches for it
     let v = c.verifyJournal(candidate)
@@ -609,8 +613,10 @@ proc handleLease*(c: var RqClient; profileId, master: string; req: LeaseRequest)
   if runId.len == 0:
     return ExecutorResponse(header: Header(protocol: 1),
       body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "no_run_available")))
+  let vr = c.query(%*[["SELECT api_version FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.lease,
     lease: LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: runId,
+                         api_version: uint32(if vr != nil and vr.len > 0: vr[0][0].getInt(1) else: 1),
                          script: loadScript(c, runId), journal: journalEntries(rows),
                          params: runParams(c, runId).mapIt(ParamsEntry(key: it[0], value: it[1])))))
 

@@ -142,6 +142,7 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "liveness_timeout", "INTEGER NOT NULL DEFAULT 300"),
       ("execution_profiles", "log_spool_bytes", "INTEGER NOT NULL DEFAULT 10485760"),
       ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600"),
+      ("runs", "api_version", "INTEGER NOT NULL DEFAULT 1"),      # PIP-001, common/luaapi.nim: the version of the Lua host API the run was made with
       ("runs", "journal_tip", "TEXT NOT NULL DEFAULT ''"),        # T-03, core/journalchain.nim: the hash of the newest record of the run's journal
       ("run_journal", "hash", "TEXT NOT NULL DEFAULT ''"),        # the chain: SHA-256 of the previous hash and this record
       ("runs", "lease_attempt", "INTEGER NOT NULL DEFAULT 0"),    # RUN-008, core/runlease.nim: the attempt of the last lease of the run,

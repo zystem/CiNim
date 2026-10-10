@@ -37,16 +37,19 @@ proc toJournal(entries: seq[JournalEntry]): Journal =
     else:
       discard result.append(e.kind, cast[string](e.payload), cast[string](e.result))
 
-proc leaseAny(s: ZConnection): Option[tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)]]] =
+type Leased = tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)], apiVersion: int]
+
+proc leaseAny(s: ZConnection): Option[Leased] =
   let resp = s.rpc(ExecutorRequest(header: Header(protocol: 1),
     body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.lease,
-      lease: LeaseRequest(run_id: "", executor_id: executorId))))
-  if resp.body.kind != ExecutorResponseBodyKind.lease: return none(tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)]])
+      lease: LeaseRequest(run_id: "", executor_id: executorId, api_versions: executorApiVersions().mapIt(uint32(it))))))
+  if resp.body.kind != ExecutorResponseBodyKind.lease: return none(Leased)
   let g = resp.body.lease
-  some (g.run_id, g.lease_token, g.script, toJournal(g.journal), g.params.mapIt((it.key, it.value)))
+  some (g.run_id, g.lease_token, g.script, toJournal(g.journal), g.params.mapIt((it.key, it.value)),
+        (if g.api_version == 0: 1 else: int(g.api_version)))     # a core from before the versions: version 1
 
-proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: seq[(string, string)]) =
-  var sb = newSandbox()
+proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: seq[(string, string)]; apiVersion: int) =
+  var sb = newSandbox(apiVersion = apiVersion)         # the host API of the version the run was made with (PIP-001)
   var jj = j
   var lostLease = ""          # RUN-008: another executor has the run now; this one stops and says nothing more about it
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
@@ -85,7 +88,7 @@ proc main() =
   var core = connectCore()
   echo "executor: connected as ", executorId
   while true:
-    var leased: Option[tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)]]]
+    var leased: Option[Leased]
     try:
       leased = leaseAny(core)
     except CatchableError as e:
@@ -98,9 +101,9 @@ proc main() =
     if leased.isNone:
       sleep 1000
       continue
-    let (runId, token, script, j, params) = leased.get
+    let (runId, token, script, j, params, apiVersion) = leased.get
     try:
-      runOnce(core, runId, token, script, j, params)
+      runOnce(core, runId, token, script, j, params, apiVersion)
     except CatchableError as e:
       stderr.writeLine "executor: run " & runId & " crashed: " & e.msg
       try: core.close() except CatchableError: discard       # a half-finished request/reply may be pending on this socket

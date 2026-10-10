@@ -5,6 +5,8 @@
 ## error with pcall, `run` reports the limit code.
 
 import luac
+import ../common/luaapi
+export luaapi
 
 type
   Limiter = object
@@ -80,10 +82,23 @@ proc fetchString*(L: LuaState; idx: cint): string =
   result = newString(int(n))
   if n > 0: copyMem(addr result[0], s, int(n))
 
-const bootstrap = staticRead("bootstrap.lua")
+const preludes = [(1, staticRead("bootstrap.lua"))]     ## the host API by version; a new version is a new file listed here
 
-proc newSandbox*(memLimit = 64 * 1024 * 1024; instrLimit = 50_000_000): Sandbox =
-  ## Defaults follow PIP-006: 64 MiB, 50M instructions between host calls.
+proc apiPrelude*(version: int): string =
+  ## the Lua prelude of that version of the host API; "" if this build has none
+  for (v, src) in preludes:
+    if v == version: return src
+
+proc executorApiVersions*(): seq[int] =
+  ## the versions this executor can really run: those it is meant to keep that it has a prelude for
+  for v in supportedApiVersions():
+    if apiPrelude(v).len > 0: result.add v
+
+proc newSandbox*(memLimit = 64 * 1024 * 1024; instrLimit = 50_000_000; apiVersion = currentApiVersion): Sandbox =
+  ## Defaults follow PIP-006: 64 MiB, 50M instructions between host calls. The host API is that of `apiVersion` (the version the run was made
+  ## with); a version this build has no prelude for is refused.
+  let bootstrap = apiPrelude(apiVersion)
+  if bootstrap.len == 0: raise newException(ValueError, "no Lua host API version " & $apiVersion & " in this build")
   result.lim = create(Limiter)
   result.lim[] = Limiter(memLimit: memLimit, instrLimit: instrLimit, step: hookStep)
   result.L = lua_newstate(luaAlloc, result.lim)
