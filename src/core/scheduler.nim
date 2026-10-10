@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb
+import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -172,7 +172,7 @@ proc renderCoreMetrics*(co: Core): string =
   ## GET /metrics, Prometheus text (docs/metrics.md): only core is scraped - Pods are short-lived (the shim reports to core),
   ## so what an operator alerts on is here: component liveness, steps by state, the launch gate, core's own memory.
   let now = epochTime()
-  result = registryMetrics(now) & memstats.renderMetrics("core") & stepmetrics.render()
+  result = registryMetrics(now) & memstats.renderMetrics("core") & stepmetrics.render() & hubmetrics.renderHubMetrics()
   let g = currentGate()
   result.add "# HELP cinim_unread_pods Finished step Pods kept because their result or log could not be read (an alert in the API).\n# TYPE cinim_unread_pods gauge\n"
   for (ns, n) in keptCounts(): result.add "cinim_unread_pods{namespace=\"" & ns & "\"} " & $n & "\n"

@@ -2,7 +2,8 @@
 ## rqlite and real CURVE sockets). Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
 import std/[unittest, json, os, options, atomics, sequtils]
 import common/[rqlite, stream, zmqcurve]
-import core/[schema, scheduler, loggate, logcircuit, streamhub, workkick, retrypolicy]
+import core/[schema, scheduler, loggate, logcircuit, streamhub, workkick, retrypolicy, hubmetrics]
+import std/strutils
 
 let url = getEnv("CINIM_RQLITE_URL")
 let certs = getCurrentDir() / "tests" / "certs"
@@ -16,14 +17,14 @@ proc addStep(c: var RqClient; runId, profileId: string; ordinal: int) =
 
 proc report(session, ns: string; slots: int; ack = 0'u64; id = 1'u64): StreamFrame =
   frame(session, "controller.report", encodeReport(PollRequest(header: Header(protocol: 1), session_id: session, namespace: ns,
-    free_pod_slots: uint32(slots), inventory_complete: true)), id = id, ack = ack)
+    free_pod_slots: uint32(slots), inventory_complete: true)), id = id, ack = ack, key = ns)
 
 proc starts(f: StreamFrame): seq[string] =
   let resp = decodeWork(f.payload)
   for cmd in resp.commands:
     if cmd.body.kind == CommandBodyKind.start: result.add cmd.body.start.step.run_id
 
-proc runStream(a: tuple[co: Core, port: int]) {.thread.} = serveStream(a.co, a.port)
+proc runStream(a: tuple[co: Core, port: int]) {.thread.} = serveStream(a.co, a.port, workers = 4)
 
 suite "RUN-016 the push channel":
   if url.len == 0:
@@ -88,11 +89,16 @@ suite "RUN-016 the push channel":
       var cl = connectStream(serverAddr, corePub, clientKeys)
       let ses = "s-b-" & sfx
       check cl.sendFrame(report(ses, o.ns, 10))
-      discard cl.receive(2000)                                  # the answer to the report: nothing to tell (a ping)
+      discard cl.next(8000)                                     # the answer to the report: the settings
+      # a second quiet report and its answer: by then the core has finished what the first report set going, so the step below is the kick's
+      check cl.sendFrame(report(ses, o.ns, 10, ack = 1, id = 2))
+      for _ in 0 ..< 10:
+        let f = cl.receive(8000)
+        if f.isNone or f.get.re == 2: break
       let r = co.createRun("p", "return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       kickProfile(o.profile)
-      let w = cl.next(8000)
+      let w = cl.nextStarts()
       check w.isSome and w.get.kind == "controller.work"
       check w.get.starts == @[r]
       cl.close()
@@ -154,6 +160,26 @@ suite "RUN-016 the push channel":
       let found = cl.nextStarts(9000)                             # the pass that looks at the profiles with waiting steps does
       check found.isSome and found.get.starts == @[r]
       cl.close()
+    test "a controller that was replaced: the newest session of an organisation is the only one, and what was pushed to the old one unacknowledged goes to it":
+      let o = newOrg()
+      var old = connectStream(serverAddr, corePub, clientKeys)
+      let sOld = "s-old-" & sfx
+      check old.sendFrame(report(sOld, o.ns, 10))
+      discard old.next(8000)                                       # the settings
+      let r = co.createRun("p", "return 1", "t1", o.profile)
+      c.addStep(r, o.profile, 1)
+      kickProfile(o.profile)
+      let pushed = old.nextStarts()
+      check pushed.isSome and pushed.get.starts == @[r]            # the step is claimed for the old controller
+      check c.query(%*[["SELECT state, controller_id FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getStr == "STARTING"
+      old.close()                                                  # the controller is replaced before it acknowledged anything
+      var fresh = connectStream(serverAddr, corePub, clientKeys)
+      check fresh.sendFrame(report("s-new-" & sfx, o.ns, 10))
+      let again = fresh.nextStarts()
+      check again.isSome and again.get.starts == @[r]              # the step was taken back from the old session and pushed to the new one
+      let now = c.query(%*[["SELECT state, controller_id FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0]
+      check now[0].getStr == "STARTING" and now[1].getStr == "s-new-" & sfx
+      fresh.close()
     test "a frame from a session the core does not know is answered with resync":
       var cl = connectStream(serverAddr, corePub, clientKeys)
       check cl.sendFrame(frame("nobody-" & sfx, "ping"))
@@ -174,5 +200,30 @@ suite "RUN-016 the push channel":
       let again = cb.next(1500)
       check again.isNone or again.get.starts.len == 0
       cb.close()
+    test "the pool: many organisations at once, each served in order, each gets only its own steps":
+      var orgs: seq[tuple[profile, ns: string]]
+      var runs: seq[string]
+      for i in 0 ..< 8:
+        let o = newOrg()
+        let r = co.createRun("p", "return 1", "t1", o.profile)
+        for k in 1 .. 2: c.addStep(r, o.profile, k)
+        orgs.add o
+        runs.add r
+      var cls: seq[ZConnection]
+      for i, o in orgs:
+        cls.add connectStream(serverAddr, corePub, clientKeys)
+        check cls[i].sendFrame(report("s-p" & $i & "-" & sfx, o.ns, 10))
+      for i in 0 ..< orgs.len:
+        let w = cls[i].nextStarts(15000)
+        check w.isSome and w.get.starts == @[runs[i], runs[i]]       # its own run only, both steps in one frame
+        check w.get.id == 2                                          # numbered in order: the settings were frame 1
+        cls[i].close()
+    test "the hub tells about itself: frames, pushed steps, the waits and the workers":
+      let m = renderHubMetrics()
+      check "cinim_stream_workers 4" in m
+      check "cinim_stream_frames_total{direction=\"in\",kind=\"report\"}" in m
+      check not ("cinim_stream_pushed_steps_total 0\n" in m)
+      check not ("cinim_stream_frame_wait_seconds_count 0\n" in m)
+      check not ("cinim_stream_kick_wait_seconds_count 0\n" in m)
     stopServers.store(true)
     joinThread(th)

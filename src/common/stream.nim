@@ -11,7 +11,9 @@ import zmqcurve
 
 ## The envelope of one frame (the payload is a Protobuf message of the kind named in `kind`; the envelope itself is plain bytes so that the
 ## modules that carry their own generated message types need no second copy of the generator's output):
-##   u8 version (1) | u64 id | u64 ack | u64 re | u16 len + session | u16 len + kind | u32 len + payload      (integers big-endian)
+##   u8 version (1) | u64 id | u64 ack | u64 re | u16 len + session | u16 len + kind | u32 len + payload [| u16 len + key]     (integers big-endian)
+## `key` (optional, left out when empty) is what the core spreads its workers by: a controller puts its namespace there, so that all the frames of an
+## organisation go to one worker, in order; a frame without one is spread by its session.
 ## kinds in use: "controller.report" (client -> core, a PollRequest), "controller.work" (core -> client, a PollResponse), "ping" (either way,
 ## empty, carries `ack`), "resync" (core -> client: "I do not know you, send your state again"), "bye" (core -> client: refused or ended, the
 ## payload is the reason). `id` is the number of a numbered frame among the sender's (0: not numbered, needs no acknowledgement); `ack` is the
@@ -19,7 +21,7 @@ import zmqcurve
 ## its reports for that, they are not resent), 0 in a frame that answers nothing, a push.
 type
   StreamFrame* = object
-    session*, kind*, payload*: string
+    session*, kind*, payload*, key*: string
     id*, ack*, re*: uint64
   FrameIn* = tuple[routingId: string, frame: StreamFrame]
 
@@ -46,6 +48,9 @@ proc encodeFrame*(f: StreamFrame): string =
   result.add char(f.kind.len shr 8); result.add char(f.kind.len and 0xff); result.add f.kind
   for i in countdown(3, 0): result.add char((f.payload.len shr (i * 8)) and 0xff)
   result.add f.payload
+  if f.key.len > 0:
+    doAssert f.key.len <= 0xffff
+    result.add char(f.key.len shr 8); result.add char(f.key.len and 0xff); result.add f.key
 
 proc decodeFrame*(s: string): Option[StreamFrame] =
   ## none for anything that is not a frame of this version (a stray or damaged message is dropped, never trusted)
@@ -71,11 +76,15 @@ proc decodeFrame*(s: string): Option[StreamFrame] =
   at += 4
   if pl > maxPayload: return none(StreamFrame)
   f.payload = take(pl)
-  if at != s.len: return none(StreamFrame)
+  if at != s.len:
+    if at + 2 > s.len: return none(StreamFrame)
+    let kl = (ord(s[at]) shl 8) or ord(s[at + 1]); at += 2
+    f.key = take(kl)
+    if at != s.len: return none(StreamFrame)
   some(f)
 
-proc frame*(session, kind: string; payload = ""; id = 0'u64; ack = 0'u64; re = 0'u64): StreamFrame =
-  StreamFrame(session: session, kind: kind, id: id, ack: ack, re: re, payload: payload)
+proc frame*(session, kind: string; payload = ""; id = 0'u64; ack = 0'u64; re = 0'u64; key = ""): StreamFrame =
+  StreamFrame(session: session, kind: kind, id: id, ack: ack, re: re, payload: payload, key: key)
 
 proc listenStream*(port: int; secretKey: string; sendTimeoutMs = 200): ZConnection =
   ## the core's side: a ROUTER that anyone with the shared client key can connect to
@@ -106,6 +115,13 @@ proc sendFrame*(c: ZConnection; f: StreamFrame): bool =
     true
   except CatchableError: false
 
+proc sendRawTo*(c: ZConnection; routingId, bytes: string): bool =
+  ## the core sends an encoded frame to the peer last heard at `routingId`
+  try:
+    c.sendAll(routingId, bytes)
+    true
+  except CatchableError: false
+
 proc sendTo*(c: ZConnection; routingId: string; f: StreamFrame): bool =
   ## the core sends to the peer last heard at `routingId`; false if that peer is gone or its queue is full (the frame stays unacknowledged
   ## and goes out again with the next contact)
@@ -114,10 +130,10 @@ proc sendTo*(c: ZConnection; routingId: string; f: StreamFrame): bool =
     true
   except CatchableError: false
 
-proc receiveFrom*(c: ZConnection; timeoutMs: int): Option[FrameIn] =
-  ## the core receives: the routing id and the frame of one message; none after `timeoutMs`, or if the message was not a frame
+proc receiveRaw*(c: ZConnection; timeoutMs: int): Option[tuple[routingId, bytes: string]] =
+  ## the core receives one message: the routing id and the bytes of the frame, not decoded; none after `timeoutMs`, or for a message of another shape
   let first = c.waitForReceive(timeoutMs)
-  if not first.msgAvailable: return none(FrameIn)
+  if not first.msgAvailable: return none(tuple[routingId, bytes: string])
   var parts = @[first.msg]
   var more = first.moreAvailable
   while more:
@@ -125,10 +141,16 @@ proc receiveFrom*(c: ZConnection; timeoutMs: int): Option[FrameIn] =
     if not nxt.msgAvailable: break
     parts.add nxt.msg
     more = nxt.moreAvailable
-  if parts.len != 2: return none(FrameIn)
-  let f = decodeFrame(parts[1])
+  if parts.len != 2: return none(tuple[routingId, bytes: string])
+  some((parts[0], parts[1]))
+
+proc receiveFrom*(c: ZConnection; timeoutMs: int): Option[FrameIn] =
+  ## the core receives: the routing id and the frame of one message; none after `timeoutMs`, or if the message was not a frame
+  let raw = c.receiveRaw(timeoutMs)
+  if raw.isNone: return none(FrameIn)
+  let f = decodeFrame(raw.get.bytes)
   if f.isNone: return none(FrameIn)
-  some((parts[0], f.get))
+  some((raw.get.routingId, f.get))
 
 proc receive*(c: ZConnection; timeoutMs: int): Option[StreamFrame] =
   ## a client receives one frame; none after `timeoutMs`

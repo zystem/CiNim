@@ -97,6 +97,14 @@ The endpoint can be turned off in Helm (`metrics.enabled: false`, on by default;
 | `cinim_finished_steps_total`, `cinim_step_cpu_seconds_total`, `cinim_step_oom_kills_total` | counters over finished steps |
 | `cinim_inflight_app_metric_sum{source,metric}` | application metrics (`metrics.scrape`) and JVM (`source="jvm"`), summed over the steps in flight |
 | `cinim_inflight_scrape_up{source}` | 1 if the endpoint answers for every step in flight |
+| `cinim_stream_peers`, `cinim_stream_unacked_frames` | the push channel (docs/conductors.md section 12): controllers connected, numbered frames sent and not yet acknowledged (summed over the workers) |
+| `cinim_stream_workers`, `cinim_stream_queued_messages` | the workers of the hub; messages waiting in their queues (near zero when the pool keeps up) |
+| `cinim_stream_frame_wait_seconds` | histogram: from a frame being read from the socket to a worker starting on it - the queue of the pool |
+| `cinim_stream_frames_total{direction,kind}` | frames of the channel by direction (`in`, `out`) and kind (`report`, `ping`, `work`, `resync`, `other`) |
+| `cinim_stream_report_seconds`, `cinim_stream_push_seconds` | histograms: the time to take in a report and answer it; the time to look at one controller for work |
+| `cinim_stream_kick_wait_seconds` | histogram: from a kick (a step made, a limit changed) to the worker of the organisation looking at it - the delay a pushed step meets inside the core |
+| `cinim_stream_busy_seconds_total` | time the workers spent handling frames and kicks, summed; its rate divided by `cinim_stream_workers` is the share of the time the pool is busy (near 1: it is the bottleneck) |
+| `cinim_stream_pushed_steps_total`, `cinim_stream_resent_frames_total`, `cinim_stream_requeued_steps_total`, `cinim_stream_send_failures_total`, `cinim_stream_dropped_peers_total{reason}` | steps pushed; frames sent again; steps taken back from a controller that went away; refusals of the socket; controllers dropped (`replaced` by a newer session, or `silent`) |
 | `cicd_process_rss_bytes{service="core"}` | memory of the core itself |
 
 Details per component: `GET /api/v1/components`. The totals of a step (peak memory, CPU seconds, number of OOM kills) are written to its

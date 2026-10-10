@@ -62,6 +62,14 @@ suite "RUN-016 push channel: the frame envelope":
               frame("", "x", "y", id = 0xFFFFFFFFFFFF'u64, ack = 1)]:
       let g = decodeFrame(encodeFrame(f))
       check g.isSome and g.get == f
+  test "the spreading key is optional: a frame without one is the same bytes as before, a frame with one carries it":
+    let plain = encodeFrame(frame("s", "ping", "abc", id = 1))
+    check decodeFrame(plain).get.key == ""
+    let keyed = frame("s", "controller.report", "abc", id = 1, key = "cinim-001-acme")
+    let back = decodeFrame(encodeFrame(keyed))
+    check back.isSome and back.get == keyed and back.get.key == "cinim-001-acme"
+    check encodeFrame(keyed).startsWith(plain[0 ..< plain.len - 3 - 0][0 .. 24])      # the same head
+    check decodeFrame(encodeFrame(keyed) & "x").isNone                                # nothing after the key
   test "anything that is not a frame is refused, never trusted":
     check decodeFrame("").isNone
     check decodeFrame("\x02garbage").isNone

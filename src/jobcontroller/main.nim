@@ -43,6 +43,7 @@ type
     inbox: Inbox                     ## the numbered frames of the core applied so far
     backlog: seq[PollResponse]       ## work pushed since the last report, applied with the next answer
     session: string                  ## our session id
+    key: string                      ## our namespace: the core spreads frames over its workers by it, so every frame of ours carries it
     reportNo: uint64
     lastGate: GateState              ## the gate as the core last said it (a bare "heard you" answer does not repeat it)
     wake: bool                       ## the core asked for our state again (`resync`)
@@ -70,7 +71,8 @@ proc exchange(p: var Push; sessionId: string; req: PollRequest): PollResponse =
   let bytes = Protobuf.encode(req)
   var payload = newString(bytes.len)
   if bytes.len > 0: copyMem(addr payload[0], unsafeAddr bytes[0], bytes.len)
-  let report = frame(sessionId, "controller.report", payload, id = p.reportNo, ack = p.inbox.ackValue)
+  let report = frame(sessionId, "controller.report", payload, id = p.reportNo, ack = p.inbox.ackValue, key = req.namespace)
+  p.key = req.namespace
   p.wake = false
   if not p.conn.sendFrame(report): raise newException(IOError, "the report could not be queued")
   let deadline = epochTime() + 8.0
@@ -114,7 +116,7 @@ proc waitPushed(p: var Push; ms: int): bool =
       let w = p.absorb(got.get)
       if w.isSome:
         p.backlog.add w.get
-        discard p.conn.sendFrame(frame(p.session, "ping", ack = p.inbox.ackValue))     # acknowledged at once, so that it is not sent again
+        discard p.conn.sendFrame(frame(p.session, "ping", ack = p.inbox.ackValue, key = p.key))     # acknowledged at once, so that it is not sent again
         return true
       if p.wake: return true
 
