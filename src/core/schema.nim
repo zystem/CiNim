@@ -145,6 +145,8 @@ proc migrate*(c: var RqClient) =
       ("runs", "api_version", "INTEGER NOT NULL DEFAULT 1"),      # PIP-001, common/luaapi.nim: the version of the Lua host API the run was made with
       ("runs", "journal_tip", "TEXT NOT NULL DEFAULT ''"),        # T-03, core/journalchain.nim: the hash of the newest record of the run's journal
       ("run_journal", "hash", "TEXT NOT NULL DEFAULT ''"),        # the chain: SHA-256 of the previous hash and this record
+      ("runs", "step_table", "TEXT NOT NULL DEFAULT ''"),         # docs/parallel.md section 3.4: the table of step numbers, sent by the executor with the first lease
+      ("steps", "journal_seq", "INTEGER"),                       # the place of the step in the run journal; NULL: the same as ordinal (a step made before the tables)
       ("runs", "lease_attempt", "INTEGER NOT NULL DEFAULT 0"),    # RUN-008, core/runlease.nim: the attempt of the last lease of the run,
       ("runs", "lease_until", "INTEGER NOT NULL DEFAULT 0"),      # when it runs out (0: given back),
       ("runs", "lease_owner", "TEXT NOT NULL DEFAULT ''"),        # and to whom (the executor's id, for the operator)

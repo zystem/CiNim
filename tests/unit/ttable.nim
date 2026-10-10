@@ -1,7 +1,8 @@
 ## PIP-003 / docs/parallel.md section 3: the table of step numbers made by a pass of the script against a stub host, the `id` option of ci.job and Job:sh, and the limit
 ## of 200 steps. Pure: no core, no cluster.
 import std/[unittest, strutils, sequtils]
-import executor/[steptable, sandbox]
+import std/options
+import executor/[steptable, sandbox, journal, replay]
 
 const sequential = """
 return ci.pipeline({ main = function(run)
@@ -135,3 +136,52 @@ suite "PIP-005 what the pass needs of the host does not reach the script":
     var sb = newSandbox()
     check sb.run("return type(__ci_line)").value == "nil"
     check sb.run("return type(debug)").value == "nil"
+
+suite "PIP-003 the table as it is stored and the numbers of a run that goes on":
+  test "a table survives encoding and decoding, overflow included":
+    var t = assignBlocks(@[4, 4, 4, 9])
+    let s = encodeTable(t)
+    var back = decodeTable(s)
+    check back.isSome
+    check back.get.blocks == t.blocks
+    check back.get.numberOf(4, 1) == t.numberOf(4, 1) and back.get.numberOf(9, 0) == t.numberOf(9, 0)
+  test "garbage or a table of rules this build does not know is not a table":
+    check decodeTable("").isNone
+    check decodeTable("not json").isNone
+    check decodeTable("{\"v\":99,\"b\":[]}").isNone
+    check decodeTable("{\"v\":1,\"b\":[[1,2]]}").isNone
+  test "the numbering of a run gives each step the number of its place and instance, in the order the steps are made":
+    var n = newNumbering(assignBlocks(@[10, 20, 20, 30]))
+    n.onSite("job_sh", 10)
+    check n.lastNo == 0
+    n.onSite("job_sh", 20)
+    check n.lastNo == 1
+    n.onSite("job_sh", 20)
+    check n.lastNo == 2
+    n.onSite("job_sh", 30)
+    check n.lastNo == 11            # after the block of the line 20 (10 numbers)
+  test "only steps are numbered: another host call leaves the number as it was":
+    var n = newNumbering(assignBlocks(@[5]))
+    n.onSite("now", 3)
+    check n.lastNo == -1
+    n.onSite("job_sh", 5)
+    check n.lastNo == 0
+  test "a replay of the same script goes through the same numbers":
+    let script = """
+      ci.job({image = "a"}, function(j)
+        for i = 1, 3 do j:sh("x" .. i) end
+        j:sh("tail")
+      end)"""
+    let table = buildTable(script).table
+    var numbers: seq[int]
+    for round in 1 .. 2:
+      var sb = newSandbox()
+      var jr: Journal
+      var n = newNumbering(table)
+      var got: seq[int]
+      let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = (got.add n.lastNo; some("0\n"))
+      let r = replay.execute(sb, jr, script, host, onSite = proc (seq: int; kind: string; line: int) = n.onSite(kind, line))
+      check r.status == esDone
+      if round == 1: numbers = got
+      else: check got == numbers
+    check numbers == @[0, 1, 2, 10]

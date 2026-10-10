@@ -5,7 +5,7 @@ import std/[os, options, strutils, times, sequtils]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/zmqcurve
-import executor/[sandbox, journal, replay]
+import executor/[sandbox, journal, replay, steptable]
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -37,7 +37,7 @@ proc toJournal(entries: seq[JournalEntry]): Journal =
     else:
       discard result.append(e.kind, cast[string](e.payload), cast[string](e.result))
 
-type Leased = tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)], apiVersion: int]
+type Leased = tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)], apiVersion: int, stepTable: string]
 
 proc leaseAny(s: ZConnection): Option[Leased] =
   let resp = s.rpc(ExecutorRequest(header: Header(protocol: 1),
@@ -46,17 +46,30 @@ proc leaseAny(s: ZConnection): Option[Leased] =
   if resp.body.kind != ExecutorResponseBodyKind.lease: return none(Leased)
   let g = resp.body.lease
   some (g.run_id, g.lease_token, g.script, toJournal(g.journal), g.params.mapIt((it.key, it.value)),
-        (if g.api_version == 0: 1 else: int(g.api_version)))     # a core from before the versions: version 1
+        (if g.api_version == 0: 1 else: int(g.api_version)),     # a core from before the versions: version 1
+        g.step_table)
 
-proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: seq[(string, string)]; apiVersion: int) =
+proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: seq[(string, string)]; apiVersion: int; stepTable: string) =
   var sb = newSandbox(apiVersion = apiVersion)         # the host API of the version the run was made with (PIP-001)
   var jj = j
   var lostLease = ""          # RUN-008: another executor has the run now; this one stops and says nothing more about it
+  # the numbers of the steps (docs/parallel.md section 3): the table the core has kept, or one made now by a pass of the script and sent to the core
+  var prep = prepare(script, params, apiVersion, stepTable)
+  if prep.refused:
+    discard s.rpc(ExecutorRequest(header: Header(protocol: 1),
+      body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.finish,
+        finish: FinishRun(run_id: runId, state: RUN_STATE_FAILED, message: prep.message, code: prep.code, lease_token: token))))
+    echo "executor: run ", runId, " refused: ", prep.code
+    return
+  if prep.toSend.len > 0:
+    discard s.rpc(ExecutorRequest(header: Header(protocol: 1),
+      body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.call,
+        call: HostCall(run_id: runId, lease_token: token, seq: 0, kind: "table", payload: cast[seq[byte]](prep.toSend)))))
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
     let resp = s.rpc(ExecutorRequest(header: Header(protocol: 1),
       body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.call,
-        call: HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind,
-                        payload: cast[seq[byte]](payload)))))
+        call: HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind, payload: cast[seq[byte]](payload),
+                        numbered: kind == "job_sh" and prep.numbering.lastNo >= 0, step_no: uint32(max(prep.numbering.lastNo, 0))))))
     if resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "lease_lost":
       lostLease = resp.body.failure.detail
       return none(string)       # as if suspended: the run goes no further here and nothing is written about it
@@ -67,7 +80,8 @@ proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: s
     let r = resp.body.result
     if r.suspended: return none(string)
     some(cast[string](r.result))
-  let r = replay.execute(sb, jj, script, host, runId = runId, params = params)
+  let r = replay.execute(sb, jj, script, host, runId = runId, params = params,
+                         onSite = proc (seq: int; kind: string; line: int) = prep.numbering.onSite(kind, line))
   if lostLease.len > 0:
     echo "executor: run ", runId, ": the lease is lost (", lostLease, "); left to its new holder"
     return
@@ -101,9 +115,9 @@ proc main() =
     if leased.isNone:
       sleep 1000
       continue
-    let (runId, token, script, j, params, apiVersion) = leased.get
+    let (runId, token, script, j, params, apiVersion, stepTable) = leased.get
     try:
-      runOnce(core, runId, token, script, j, params, apiVersion)
+      runOnce(core, runId, token, script, j, params, apiVersion, stepTable)
     except CatchableError as e:
       stderr.writeLine "executor: run " & runId & " crashed: " & e.msg
       try: core.close() except CatchableError: discard       # a half-finished request/reply may be pending on this socket

@@ -79,7 +79,7 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
       lua_settop(co, 0)
       if kind notin hostKinds:
         return failed("script_error", "unknown host call '" & kind & "'")
-      if onSite != nil and line > 0: onSite(seq, kind, line)
+      if onSite != nil: onSite(seq, kind, line)          # line 0: the host call has none (a step without one is numbered from the overflow)
       var res: string
       if seq < j.entries.len:
         let e = j.entries[seq]

@@ -112,5 +112,49 @@ suite "RUN-009 the conductor":
       p.terminate()
       check p.waitForExit(15000) == 0
       p.close()
+    proc finishStep(run: string; ordinal: int) =
+      discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ? AND ordinal = ?", run, ordinal]])
+      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: run, seq: uint32(ordinal), attempt: 1),
+                                                         state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
+
+    proc pendingOrdinals(run: string): seq[int] =
+      let v = c.query(%*[["SELECT ordinal FROM steps WHERE run_id = ? AND state = 'PENDING' ORDER BY ordinal", run]])["results"][0]{"values"}
+      if v != nil:
+        for row in v: result.add row[0].getInt
+
+    test "PIP-003 the steps of a run get the numbers of its table, not their places in the journal, and the run goes to its end":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t6")
+      let script = "ci.job({image='a'}, function(j)\n  for i = 1, 3 do j:sh('x' .. i) end\n  j:sh('tail')\nend)"
+      let r = co.createRun("p", script, "t1", o.profile)
+      var seen: seq[int]
+      let deadline = epochTime() + 90
+      while epochTime() < deadline and stateOf(r) == "RUNNING":
+        for n in pendingOrdinals(r):
+          if n notin seen:
+            seen.add n
+            finishStep(r, n)
+        sleep 200
+      check stateOf(r) == "SUCCEEDED"
+      check seen == @[0, 1, 2, 10]                      # the loop has the block 0..9, the step after it starts at 10
+      check c.query(%*[["SELECT step_table FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr.startsWith("{\"v\":1")
+      check c.query(%*[["SELECT group_concat(seq) FROM run_journal WHERE run_id = ? AND seq >= 0", r]])["results"][0]["values"][0][0].getStr == "0,1,2,3"
+      stop p
+    test "PIP-006 a script with more than 200 steps ends before it makes a single one, with step_limit":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t7")
+      let r = co.createRun("p", "ci.job({image='a'}, function(j) for i = 1, 201 do j:sh('x') end end)", "t1", o.profile)
+      check waitState(r, "FAILED")
+      check c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "step_limit"
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
+      stop p
+    test "PIP-018 an id used twice ends the run with duplicate_id before any step is made":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t8")
+      let r = co.createRun("p", "ci.job({image='a'}, function(j)\n j:sh('x', {id='same'})\n j:sh('y', {id='same'})\nend)", "t1", o.profile)
+      check waitState(r, "FAILED")
+      check c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "duplicate_id"
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
+      stop p
     stopServers.store(true)
     joinThread(th)

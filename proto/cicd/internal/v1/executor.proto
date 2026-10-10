@@ -39,6 +39,8 @@ message HostCall {
   uint64 seq = 3;                    // the journal position this call would occupy
   string kind = 4;
   bytes payload = 5;
+  bool numbered = 6;                 // the executor gave this step a number from its table (docs/parallel.md section 3): `step_no`; false: an executor from before the tables, the number is `seq`
+  uint32 step_no = 7;                // the number of the step (StepRef.seq); need not be `seq`, the place in the journal
 }
 
 message HostResult {
@@ -84,6 +86,7 @@ message LeaseGranted {
                                        // pipeline_bundles/blob storage yet, spec 8.2 pipeline_bundles.digest)
   map<string, string> params = 7;    // the launch parameters given when the run was created (PIP-012), as text; the script's declarations type and complete them
   uint32 api_version = 8;            // the version of the Lua host API the run was made with: the executor replays it with the prelude of that version
+  string step_table = 9;              // the table of step numbers of the run (executor/steptable.nim) as the executor sent it with its first lease; "" until it has
   string run_id = 6;                  // which run this lease is for (echoes a non-empty request, or
                                        // resolves "any available run")
 }

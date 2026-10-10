@@ -8,7 +8,7 @@ import posix
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, stream, streamstate, runpipe]
-import executor/[sandbox, journal, replay]
+import executor/[sandbox, journal, replay, steptable]
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -59,15 +59,29 @@ proc runMode() =
   let g = Protobuf.decode(cast[seq[byte]](first.get.payload), LeaseGranted)
   let runId = g.run_id
   let token = g.lease_token
-  var sb = newSandbox(apiVersion = (if g.api_version == 0: 1 else: int(g.api_version)))
+  let apiVersion = if g.api_version == 0: 1 else: int(g.api_version)
+  var sb = newSandbox(apiVersion = apiVersion)
   var jj = toJournal(g.journal)
   var lostLease = ""
-  let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
+  # the numbers of the steps (docs/parallel.md section 3): the table the core has kept, or one made now by a pass of the script and sent to the core
+  var prep = prepare(g.script, g.params.mapIt((it.key, it.value)), apiVersion, g.step_table)
+  if prep.refused:
+    # more than 200 steps, or an id used twice: an error for the author, before anything is made
+    send(pkFinish, wireString(Protobuf.encode(FinishRun(run_id: runId, state: RUN_STATE_FAILED, message: prep.message, code: prep.code, lease_token: token))))
+    quit(0)
+  proc callCore(seq: int; kind, payload: string; numbered = false; stepNo = 0): ExecutorResponse =
     send(pkCall, wireString(Protobuf.encode(HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind,
-                                                       payload: cast[seq[byte]](payload)))))
+                                                       payload: cast[seq[byte]](payload), numbered: numbered, step_no: uint32(stepNo)))))
     let back = readPipeFd(0)
     if back.isNone or back.get.kind != pkReply: quit(2)         # the supervisor is gone: nothing more to do here
-    let resp = Protobuf.decode(cast[seq[byte]](back.get.payload), ExecutorResponse)
+    Protobuf.decode(cast[seq[byte]](back.get.payload), ExecutorResponse)
+  if prep.toSend.len > 0:
+    let sent = callCore(0, "table", prep.toSend)
+    if sent.body.kind == ExecutorResponseBodyKind.failure and sent.body.failure.code == "lease_lost":
+      send(pkLost, sent.body.failure.detail)
+      quit(0)
+  let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
+    let resp = callCore(seq, kind, payload, numbered = kind == "job_sh" and prep.numbering.lastNo >= 0, stepNo = max(prep.numbering.lastNo, 0))
     if resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "lease_lost":
       lostLease = resp.body.failure.detail
       return none(string)
@@ -76,7 +90,8 @@ proc runMode() =
     if resp.body.kind != ExecutorResponseBodyKind.result: return none(string)
     if resp.body.result.suspended: return none(string)
     some(cast[string](resp.body.result.result))
-  let r = replay.execute(sb, jj, g.script, host, runId = runId, params = g.params.mapIt((it.key, it.value)))
+  let r = replay.execute(sb, jj, g.script, host, runId = runId, params = g.params.mapIt((it.key, it.value)),
+                         onSite = proc (seq: int; kind: string; line: int) = prep.numbering.onSite(kind, line))
   if lostLease.len > 0:
     send(pkLost, lostLease)
   elif r.status == esSuspended:

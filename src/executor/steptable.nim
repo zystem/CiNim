@@ -1,7 +1,7 @@
 ## The table of step numbers (docs/parallel.md section 3): before a run is led, the script is run once against a stub host and the places where steps are made are
 ## recorded; the places are numbered in the order in which they were first met, a place that made one step gets one number and a place that made several gets a
 ## block with room to spare. A step finds its number here when it is made. Pure but for the pass itself, which runs the script in a sandbox like any other.
-import std/[options, strutils]
+import std/[options, strutils, json, tables]
 import sandbox, journal, replay
 
 const
@@ -90,3 +90,57 @@ proc buildTable*(script: string; params: seq[(string, string)] = @[]; apiVersion
     else:
       result.partial = true
       result.code = r.code
+
+# ------------------------------------------------------------------ the table as it is stored, and the numbers of a run that goes on
+
+const tableRules = 1                 ## the version of the rules that make a table; a table of other rules is not read
+
+proc encodeTable*(t: StepTable): string =
+  ## the text the core keeps with the run (`runs.step_table`): a run that is led again, by whichever executor, uses this table and not a new one
+  var b = newJArray()
+  for x in t.blocks: b.add %[x.line, x.start, x.size, x.observed]
+  $(%*{"v": tableRules, "b": b})
+
+proc decodeTable*(s: string): Option[StepTable] =
+  if s.len == 0: return none(StepTable)
+  try:
+    let j = parseJson(s)
+    if j.kind != JObject or j{"v"}.getInt != tableRules or j{"b"}.kind != JArray: return none(StepTable)
+    var t = StepTable(overflowNext: overflowBase)
+    for x in j["b"]:
+      if x.kind != JArray or x.len != 4: return none(StepTable)
+      t.blocks.add Block(line: x[0].getInt, start: x[1].getInt, size: x[2].getInt, observed: x[3].getInt)
+    some(t)
+  except CatchableError:
+    none(StepTable)
+
+type Numbering* = object
+  ## the numbers of the steps of one execution of a script: told where each host call is made, it says the number of the step
+  table*: StepTable
+  counts: Table[int, int]
+  lastNo*: int                       ## the number of the step made last, -1 before the first
+
+proc newNumbering*(t: StepTable): Numbering = Numbering(table: t, lastNo: -1)
+
+proc onSite*(n: var Numbering; kind: string; line: int) =
+  ## to be called for every host call before it is dispatched, in the order of the calls, answered from the journal or not (`replay.execute`'s `onSite`)
+  if kind != "job_sh": return
+  let k = n.counts.getOrDefault(line, 0)
+  n.counts[line] = k + 1
+  n.lastNo = n.table.numberOf(line, k)
+
+type Prepared* = object
+  numbering*: Numbering
+  toSend*: string                    ## the table to send to the core before the first call ("" when the core already has it)
+  refused*: bool                     ## the pass proved the script wrong (more than 200 steps, a repeated id): the run ends with `code` and `message`
+  code*, message*: string
+
+proc prepare*(script: string; params: seq[(string, string)]; apiVersion: int; stored: string): Prepared =
+  ## What an executor does when it has been given a run: use the table the core has kept with it, and when there is none make it by a pass of the script.
+  let known = decodeTable(stored)
+  if known.isSome:
+    return Prepared(numbering: newNumbering(known.get))
+  let r = buildTable(script, params, apiVersion)
+  if not r.ok:
+    return Prepared(refused: true, code: r.code, message: r.message)
+  Prepared(numbering: newNumbering(r.table), toSend: encodeTable(r.table))

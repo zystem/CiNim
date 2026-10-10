@@ -32,6 +32,7 @@ var waitReasonSet: Atomic[bool]   ## some steps currently carry wait_reason = lo
 
 const
   maxFailMessage* = 2000
+  maxStepTable* = 64 * 1024        ## the table of step numbers of a run: 200 places at most, a few KB
   maxAdmissionCandidates = 2000   ## the pending steps of one organisation looked at in one poll: 200 steps a run, at most pod_limit active runs
 
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
@@ -291,14 +292,14 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
     # as a different call than the one in the journal and fails script_nondeterminism - steps.command
     # alone is missing the job key and image, so join jobs for the key.
-    let pl = c.query(%*[["SELECT j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command " &
+    let pl = c.query(%*[["SELECT j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command, COALESCE(s.journal_seq, s.ordinal) " &
       "FROM steps s JOIN jobs j ON j.id = s.job_id WHERE s.run_id = ? AND s.ordinal = ?", t.step.run_id, int(t.step.seq)]])
     let plv = pl["results"][0]{"values"}
     if plv != nil and plv.len > 0:
       try:
         # the step is closed out and its result goes into the journal, chained, in one transaction; if the record is already there
         # (a retried poll) nothing is done again
-        discard c.appendRow(t.step.run_id, int(t.step.seq), "job_sh", plv[0][0].getStr, res, alongside = %*[
+        discard c.appendRow(t.step.run_id, plv[0][1].getInt, "job_sh", plv[0][0].getStr, res, alongside = %*[
           ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
            protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
            t.step.run_id, int(t.step.seq), attempt]])
@@ -643,9 +644,10 @@ proc grantLease*(c: var RqClient; master, candidate, owner: string; versions: se
     discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = 'journal_corrupt', fail_message = ?, lease_until = 0 " &
       "WHERE id = ? AND state = ?", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsRunning)]])
     return none(LeaseGranted)
-  let vr = c.query(%*[["SELECT api_version FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
+  let vr = c.query(%*[["SELECT api_version, step_table FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
   some LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: candidate,
                     api_version: uint32(if vr != nil and vr.len > 0: vr[0][0].getInt(1) else: 1),
+                    step_table: (if vr != nil and vr.len > 0: vr[0][1].getStr else: ""),
                     script: loadScript(c, candidate), journal: journalEntries(v.rows),
                     params: runParams(c, candidate).mapIt(ParamsEntry(key: it[0], value: it[1])))
 
@@ -729,6 +731,14 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     discard c.appendRow(req.run_id, int(req.seq), "params", json, "")
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
+  if req.kind == "table":
+    # the table of step numbers (docs/parallel.md section 3.4), made by the executor before the run's first call: kept once, the first one stays
+    if req.payload.len > maxStepTable:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "the table of step numbers is too large")))
+    discard c.execute(%*[["UPDATE runs SET step_table = ? WHERE id = ? AND step_table = ''", cast[string](req.payload), req.run_id]])
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind != "job_sh":
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "unknown host call " & req.kind)))
@@ -775,9 +785,12 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
   let jr = c.query(%*[["SELECT id FROM jobs WHERE run_id = ? AND key = ?", req.run_id, jobKey]])
   let jobId = jr["results"][0]{"values"}[0][0].getStr
   # OR IGNORE: the same call twice (two executors met the same run during a rollout, or one asked again after a lost answer) is one step, not a crash of the core
-  discard c.execute(%*[["INSERT OR IGNORE INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, profile, queued_at) " &
-    "VALUES (?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
-    schema.newId(), req.run_id, jobId, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, profile, now]])
+  # the number of the step is the one the executor gave it from its table (an executor from before the tables sends none: the number is then the place); the place in the
+  # journal, where the step's result is written, is `seq`
+  let number = if req.numbered: int(req.step_no) else: int(req.seq)
+  discard c.execute(%*[["INSERT OR IGNORE INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, profile, queued_at) " &
+    "VALUES (?, ?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
+    schema.newId(), req.run_id, jobId, number, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, profile, now]])
   kickProfile(profileId)       # the push channel hands it to the organisation's controller at once
   giveBackLease(c, req.run_id, caller.attempt)       # the executor suspends the run: it can be leased again as soon as the step is done
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(

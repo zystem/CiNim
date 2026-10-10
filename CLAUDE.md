@@ -54,4 +54,5 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 4. Artifacts: a sweeper for retention and for abandoned multipart uploads, quotas per organisation, artifacts between runs, caches (DAT-004).
 5. TLS and authentication of the registry and one registry name for the images; a deploy step; reproducible pinning; run cancellation (`concurrency: cancel_previous`).
 6. UI tests (layer 1: render the Nimja templates and parse them with `nimquery`; Hurl against the server).
-7. The 72-hour soak on the second test cluster: summarise with `tools/soak/summarize.sh` and record in `docs/specification.md` A.12 and `docs/threat-model.md` T-27.
+7. Compatibility code to delete when its condition is met: `docs/compat.md` (the list is the memory; strike a line in the commit that deletes the code).
+8. The 72-hour soak on the second test cluster: summarise with `tools/soak/summarize.sh` and record in `docs/specification.md` A.12 and `docs/threat-model.md` T-27.
