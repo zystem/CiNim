@@ -74,7 +74,7 @@ proc exchange(p: var Push; sessionId: string; req: PollRequest): PollResponse =
   let bytes = Protobuf.encode(req)
   var payload = newString(bytes.len)
   if bytes.len > 0: copyMem(addr payload[0], unsafeAddr bytes[0], bytes.len)
-  let report = frame(sessionId, "controller.report", payload, id = p.reportNo, ack = p.inbox.ackValue, key = req.namespace)
+  var report = frame(sessionId, "controller.report", payload, id = p.reportNo, ack = p.inbox.ackValue, key = req.namespace)
   p.key = req.namespace
   p.wake = false
   if not p.conn.sendFrame(report): raise newException(IOError, "the report could not be queued")
@@ -85,6 +85,8 @@ proc exchange(p: var Push; sessionId: string; req: PollRequest): PollResponse =
     let f = got.get
     let w = p.absorb(f)
     if f.kind == "resync":
+      # the core forgot this session: the numbering of its frames starts again (absorb reset ours), so the report goes again with the acknowledgement that is true now
+      report = frame(sessionId, "controller.report", payload, id = p.reportNo, ack = p.inbox.ackValue, key = req.namespace)
       discard p.conn.sendFrame(report)
       continue
     if f.re == p.reportNo:

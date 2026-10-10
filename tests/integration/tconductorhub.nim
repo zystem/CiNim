@@ -227,6 +227,19 @@ suite "RUN-016 conductors on the push channel":
       drainPassSeconds = 10.0
       keep.close()
       extra.close()
+    test "a hello from a session the core does not know, with an acknowledgement above 0, is told to start again, and is welcomed when it does":
+      let o = newOrg()
+      let r = co.createRun("p", "return 1", "t1", o.profile)
+      var cl = connectStream(serverAddr, corePub, clientKeys)
+      let ses = "cd-rs-" & sfx
+      check cl.sendFrame(hello(ses, "c-rs", o.ns, 3, ack = 4))
+      check cl.nextKind("resync", 8000).isSome
+      check cl.nextKind("conductor.lease", 1500).isNone               # nothing was leased to a conductor that does not count right
+      check cl.sendFrame(hello(ses, "c-rs", o.ns, 3, ack = 0, fid = 2))
+      check cl.nextKind("conductor.welcome").isSome
+      let l = cl.nextKind("conductor.lease")
+      check l.isSome and decodeLeaseGranted(l.get.payload).run_id == r
+      cl.close()
     test "the metrics count the conductors' frames and the runs pushed":
       let m = renderHubMetrics()
       check "cinim_stream_frames_total{direction=\"in\",kind=\"hello\"}" in m

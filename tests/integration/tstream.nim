@@ -226,5 +226,38 @@ suite "RUN-016 the push channel":
       check not ("cinim_stream_pushed_steps_total 0\n" in m)
       check not ("cinim_stream_frame_wait_seconds_count 0\n" in m)
       check not ("cinim_stream_kick_wait_seconds_count 0\n" in m)
+    test "a report from a session the core does not know, with an acknowledgement above 0, is told to start again (resync), and is accepted when it does":
+      # the core lost the controller's record (a restart, a replaced session) while the controller still counts the frames it had: numbers would start again from 1 and
+      # be taken for repeats, and the steps in them would be acknowledged without being seen
+      let o = newOrg()
+      let r = co.createRun("p", "return 1", "t1", o.profile)
+      c.addStep(r, o.profile, 1)
+      var cl = connectStream(serverAddr, corePub, clientKeys)
+      check cl.sendFrame(report("jc-9100.5", o.ns, 10, ack = 5, id = 7))
+      let answer = cl.receive(8000)
+      check answer.isSome and answer.get.kind == "resync"
+      check c.query(%*[["SELECT state FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getStr == "PENDING"      # nothing was claimed for it
+      check cl.sendFrame(report("jc-9100.5", o.ns, 10, ack = 0, id = 8))
+      let w = cl.nextStarts()
+      check w.isSome and w.get.starts == @[r]
+      cl.close()
+    test "an older session of an organisation does not displace the newer one: it is heard and gets no work":
+      let o = newOrg()
+      let r = co.createRun("p", "return 1", "t1", o.profile)
+      c.addStep(r, o.profile, 1)
+      var fresh = connectStream(serverAddr, corePub, clientKeys)
+      var old = connectStream(serverAddr, corePub, clientKeys)
+      check fresh.sendFrame(report("jc-9300.5", o.ns, 10))
+      let first = fresh.nextStarts()
+      check first.isSome and first.get.starts == @[r]
+      check old.sendFrame(report("jc-9200.5", o.ns, 10))            # the controller that is being replaced is still reporting
+      let heard = old.receive(8000)
+      check heard.isSome and heard.get.kind == "ping" and heard.get.re == 1
+      check old.nextStarts(1500).isNone
+      # the newer session is still the one the core knows: a ping of it is not answered with resync
+      check fresh.sendFrame(frame("jc-9300.5", "ping", ack = first.get.id, key = o.ns))
+      check fresh.receive(1500).isNone or fresh.receive(100).isNone
+      fresh.close()
+      old.close()
     stopServers.store(true)
     joinThread(th)

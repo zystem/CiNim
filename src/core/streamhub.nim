@@ -127,11 +127,26 @@ proc dropPeer(h: var Hub; session: string; reason: string) =
 
 proc pushTo(h: var Hub; p: var Peer)
 
+func sessionStamp(session: string): float =
+  ## a controller names its session `jc-<time it started>`; the later session is the newer controller. 0 for a name of another shape.
+  if not session.startsWith("jc-"): return 0.0
+  try: parseFloat(session[3 .. ^1]) except ValueError: 0.0
+
 proc onReport(h: var Hub; routingId: string; f: StreamFrame) =
   var req: PollRequest
   try: req = decodeReport(f.payload)
   except CatchableError: return
   let known = f.session in h.peers
+  if not known and f.ack > 0:
+    # The core has no record of this session but the controller counts frames it had received (the core was restarted, or dropped the session): the numbers of the core's
+    # frames start again from 1 and would be taken for repeats, and a step in one would be acknowledged without being seen. It is told to start again.
+    h.emit(routingId, frame("core", "resync"))
+    return
+  for session, other in h.peers:
+    # a controller that is being replaced goes on reporting until its Pod is gone: it must not take the place of the newer one
+    if session != f.session and other.namespace == req.namespace and sessionStamp(other.session) > sessionStamp(f.session):
+      h.emit(routingId, frame("core", "ping", re = f.id))
+      return
   var p = if known: h.peers[f.session] else: Peer(session: f.session, outbox: initOutbox())
   let moved = known and p.routingId != routingId          # the same controller on a new connection
   p.routingId = routingId
@@ -230,6 +245,11 @@ proc onHello(h: var Hub; routingId: string; f: StreamFrame) =
     h.emit(routingId, frame("core", "conductor.welcome", "unauthorized", re = f.id))
     h.conds.del f.session
     return
+  if f.session notin h.conds and f.ack > 0:
+    # the core has no record of this session but the conductor counts leases it had received (the core was restarted): the numbers of the leases start again from 1 and
+    # would be taken for repeats, and a run in one would be acknowledged without being started (the lease then runs out a minute later). It is told to start again.
+    h.emit(routingId, frame("core", "resync"))
+    return
   let known = f.session in h.conds
   var c = if known: h.conds[f.session] else: Cond(session: f.session, outbox: initOutbox())
   let moved = known and c.routingId != routingId
@@ -258,7 +278,7 @@ proc onHello(h: var Hub; routingId: string; f: StreamFrame) =
   let creditBefore = c.credit.available
   c.credit.set(if c.draining: 0 else: int(hello.free_places))
   c.idleSince = if hello.held_runs.len > 0: 0.0 elif c.idleSince == 0.0: epochTime() else: c.idleSince
-  discard registryTouch("conductor", c.id, epochTime(), @[("runs", $hello.held_runs.len)])
+  discard registryTouch("conductor", c.namespace & "/" & c.id, epochTime(), @[("runs", $hello.held_runs.len)])
   h.emit(routingId, frame("core", "conductor.welcome", "", re = f.id))
   # a hello that only says "still here, same places" asks the database nothing: the kicks and the once-a-second pass find runs for it
   if not known or moved or c.credit.available > creditBefore: h.pushLeases(c)
