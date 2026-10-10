@@ -239,6 +239,10 @@ proc onHello(h: var Hub; routingId: string; f: StreamFrame) =
   var hello: ConductorHello
   try: hello = decodeHello(f.payload)
   except CatchableError: return
+  if hello.api_versions.len == 0:
+    h.emit(routingId, frame("core", "conductor.welcome", "executor_too_old", re = f.id))        # it names no version of the Lua API it can run
+    h.conds.del f.session
+    return
   let wrong = hello.conductor_id.len == 0 or hello.namespace.len == 0 or
               not constantTimeEqual(hello.credential, conductorCredential(h.master, hello.namespace, hello.conductor_id))
   if wrong:

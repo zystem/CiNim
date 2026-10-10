@@ -1,6 +1,6 @@
 # Deploying CiNim
 
-A shard is one Helm release of the chart `deploy/charts/cinim-shard`. The chart installs the core, the pipeline executor, the rights for
+A shard is one Helm release of the chart `deploy/charts/cinim-shard`. The chart installs the core, the rights for
 creating organisations (SHD-007) and the Ingress of the shard, and brings rqlite and the log circuit (two VictoriaLogs nodes and vlagent) as
 subcharts from their official charts: one `helm install`, no helmfile. In the `multi` mode the router of the cluster
 (`deploy/charts/cinim-router`) is a second, separate release, installed once per cluster.
@@ -14,7 +14,7 @@ helm dependency build deploy/charts/cinim-shard     # downloads the subcharts in
 ```
 
 The transport keys (D-24) are a Secret with four Z85 files: `core.pub`, `core.key`, `client.pub`, `client.key`. The core gets the first two,
-the executor the other two and `core.pub`. `tools/zmq/gen_curve_keys.sh` makes a test pair; a real installation issues its own keys.
+the controllers and conductors of the organisations the other two and `core.pub`. `tools/zmq/gen_curve_keys.sh` makes a test pair; a real installation issues its own keys.
 
 ```bash
 kubectl create namespace cinim-001
@@ -131,7 +131,7 @@ helm install registry twuni/docker-registry -n registry --create-namespace -f de
 tools/image/build_core.sh registry.example.com/cinim:dev && docker push registry.example.com/cinim:dev
 ```
 
-The image is built by `tools/image/build_core.sh`: the core (with TLS) and the executor are static binaries in a `scratch` image of about 8 MB
+The image is built by `tools/image/build_core.sh`: the core (with TLS) is a static binary in a `scratch` image of about 8 MB
 with the CA certificates, so the image needs no libraries (`deploy/core/Dockerfile`). The image of the job controller is built by
 `tools/image/build_controller.sh <image:tag>` (`deploy/controller/Dockerfile`): the static controller, with the Kubernetes C client, libcurl,
 OpenSSL, libzmq, libsodium and SQLite linked in, and the static shim that it hands to every step Pod, in a `scratch` image of about 8 MB.
@@ -217,13 +217,13 @@ With `deploy.kubeApiServer: true` the core makes that policy in the namespace of
 (the chart adds it to the core's ClusterRole and to its admission policy only then, T-45). On a cluster without Cilium leave the flag off and list the API server's address in `deploy.egress`. The Pods of the
 other profiles stay closed: the policy selects the label.
 
-The example is `deploy/examples/self-build`: `deployer.yaml` is a ServiceAccount that may only patch the Deployments `cinim-core` and `cinim-executor` of the shard, and the fourth step of
+The example is `deploy/examples/self-build`: `deployer.yaml` is a ServiceAccount that may only patch the Deployment `cinim-core` of the shard, and the fourth step of
 `self-build.lua` (`DEPLOY=true`) uses its token, kept as the step secrets `DEPLOY_TOKEN` and `DEPLOY_CA`, to give both the new image and the core the new controller image. The controllers of the organisations that
 exist are not changed by that (the core never changes an object it has made): delete the Deployment `cinim-job-controller` of an organisation and the next pass of the reconciliation makes it again from the new image.
 
 Checked on the TESTING cluster, through the API alone: with `deploy.enabled` and `deploy.kubeApiServer` the core made `allow-deploy-kube-apiserver` in the namespace of a new organisation; the run of `self-build.lua` with `BUILD=false`,
-`DEPLOY=true` and the tag of the previous build ran the fourth step as an ordinary Pod (non-root), the step fetched `DEPLOY_TOKEN` and `DEPLOY_CA`, patched the executor and the core, and the cluster ran the other images a few seconds
-later (the core's `CINIM_CONTROLLER_IMAGE` too). The run was then ended by the older executor, which replayed the script and did not know the profile: a rollout to a version that does not know what the script uses ends the run, so a pipeline that
+`DEPLOY=true` and the tag of the previous build ran the fourth step as an ordinary Pod (non-root), the step fetched `DEPLOY_TOKEN` and `DEPLOY_CA`, patched the core, and the cluster ran the other image a few seconds
+later (the core's `CINIM_CONTROLLER_IMAGE` and `CINIM_CONDUCTOR_IMAGE` too). The run was then ended by the older executor, which replayed the script and did not know the profile: a rollout to a version that does not know what the script uses ends the run, so a pipeline that
 rolls out its own platform should not be replayed by an older executor. The whole chain, in one run (`BUILD` and `DEPLOY` both true): the clone of the repository's main branch, the two Kaniko builds (the second from the cache of the first) and the deploy step took about five minutes with warm caches; all four steps succeeded, the core and the executor were then running the images that the run had built, and a pipeline of four steps (an ordinary step, a build step, an ordinary step) ran on them. The deploy step of the first attempt did not start: the init container of the volume refused a directory that a build step had made (the shim now leaves a directory that is already open). Not checked: a cluster without Cilium.
 
 ## CiNim builds itself
@@ -415,5 +415,5 @@ with the volumes and its record. `0` deletes it at once and a negative value nev
 `POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state
 volume and Deployment), the quota, the limit range, the network policies and, in the `multi` mode, the Ingress of the organisation (SHD-007);
 `DELETE` switches an organisation off and `DELETE ?purge=true` deletes it. The job controller runs from its own image, `<image.repository>-controller:<image.tag>` unless `controller.image` says otherwise.
-The chart expects `/core` and `/executor` in `image.repository`; no pipeline publishes the images by itself yet (`tools/image` builds them, see above).
+The chart expects `/core` in `image.repository`, the controller's and the conductor's images next to it; no pipeline publishes the images by itself yet (`tools/image` builds them, see above).
 A volume of the controller needs a StorageClass: set `controller.stateStorageClass` when the cluster has no default one.

@@ -35,7 +35,7 @@
     "organizations": {"type": "object", "properties": {"reconcileInterval": {"type": "integer", "minimum": 10}, "retention": {"type": "integer", "minimum": -1}, "purgeGrace": {"type": "integer", "minimum": 0}}},
     "network": {"type": "object", "properties": {"egress": {"enum": ["restricted", "open"]}, "ingress": {"enum": ["closed", "open"]}}},
     "controller": {"type": "object", "properties": {"image": {"type": "string"}, "stateStorageClass": {"type": "string"}}},
-    "conductor": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "image": {"type": "string"}}},
+    "conductor": {"type": "object", "properties": {"image": {"type": "string"}}},
     "admissionPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
   },
   "if": {"properties": {"mode": {"const": "multi"}}},

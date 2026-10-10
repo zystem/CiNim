@@ -78,6 +78,15 @@ suite "RUN-016 conductors on the push channel":
       check w.isSome and w.get.payload == "unauthorized" and w.get.re == 1
       check cl.nextKind("conductor.lease", 1500).isNone
       cl.close()
+    test "a conductor that names no version of the Lua API is refused as too old":
+      let o = newOrg()
+      var cl = connectStream(serverAddr, corePub, clientKeys)
+      let bare = frame("cd-v-" & sfx, "conductor.hello", encodeHello(ConductorHello(conductor_id: "c-v", namespace: o.ns,
+        credential: conductorCredential(master, o.ns, "c-v"), free_places: 5)), id = 1, key = o.ns)
+      check cl.sendFrame(bare)
+      let w = cl.nextKind("conductor.welcome")
+      check w.isSome and w.get.payload == "executor_too_old"
+      cl.close()
     test "the credential of another namespace, or of another conductor, is refused":
       let a = newOrg()
       let b = newOrg()

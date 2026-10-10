@@ -1,10 +1,10 @@
 # Pipeline conductors in the organisation's namespace (design)
 
 Requirements touched: RUN-004 (limits), RUN-008 (lease), RUN-009 (density), RUN-016 (liveness), PIP-003/004/006 (journal, replay, limits), SEC-007 (isolation of the pipeline logic), SEC-010 (rights in the cluster), SHD-008 (reconciliation), D-49 (the core is the source of settings), T-03 (journal tampering).
-**Terminology.** This component is called the *pipeline executor* in the specification and in the code (`src/executor`, `src/executorsvc`, `ExecutorChannel`, `LeaseRequest.executor_id`; RUN-008, RUN-009, SEC-007). The owner named it the **conductor** (in Russian, *дирижёр*). This design uses the new name; the specification and the code take it over when it is built.
-**Status: a design; phases 1 (the core), 2 (the conductor program) and 3 (the controller makes the conductors; off unless the shard has a conductor image) are built, see the "As built" sections; replacement of conductors and phases 4-5 are not.** The decisions are the owner's, taken on 2026-10-10 after a comparison with the competitors (`docs/prior-art-queues-sandboxes.md`). `docs/parallel.md` follows this document where the place of the conductor matters.
+**Terminology.** This component is called the *pipeline executor* in the specification and in the code (`src/executor`, `ExecutorChannel`, RUN-008, RUN-009, SEC-007; the service `src/executorsvc` and its channel on port 19741 are gone). The owner named it the **conductor** (in Russian, *дирижёр*). This design uses the new name; the specification and the code take it over when it is built.
+**Status: a design; phases 1 (the core), 2 (the conductor program) and 3 (the controller makes the conductors) are built and the shared executor service is removed, see the "As built" sections; phases 4-5 of the list in section 11 are not (the shared executor was part of phase 5).** The decisions are the owner's, taken on 2026-10-10 after a comparison with the competitors (`docs/prior-art-queues-sandboxes.md`). `docs/parallel.md` follows this document where the place of the conductor matters.
 
-## 1. Today
+## 1. Before (history; the shared executor service described here was removed on 2026-10-11, the conductors lead every run)
 
 * One **shared executor service** (`src/executorsvc`, a Deployment of the shard) serves **every organisation**; `LeaseRequest.run_id` empty means "the next run of any organisation".
 * It leads **one run at a time** (RUN-009 density is not built) and dials the core directly (ZeroMQ + CURVE, port 19741) with the shared client key.

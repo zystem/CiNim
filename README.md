@@ -19,7 +19,7 @@ section 17 of the specification; the sections of the specification describe the 
 |---|---|---|
 | core | `src/core` | scheduler, log collector (a proxy to vlagent), launch gate, REST API, `/metrics`; state in rqlite |
 | job controller | `src/jobcontroller` | creates and tracks step Pods (logic is separate from Kubernetes: `logic.nim` and `backend.nim`), state in sqlite |
-| executor | `src/executorsvc`, `src/executor` | Lua sandbox, journal, replay |
+| conductor | `src/conductor`, `src/executor` | Supervisor and run processes; Lua sandbox, journal, replay |
 | shim | `src/shim` | runs the step's command in the Pod: secret masking, log spool, metrics, timeout, events in the Pod log |
 | router | `src/router`, `deploy/charts/cinim-router` | the `multi` mode (SHD-006): a registry of organisations that the cores register with, a page with their availability and a JSON list; proxies nothing |
 | contracts | `proto/` | Protobuf, `buf lint`, compatibility tests |

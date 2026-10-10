@@ -22,7 +22,7 @@ Status values: **verified** (automated test exists), **partial**, **designed** (
 |:---|:---|:---|
 | Z0 Internet | browsers, SCM webhooks, API clients | none |
 | Z1 Edge and shared services | ingress, OCI plugin registry | authenticated users or none, no tenant data at rest |
-| Z2 Shard core | core (scheduler, collector, log-circuit module), executor workers, UI/API service, event service, log gateway, rqlite, vlagent, VictoriaLogs (two nodes) | platform-trusted |
+| Z2 Shard core | core (scheduler, collector, log-circuit module), the push channel hub, UI/API service, event service, log gateway, rqlite, vlagent, VictoriaLogs (two nodes) | platform-trusted |
 | Z3 Executor sandbox | Lua state per run inside a separate unprivileged process | **untrusted code**, deterministic host API only |
 | Z4 Profile namespace | job-controller, step Pods, shim | job-controller privileged in the namespace; step Pods untrusted |
 | Z5 Plugin containers | step plugins in step Pods | untrusted, capability-limited |
@@ -36,7 +36,7 @@ Status values: **verified** (automated test exists), **partial**, **designed** (
 | F2 Webhooks | SCM to event service | HTTPS, provider signature, delivery-id dedupe, timestamp window | |
 | F3 ControllerAttach | job-controller to scheduler | ZeroMQ DEALER/ROUTER (the push channel) with CURVE (D-24); the server key is pinned by the client, the shared `client` keypair identifies services until the bootstrap-token exchange (IAM-003) exists; outbound only | proto `controller.proto` |
 | F4 LogIngest, StepReport | shim to collector and scheduler | ZeroMQ CURVE with the shared `client` keypair (mounted as a Secret); the projected job token (SEC-010) is the intended identity and is **not checked yet** (T-08); batches carry the attempt number and a per-block checksum, stale attempts cannot touch the current one | `logs.proto`, `step.proto` |
-| F5 ExecutorChannel | executor to scheduler | ZeroMQ CURVE; lease token (RUN-008) | `executor.proto` |
+| F5 Conductor channel | conductor to core, on the push channel (port 19745) | ZeroMQ CURVE; the conductor's credential (IAM-003), lease token (RUN-008), every call checked against the conductor's organisation and lease | `executor.proto` |
 | F6 State | scheduler/core to rqlite | rqlite HTTP with authentication, TLS in cluster; strict writes | client must check top-level `error` |
 | F7 Logs | collector to vlagent to both VictoriaLogs nodes; gateway to the node picked by ClusterState | TLS with server verification plus login and password (D-24: VictoriaLogs mTLS is enterprise-only); VictoriaLogs closed inside the shard, only vlagent and the gateway reach it (DAT-008) | measured (A.7); no broker, no single master |
 | F8 Kubernetes API | job-controller to API server | ServiceAccount token, namespaced Role on a **dedicated namespace** (pods create/get/list/delete, `pods/log`, `pods/exec` for the spool fallback, configmaps/secrets create/get; see docs/settings.md) | official C client (D-26, A.6); `pods/exec` is an added right, see T-37 |

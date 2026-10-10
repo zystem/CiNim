@@ -1,6 +1,6 @@
 ## PIP-001: a run records the version of the Lua host API it was made with, and is leased only to an executor that can run that version
 ## (against a real rqlite). Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
-import std/[unittest, json, os]
+import std/[unittest, json, os, options]
 import common/[rqlite, luaapi]
 import core/[schema, scheduler]
 
@@ -17,9 +17,8 @@ suite "PIP-001 the version of the host API of a run":
     let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns")
     proc versionOf(run: string): int =
       c.query(%*[["SELECT api_version FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getInt
-    proc lease(run: string; versions: seq[uint32]): ExecutorResponse =
-      handleLease(c, defaultProfile, master, LeaseRequest(run_id: run, executor_id: "exec-v", api_versions: versions))
-    proc granted(r: ExecutorResponse): bool = r.body.kind == ExecutorResponseBodyKind.lease
+    proc lease(run: string; versions: seq[int]): Option[LeaseGranted] =
+      grantLease(c, master, run, "exec-v", versions)
     proc release(run: string) =
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", run]])
 
@@ -33,17 +32,11 @@ suite "PIP-001 the version of the host API of a run":
     test "a run of a version the executor cannot run is not leased to it, and is to one that can":
       let r = co.createRun("p", "return 1")
       discard c.execute(%*[["UPDATE runs SET api_version = 5 WHERE id = ?", r]])
-      check not lease(r, @[1'u32, 2, 3]).granted
-      check c.leaseCandidates(r, @[1, 2, 3]).len == 0
-      check c.leaseCandidates(r, @[3, 4, 5]) == @[r]
-      let g = lease(r, @[3'u32, 4, 5])
-      check g.granted and g.body.lease.api_version == 5
+      check lease(r, @[1, 2, 3]).isNone
+      let g = lease(r, @[3, 4, 5])
+      check g.isSome and g.get.api_version == 5
       release(r)
-    test "an executor that names no versions is refused as too old, and is given no run":
-      let r1 = co.createRun("p", "return 1")
-      let resp = lease(r1, @[])
-      check not resp.granted and resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "executor_too_old"
     test "the lease says which version to replay with":
       let r = co.createRun("p", "return 1")
-      let g = lease(r, @[uint32(currentApiVersion)])
-      check g.granted and g.body.lease.api_version == uint32(currentApiVersion)
+      let g = lease(r, @[currentApiVersion])
+      check g.isSome and g.get.api_version == uint32(currentApiVersion)

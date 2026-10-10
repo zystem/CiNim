@@ -1,6 +1,6 @@
 ## T-03: the core writes the run journal with a hash chain, keeps the newest hash with the run, and checks the chain before a run goes to an
 ## executor (against a real rqlite). Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
-import std/[unittest, json, os, strutils, sequtils]
+import std/[unittest, json, os, strutils, sequtils, options]
 import common/rqlite
 import core/[schema, scheduler, runlease, journalchain, journaldb, retrypolicy]
 
@@ -19,9 +19,8 @@ suite "T-03 the hash chain of the journal":
       c.query(%*[["SELECT state FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getStr
     proc failCode(run: string): string =
       c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getStr
-    proc leaseIt(run: string): ExecutorResponse =
-      handleLease(c, defaultProfile, master, LeaseRequest(run_id: run, executor_id: "exec-t", api_versions: @[1'u32]))
-    proc leaseGranted(r: ExecutorResponse): bool = r.body.kind == ExecutorResponseBodyKind.lease
+    proc leaseIt(run: string): Option[LeaseGranted] =
+      grantLease(c, master, run, "exec-t", @[1])
     proc finishStep(run: string; ordinal: int) =
       ## what the controller's report does for a step that ended with code 0
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: run, seq: uint32(ordinal), attempt: 1),
@@ -50,8 +49,8 @@ suite "T-03 the hash chain of the journal":
       let r = runWithSteps(2)
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", r]])
       let resp = leaseIt(r)
-      check resp.leaseGranted
-      let g = resp.body.lease
+      check resp.isSome
+      let g = resp.get
       check g.journal.len == 3
       check g.journal.allIt(it.hash.len == 64)
     test "the same record twice is one record":
@@ -63,25 +62,25 @@ suite "T-03 the hash chain of the journal":
       let r = runWithSteps(3)
       discard c.execute(%*[["UPDATE run_journal SET result = '0' || char(10) || 'x' WHERE run_id = ? AND seq = 2", r]])
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", r]])
-      check not leaseIt(r).leaseGranted
+      check leaseIt(r).isNone
       check stateOf(r) == "INFRASTRUCTURE_ERROR" and failCode(r) == "journal_corrupt"
     test "the newest records taken away (so that a step would be done again): found by the tip":
       let r = runWithSteps(3)
       discard c.execute(%*[["DELETE FROM run_journal WHERE run_id = ? AND seq = 3", r]])
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", r]])
-      check not leaseIt(r).leaseGranted
+      check leaseIt(r).isNone
       check failCode(r) == "journal_corrupt"
     test "a record forged into the journal is found":
       let r = runWithSteps(2)
       discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at, hash) VALUES (?, 3, 'job_sh', '', 'x', '0', '1', ?)",
         r, "a".repeat(64)]])
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", r]])
-      check not leaseIt(r).leaseGranted
+      check leaseIt(r).isNone
       check failCode(r) == "journal_corrupt"
     test "a journal without hashes is not adopted: the run does not go to an executor and ends with journal_corrupt":
       let r = co.createRun("p", "return 1")
       for i in 0 .. 2:
         discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) VALUES (?, ?, 'job_sh', '', ?, '0', '1')",
           r, i, "p" & $i]])
-      check not leaseIt(r).leaseGranted
+      check leaseIt(r).isNone
       check stateOf(r) == "INFRASTRUCTURE_ERROR" and failCode(r) == "journal_corrupt"

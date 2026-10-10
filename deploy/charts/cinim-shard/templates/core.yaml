@@ -33,7 +33,6 @@ spec:
           command: ["/core"]
           ports:
             - {name: http, containerPort: 18081}
-            - {name: executor, containerPort: 19741}
             - {name: stepreport, containerPort: 19742}
             - {name: logingest, containerPort: 19743}
             - {name: artifacts, containerPort: 19744}
@@ -49,7 +48,7 @@ spec:
             - {name: CINIM_CERTS, value: /etc/cinim}
             # what the core makes the objects of an organisation from (SHD-007)
             - {name: CINIM_CONTROLLER_IMAGE, value: {{ include "cinim-shard.controllerImage" . | quote }}}
-            - {name: CINIM_CONDUCTOR_IMAGE, value: {{ if .Values.conductor.enabled }}{{ include "cinim-shard.conductorImage" . | quote }}{{ else }}""{{ end }}}
+            - {name: CINIM_CONDUCTOR_IMAGE, value: {{ include "cinim-shard.conductorImage" . | quote }}}
             - {name: CINIM_CONTROLLER_STATE_CLASS, value: {{ .Values.controller.stateStorageClass | quote }}}
             - {name: CINIM_STEP_EPHEMERAL_LIMIT, value: {{ .Values.steps.ephemeralStorageLimit | quote }}}
             # the deploy profile (D-48): the namespace of an organisation gets the policies that let a step of the profile reach what the operator lists
@@ -191,7 +190,6 @@ spec:
     app.kubernetes.io/name: cinim-core
   ports:
     - {name: http, port: 80, targetPort: http}
-    - {name: executor, port: 19741, targetPort: executor}
     - {name: stepreport, port: 19742, targetPort: stepreport}
     - {name: logingest, port: 19743, targetPort: logingest}
     - {name: artifacts, port: 19744, targetPort: artifacts}

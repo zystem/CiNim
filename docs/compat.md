@@ -11,10 +11,10 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 | The columns of the controller's state added by `ALTER TABLE` | `jobcontroller/ctrlstate.nim` (line "state files from before these columns") | controller state files from before | the state volumes of the controllers are made again, or a migration number replaces the ALTERs |
 | The `ALTER TABLE … ADD COLUMN` list of the core | `core/schema.nim` (`migrate`) | databases from before each column | when there is a first release: fold the columns into `CREATE TABLE` and number the migrations |
 | The host call `sh` and `ci.sh` (a fixture of the tests) | `executor/replay.nim` (`hostKinds`), `executor/bootstrap.lua`, `tests/unit/tluaapi.nim` (`fixtureOnly`) | the early tests of the sandbox | the tests use `Job:sh` |
-| The shared executor service | `src/executorsvc`, `ExecutorChannel` on port 19741, the chart's executor | the conductors are not the only way yet | phase 5 of docs/conductors.md |
 
 ## Deleted (2026-10-11)
 
+* The shared executor service (`src/executorsvc`, `ExecutorChannel` on port 19741, the chart's executor Deployment, the lease request of the protocol, `handleLease`, `leaseCandidates`): the conductors lead every run; the chart has no `conductor.enabled` any more.
 * A step with `journal_seq` NULL at `ordinal`, a host call with `numbered` false: the core refuses a `job_sh` without a number (`executor_too_old`); the column is always set; the live database was filled in by hand before the rollout.
 * A journal without a hash chain (`cvLegacy`, `adoptLegacyLocked`, `legacyHashes`): such a journal is `journal_corrupt` like any other that does not hold; the runs of the live database that had one were deleted.
 * The executors chain no record of their own: a record without a hash is `journal_corrupt` at replay.

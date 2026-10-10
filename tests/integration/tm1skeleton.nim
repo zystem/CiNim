@@ -32,8 +32,8 @@ let
   ns = "cinim-test"
   certs = getCurrentDir() / "tests" / "certs"
   buildDir = getCurrentDir() / "build" / "tests" / "m1skeleton"
-  # distinct from the ports a developer's own manual core/job-controller/executor-service (default 19740/
-  # 19741/18081) might already be running on, and from the "cinim" namespace they might be using.
+  # distinct from the ports a developer's own manual core/job-controller/conductor (default 19745/
+  # 18081) might already be running on, and from the "cinim" namespace they might be using.
   # CINIM_CORE_HOST=<ip>: core already runs there (default ports, see src/core/main.nim) instead of being
   # spawned here. That is what lets the *step Pod's* shim reach the collector - Pods in the test cluster
   # may have no route to the developer machine but do have one to the TESTING host - so the log check
@@ -42,7 +42,6 @@ let
   remoteCore = coreHost.len > 0
   host = if remoteCore: coreHost else: "127.0.0.1"
   streamPort = if remoteCore: 19745 else: 19765        # the push channel of the controllers
-  executorPort = if remoteCore: 19741 else: 19761
   stepReportPort = if remoteCore: 19742 else: 19762
   logIngestPort = if remoteCore: 19743 else: 19763
   apiPort = if remoteCore: 18081 else: 18091
@@ -68,10 +67,10 @@ proc spawn(exe, log: string; env: StringTableRef): Process =
   ## has already exited (or ignores the signal) while the actual service survives, orphaned under init.
   startProcess("/bin/sh", args = @["-c", "exec " & quoteShell(exe) & " > " & quoteShell(log) & " 2>&1"], env = env)
 
-var core, jobctl, execsvc: Process
+var core, jobctl, conductor: Process
 
 proc stopAll() =
-  for p in [core, jobctl, execsvc]:
+  for p in [core, jobctl, conductor]:
     if p != nil:
       try:
         p.terminate()
@@ -260,7 +259,7 @@ suite "walking skeleton end to end":
     test "skipped: CINIM_RQLITE_URL/K8S_PREFIX not set":
       skip()
   else:
-    test "setup: generate CURVE keypairs, flatten proto imports, build core/job-controller/executor-service/shim":
+    test "setup: generate CURVE keypairs, flatten proto imports, build core/job-controller/conductor/shim":
       check execCmd("tools/zmq/gen_curve_keys.sh") == 0
       check execCmd("tools/proto/nim_flatten.sh build/nimproto") == 0
       createDir(buildDir)
@@ -268,8 +267,8 @@ suite "walking skeleton end to end":
         " src/core/main.nim") == 0
       check execCmd("nim c --hints:off --warnings:off -d:k8sPrefix=" & quoteShell(k8sPrefix) &
         " -o:" & quoteShell(buildDir / "jobcontroller") & " src/jobcontroller/main.nim") == 0
-      check execCmd("nim c --hints:off --warnings:off" &
-        " -o:" & quoteShell(buildDir / "executorsvc") & " src/executorsvc/main.nim") == 0
+      check execCmd("nim c --hints:off --warnings:off -p:src" &
+        " -o:" & quoteShell(buildDir / "conductor") & " src/conductor/main.nim") == 0
       # two shims: the plain one (no ZeroMQ - what job-controller mounts into the step Pod, whose image
       # has no libzmq) and the -d:shimLogging one the local log-pipeline test below runs directly
       check execCmd("nim c --hints:off --warnings:off" &
@@ -287,17 +286,17 @@ suite "walking skeleton end to end":
     test "setup: test namespace exists":
       discard execCmd(kubectlBase & " create ns " & ns)   # ignore AlreadyExists
 
-    test "setup: start core, job-controller and executor-service":
+    test "setup: start core, job-controller and conductor":
       if not remoteCore:
         var coreEnv = @[("CINIM_RQLITE_URL", rqliteUrl), ("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
-          ("CINIM_STREAM_PORT", $streamPort), ("CINIM_EXECUTOR_PORT", $executorPort),
+          ("CINIM_STREAM_PORT", $streamPort),
           ("CINIM_STEPREPORT_PORT", $stepReportPort), ("CINIM_LOGINGEST_PORT", $logIngestPort),
           ("CINIM_API_PORT", $apiPort), ("CINIM_LOG_HOLD_TIMEOUT", "20")]
         if logsReady: coreEnv.add [("CINIM_VLAGENT_URL", vlagentUrl), ("CINIM_VICTORIALOGS_URL", victoriaLogsUrl)]
         else: coreEnv.add ("CINIM_LAUNCH_GATE", "off")   # no log circuit in this setup: RUN-015 would (rightly) keep every step queued
         core = spawn(buildDir / "core", buildDir / "core.log", svcEnv(coreEnv))
       waitApiUp(apiPort)
-      # the job-controller reaches core by its push channel, the executor-service by ExecutorChannel (CINIM_CORE_ADDR)
+      # the job-controller and the conductor reach core by its push channel
       var jcEnv = @[("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
         ("CINIM_CORE_STREAM_ADDR", "tcp://" & host & ":" & $streamPort),
         ("CINIM_SHIM_BIN", buildDir / (if staticShim.len > 0: "cicd-shim-logging" else: "cicd-shim")),
@@ -306,8 +305,12 @@ suite "walking skeleton end to end":
       # are the core's to give (D-49); a remote core gives those of its Service in the cluster, which is what the Pods reach.
       if kubeconfig.len > 0: jcEnv.add ("CINIM_KUBECONFIG", kubeconfig)
       jobctl = spawn(buildDir / "jobcontroller", buildDir / "jobcontroller.log", svcEnv(jcEnv))
-      execsvc = spawn(buildDir / "executorsvc", buildDir / "executorsvc.log", svcEnv({
-        "CINIM_CERTS": certs, "CINIM_CORE_ADDR": "tcp://" & host & ":" & $executorPort}))
+      # the conductor of the organisation (the namespace of the test), with the credential the core makes for it
+      let credential = execProcess(buildDir / "core", args = ["conductor-credential", ns, "cond-1"], env = svcEnv({"CINIM_CERTS": certs}),
+                                   options = {poStdErrToStdOut}).strip
+      conductor = spawn(buildDir / "conductor", buildDir / "conductor.log", svcEnv({
+        "CINIM_CERTS": certs, "CINIM_CORE_STREAM_ADDR": "tcp://" & host & ":" & $streamPort, "CINIM_NAMESPACE": ns,
+        "CINIM_CONDUCTOR_ID": "cond-1", "CINIM_CONDUCTOR_CREDENTIAL": credential}))
       sleep 1000   # let both clients complete their first ZeroMQ connect before the run is submitted
       # the log wait of a finished step is a profile setting (UI); short here, so the logs_undelivered scenarios do not take 10 minutes
       if remoteCore: check putProfile(%*{"log_hold_timeout": 20}){"log_hold_timeout"}.getInt == 20

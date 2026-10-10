@@ -27,6 +27,11 @@ suite "RUN-008 the lease of a run":
     proc refused(r: ExecutorResponse): bool =
       r.body.kind == ExecutorResponseBodyKind.failure and r.body.failure.code == "lease_lost"
     proc answered(r: ExecutorResponse): bool = r.body.kind == ExecutorResponseBodyKind.result
+    proc leasable(run: string): bool =
+      ## what the core offers to a conductor: RUNNING, nobody holds it, and no step of it is still PENDING, STARTING or RUNNING
+      let v = c.query(%*[["SELECT 1 FROM runs WHERE id = ? AND state = 'RUNNING' AND (lease_until = 0 OR lease_until < ?) AND id NOT IN " &
+        "(SELECT run_id FROM steps WHERE state IN ('PENDING', 'STARTING', 'RUNNING'))", run, getTime().toUnix()]])["results"][0]{"values"}
+      v != nil and v.len > 0
 
     test "a run is leased to one executor; the second is told it is taken":
       let r = co.createRun("p", "return 1")
@@ -55,9 +60,9 @@ suite "RUN-008 the lease of a run":
       check resp.answered and resp.body.result.suspended
       check untilOf(r) == 0
       check params(r, tok).refused                         # given back
-      check r notin c.leaseCandidates(r)                    # a step is in flight: not offered again until it is done
+      check not leasable(r)                    # a step is in flight: not offered again until it is done
       discard c.execute(%*[["UPDATE steps SET state = 'SUCCEEDED' WHERE run_id = ?", r]])
-      check r in c.leaseCandidates(r)                       # the step is done: the next executor may take it
+      check leasable(r)                       # the step is done: the next executor may take it
       let b = c.takeRunLease(master, r, "exec-b")
       check b.startsWith("2.")
       check params(r, tok).refused                         # the first token is of attempt 1
@@ -66,7 +71,7 @@ suite "RUN-008 the lease of a run":
       let r = co.createRun("p", "return 1")
       let a = c.takeRunLease(master, r, "exec-a")
       discard c.execute(%*[["UPDATE runs SET lease_until = ? WHERE id = ?", getTime().toUnix() - 5, r]])
-      check r in c.leaseCandidates(r)
+      check leasable(r)
       let b = c.takeRunLease(master, r, "exec-b")
       check b.startsWith("2.")
       check params(r, a).refused

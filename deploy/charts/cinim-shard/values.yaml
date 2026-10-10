@@ -30,7 +30,7 @@ image:
   pullPolicy: IfNotPresent
 
 # The Secret that holds the CURVE keys of the transport (D-24): core.pub, core.key, client.pub, client.key. The core gets the first two,
-# the executor the other two and core.pub.
+# the controllers and conductors of the organisations the other two and core.pub.
 curve:
   secretName: ""
 
@@ -74,13 +74,11 @@ controller:
   # StorageClass of the controller's state volume (1 Gi per organisation); empty is the cluster's default class
   stateStorageClass: ""
 
-# The conductors of every organisation (docs/conductors.md): Pods that lead the runs of the organisation, made by its job controller. Off by default: the shared
-# executor of this chart then leads every run, as before. With `enabled` the core tells each controller how many conductors to keep and with which image
-# (empty: <image.repository>-conductor:<image.tag>), and the namespace of each organisation gets the policy that lets them reach the core's push channel.
-# How many: the organisation's runs_per_conductor and conductor_min (GET/PUT /api/v1/profile). The shared executor still leases runs too; scale it to 0 for the
-# conductors alone.
+# The conductors of every organisation (docs/conductors.md): Pods that lead the runs of the organisation, made by its job controller; nothing else leads a run. The core
+# tells each controller how many to keep and with which image (empty: <image.repository>-conductor:<image.tag>), and the namespace of each organisation gets the policy
+# that lets them reach the core's push channel. A conductor that runs another image than this one is drained when it is idle and made again with this one.
+# How many: the organisation's runs_per_conductor and conductor_min (GET/PUT /api/v1/profile).
 conductor:
-  enabled: false
   image: ""
 
 # The build profile (D-42, A.13, Q-17): with `enabled` the namespace of every organisation is Pod Security `baseline` by label (a build needs
@@ -184,12 +182,6 @@ core:
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {memory: 512Mi}
-
-executor:
-  enabled: true
-  resources:
-    requests: {cpu: 50m, memory: 64Mi}
-    limits: {memory: 256Mi}
 
 # The subcharts (official charts). The names are fixed so that the core finds them.
 rqlite:

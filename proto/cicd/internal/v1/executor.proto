@@ -15,13 +15,6 @@ message JournalEntry {
   bytes hash = 5;                    // SHA-256(prev_hash || seq || kind || payload || result), length-prefixed fields
 }
 
-message LeaseRequest {
-  string run_id = 1;                 // empty means "assign the next available run" (RUN-009)
-  string executor_id = 2;
-  string lease_token = 3;            // proves ownership after a scheduler restart (RUN-008)
-  repeated uint32 api_versions = 4;  // the versions of the Lua host API this executor can run (PIP-001); none: an executor from before them, version 1
-}
-
 // What a conductor (docs/conductors.md) says to the core on the push channel when it connects, when its free places change, and every few seconds.
 // The credential is the conductor's (IAM-003): the core makes it for the namespace's controller, which gives it to the conductor's Pod.
 message ConductorHello {
@@ -59,19 +52,18 @@ message FinishRun {
 }
 
 message ExecutorRequest {
-  reserved 4;                        // was `finish_run_id`, a field nothing read
+  reserved 2, 4;                     // 2: the lease request of the shared executor service, 4: `finish_run_id`; the core pushes leases to conductors (ConductorHello, LeaseGranted)
   Header header = 1;
   oneof body {
-    LeaseRequest lease = 2;
     HostCall call = 3;
     FinishRun finish = 5;               // carries the terminal state
   }
 }
 
 message ExecutorResponse {
+  reserved 2;
   Header header = 1;
   oneof body {
-    LeaseGranted lease = 2;
     HostResult result = 3;
     Failure failure = 4;
   }
@@ -87,6 +79,5 @@ message LeaseGranted {
   map<string, string> params = 7;    // the launch parameters given when the run was created (PIP-012), as text; the script's declarations type and complete them
   uint32 api_version = 8;            // the version of the Lua host API the run was made with: the executor replays it with the prelude of that version
   string step_table = 9;              // the table of step numbers of the run (executor/steptable.nim) as the executor sent it with its first lease; "" until it has
-  string run_id = 6;                  // which run this lease is for (echoes a non-empty request, or
-                                       // resolves "any available run")
+  string run_id = 6;                  // which run this lease is for
 }

@@ -613,19 +613,6 @@ proc takeRunLease*(c: var RqClient; master, runId, owner: string; versions: seq[
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: "" else: leaseToken(master, runId, vals[0][0].getInt)
 
-proc leaseCandidates*(c: var RqClient; only = ""; versions: seq[int] = @[]; profileId = ""; started = -1; limit = 5): seq[string] =
-  ## RUNNING runs that nobody holds and that have no step still PENDING/STARTING/RUNNING: presumed suspended, ready to (re)lease
-  ## (`only`: just that run, if it is one - for the tests; `profileId`: the runs of one organisation's profile; `started` 1: only runs that were led
-  ## before, 0: only runs never led)
-  let r = c.query(%*[["SELECT id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND (? = '' OR id = ?) AND (? = '' OR profile_id = ?) " &
-    (if started == 1: "AND lease_attempt > 0 " elif started == 0: "AND lease_attempt = 0 " else: "") &
-    (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND id NOT IN " &
-    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY created_at LIMIT ?",
-    protoName(rsRunning), getTime().toUnix(), only, only, profileId, profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), limit]])
-  let vals = r["results"][0]{"values"}
-  if vals != nil:
-    for row in vals: result.add row[0].getStr
-
 proc activeRuns*(c: var RqClient; profileId: string): int =
   ## the runs of an organisation that have been led and are not over: they hold a place of `pod_limit` (docs/conductors.md section 4), whether a
   ## conductor has them this moment or they wait for a step
@@ -679,21 +666,6 @@ proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versi
     if g.isSome:
       result.add g.get
       inc made
-
-proc handleLease*(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
-  discard registryTouch("executor", "executor-service", epochTime())
-  let owner = if req.executor_id.len > 0: req.executor_id else: "executor"
-  # the versions of the host API this executor can run (PIP-001); an executor that names none is too old to be served
-  if req.api_versions.len == 0:
-    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure,
-      failure: Failure(code: "executor_too_old", detail: "the lease request names no versions of the Lua API (api_versions); rebuild the executor")))
-  let versions = req.api_versions.mapIt(int(it))
-  for candidate in (if req.run_id.len > 0: @[req.run_id] else: leaseCandidates(c, versions = versions)):
-    let g = grantLease(c, master, candidate, owner, versions)
-    if g.isSome:
-      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.lease, lease: g.get))
-  ExecutorResponse(header: Header(protocol: 1),
-    body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "no_run_available")))
 
 proc leaseLost(detail: string): ExecutorResponse =
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
@@ -818,30 +790,3 @@ proc handleFinish*(c: var RqClient; req: FinishRun; master: string): ExecutorRes
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.result,
     result: HostResult(suspended: false)))
 
-proc serveExecutorChannel*(co: Core; port: int) {.thread.} =
-  {.cast(gcsafe).}:
-    var c = newRq(co.rqliteUrl)
-    let (_, secretKey) = loadKeypair(co.certs, "core")
-    let conn = listenRep(port, secretKey)
-    while not stopServers.load:
-      let body = conn.receive()
-      if body.len == 0: continue
-      let req = Protobuf.decode(cast[seq[byte]](body), ExecutorRequest)
-      # an error in one request is answered as an error of that request; it must not end the core (a REP socket also needs its answer to go on)
-      let resp = try:
-        case req.body.kind
-        of ExecutorRequestBodyKind.lease: handleLease(c, co.profileId, secretKey, req.body.lease)
-        of ExecutorRequestBodyKind.call: handleCall(c, co, req.body.call, secretKey)
-        of ExecutorRequestBodyKind.finish: handleFinish(c, req.body.finish, secretKey)
-        of ExecutorRequestBodyKind.notSet:
-          ExecutorResponse(header: Header(protocol: 1),
-            body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error")))
-      except CatchableError as e:
-        stderr.writeLine "core: executor channel: " & e.msg
-        ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
-          kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "internal", detail: e.msg)))
-      let outb = Protobuf.encode(resp)
-      var s = newString(outb.len)
-      if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)
-      conn.send(s)
-    conn.close()

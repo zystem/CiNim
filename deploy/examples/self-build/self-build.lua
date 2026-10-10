@@ -24,15 +24,14 @@ local function build(target, image)
   end)
 end
 
--- The core and the executor get the new tag. The executor first: the core's own restart ends the Pod that this step runs next to, and the step's result
--- is delivered to the new core when it is up (the shim keeps trying). The strategy of both Deployments is Recreate: one Pod at a time.
+-- The core gets the new tag, and with it the images the core hands out: the controllers' and the conductors'. The core's own restart ends the Pod that this step runs next to,
+-- and the step's result is delivered to the new core when it is up (the shim keeps trying). A conductor of the old image is drained when it is idle and made again with the new one.
 local ROLLOUT = [[
 set -eu
 printf '%s\n' "$DEPLOY_CA" > "$CICD_RUN_DIR/ca.crt"
 k="kubectl --server https://kubernetes.default.svc --certificate-authority $CICD_RUN_DIR/ca.crt --token $DEPLOY_TOKEN -n $NAMESPACE"
 pull="${PULL_REGISTRY:-$REGISTRY}"; tag="${TAG:-$IMAGE_TAG}"
-$k patch deployment cinim-executor -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"executor\",\"image\":\"$pull/cinim:$tag\"}]}}}}"
-$k patch deployment cinim-core -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"core\",\"image\":\"$pull/cinim:$tag\",\"env\":[{\"name\":\"CINIM_CONTROLLER_IMAGE\",\"value\":\"$pull/cinim-controller:$tag\"}]}]}}}}"
+$k patch deployment cinim-core -p "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"core\",\"image\":\"$pull/cinim:$tag\",\"env\":[{\"name\":\"CINIM_CONTROLLER_IMAGE\",\"value\":\"$pull/cinim-controller:$tag\"},{\"name\":\"CINIM_CONDUCTOR_IMAGE\",\"value\":\"$pull/cinim-conductor:$tag\"}]}]}}}}"
 echo "rolled out $pull/cinim:$tag"
 ]]
 
@@ -56,6 +55,7 @@ return ci.pipeline({
       end)
       build("core", "cinim")
       build("controller", "cinim-controller")
+      build("conductor", "cinim-conductor")
     end
     if run.params.DEPLOY then
       ci.job({image = KUBECTL, profile = "deploy", secrets = {"DEPLOY_TOKEN", "DEPLOY_CA"}}, function(j)
