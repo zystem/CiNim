@@ -175,6 +175,16 @@ function ci.finally(fn) end
 function ci.sleep(seconds) end
 ---@return number                          # Unix time in seconds (fractional), from the journal on replay
 function ci.now() end
+---@param n integer                        # 0 to 57
+---@return string                          # exactly one character of Base58 (`123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`, no 0 O I l); an error if n does not fit; results sort like the numbers. Pure, not journaled
+function b58x(n) end
+---@param n integer                        # 0 to 3363 (a run needs 200 at most)
+---@return string                          # exactly two characters of Base58; an error if n does not fit; results sort like the numbers. Pure, not journaled. For ids built in loops: "a" .. b58xx(i) .. b58xx(j) .. b58xx(k)
+function b58xx(n) end
+---@param fmt string                      # letters and digits that stand for themselves, `{x}` (one Base58 character) and `{xx}` (two); at most 8 characters in all, a letter first
+---@param ... integer                     # one number for each placeholder, in order
+---@return string                          # the id: `b58f("a{xx}{xx}{xx}", i, j, k)` is `"a" .. b58xx(i) .. b58xx(j) .. b58xx(k)`. The format is checked as a whole before the numbers: too long, a placeholder or digit first, an unknown placeholder or a wrong number of arguments is an error. Pure, not journaled
+function b58f(fmt, ...) end
 ---@return number                          # in [0, 1), from the journal on replay
 function ci.random() end
 

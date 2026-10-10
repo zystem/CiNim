@@ -516,6 +516,71 @@ local function resolve_params(decls, given)
   return typed, (#parts > 0) and ("{" .. table.concat(parts, ",") .. "}") or ""
 end
 
+-- `b58x(n)` and `b58xx(n)`: pure functions (not journaled) that write the integer n as exactly one or exactly two characters of the Base58 alphabet of Bitcoin (digits
+-- and letters without 0, O, I, l, which are mistaken for one another): `b58x` 0 to 57, `b58xx` 0 to 3363, of which a run needs 200 at most. A number that does not fit is an
+-- error, never a longer result. The alphabet is in the order of the characters' codes, so results of one function sort like the numbers. For ids built in loops, which are at
+-- most 8 characters of letters and digits (docs/parallel.md section 3.3): "a" .. b58xx(i) .. b58xx(j) .. b58xx(k) is 7.
+local B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+local function b58_digits(name, n, width)
+  if type(n) ~= "number" or n % 1 ~= 0 then error(name .. ": an integer expected, got " .. tostring_(n), 3) end
+  local top = math.tointeger(58 ^ width) - 1
+  local given = n
+  n = math.tointeger(n)
+  if n == nil or n < 0 or n > top then error(name .. ": " .. tostring_(given) .. " does not fit " .. width .. " character(s) (0 to " .. top .. ")", 3) end
+  local out = {}
+  for i = width, 1, -1 do
+    local d = n % 58
+    out[i] = string.sub(B58, d + 1, d + 1)
+    n = n // 58
+  end
+  return table.concat(out)
+end
+G.b58x = function(n) return b58_digits("b58x", n, 1) end
+G.b58xx = function(n) return b58_digits("b58xx", n, 2) end      -- globals of their own, not members of `ci`: plain helpers of the script
+
+-- `b58f(format, ...)`: an id built from a format in which every number shows how many characters it takes. `{x}` is one character of Base58 (`b58x`), `{xx}` two (`b58xx`);
+-- any other character of the format is a letter or digit and stands for itself: b58f("a{xx}{xx}{xx}", i, j, k) is "a" .. b58xx(i) .. b58xx(j) .. b58xx(k). The format is
+-- checked as a whole, before a number is looked at: at most 8 characters, a letter first, only these placeholders, as many arguments as placeholders (docs/parallel.md
+-- section 3.3). Pure, not journaled.
+function b58f(fmt, ...)
+  if type(fmt) ~= "string" then error("b58f: the format is a string, got " .. type(fmt), 2) end
+  local parts, size, i = {}, 0, 1
+  while i <= #fmt do
+    local c = string.sub(fmt, i, i)
+    if c == "{" then
+      local close = string.find(fmt, "}", i, true)
+      local name = close and string.sub(fmt, i + 1, close - 1)
+      if name ~= "x" and name ~= "xx" then error("b58f: at position " .. i .. " of the format only {x} and {xx} are placeholders", 2) end
+      parts[#parts + 1] = #name
+      size = size + #name
+      i = close + 1
+    elseif string.find(c, "^[A-Za-z0-9]$") then
+      parts[#parts + 1] = c
+      size = size + 1
+      i = i + 1
+    else
+      error("b58f: at position " .. i .. " of the format a letter, a digit, {x} or {xx} is expected", 2)
+    end
+  end
+  if type(parts[1]) ~= "string" or not string.find(parts[1], "^[A-Za-z]$") then error("b58f: an id starts with a letter, and the format does not", 2) end
+  if size > 8 then error("b58f: the format makes " .. size .. " characters, an id is at most 8", 2) end
+  local slots = 0
+  for _, p in ipairs(parts) do if type(p) == "number" then slots = slots + 1 end end
+  if select("#", ...) ~= slots then error("b58f: the format has " .. slots .. " placeholder(s) and " .. select("#", ...) .. " argument(s)", 2) end
+  local args, out, k = { ... }, {}, 0
+  for _, p in ipairs(parts) do
+    if type(p) == "number" then
+      k = k + 1
+      local ok, r = pcall(b58_digits, "b58f", args[k], p)
+      if not ok then error("b58f: argument " .. k .. ": " .. tostring_(r), 2) end
+      out[#out + 1] = r
+    else
+      out[#out + 1] = p
+    end
+  end
+  return table.concat(out)
+end
+
 G.ci = {
   now = function() return tonumber(call("now", "")) end,
   random = function() return tonumber(call("random", "")) end,

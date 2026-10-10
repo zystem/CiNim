@@ -661,6 +661,7 @@ Names, semantics and journaling rules are normative; the signatures are fixed in
 | `ci.run(ref, params, opts)` | `main` | Yes | A child run, waits for its result (PIP-010) |
 | `ci.start(ref, params, opts)`, `h:wait()`, `h:cancel()` | `main` | Yes | A child run without waiting; a handle (PIP-010) |
 | `ci.sleep(seconds)`, `ci.now()`, `ci.random()` | `main` | Yes | A timer without a Pod, the time, a random number |
+| `b58x(n)`, `b58xx(n)`, `b58f(format, ...)` | Everywhere | No | Pure functions: the integer `n` as exactly one (0 to 57) or exactly two (0 to 3363) characters of the Base58 alphabet of Bitcoin (`123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`, no `0 O I l`), in the order of their codes; a number that does not fit is an error. For ids built in loops, which are at most 8 characters (`"a" .. b58xx(i) .. b58xx(j) .. b58xx(k)`); a run needs 200 at most. `b58f("a{xx}{xx}{xx}", i, j, k)` builds the whole id from a format in which `{x}` is one such character and `{xx}` two, so that the length of the id is seen in the format; the format is checked as a whole (at most 8 characters, a letter first, only these placeholders, one argument for each) |
 | `ci.finally(fn)` | `main` | Yes | Cleanup on cancellation and error |
 | `ci.log(level, msg)`, `ci.fail(msg)` | Everywhere | Yes | A message to the run log; an explicit failure |
 

@@ -5,7 +5,7 @@ import executor/sandbox
 # names from the table in 6.7 (plus ci.vault from the text below it)
 const specNames = ["ci.pipeline", "ci.string", "ci.number", "ci.bool", "ci.choice", "ci.list", "ci.map", "ci.secret", "ci.vault",
   "ci.stage", "ci.job", "ci.parallel", "ci.spawn", "ci.matrix", "ci.input", "ci.deploy", "ci.run", "ci.sleep", "ci.now",
-  "ci.random", "ci.finally", "ci.log", "ci.fail",
+  "ci.random", "ci.finally", "ci.log", "ci.fail", "b58x", "b58xx", "b58f",
   "Job:checkout", "Job:sh", "Job:use", "Job:env", "JobArtifact.upload", "JobArtifact.download", "JobCache.save", "JobCache.restore",
   "Handle:wait", "Handle:cancel"]
 const fixtureOnly = ["sh"]      # ci.sh is a test fixture; API v1 has Job:sh
@@ -29,8 +29,11 @@ suite "PIP-017 Lua API v1 signatures":
         check lines[i - 1].startsWith("---@")
 
   test "PIP-017 the signature file is valid Lua and loads in the sandbox":
+    # the file declares the globals `b58x` and `b58xx` as well as the members of `ci`; the globals of the sandbox are write-protected, so it is run in an environment of its own
     var sb = newSandbox()
-    let r = sb.run(readFile("lua/stdlib/cicd.d.lua"))
+    let src = readFile("lua/stdlib/cicd.d.lua")
+    check "]==]" notin src
+    let r = sb.run("local f, e = load([==[" & src & "]==], '=stub', 't', {})\nif not f then error(e) end\nf()\nreturn 'ok'")
     check r.code == "ok"
 
   test "PIP-005 the sandbox ci table exposes only API v1 names (plus the documented fixture)":

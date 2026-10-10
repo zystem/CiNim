@@ -305,3 +305,29 @@ The purposes differ: **determinism** (so that replay gives the same calls), **se
 * Harness: [delegate overview](https://developer.harness.io/docs/platform/delegates/delegate-concepts/delegate-overview), [Kubernetes build infrastructure](https://developer.harness.io/docs/continuous-integration/use-ci/set-up-build-infrastructure/k8s-build-infrastructure/set-up-a-kubernetes-cluster-build-infrastructure); Semaphore: [self-hosted agents](https://semaphore.io/product/self-hosted-agents)
 * Travis CI: [build environment](https://docs.travis-ci.com/user/reference/overview/), [worker](https://pkg.go.dev/github.com/travis-ci/worker), [RabbitMQ case study](https://blogs.vmware.com/tanzu/continuous-integration-scaling-to-74-000-builds-per-day-with-travis-ci-rabbitmq/); AWS: [CodePipeline execution modes](https://docs.aws.amazon.com/codepipeline/latest/userguide/execution-modes.html), [CodeBuild builds](https://docs.aws.amazon.com/codebuild/latest/userguide/builds-working.html), [CodeBuild quotas](https://docs.aws.amazon.com/codebuild/latest/userguide/limits.html)
 * Dagger: [internals](https://devel.docs.dagger.io/api/internals); CircleCI: [runner concepts](https://circleci.com/docs/guides/execution-runner/runner-concepts); Drone: [runner capacity](https://docs.drone.io/runner/kubernetes/configuration/reference/drone-runner-capacity/)
+
+## 11. Step identity in other systems (2026-10-10; for `docs/parallel.md` section 3)
+
+What was looked at: how a step (a task, a job) is named and numbered, whether the name survives between runs, and whether the structure is known before the run. Read through the same page-fetch tool as above (summaries by a smaller model, some pages came back cut); **what could not be confirmed is marked.**
+
+| System | Identity of a step | Stable between runs | Known before the run |
+|---|---|---|---|
+| Temporal | `ActivityId`: if not given, an incremental sequence number (SDK documentation); can be set | Within one workflow replay; between runs only if set | No: the code runs as it goes |
+| Jenkins Pipeline | `FlowNode.getId()`: unique within one execution, stable across restarts; between runs not promised (Javadoc) | No | No |
+| Argo Workflows | The node id is a deterministic hash of the node name (model documentation); the hash function was **not confirmed** | Yes, while the name is the same | Partly, from the template |
+| Tekton matrix | TaskRun `<pipelinerun>-<task>-<index>`, indexes 0, 1, 2 …; at most 256 combinations by default, a larger matrix **fails validation** | Yes, while the matrix is the same | Yes |
+| GitLab CI | Jobs of a matrix are named with their values, `deploystacks: [aws]`; `CI_NODE_INDEX` of `parallel` **not confirmed** on the page | Yes (by name) | Yes (static YAML) |
+| GitHub Actions | `job_id` given by the author, unique in the file; a matrix may be built at run time from another job's output (`fromJSON`) | Yes | Not for a dynamic matrix |
+| Buildkite | `key` given by the author (a repeated key is an error); jobs get system ids; pipelines are uploaded while the build runs | Yes (by key) | No |
+| Airflow | `task_id` by the author and an integer `map_index` for mapped tasks; `map_index_template` shows a name instead of the integer in the UI | Yes | From running the DAG file (known, **not re-checked here**) |
+| Nextflow | A hash of the inputs, the script and the environment (128 bits); the work directory is `ab/cdef…` of it. That the console shows `[ab/cdef12]` is known from use, **not found in the documentation read** | Yes, while the inputs are the same | No |
+
+What it gave us:
+
+1. **Nobody uses a short hash as the identity.** A hash is the identity where the identity is the content (Nextflow, Argo) and is long; a short prefix is only a label for the eye (git, Nextflow). Three characters cannot be unique (a collision in a run of 20 steps is a 4.5 % chance with 3 hex digits).
+2. **The stable handle is a name the author gives** (`job_id`, `key`, `task_id`, the name of a node). Numbers count the fan-out: the index in a matrix (Tekton, Airflow, GitLab). Hence the numbers of our fan-out are blocks in the order of the tree and the `id` option is a part of the design (`docs/parallel.md` section 3.3, 1 to 8 letters and digits), with a repeated id an error that the author resolves, as in Buildkite.
+3. **A fan-out limit is checked before anything runs** (Tekton). Ours is 200 steps, 200 branches and 200 levels, checked on the table and while the run goes.
+4. **Systems that need the structure ahead run or read the definition** (Airflow runs the DAG file); systems with code-defined flow that do not need it (Temporal, Jenkins) have no table. Our run does not depend on the table: it only gives the numbers a first guess, and a step it did not foresee takes a number from the tail.
+5. **A number unique only inside one run is normal** (Jenkins). Stability between runs is given by names everywhere.
+
+Sources: [Jenkins FlowNode](https://javadoc.jenkins.io/plugin/workflow-api/org/jenkinsci/plugins/workflow/graph/FlowNode.html), [Tekton matrix](https://tekton.dev/docs/pipelines/matrix/), [GitLab job control](https://docs.gitlab.com/ci/jobs/job_control/), [GitHub matrix](https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs), [GitHub workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax), [Buildkite dynamic pipelines](https://buildkite.com/docs/pipelines/configure/dynamic-pipelines), [Airflow dynamic task mapping](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html), [Nextflow cache and resume](https://docs.seqera.io/nextflow/cache-and-resume), [Temporal activities, Go SDK](https://docs.temporal.io/develop/go/activities/execution), [Argo node status model](https://argo-models.readthedocs.io/en/latest/autoapi/argo/models/v1alpha1_node_status/).
