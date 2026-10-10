@@ -89,6 +89,15 @@ core: queue of runs, queue of steps, limits, journal (with its hash chain)
 * **SEC-007** holds: separate processes, seccomp, read-only file system, rlimits, one Lua state per run, destroyed with the process. The threat model gets the conductor as a component in the organisation's zone (not Z2), its flow to the core, and the threats of a process escape (bounded to its own run's lease and the Pod).
 * Step Pods and conductors reach the core the same way (a credential and a port); if a gateway for the Pods of tenants is wanted later, it is for both at once.
 
+### As built (the hash chain of the journal, 2026-10-11)
+
+* **Code.** `src/core/journalchain.nim` (the chain and its check, pure; it uses the hash function of `executor/journal.nim`, so an executor can check with the code it has), `src/core/journaldb.nim` (the rows in the database; one lock for the threads of the core), columns `run_journal.hash` and `runs.journal_tip`.
+* **Writing.** Only the core writes the journal: the answer to `params` and the result of a finished step (`appendRow`: the record, its hash from the newest record, and the run's tip, in one transaction with the step's own update). The same record twice is one record. A run written before the chain is chained, from what is there, the first time it is touched.
+* **Checking.** Before a run is given to an executor the core checks the whole chain, the numbers (from 0, no gaps) and the tip. A run that fails ends as `infrastructure_error` with `journal_corrupt` and is never leased. The records go to the executor with their hashes, and the executor's replay checks them again (`journal_corrupt`), so a change on the way or at rest is seen twice.
+* **What it finds:** a changed record, a record taken out, added, or swapped, the newest records taken away (the tip), a forged record. **What it does not:** an attacker who can write the database and knows the function can rebuild the whole chain and the tip (a keyed chain would resist that, but the verifier would need the key; not done), and the removal of the newest records together with the tip.
+* **Checked.** Unit tests of the chain (a changed result, payload or kind, a row cut out, swapped, added, the tip, rows from before the chain, a half hashed journal); integration tests against a real rqlite (rows chained and the tip kept, the lease sends the hashes, the same record twice, a changed result, the newest record deleted, a forged record, a run from before the chain adopted at its next lease, a record added to such a run); and the real core with the real executor service: a run with two steps was leased three times, its journal chained with the tip kept, and replayed with the stored hashes.
+* **Not checked.** Several cores at once on one database (the lock is a lock of one process); a very long journal (the check is linear in its length, at most a few hundred records with the limit of 200 steps).
+
 ## 8. Memory and sizing (estimates, to be measured)
 
 | Part | Estimate | Bound |

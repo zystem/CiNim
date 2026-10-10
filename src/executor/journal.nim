@@ -18,7 +18,7 @@ proc sha256hex(data: string): string =
   let d = secureHash(Sha_256, data)
   for c in d: result.add toHex(ord(c), 2).toLowerAscii
 
-proc entryHash(prev: string; e: Entry): string =
+proc entryHash*(prev: string; e: Entry): string =
   # Length-prefixed fields: no ambiguity between adjacent values.
   var buf = prev
   for f in [$e.seq, e.kind, e.payload, e.result]:

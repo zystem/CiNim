@@ -28,11 +28,14 @@ proc rpc(s: ZConnection; req: ExecutorRequest): ExecutorResponse =
   Protobuf.decode(cast[seq[byte]](body), ExecutorResponse)
 
 proc toJournal(entries: seq[JournalEntry]): Journal =
-  # core's run_journal table (src/core/schema.nim) does not store a hash column - the wire JournalEntry.hash
-  # is unset. The hash chain is a pure function of (seq, kind, payload, result) in order (journal.nim's
-  # entryHash), so rebuild it here with append() rather than trusting an absent transported hash.
+  # The core keeps the hash chain (T-03) and sends each record with its hash: they are taken as they come, and replay checks the chain
+  # (`journal_corrupt` if a record was changed on the way or at rest). A record without a hash (a core from before the chain) is chained here.
   for e in entries:
-    discard result.append(e.kind, cast[string](e.payload), cast[string](e.result))
+    if e.hash.len > 0:
+      result.entries.add Entry(seq: int(e.seq), kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
+                               hash: cast[string](e.hash))
+    else:
+      discard result.append(e.kind, cast[string](e.payload), cast[string](e.result))
 
 proc leaseAny(s: ZConnection): Option[tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)]]] =
   let resp = s.rpc(ExecutorRequest(header: Header(protocol: 1),

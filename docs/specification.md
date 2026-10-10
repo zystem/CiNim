@@ -1103,7 +1103,7 @@ The inputs of a step go through the path Lua table -> canonical JSON -> validati
 
 **SEC-007 Isolation of the pipeline executor.** The worker is a separate unprivileged process or container: a seccomp profile, a read-only file system (except a limited tmpfs), no network and no database access, rlimits on CPU and memory, one Lua state per run destroyed when the run finishes; there are no shared tables or global state between runs.
 
-**SEC-008 Journal integrity.** Every journal record contains the hash of the previous one; on replay the chain is verified, and a violation moves the run to `infrastructure_error` with the code `journal_corrupted`.
+**SEC-008 Journal integrity.** Every journal record contains the hash of the previous one; the core writes the records and keeps the newest hash with the run; the chain is verified by the core before a run is leased and again by the executor on replay, and a violation moves the run to `infrastructure_error` with the code `journal_corrupt`.
 
 **SEC-009 The C boundary.** External C libraries (Lua, TLS, codecs) are used at pinned versions and built in CI with sanitizers, and the parsers of untrusted data (report XML, Protobuf from plugins, HTTP/2 frames) have input limits and fuzz tests.
 
@@ -1190,7 +1190,7 @@ The UI is built as an MPA, not an SPA: the HTML is produced entirely on the serv
 | Tracing | Webhook -> preflight -> queue -> Pod -> steps -> reports; the W3C trace context is passed to the Pod through the shim's environment without sensitive baggage |
 | Logs | Structured JSON, request/run/job/step/shard IDs, sampling for success, full for errors; PII/secrets filtering |
 | Health | /live is the process only; /ready checks critical dependencies; detailed admin diagnostics are protected |
-| Alerts | Oldest queue age, no schedulers, loss of contact with a job controller, a Pod in Pending longer than a threshold, PVC creation failures, orphaned resources, rqlite write latency and frequent leader changes, vlagent queue growth, the launch gate closed (no node available) longer than a threshold, a VictoriaLogs node volume or vlagent queue filling up, no successful or verified backup on time and no node for a snapshot (BKP-006), a node recovery in progress and record loss during it, replay errors (`script_nondeterminism`, `journal_corrupted`), RSS growth trend, error budget burn, storage saturation, backup failure |
+| Alerts | Oldest queue age, no schedulers, loss of contact with a job controller, a Pod in Pending longer than a threshold, PVC creation failures, orphaned resources, rqlite write latency and frequent leader changes, vlagent queue growth, the launch gate closed (no node available) longer than a threshold, a VictoriaLogs node volume or vlagent queue filling up, no successful or verified backup on time and no node for a snapshot (BKP-006), a node recovery in progress and record loss during it, replay errors (`script_nondeterminism`, `journal_corrupt`), RSS growth trend, error budget burn, storage saturation, backup failure |
 
 - The platform learns the state of the log circuit (nodes, vlagent queues, backups) by itself: the log-circuit module (in the shard core) polls the nodes and vlagent (DAT-010) and shows them in the "Backups" section, on administrative pages and in its own metrics.
 

@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease
+import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -283,21 +283,23 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
             protoName(podSays) & ", the shim's last state says " & protoName(shimSays) & " (" & shim.get.reason & ")"
     # the step's own result: write it into run_journal, close out the step
     let res = $t.exit_code & "\n"
-    try:
-      discard c.execute(%*[
-        ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-         protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
-         t.step.run_id, int(t.step.seq), attempt],
-        # payload must equal exactly what the executor's host call sent (bootstrap.lua Job:sh:
-        # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
-        # as a different call than the one in the journal and fails script_nondeterminism - steps.command
-        # alone (the old query) is missing the job key and image, so join jobs for the key.
-        ["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
-         "SELECT s.run_id, s.ordinal, 'job_sh', '', j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command, ?, ? " &
-         "FROM steps s JOIN jobs j ON j.id = s.job_id WHERE s.run_id = ? AND s.ordinal = ?",
-         res, $now, t.step.run_id, int(t.step.seq)]], transaction = true)
-    except RqError:
-      discard   # already applied (retried poll): idempotent by (run_id, seq) PK, ignore the conflict
+    # payload must equal exactly what the executor's host call sent (bootstrap.lua Job:sh:
+    # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
+    # as a different call than the one in the journal and fails script_nondeterminism - steps.command
+    # alone is missing the job key and image, so join jobs for the key.
+    let pl = c.query(%*[["SELECT j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command " &
+      "FROM steps s JOIN jobs j ON j.id = s.job_id WHERE s.run_id = ? AND s.ordinal = ?", t.step.run_id, int(t.step.seq)]])
+    let plv = pl["results"][0]{"values"}
+    if plv != nil and plv.len > 0:
+      try:
+        # the step is closed out and its result goes into the journal, chained, in one transaction; if the record is already there
+        # (a retried poll) nothing is done again
+        discard c.appendRow(t.step.run_id, int(t.step.seq), "job_sh", plv[0][0].getStr, res, alongside = %*[
+          ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
+           protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
+           t.step.run_id, int(t.step.seq), attempt]])
+      except RqError as e:
+        stderr.writeLine "core: could not record the result of step " & t.step.run_id & "/" & $t.step.seq & ": " & e.msg
 
 proc probeAndAge*(c: var RqClient; coreStartedAt: int64) =
   ## once per watchdog pass: rqlite and the log circuit are probed by core itself, and silence ages every component
@@ -553,14 +555,10 @@ proc loadScript(c: var RqClient; runId: string): string =
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0: vals[0][0].getStr else: ""
 
-proc loadJournal(c: var RqClient; runId: string): seq[JournalEntry] =
-  let r = c.query(%*[["SELECT seq, kind, payload, result FROM run_journal " &
-    "WHERE run_id = ? AND seq >= 0 ORDER BY seq", runId]])
-  let vals = r["results"][0]{"values"}
-  if vals != nil:
-    for row in vals:
-      result.add JournalEntry(seq: uint64(row[0].getInt), kind: row[1].getStr,
-        payload: cast[seq[byte]](row[2].getStr), result: cast[seq[byte]](row[3].getStr))
+proc journalEntries(rows: seq[Row]): seq[JournalEntry] =
+  for r in rows:
+    result.add JournalEntry(seq: uint64(r.seq), kind: r.kind, payload: cast[seq[byte]](r.payload), result: cast[seq[byte]](r.result),
+                            hash: cast[seq[byte]](r.hash))
 
 proc leaseStateOf(c: var RqClient; runId: string): LeaseState =
   let r = c.query(%*[["SELECT lease_attempt, lease_until FROM runs WHERE id = ?", runId]])
@@ -589,21 +587,31 @@ proc leaseCandidates*(c: var RqClient; only = ""): seq[string] =
   if vals != nil:
     for row in vals: result.add row[0].getStr
 
-proc handleLease(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
+proc handleLease*(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
   discard registryTouch("executor", "executor-service", epochTime())
   let owner = if req.executor_id.len > 0: req.executor_id else: "executor"
   var runId, token: string
+  var rows: seq[Row]
   for candidate in (if req.run_id.len > 0: @[req.run_id] else: leaseCandidates(c)):
     token = takeRunLease(c, master, candidate, owner)
-    if token.len > 0:
-      runId = candidate
-      break
+    if token.len == 0: continue
+    # the journal is checked before the run goes to an executor (T-03): the core wrote it, the core vouches for it
+    let v = c.verifyJournal(candidate)
+    if v.check.verdict == cvBroken:
+      stderr.writeLine "core: the journal of run " & candidate & " is corrupt: " & v.check.why & "; the run ends"
+      discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = 'journal_corrupt', fail_message = ?, lease_until = 0 " &
+        "WHERE id = ? AND state = ?", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsRunning)]])
+      token = ""
+      continue
+    runId = candidate
+    rows = v.rows
+    break
   if runId.len == 0:
     return ExecutorResponse(header: Header(protocol: 1),
       body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "no_run_available")))
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.lease,
     lease: LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: runId,
-                         script: loadScript(c, runId), journal: loadJournal(c, runId),
+                         script: loadScript(c, runId), journal: journalEntries(rows),
                          params: runParams(c, runId).mapIt(ParamsEntry(key: it[0], value: it[1])))))
 
 proc leaseLost(detail: string): ExecutorResponse =
@@ -643,8 +651,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: why)))
     c.storeEffectiveParams(req.run_id, json)
     # a call that answers at once has no step to write its journal entry later: core writes it (the replay of a restarted executor finds it there)
-    discard c.execute(%*[["INSERT OR IGNORE INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) VALUES (?, ?, 'params', '', ?, '', ?)",
-      req.run_id, int(req.seq), json, $getTime().toUnix()]])
+    discard c.appendRow(req.run_id, int(req.seq), "params", json, "")
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind != "job_sh":

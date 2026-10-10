@@ -142,6 +142,8 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "liveness_timeout", "INTEGER NOT NULL DEFAULT 300"),
       ("execution_profiles", "log_spool_bytes", "INTEGER NOT NULL DEFAULT 10485760"),
       ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600"),
+      ("runs", "journal_tip", "TEXT NOT NULL DEFAULT ''"),        # T-03, core/journalchain.nim: the hash of the newest record of the run's journal
+      ("run_journal", "hash", "TEXT NOT NULL DEFAULT ''"),        # the chain: SHA-256 of the previous hash and this record
       ("runs", "lease_attempt", "INTEGER NOT NULL DEFAULT 0"),    # RUN-008, core/runlease.nim: the attempt of the last lease of the run,
       ("runs", "lease_until", "INTEGER NOT NULL DEFAULT 0"),      # when it runs out (0: given back),
       ("runs", "lease_owner", "TEXT NOT NULL DEFAULT ''"),        # and to whom (the executor's id, for the operator)

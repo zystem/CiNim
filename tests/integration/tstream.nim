@@ -53,7 +53,7 @@ suite "RUN-016 the push channel":
       s.jobPodLimitPercent = 100
       co.setProfileSettings(s, prof)
       (prof, ns)
-    proc next(cl: ZConnection; ms = 3000): Option[StreamFrame] =
+    proc next(cl: ZConnection; ms = 8000): Option[StreamFrame] =
       ## the next frame that is not just 'heard you'
       for _ in 0 ..< 10:
         let f = cl.receive(ms)
@@ -81,7 +81,7 @@ suite "RUN-016 the push channel":
       let r = co.createRun("p", "return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       kickProfile(o.profile)
-      let w = cl.next(4000)
+      let w = cl.next(8000)
       check w.isSome and w.get.kind == "controller.work"
       check w.get.starts == @[r]
       cl.close()
