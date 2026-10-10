@@ -82,6 +82,8 @@ proc fetchString*(L: LuaState; idx: cint): string =
   result = newString(int(n))
   if n > 0: copyMem(addr result[0], s, int(n))
 
+proc ci_line(L: LuaState): cint {.importc, cdecl.}
+
 const preludes = [(1, staticRead("bootstrap.lua"))]     ## the host API by version; a new version is a new file listed here
 
 proc apiPrelude*(version: int): string =
@@ -110,6 +112,9 @@ proc newSandbox*(memLimit = 64 * 1024 * 1024; instrLimit = 50_000_000; apiVersio
   luaL_requiref(L, "utf8", luaopen_utf8, 1)
   luaL_requiref(L, "math", luaopen_math, 1)
   luaL_requiref(L, "coroutine", luaopen_coroutine, 1)
+  # the one thing of the debug interface the prelude needs: the line of the script that a step is made on (lua_glue.c); it takes it from here and removes the global
+  lua_pushcclosure(L, ci_line, 0)
+  lua_setglobal(L, "__ci_line")
   lua_settop(L, 0)
   doAssert luaL_loadbufferx(L, bootstrap.cstring, csize_t(bootstrap.len),
                             "=bootstrap", "t") == LUA_OK

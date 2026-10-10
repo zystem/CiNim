@@ -1,6 +1,10 @@
 -- Sandbox bootstrap: runs once with the real globals, returns the read-only
 -- environment table that user scripts see as _ENV (PIP-005).
 local G = _G
+-- The only thing of the debug interface that is needed: the line of the script on which a step is made (the place of the step in the table of docs/parallel.md section 3.4).
+-- The host gives a function for it (lua_glue.c); the closures below keep it and the global is removed at once, so a script cannot reach it.
+local getline = G.__ci_line
+G.__ci_line = nil
 local type, error, rawget, rawset, rawlen, rawnext = type, error, rawget, rawset, rawlen, next
 local getmetatable, setmetatable, tostring_ = getmetatable, setmetatable, tostring
 local mtype = math.type
@@ -103,10 +107,11 @@ end
 local yield_, running = coroutine.yield, coroutine.running
 local state = {}
 
-local function call(kind, payload)
+local function call(kind, payload, line)
   if running() ~= state.main then
     error("ci." .. kind .. ": host calls are not supported inside nested coroutines", 3)
   end
+  if line then return yield_(kind, payload, line) end      -- `line`: the place of a step in the script, for the table of step numbers; the driver may ignore it
   return yield_(kind, payload)
 end
 
@@ -122,6 +127,27 @@ end
 -- same as `for`/`pcall` are not journaled --- only what a job's steps actually do is (PIP-003).
 -- `matrix`, `parallel`, `use`, `ci.input`, services and secrets are not implemented yet.
 local job_seq = 0
+
+-- The limit of steps in a run and the ids that the author gives to jobs and steps (docs/parallel.md section 3). A run has at most 200 steps: the 201st is an error
+-- returned to the author (`step_limit`). An id is 1 to 8 letters and digits starting with a letter (so that it cannot be taken for a number), unique in the run, and a repeat
+-- is the author's to resolve: the run fails with `duplicate_id` and the two lines. The script runs again in a fresh state at every replay, so both checks are made again each time.
+local MAX_STEPS = 200
+local step_count = 0
+local ids_seen = {}                      -- id -> the line where it was first used
+
+local function check_id(v, what)
+  if v == nil then return nil end
+  if type(v) ~= "string" or #v > 8 or not v:find("^[A-Za-z][A-Za-z0-9]*$") then
+    error(what .. ": an id is 1 to 8 letters and digits starting with a letter, got " .. (type(v) == "string" and ("'" .. v .. "'") or type(v)), 3)
+  end
+  return v
+end
+
+local function claim_id(id, line)
+  local first = ids_seen[id]
+  if first then error("duplicate_id: the id '" .. id .. "' is used at line " .. first .. " and again at line " .. line, 0) end
+  ids_seen[id] = line
+end
 
 -- Application metrics of a step (`metrics = {...}` in ci.job / Job:sh options). The shim in the step's Pod reads them
 -- (docs/metrics.md); here the table is validated and reduced to one canonical JSON string, so the same declaration is
@@ -376,10 +402,14 @@ end
 local Job_mt = { __index = {
   sh = function(self, cmd, opts)
     if type(cmd) ~= "string" then error("Job:sh: string expected", 2) end
+    local line = getline()
+    step_count = step_count + 1
+    if step_count > MAX_STEPS then error("step_limit: a run has at most " .. MAX_STEPS .. " steps; the step at line " .. line .. " is the " .. step_count .. "th", 0) end
+    if opts and opts.id ~= nil then claim_id(check_id(opts.id, "Job:sh"), line) end
     -- payload: job key, image, profile ("" = the ordinary one), canonical options JSON ("" = none) and the command, tab-separated; the
     -- command is last because it may itself contain tabs (core splits into five fields)
     if opts and opts.ignore_failure ~= nil and type(opts.ignore_failure) ~= "boolean" then error("Job:sh: ignore_failure must be a boolean", 2) end
-    local code, out = call("job_sh", self.__key .. "\t" .. self.__image .. "\t" .. self.__profile .. "\t" .. step_opts(self, opts) .. "\t" .. cmd):match("^(%-?%d+)\n(.*)$")
+    local code, out = call("job_sh", self.__key .. "\t" .. self.__image .. "\t" .. self.__profile .. "\t" .. step_opts(self, opts) .. "\t" .. cmd, line):match("^(%-?%d+)\n(.*)$")
     code = tonumber(code)
     -- a non-zero code fails the job (and so the run, unless the script catches the error); `ignore_failure = true` returns it instead
     -- (6.7, ShOpts.ignore_failure). The code is in the journal, so a replay fails at the same call.
@@ -598,6 +628,7 @@ G.ci = {
   job = function(opts, fn)
     if type(opts) ~= "table" then error("ci.job: table expected", 2) end
     if type(fn) ~= "function" then error("ci.job: function expected", 2) end
+    if opts.id ~= nil then claim_id(check_id(opts.id, "ci.job"), getline()) end
     job_seq = job_seq + 1
     local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
       __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3) }, Job_mt)

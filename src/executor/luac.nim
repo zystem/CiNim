@@ -73,6 +73,8 @@ proc lua_createtable*(L: LuaState; narr, nrec: cint)
 proc lua_setfield*(L: LuaState; idx: cint; k: cstring)
 proc luaL_unref*(L: LuaState; t, r: cint)
 proc luaL_ref*(L: LuaState; t: cint): cint
+proc lua_pushcclosure*(L: LuaState; fn: LuaCFunction; n: cint)
+proc lua_setglobal*(L: LuaState; name: cstring)
 proc luaL_requiref*(L: LuaState; modname: cstring; openf: LuaCFunction; glb: cint)
 proc luaL_loadbufferx*(L: LuaState; buff: cstring; sz: csize_t; name, mode: cstring): cint
 proc luaopen_base*(L: LuaState): cint
@@ -81,4 +83,5 @@ proc luaopen_string*(L: LuaState): cint
 proc luaopen_utf8*(L: LuaState): cint
 proc luaopen_math*(L: LuaState): cint
 proc luaopen_coroutine*(L: LuaState): cint
+proc lua_tointegerx*(L: LuaState; idx: cint; isnum: ptr cint): int64
 {.pop.}

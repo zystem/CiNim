@@ -121,6 +121,14 @@ after a round: if some branch moved, go on;  if all unfinished ones are parked, 
 3. **`cancel_step` and `fail_fast`.**
 4. After that: `ci.spawn`, run cancellation, `ci.finally`.
 
+## 9a. As built (phase 1, first part, 2026-10-11)
+
+* **What is built.** `src/executor/steptable.nim` (the pass of the script against a stub host, the blocks of numbers, the lookup with the overflow), the `id` option of `ci.job` and `Job:sh` and the limit of 200 steps in `src/executor/bootstrap.lua`, the line of a step through a one-function C helper in `src/executor/lua_glue.c`, and `replay.execute`'s `onSite` and the codes `duplicate_id` and `step_limit`. Tests: `tests/unit/ttable.nim`.
+* **The line, not the column.** Lua's debug interface gives the line of a call and no column. The place of a step in the table is therefore its **line**, and two steps made on one line are told apart by the order in which they were made there (the instance, 0, 1 …). A one-line script with several steps is still numbered correctly; what a line cannot tell is two different sites that swap places between runs.
+* **What the pass refuses and what it lets through.** Only what it can prove: more than 200 steps (`step_limit`, the 201st step) and an id used twice (`duplicate_id`, with the two lines). A script that breaks in the pass for another reason (it reads a result the stub did not give, it loops) leaves a **partial** table and the run is not refused.
+* **The stub host.** Every step succeeds with code 0 and no output, `ci.now()` gives 0, `ci.random()` 0.5, the parameters are the given ones completed with the defaults.
+* **Not built yet (the rest of phase 1).** The table is not stored with the run and the executor does not ask it for the number of a step; `HostCall` carries no key and `steps` has no `call_key` or `step_id`; the journal and the migration of old rows are unchanged; the step numbers in use are still the journal positions (the same as the table gives a sequential script). `ci.parallel`, `ci.matrix` and the plan before the run (`pipelines:check`) are later phases.
+
 ## 10. Questions for the owner
 
 1. Is **raising** after the branches have ended (and `keep_going` to get the table) the right default for a failed branch? The alternative is to return the table and let the script look.

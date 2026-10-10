@@ -4,7 +4,7 @@
 ## Calls with a journal record are answered from the journal (replay), the
 ## first call without one goes to the host and is appended.
 
-import std/options
+import std/[options, strutils]
 import luac, sandbox, journal
 
 type
@@ -32,8 +32,10 @@ proc failed(code, msg: string): ExecResult =
 
 proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
               onAppend: proc (e: Entry) = nil; maxEntries = 100_000; runId = "";
-              params: seq[(string, string)] = @[]): ExecResult =
-  ## `params` are the launch parameters given when the run was created, as text.
+              params: seq[(string, string)] = @[];
+              onSite: proc (seq: int; kind: string; line: int) = nil): ExecResult =
+  ## `params` are the launch parameters given when the run was created, as text. `onSite` is told, for every host call that has one, the line of the script it was made on
+  ## (a step: docs/parallel.md section 3.4); the table of step numbers is made from it.
   ## `runId` is passed to a real (`ci.pipeline`) script's `main(run)` as `run.run_id` (`lua/stdlib/cicd.d.lua`'s `Run` is a bigger table; only `run_id` exists so far). A script that
   ## returns a plain value directly, as the sandbox test fixtures do, ignores the extra argument.
   if not j.verify():
@@ -67,12 +69,17 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
     let hit = sb.limitCode()
     if hit.len > 0: return failed(hit, "limit exceeded")
     if rs == LUA_YIELD:
-      if nres != 2: return failed("script_error", "malformed host call")
+      if nres notin 2 .. 3: return failed("script_error", "malformed host call")
+      var line = 0
+      if nres == 3:                  # kind, payload and the line of the script the call was made on
+        line = int(lua_tointegerx(co, -1, nil))
+        lua_settop(co, -2)
       let kind = fetchString(co, -2)
       let payload = fetchString(co, -1)
       lua_settop(co, 0)
       if kind notin hostKinds:
         return failed("script_error", "unknown host call '" & kind & "'")
+      if onSite != nil and line > 0: onSite(seq, kind, line)
       var res: string
       if seq < j.entries.len:
         let e = j.entries[seq]
@@ -104,4 +111,8 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
         result.value = fetchString(co, -1)
       return
     else:
-      return failed("script_error", fetchString(co, -1))
+      let msg = fetchString(co, -1)
+      # the errors of the host API that have a code of their own: the message begins with it (bootstrap.lua), possibly after the position `script:12:`
+      for code in ["duplicate_id", "step_limit"]:
+        if (code & ":") in msg: return failed(code, msg)
+      return failed("script_error", msg)
