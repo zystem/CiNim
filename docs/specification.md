@@ -438,7 +438,7 @@ A pipeline is a Lua 5.4 script executed in the sandbox of the pipeline executor.
 
 **PIP-002 Two phases.** The script returns a table `ci.pipeline{...}` with metadata fields (`name`, `on`, `params`, `env`, `requires` --- execution profiles, `storage`, `permissions`, `concurrency`, `timeout`) and a function `main`. The metadata phase runs at discovery and at run creation in a mode without side effects: only type constructors and pure functions are available. The execution phase calls `main(run)`.
 
-**PIP-003 Call journal.** `main` runs as a coroutine. Every host API call that has a side effect or a result is written to the append-only run journal: `(run_id, seq, type, call fingerprint, result)`. This covers `ci.job`, `j.sh`, `j.use`, `j.env`, `ci.parallel`, `ci.spawn`, `ci.input`, `ci.run`, `ci.sleep`, `ci.now`, `ci.random`. The result of a step includes the exit code and `outputs` (STO-003), so data passed between steps is reproducible on replay. Calls must be suspendable through `pcall` so that ordinary Lua error handling works. Waiting for a step, an approval or a timer frees the executor and takes no cluster resources.
+**PIP-003 Call journal.** `main` runs as a coroutine. Every host API call that has a side effect or a result is written to the append-only run journal: `(run_id, seq, type, call fingerprint, result)`. This covers `ci.job`, `j.sh`, `j.use`, `j.env`, `ci.parallel`, `ci.spawn`, `ci.input`, `ci.run`, `ci.start`, `ci.sleep`, `ci.now`, `ci.random`. The result of a step includes the exit code and `outputs` (STO-003), so data passed between steps is reproducible on replay. Calls must be suspendable through `pcall` so that ordinary Lua error handling works. Waiting for a step, an approval or a timer frees the executor and takes no cluster resources.
 
 **PIP-004 Replay.** When an executor fails, restarts or is rebalanced, a new worker runs the same bundle from the beginning, substituting results from the journal for real calls until it reaches the first call with no record; from there execution proceeds normally. A step that was started but not finished at the moment of failure is not started again: the job controller reports its actual state by the deterministic Pod name (RUN-002). If the fingerprint of a call does not match the journal record, the run gets the state `infrastructure_error` with the code `script_nondeterminism`, and the diagnostics give the `seq`, the expected call and the actual call.
 
@@ -452,7 +452,7 @@ A pipeline is a Lua 5.4 script executed in the sandbox of the pipeline executor.
 
 **PIP-009 Matrix.** `ci.matrix` builds the Cartesian product of axes with include/exclude, `max_parallel` and `fail_fast`; the result is executed through `ci.parallel`. The expansion limit is checked at the call and, where the size is computed statically, at preflight (PIP-016).
 
-**PIP-010 Child pipelines.** `ci.run(ref, params, opts)` creates a child run (in the same or another project of the same shard if policy allows; a project on another shard cannot be called, SHD-002) and with `wait=true` suspends the parent until the result. A child run passes policy like an ordinary one, gets its own storage (STO-001) and keeps a reference to the parent.
+**PIP-010 Child pipelines.** A child run is made by one of two calls. `ci.run(ref, params, opts)` creates it and **waits**: the parent is suspended at once until the child ends and gets the child's result (its state and `outputs`), so a step such as `build` can run `deploy` as a run and fold its status into its own. `ci.start(ref, params, opts)` creates it and returns a **handle** at once (`h.id`, `h:wait()`, `h:cancel()`): the parent goes on, the child lives on its own, and `h:wait()` suspends the parent like `ci.run` does. The child may be in the same or another project of the same shard if policy allows; a project on another shard cannot be called, SHD-002. A child run passes policy like an ordinary one, counts among the organisation's active runs, gets its own storage (STO-001) and keeps a reference to the parent. In the parent's limit of 200 (PIP-006) every `ci.run` and `ci.start` is one place, and the depth of runs started by runs is limited by the same number.
 
 **PIP-011 Libraries.** A Lua module is published to the registry with SemVer, a digest and a declaration of inputs and outputs. `require("lib/go@1.4.0")` is resolved through the lockfile `.ci/lock.json` (name, version, digest); a production policy may forbid mutable refs. A module is loaded only by digest and runs in the same sandbox.
 
@@ -658,7 +658,8 @@ Names, semantics and journaling rules are normative; the signatures are fixed in
 | `ci.matrix{...}` | `main` | No | Combinations of axes with include/exclude and a limit |
 | `ci.input{...}` | `main` | Yes | A manual decision that holds no cluster resources (PIP-013) |
 | `ci.deploy(env, fn)` | `main` | Yes | A job in a protected environment with the DEP-002 checks |
-| `ci.run(ref, params, opts)` | `main` | Yes | A child run (PIP-010) |
+| `ci.run(ref, params, opts)` | `main` | Yes | A child run, waits for its result (PIP-010) |
+| `ci.start(ref, params, opts)`, `h:wait()`, `h:cancel()` | `main` | Yes | A child run without waiting; a handle (PIP-010) |
 | `ci.sleep(seconds)`, `ci.now()`, `ci.random()` | `main` | Yes | A timer without a Pod, the time, a random number |
 | `ci.finally(fn)` | `main` | Yes | Cleanup on cancellation and error |
 | `ci.log(level, msg)`, `ci.fail(msg)` | Everywhere | Yes | A message to the run log; an explicit failure |

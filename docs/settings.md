@@ -10,6 +10,8 @@ steps that start after the change. Every organisation has a profile of its own (
 | `log_spool_bytes` | 1 MiB..1 GiB | 10 MiB | the queue of undelivered log on the Pod's ephemeral storage. A full queue slows the build (back-pressure), nothing is lost |
 | `log_hold_timeout` | 10..86400 s | 600 | how long a finished step waits for the log to be delivered and for the core's answer. After that: `logs_undelivered`, the command's result is kept |
 | `liveness_timeout` | 30..3600 s | 300 | one timeout for two cases: the Pod did not start within this time (reason `start_timeout`) or the shim has been silent this long (reason `outcome_unknown`). In both cases the core finishes the step and removes the Pod; the step is not repeated. The count runs from the last sign of life or from the start of the core, whichever is later: a restart of the core does not kill steps |
+| `pod_limit` | 1..10000 | 20 | the most step Pods the organisation has in flight at once (steps handed to its controller and not finished). Steps above it wait in the core's queue and go as places free up (RUN-004, `docs/conductors.md` section 4). Conductor Pods are not counted |
+| `job_pod_limit_percent` | 1..100 | 20 | the share of `pod_limit` one run (a "job") may hold in flight, rounded up, at least 1. With the default of 20 each of 20 Pods allows a run 4, so one run with many parallel steps cannot take the places of the others; the run with the fewest steps in flight is served first |
 
 The core's environment variables `CINIM_LOG_SPOOL_BYTES` and `CINIM_LOG_HOLD_TIMEOUT` are the defaults for the case when the profile does not set them; the core sends them to the controllers with every answer to a poll (D-49), and normally the profile applies.
 
@@ -26,7 +28,7 @@ The core's environment variables `CINIM_LOG_SPOOL_BYTES` and `CINIM_LOG_HOLD_TIM
 
 ## Job controller environment
 
-What a controller needs to **find the core and prove who it is**, and nothing else (D-49): `CINIM_NAMESPACE` (the namespace it serves), `CINIM_CORE_ADDR` (the core's ControllerAttach), `CINIM_CERTS` (its transport keys),
+What a controller needs to **find the core and prove who it is**, and nothing else (D-49): `CINIM_NAMESPACE` (the namespace it serves), `CINIM_CORE_ADDR` (the core's ControllerAttach), `CINIM_CORE_STREAM_ADDR` (the core's push channel, port 19745; with it the controller keeps a connection and the core pushes work to it at once, without it the controller polls), `CINIM_CERTS` (its transport keys),
 `CINIM_BOOTSTRAP_FILE` (the one-time token), `CINIM_STATE_DIR` (its state), `CINIM_SHIM_BIN`, `CINIM_KUBECONFIG` (outside a cluster). The core makes them in the Deployment of an organisation. Everything else a controller works by,
 the build profile, the run volume, the addresses of the core that a step's shim dials, the default spool and log wait, and how long a finished Pod is kept, comes from the core in every answer to the controller's poll
 (`ControllerConfig`, see the core's environment below) and is applied to the next Pod it makes.

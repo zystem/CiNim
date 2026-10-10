@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules
+import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -30,12 +30,15 @@ type
 var stopServers*: Atomic[bool]
 var waitReasonSet: Atomic[bool]   ## some steps currently carry wait_reason = logs_unavailable (so clearing it is a write only on the open edge)
 
-const maxFailMessage* = 2000
+const
+  maxFailMessage* = 2000
+  maxAdmissionCandidates = 2000   ## the pending steps of one organisation looked at in one poll: 200 steps a run, at most pod_limit active runs
 
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
   ## the execution profile's settings (set through the API/UI, D-27, D-29); defaults when the row is missing
   result = defaultSettings()
-  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout FROM execution_profiles WHERE id = ?", profileId]])
+  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent " &
+    "FROM execution_profiles WHERE id = ?", profileId]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0:
     result.infraRetries = vals[0][0].getInt(3)
@@ -43,6 +46,8 @@ proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
     result.livenessTimeout = vals[0][2].getInt(defaultLivenessTimeout)
     result.logSpoolBytes = vals[0][3].getBiggestInt(defaultLogSpoolBytes)
     result.logHoldTimeout = vals[0][4].getInt(defaultLogHoldTimeout)
+    result.podLimit = vals[0][5].getInt(admission.defaultPodLimit)
+    result.jobPodLimitPercent = vals[0][6].getInt(admission.defaultJobPodLimitPercent)
 
 proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
   result = defaultPolicy()
@@ -102,14 +107,16 @@ proc getProfileSettings*(co: Core; profileId = ""): JsonNode =
   var c = newRq(co.rqliteUrl)
   let p = loadSettings(c, if profileId.len > 0: profileId else: co.profileId)
   %*{"infra_retries": p.infraRetries, "log_max_bytes": p.logMaxBytes, "liveness_timeout": p.livenessTimeout,
-     "log_spool_bytes": p.logSpoolBytes, "log_hold_timeout": p.logHoldTimeout}
+     "log_spool_bytes": p.logSpoolBytes, "log_hold_timeout": p.logHoldTimeout,
+     "pod_limit": p.podLimit, "job_pod_limit_percent": p.jobPodLimitPercent}
 
 proc setProfileSettings*(co: Core; s: ProfileSettings; profileId = "") =
   var c = newRq(co.rqliteUrl)
   discard c.execute(%*[["UPDATE execution_profiles SET infra_retries = ?, log_max_bytes = ?, liveness_timeout = ?, " &
-    "log_spool_bytes = ?, log_hold_timeout = ? WHERE id = ?",
-    s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout,
+    "log_spool_bytes = ?, log_hold_timeout = ?, pod_limit = ?, job_pod_limit_percent = ? WHERE id = ?",
+    s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout, s.podLimit, s.jobPodLimitPercent,
     (if profileId.len > 0: profileId else: co.profileId)]])
+  kickProfile(if profileId.len > 0: profileId else: co.profileId)    # a raised limit may let waiting steps go
 
 # ------------------------------------------------------------------ log window read (DAT-001)
 # A bare stand-in for the log gateway, served by the REST API in core/api.nim: one GET, no from/around/search
@@ -399,7 +406,9 @@ proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
                    log_spool_bytes: uint64(s.logSpoolBytes), log_hold_timeout_seconds: uint32(s.logHoldTimeout),
                    pod_retention_read_seconds: uint32(max(s.podRetentionRead, 0)), pod_retention_unread_seconds: uint32(max(s.podRetentionUnread, 0)))
 
-proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest): PollResponse =
+proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest; push = false): PollResponse =
+  ## `push`: the push channel (core/streamhub.nim) asks on behalf of a controller that has said nothing new - what there is to hand out now; it is
+  ## not the controller's heartbeat and tells nothing about its Pods
   # Who is asking (IAM-003, T-46): a namespace that has a controller identity is served only against its credential, or against the
   # bootstrap token once, in which case the credential is handed out and nothing else happens in this poll. A namespace without
   # an identity (a single-tenant setup) is trusted as before.
@@ -419,9 +428,9 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     if decision.confirm: c.confirmCredential(req.namespace)
   of vLegacy: discard
   # every poll is the controller's heartbeat (D-29)
-  discard registryTouch("controller", req.session_id, epochTime(), @[("pods", $req.inventory.len)])
+  if not push: discard registryTouch("controller", req.session_id, epochTime(), @[("pods", $req.inventory.len)])
   # the Pods this controller keeps because it could not read them (the result unknown, the log undelivered): an alert for each, until it removes them
-  if req.kept_complete and req.namespace.len > 0:
+  if req.kept_complete and req.namespace.len > 0 and not push:
     var items: seq[KeptItem]
     for k in req.kept:
       items.add KeptItem(pod: k.pod_name, runId: k.step.run_id, reason: k.reason, seq: int(k.step.seq), attempt: int(k.step.attempt),
@@ -460,17 +469,39 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     discard c.execute(%*[["UPDATE steps SET wait_reason = ? WHERE state = ? AND wait_reason IS NULL",
       reasonUnavailable, protoName(ssPending)]])
     waitReasonSet.store(true)
-  # 3. Claim up to free_pod_slots pending steps whose pause (not_before, after a lost attempt) is over.
-  for _ in 0 ..< (if gate.isOpen and profileId.len > 0: int(req.free_pod_slots) else: 0):   # no profile for the namespace: no steps
+  # 3. Hand out pending steps whose pause (not_before, after a lost attempt) is over, within the limits of the organisation (RUN-004):
+  #    at most free_pod_slots now, at most pod_limit in flight, at most job_pod_limit_percent of that for one run; the run with the
+  #    fewest steps in flight first (core/admission.nim). No profile for the namespace: no steps.
+  var toClaim: seq[string]
+  if gate.isOpen and profileId.len > 0 and req.free_pod_slots > 0:
+    let now = getTime().toUnix()
+    var pending: seq[Candidate]
+    let pr = c.query(%*[["SELECT id, run_id, priority, CAST(queued_at AS INTEGER) FROM steps WHERE state = ? AND profile_id = ? AND not_before <= ? " &
+      "ORDER BY priority DESC, queued_at LIMIT ?", protoName(ssPending), profileId, now, maxAdmissionCandidates]])
+    let pv = pr["results"][0]{"values"}
+    if pv != nil:
+      for row in pv:
+        pending.add Candidate(id: row[0].getStr, runId: row[1].getStr, priority: row[2].getInt, queuedAt: row[3].getBiggestInt)
+    if pending.len > 0:
+      var inFlight = initTable[string, int]()
+      var total = 0
+      let fr = c.query(%*[["SELECT run_id, COUNT(*) FROM steps WHERE profile_id = ? AND state IN (?, ?) GROUP BY run_id",
+        profileId, protoName(ssStarting), protoName(ssRunning)]])
+      let fv = fr["results"][0]{"values"}
+      if fv != nil:
+        for row in fv:
+          inFlight[row[0].getStr] = row[1].getInt
+          total += row[1].getInt
+      toClaim = admit(pending, inFlight, total, settings.podLimit, jobPodLimit(settings.podLimit, settings.jobPodLimitPercent), int(req.free_pod_slots))
+  for stepId in toClaim:
     let r = c.execute(%*[["UPDATE steps SET state = ?, controller_id = ?, claimed_at = ?, version = version + 1, " &
       "pod_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_reason END, " &
       "pod_message = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_message END, " &
       "wait_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN NULL ELSE wait_reason END " &
-      "WHERE id = (SELECT id FROM steps WHERE state = ? AND profile_id = ? AND not_before <= ? " &
-      "ORDER BY priority DESC, queued_at LIMIT 1) AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts, profile",
-      protoName(ssStarting), req.session_id, getTime().toUnix(), protoName(ssPending), profileId, getTime().toUnix(), protoName(ssPending)]])
+      "WHERE id = ? AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts, profile",
+      protoName(ssStarting), req.session_id, getTime().toUnix(), stepId, protoName(ssPending)]])
     let vals = r["results"][0]{"values"}
-    if vals == nil or vals.len == 0: break
+    if vals == nil or vals.len == 0: continue    # another poll took it first
     let row = vals[0]
     commands.add Command(seq: seq, body: CommandBody(kind: CommandBodyKind.start, start: StartStep(
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
@@ -487,6 +518,17 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     release = releasableRuns(c, profileId, getTime().toUnix(), retentionFromEnv())
   PollResponse(header: Header(protocol: 1), commands: commands, release_storage: release, config: controllerConfigOf(shardSettingsFromEnv()),
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)
+
+# The payloads of the push channel (core/streamhub.nim). Encoding is done here, in the module that generates the message types: protobuf_serialization
+# finds the support for the enum fields of a message only where the types were generated.
+proc wireString(b: seq[byte]): string =
+  result = newString(b.len)
+  if b.len > 0: copyMem(addr result[0], unsafeAddr b[0], b.len)
+proc encodeReport*(req: PollRequest): string = wireString(Protobuf.encode(req))
+proc decodeReport*(payload: string): PollRequest = Protobuf.decode(cast[seq[byte]](payload), PollRequest)
+proc encodeWork*(resp: PollResponse): string = wireString(Protobuf.encode(resp))
+proc decodeWork*(payload: string): PollResponse = Protobuf.decode(cast[seq[byte]](payload), PollResponse)
+proc encodeConfig*(c: ControllerConfig): string = wireString(Protobuf.encode(c))
 
 proc serveControllerAttach*(co: Core; port: int) {.thread.} =
   {.cast(gcsafe).}:
@@ -605,6 +647,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
   discard c.execute(%*[["INSERT OR IGNORE INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, profile, queued_at) " &
     "VALUES (?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
     schema.newId(), req.run_id, jobId, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, profile, now]])
+  kickProfile(profileId)       # the push channel hands it to the organisation's controller at once
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
     kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: true)))
 

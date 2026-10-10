@@ -249,13 +249,14 @@ proc onRequest() {.raises: [], gcsafe.} =
         elif getMethod() == "PUT":
           let j = try: parseJson(getBody()) except JsonParsingError: nil
           if j == nil or j.kind != JObject:
-            problem(Http400, "invalid_request", "a JSON object with any of infra_retries, log_max_bytes, log_spool_bytes, log_hold_timeout, liveness_timeout is required")
+            problem(Http400, "invalid_request", "a JSON object with any of infra_retries, log_max_bytes, log_spool_bytes, log_hold_timeout, liveness_timeout, pod_limit, job_pod_limit_percent is required")
             return
           let cur = coreRef.getProfileSettings(profileId)
           var s = ProfileSettings(infraRetries: cur["infra_retries"].getInt, logMaxBytes: cur["log_max_bytes"].getBiggestInt,
                                   livenessTimeout: cur["liveness_timeout"].getInt, logSpoolBytes: cur["log_spool_bytes"].getBiggestInt,
-                                  logHoldTimeout: cur["log_hold_timeout"].getInt)
-          for k in ["infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout"]:
+                                  logHoldTimeout: cur["log_hold_timeout"].getInt, podLimit: cur["pod_limit"].getInt,
+                                  jobPodLimitPercent: cur["job_pod_limit_percent"].getInt)
+          for k in ["infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent"]:
             if j.hasKey(k) and j[k].kind != JInt:
               problem(Http400, "invalid_request", k & " must be an integer")
               return
@@ -264,6 +265,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           if j.hasKey("liveness_timeout"): s.livenessTimeout = j["liveness_timeout"].getInt
           if j.hasKey("log_spool_bytes"): s.logSpoolBytes = j["log_spool_bytes"].getBiggestInt
           if j.hasKey("log_hold_timeout"): s.logHoldTimeout = j["log_hold_timeout"].getInt
+          if j.hasKey("pod_limit"): s.podLimit = j["pod_limit"].getInt
+          if j.hasKey("job_pod_limit_percent"): s.jobPodLimitPercent = j["job_pod_limit_percent"].getInt
           let bad = validate(s)
           if bad.len > 0:
             problem(Http400, "invalid_request", bad)

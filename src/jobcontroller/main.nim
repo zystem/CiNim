@@ -9,7 +9,8 @@ import std/[os, json, strutils, times, sequtils, tables]
 import crunchy
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, spoolwire]
+import std/options
+import common/[zmqcurve, spoolwire, stream, streamstate]
 import backend, ctrlstate, logic, k8s, podverdict, shardsettings
 
 import_proto3 "../../build/nimproto/all.proto"
@@ -30,6 +31,9 @@ let
   # IAM-003: the one-time token with which this controller enrols at core (a Secret that core made with the namespace); the credential
   # that core gives in exchange is kept next to the state and sent in every poll
   bootstrapFile = getEnv("CINIM_BOOTSTRAP_FILE", "")
+  # the push channel (docs/conductors.md section 12): with this address the controller keeps a connection to the core and the core pushes work
+  # to it at once; without it the controller polls as before
+  streamAddr = getEnv("CINIM_CORE_STREAM_ADDR", "")
 const pollIntervalMs = 1000
 
 var logIngestAddr = ""      ## where *this* process reaches the core's LogIngest, to hand over the blocks it pulled out of a Pod's spool (the exec fallback, D-29); the core says in every answer to a poll (D-49)
@@ -47,6 +51,77 @@ proc rpc(s: ZConnection; req: PollRequest): PollResponse =
   if not avail: raise newException(IOError, "no reply from core within the receive timeout")
   Protobuf.decode(cast[seq[byte]](body), PollResponse)
 
+
+# ---- the push channel: a controller's end
+type
+  Push = object
+    conn: ZConnection
+    inbox: Inbox                     ## the numbered frames of the core applied so far
+    backlog: seq[PollResponse]       ## work pushed since the last report, applied with the next answer
+    reportNo: uint64
+    lastGate: GateState              ## the gate as the core last said it (a bare "heard you" answer does not repeat it)
+    wake: bool                       ## the core asked for our state again (`resync`)
+
+proc connectPush(): ZConnection =
+  connectStream(streamAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"))
+
+proc decodeWork(payload: string): PollResponse =
+  Protobuf.decode(cast[seq[byte]](payload), PollResponse)
+
+proc absorb(p: var Push; f: StreamFrame): Option[PollResponse] =
+  ## the work in a frame, if it is to be applied now: the next numbered frame, or one that is not numbered (an answer about identity)
+  if f.kind == "resync":
+    p.wake = true
+    return none(PollResponse)
+  if f.kind != "controller.work": return none(PollResponse)
+  if f.id != 0 and p.inbox.accept(f.id) != acApply: return none(PollResponse)
+  let w = (try: decodeWork(f.payload) except CatchableError: return none(PollResponse))
+  if not (w.unauthorized or w.issued_credential.len > 0): p.lastGate = w.gate
+  some(w)
+
+proc exchange(p: var Push; sessionId: string; req: PollRequest): PollResponse =
+  ## send our state and wait for the core's answer to it; whatever the core pushed meanwhile is applied with it
+  inc p.reportNo
+  let bytes = Protobuf.encode(req)
+  var payload = newString(bytes.len)
+  if bytes.len > 0: copyMem(addr payload[0], unsafeAddr bytes[0], bytes.len)
+  let report = frame(sessionId, "controller.report", payload, id = p.reportNo, ack = p.inbox.ackValue)
+  p.wake = false
+  if not p.conn.sendFrame(report): raise newException(IOError, "the report could not be queued")
+  let deadline = epochTime() + 8.0
+  while epochTime() < deadline:
+    let got = p.conn.receive(500)
+    if got.isNone: continue
+    let f = got.get
+    let w = p.absorb(f)
+    if f.kind == "resync":
+      discard p.conn.sendFrame(report)
+      continue
+    if f.re == p.reportNo:
+      var r = if w.isSome: w.get else: PollResponse(header: Header(protocol: 1), poll_after_ms: pollIntervalMs, gate: p.lastGate)
+      if w.isSome and (w.get.unauthorized or w.get.issued_credential.len > 0): return r      # the answer about identity stands alone
+      for b in p.backlog:
+        r.commands = b.commands & r.commands
+        r.release_storage = b.release_storage & r.release_storage
+        if not r.config.present and b.config.present: r.config = b.config
+      p.backlog.setLen 0
+      return r
+    elif w.isSome: p.backlog.add w.get
+  raise newException(IOError, "no answer from the core within 8 s")
+
+proc waitPushed(p: var Push; ms: int): bool =
+  ## wait for the next round; true as soon as the core pushed work (or asked for our state), so that the round starts at once
+  let deadline = epochTime() + ms.float / 1000.0
+  while true:
+    let left = int((deadline - epochTime()) * 1000)
+    if left <= 0: return false
+    let got = p.conn.receive(min(left, 200))
+    if got.isSome:
+      let w = p.absorb(got.get)
+      if w.isSome:
+        p.backlog.add w.get
+        return true
+      if p.wake: return true
 
 proc deliverToCore(runId: string; seq, attempt: int; frames: seq[Frame]): uint64 =
   ## Blocks pulled out of a Pod's spool go to core's LogIngest exactly as the shim would have sent them (same sequence numbers:
@@ -134,14 +209,16 @@ proc main() =
   let adopted = st.active()
   echo "jobcontroller: state in ", stateDir, ", adopted ", adopted.len, " step Pod(s) from the previous run"
   let sessionId = "jc-" & $epochTime()
-  var core = connectCore()
+  let usePush = streamAddr.len > 0
+  var core: ZConnection = (if usePush: nil else: connectCore())
+  var push = Push(conn: (if usePush: connectPush() else: nil), inbox: initInbox())
   var credential = readTrimmed(credentialPath())
   var handBack: seq[PodTransition]       # steps assigned to us while the launch gate was closed: no Pod exists, they go back
   var ackSeq = 0'u64
   var lastSweep = 0.0
   var released: seq[string]               # run volumes deleted since the last answered poll: core is told, and stops asking (STO-006)
   var seenPhase: Table[string, string]     # pod name -> phase as of the last round (only a Running Pod has a spool worth pulling)
-  echo "jobcontroller: connected, session=", sessionId
+  echo "jobcontroller: ", (if usePush: "push channel to " & streamAddr else: "polling " & coreAddr), ", session=", sessionId
   while true:
     let now = epochTime()
     let round = pollRound(be, st, cfg, now)
@@ -154,13 +231,15 @@ proc main() =
       storage_released: released)
     var resp: PollResponse
     try:
-      resp = core.rpc(req)
+      resp = (if usePush: push.exchange(sessionId, req) else: core.rpc(req))
     except CatchableError as e:
       # core unreachable: nothing is lost - the ends stay unreported in our state and go out with the next poll
       stderr.writeLine "jobcontroller: core does not answer (" & e.msg & "), retrying"
-      try: core.close() except CatchableError: discard
+      if not usePush:
+        try: core.close() except CatchableError: discard
       sleep 2000
-      try: core = connectCore() except CatchableError: discard
+      if not usePush:
+        try: core = connectCore() except CatchableError: discard       # the push channel reconnects by itself
       continue
     if resp.issued_credential.len > 0:
       # enrolled: keep the credential, and from the next poll on it is the proof (the poll got nothing else, so nothing is lost)
@@ -253,6 +332,8 @@ proc main() =
       let sw = sweep(be, st, cfg, int64(epochTime()))
       if sw.expired.len > 0: echo "jobcontroller: removed finished Pod(s) after their retention: ", sw.expired.join(", ")
       if sw.orphans.len > 0: echo "jobcontroller: removed orphan Pod(s) (not in this controller's state): ", sw.orphans.join(", ")
-    sleep(if resp.poll_after_ms > 0: int(resp.poll_after_ms) else: pollIntervalMs)
+    let pause = if resp.poll_after_ms > 0: int(resp.poll_after_ms) else: pollIntervalMs
+    if usePush: discard push.waitPushed(pause)        # work pushed by the core ends the wait
+    else: sleep(pause)
 
 main()

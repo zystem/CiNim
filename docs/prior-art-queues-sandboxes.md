@@ -198,7 +198,7 @@ Marks: **[V]** read in the product's documentation in this research; **[S]** fro
 | Bitbucket | plan runner concurrency; 1 000 queued steps | workspace | 100 steps per pipeline |
 | CodeBuild | 20 per compute type (some types), queue 5x | project limit (an error, not a queue) | none |
 | Harness | delegate task capacity | none read | the stage pod |
-| **S0** | profile `step_pod_limit` (new) | conductors 3 per organisation | `run_pod_limit` 20%; 200 steps |
+| **S0** | profile `step_pod_limit` (new) | conductors 3 per organisation | `job_pod_limit` 20%; 200 steps |
 
 ### 4.4 Pods and scale to zero
 

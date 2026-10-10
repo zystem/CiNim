@@ -5,7 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/rqlite
-import apiauth, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules
+import apiauth, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
 if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token-reset`: a lost administrator token is made again (IAM-003, core/apiauth.nim); the new
@@ -24,6 +24,7 @@ let
   stepReportPort = parseInt(getEnv("CINIM_STEPREPORT_PORT", "19742"))
   logIngestPort = parseInt(getEnv("CINIM_LOGINGEST_PORT", "19743"))
   artifactPort = parseInt(getEnv("CINIM_ARTIFACTINGEST_PORT", "19744"))
+  streamPort = parseInt(getEnv("CINIM_STREAM_PORT", "19745"))   ## the push channel of the controllers (docs/conductors.md section 12)
   vlagentUrl = getEnv("CINIM_VLAGENT_URL", "http://127.0.0.1:19429/insert/jsonline")
   # one VictoriaLogs node URL, or several separated by commas, in the same order as vlagent's remoteWrite list
   # (vlagent labels its per-destination queues by that position); reads still go to the first node
@@ -45,6 +46,7 @@ type
 
 proc runControllerAttach(a: Args) {.thread.} = serveControllerAttach(a.co, a.port)
 proc runExecutorChannel(a: Args) {.thread.} = serveExecutorChannel(a.co, a.port)
+proc runStream(a: Args) {.thread.} = serveStream(a.co, a.port)
 proc runLogIngest(a: tuple[co: Collector, certs: string, port: int]) {.thread.} =
   serveLogIngest(a.co, a.certs, a.port)
 proc runStepReport(a: StepReportArgs) {.thread.} = serveStepReport(a.rqliteUrl, a.certs, a.port, a.profileId)
@@ -121,6 +123,8 @@ proc main() =
   var logIngestThread: Thread[tuple[co: Collector, certs: string, port: int]]
   createThread(controllerThread, runControllerAttach, (co, controllerPort))
   createThread(executorThread, runExecutorChannel, (co, executorPort))
+  var streamThread: Thread[Args]
+  createThread(streamThread, runStream, (co, streamPort))
   createThread(logIngestThread, runLogIngest,
     (Collector(rqliteUrl: rqliteUrl, vlagentUrl: vlagentUrl), certs, logIngestPort))
   createThread(stepReportThread, runStepReport, (rqliteUrl, certs, stepReportPort, profileId))
@@ -131,7 +135,7 @@ proc main() =
   var watchdogThread: Thread[tuple[rqliteUrl, profileId: string, startedAt: int64]]
   createThread(watchdogThread, runWatchdog, (rqliteUrl, profileId, getTime().toUnix()))
   echo "core: ControllerAttach on ", controllerPort, ", ExecutorChannel on ", executorPort,
-       ", LogIngest on ", logIngestPort, ", ArtifactIngest on ", artifactPort, ", StepReport on ", stepReportPort, ", API on ", apiPort
+       ", LogIngest on ", logIngestPort, ", ArtifactIngest on ", artifactPort, ", the push channel on ", streamPort, ", StepReport on ", stepReportPort, ", API on ", apiPort
   serveApi(co, apiPort)   # returns immediately: GuildenStern runs its own thread pool (D-25)
   # GuildenStern installs its own SIGTERM/SIGINT handler that only stops *its* threads, and the loop that
   # used to sit here (`while true: sleep`) never noticed - so the process ignored SIGTERM and a supervisor

@@ -11,6 +11,8 @@
 ##     that another attempt would meet again, so it is not repeated either;
 ##   - every retry is bounded by `infra_retries` (default 3), spaced out with a growing pause so a node that keeps losing Pods
 ##     cannot be hammered (the retry storm Jenkins' Kubernetes plugin is known for).
+import admission
+
 type
   Decision* = enum
     dFinish             ## the step is done: record its own result
@@ -35,6 +37,8 @@ type
     logHoldTimeout*: int      ## 10..86400 s, default 600: how long a finished step waits for its log to be delivered (and for core)
     livenessTimeout*: int     ## 30..3600 s, default 300: a Pod that has not started, or a shim that has not been heard from,
                               ## for this long is killed by core (one timeout for both, D-29)
+    podLimit*: int            ## 1..10000, default 20: the most step Pods the organisation has in flight at once (RUN-004, core/admission.nim)
+    jobPodLimitPercent*: int  ## 1..100, default 20: the share of `podLimit` one run may hold (rounded up, at least 1)
 
 const
   defaultLogMaxBytes* = 1'i64 shl 30
@@ -44,7 +48,8 @@ const
 
 func defaultSettings*(): ProfileSettings =
   ProfileSettings(infraRetries: 3, logMaxBytes: defaultLogMaxBytes, livenessTimeout: defaultLivenessTimeout,
-                  logSpoolBytes: defaultLogSpoolBytes, logHoldTimeout: defaultLogHoldTimeout)
+                  logSpoolBytes: defaultLogSpoolBytes, logHoldTimeout: defaultLogHoldTimeout,
+                  podLimit: admission.defaultPodLimit, jobPodLimitPercent: admission.defaultJobPodLimitPercent)
 
 func validate*(s: ProfileSettings): string =
   ## "" if valid, else what is wrong (the API answers 400 with it)
@@ -53,7 +58,7 @@ func validate*(s: ProfileSettings): string =
   elif s.logSpoolBytes notin 1'i64 shl 20 .. 1'i64 shl 30: "log_spool_bytes must be 1 MiB..1 GiB"
   elif s.logHoldTimeout notin 10 .. 86400: "log_hold_timeout must be 10..86400 seconds"
   elif s.livenessTimeout notin 30 .. 3600: "liveness_timeout must be 30..3600 seconds"
-  else: ""
+  else: validateLimits(s.podLimit, s.jobPodLimitPercent)
 
 func decide*(reason: string; attempt: int; p: RetryPolicy): Decision =
   ## `attempt` is the attempt that just ended (1 = the first run).

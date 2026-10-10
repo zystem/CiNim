@@ -141,7 +141,9 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "log_max_bytes", "INTEGER NOT NULL DEFAULT 1073741824"),
       ("execution_profiles", "liveness_timeout", "INTEGER NOT NULL DEFAULT 300"),
       ("execution_profiles", "log_spool_bytes", "INTEGER NOT NULL DEFAULT 10485760"),
-      ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600")]:
+      ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600"),
+      ("execution_profiles", "pod_limit", "INTEGER NOT NULL DEFAULT 20"),              # RUN-004, core/admission.nim: step Pods in flight of the organisation
+      ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20")]:  # the share of it one run may hold
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
   discard c.execute(%*[["CREATE INDEX IF NOT EXISTS runs_storage ON runs (profile_id, storage_released, state)"]])    # what the polls of the controllers ask (core/runstorage.nim)

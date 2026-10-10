@@ -70,7 +70,7 @@ after a round: if some branch moved, go on;  if all unfinished ones are parked, 
 * **The lease (RUN-008)** is that of `docs/conductors.md` section 6: a token and an attempt number per run, carried by every call; the core refuses a call of an older attempt, which closes the case of two conductors on one run. `runs` gets `lease_token`, `lease_attempt`, `lease_until` and `dirty`; `dirty` marks a suspended run whose wait has ended (a timer, an approval, a child run), which may be leased again. The present rule ("lease a run that has no step in flight") goes away.
 * **Cancelling a step of a run** (`cancel_step`, a new host call, journaled): a `PENDING` step becomes `CANCELED` at once; one that runs is marked and the controller is told by the `CancelStep` it already knows (the Pod is deleted with a grace period, the shim receives SIGTERM, RUN-006); its result for the script is the error `canceled`.
   The run-level `POST /api/v1/runs/{id}:cancel` is the same operation for every step plus the end of the script (later).
-* The controller takes the steps the core admits under the limits of `docs/conductors.md` section 4 (`pod_limit`, `run_pod_limit`, the run with the fewest steps in flight first) pushed to it by the core; the run volume's claim is still created once (idempotent).
+* The controller takes the steps the core admits under the limits of `docs/conductors.md` section 4 (`pod_limit`, `job_pod_limit`, the run with the fewest steps in flight first) pushed to it by the core; the run volume's claim is still created once (idempotent).
 
 ## 7. Storage and shared files
 
