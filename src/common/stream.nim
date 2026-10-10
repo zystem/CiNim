@@ -106,6 +106,9 @@ proc connectStream*(address, serverPublicKey: string; client: CurveKeypair; send
     s.setsockopt(HEARTBEAT_TIMEOUT, heartbeatTimeoutMs.cint)
     s.setsockopt(RECONNECT_IVL, 500.cint)
     s.setsockopt(RECONNECT_IVL_MAX, 5000.cint)
+    # A connect that gets no answer is given up after 5 s and tried again with a new source port. Without this the attempt lasts as long as the operating system retries the
+    # SYN (about two minutes): a conductor, whose Pod is under a network policy, was seen to stay out for that long after the core's Pod was replaced.
+    s.setsockopt(CONNECT_TIMEOUT, 5000.cint)
     s.setsockopt(SNDTIMEO, sendTimeoutMs.cint)
 
 proc sendFrame*(c: ZConnection; f: StreamFrame): bool =
