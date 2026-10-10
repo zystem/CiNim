@@ -12,6 +12,7 @@
 ##   - every retry is bounded by `infra_retries` (default 3), spaced out with a growing pause so a node that keeps losing Pods
 ##     cannot be hammered (the retry storm Jenkins' Kubernetes plugin is known for).
 import admission
+import ../common/conductorplan
 
 type
   Decision* = enum
@@ -39,6 +40,8 @@ type
                               ## for this long is killed by core (one timeout for both, D-29)
     podLimit*: int            ## 1..10000, default 20: the most step Pods the organisation has in flight at once (RUN-004, core/admission.nim)
     jobPodLimitPercent*: int  ## 1..100, default 20: the share of `podLimit` one run may hold (rounded up, at least 1)
+    runsPerConductor*: int    ## 1..100, default 10: the runs one conductor Pod leads at once (docs/conductors.md)
+    conductorMin*: int        ## 0..ceil(podLimit / runsPerConductor), default 1: the conductors kept warm; 0 lets the organisation scale to zero
 
 const
   defaultLogMaxBytes* = 1'i64 shl 30
@@ -49,7 +52,8 @@ const
 func defaultSettings*(): ProfileSettings =
   ProfileSettings(infraRetries: 3, logMaxBytes: defaultLogMaxBytes, livenessTimeout: defaultLivenessTimeout,
                   logSpoolBytes: defaultLogSpoolBytes, logHoldTimeout: defaultLogHoldTimeout,
-                  podLimit: admission.defaultPodLimit, jobPodLimitPercent: admission.defaultJobPodLimitPercent)
+                  podLimit: admission.defaultPodLimit, jobPodLimitPercent: admission.defaultJobPodLimitPercent,
+                  runsPerConductor: defaultRunsPerConductor, conductorMin: defaultConductorMin)
 
 func validate*(s: ProfileSettings): string =
   ## "" if valid, else what is wrong (the API answers 400 with it)
@@ -58,6 +62,9 @@ func validate*(s: ProfileSettings): string =
   elif s.logSpoolBytes notin 1'i64 shl 20 .. 1'i64 shl 30: "log_spool_bytes must be 1 MiB..1 GiB"
   elif s.logHoldTimeout notin 10 .. 86400: "log_hold_timeout must be 10..86400 seconds"
   elif s.livenessTimeout notin 30 .. 3600: "liveness_timeout must be 30..3600 seconds"
+  elif s.runsPerConductor notin 1 .. maxRunsPerConductor: "runs_per_conductor must be 1.." & $maxRunsPerConductor
+  elif s.conductorMin notin 0 .. maxConductors(s.podLimit, s.runsPerConductor):
+    "conductor_min must be 0.." & $maxConductors(s.podLimit, s.runsPerConductor) & " (pod_limit / runs_per_conductor, rounded up)"
   else: validateLimits(s.podLimit, s.jobPodLimitPercent)
 
 func decide*(reason: string; attempt: int; p: RetryPolicy): Decision =

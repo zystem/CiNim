@@ -11,7 +11,7 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import std/options
 import common/[zmqcurve, spoolwire, stream, streamstate]
-import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence
+import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -47,6 +47,7 @@ type
     reportNo: uint64
     lastGate: GateState              ## the gate as the core last said it (a bare "heard you" answer does not repeat it)
     wake: bool                       ## the core asked for our state again (`resync`)
+    plan: ConductorPlan              ## the conductors the core last asked for; taken from every frame as it comes, so that an answer that arrived late and was merged into another is not lost
 
 proc connectPush(): ZConnection =
   connectStream(streamAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"))
@@ -63,6 +64,7 @@ proc absorb(p: var Push; f: StreamFrame): Option[PollResponse] =
   if f.kind != "controller.work": return none(PollResponse)
   if f.id != 0 and p.inbox.accept(f.id) != acApply: return none(PollResponse)
   let w = (try: decodeWork(f.payload) except CatchableError: return none(PollResponse))
+  if w.conductors.present: p.plan = w.conductors
   if not (w.unauthorized or w.issued_credential.len > 0): p.lastGate = w.gate
   some(w)
 
@@ -216,6 +218,8 @@ proc main() =
   var handBack: seq[PodTransition]       # steps assigned to us while the launch gate was closed: no Pod exists, they go back
   var ackSeq = 0'u64
   var lastSweep = 0.0
+  var lastConductors = 0.0
+  var conductorTried: Table[int, float]
   var released: seq[string]               # run volumes deleted since the last answered poll: core is told, and stops asking (STO-006)
   var seenPhase: Table[string, string]     # pod name -> phase as of the last round (only a Running Pod has a spool worth pulling)
   echo "jobcontroller: push channel to ", streamAddr, ", session=", sessionId
@@ -277,6 +281,19 @@ proc main() =
       cfg.logHoldTimeout = int(c.log_hold_timeout_seconds)
       cfg.retentionRead = int(c.pod_retention_read_seconds)
       cfg.retentionUnread = int(c.pod_retention_unread_seconds)
+    let conductorPlan = push.plan
+    if conductorPlan.present and epochTime() - lastConductors >= 5.0:
+      # the conductors: the first N are made, an ended one is removed; one that runs is never stopped here (the core drains it)
+      lastConductors = epochTime()
+      let spec = ConductorSpec(image: conductorPlan.image, runsPerConductor: int(conductorPlan.runs_per_conductor),
+                               drainSeconds: int(conductorPlan.drain_seconds), streamAddr: streamAddr, namespace: ns,
+                               curveSecret: "cinim-controller-curve")      # the Secret the core made with the namespace (core/orgprovision.nim: curveSecretName)
+      try:
+        let r = reconcile(be, spec, int(conductorPlan.desired), conductorPlan.credentials.mapIt((it.id, it.credential)), epochTime(), conductorTried)
+        if r.created.len > 0 or r.deleted.len > 0:
+          echo "jobcontroller: conductors: made ", r.created.join(","), "; removed ", r.deleted.join(",")
+      except CatchableError as e:
+        stderr.writeLine "jobcontroller: conductors: " & e.msg
     if due:        # what the report carried has been taken in
       afterPoll(st, round.transitions, int64(now))
       released.setLen(0)

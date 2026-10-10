@@ -6,10 +6,10 @@
 ## path. The watchdog (watchdogPass) enforces liveness_timeout, unwantedPods tells the controller which Pods to remove, and
 ## renderCoreMetrics / componentsJson serve /metrics and /api/v1/components.
 
-import std/[json, strutils, times, atomics, httpclient, uri, sequtils, tables]
+import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi]
+import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
@@ -37,7 +37,7 @@ const
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
   ## the execution profile's settings (set through the API/UI, D-27, D-29); defaults when the row is missing
   result = defaultSettings()
-  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent " &
+  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min " &
     "FROM execution_profiles WHERE id = ?", profileId]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0:
@@ -48,6 +48,8 @@ proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
     result.logHoldTimeout = vals[0][4].getInt(defaultLogHoldTimeout)
     result.podLimit = vals[0][5].getInt(admission.defaultPodLimit)
     result.jobPodLimitPercent = vals[0][6].getInt(admission.defaultJobPodLimitPercent)
+    result.runsPerConductor = vals[0][7].getInt(defaultRunsPerConductor)
+    result.conductorMin = vals[0][8].getInt(defaultConductorMin)
 
 proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
   result = defaultPolicy()
@@ -109,13 +111,14 @@ proc getProfileSettings*(co: Core; profileId = ""): JsonNode =
   let p = loadSettings(c, if profileId.len > 0: profileId else: co.profileId)
   %*{"infra_retries": p.infraRetries, "log_max_bytes": p.logMaxBytes, "liveness_timeout": p.livenessTimeout,
      "log_spool_bytes": p.logSpoolBytes, "log_hold_timeout": p.logHoldTimeout,
-     "pod_limit": p.podLimit, "job_pod_limit_percent": p.jobPodLimitPercent}
+     "pod_limit": p.podLimit, "job_pod_limit_percent": p.jobPodLimitPercent,
+     "runs_per_conductor": p.runsPerConductor, "conductor_min": p.conductorMin}
 
 proc setProfileSettings*(co: Core; s: ProfileSettings; profileId = "") =
   var c = newRq(co.rqliteUrl)
   discard c.execute(%*[["UPDATE execution_profiles SET infra_retries = ?, log_max_bytes = ?, liveness_timeout = ?, " &
-    "log_spool_bytes = ?, log_hold_timeout = ?, pod_limit = ?, job_pod_limit_percent = ? WHERE id = ?",
-    s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout, s.podLimit, s.jobPodLimitPercent,
+    "log_spool_bytes = ?, log_hold_timeout = ?, pod_limit = ?, job_pod_limit_percent = ?, runs_per_conductor = ?, conductor_min = ? WHERE id = ?",
+    s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout, s.podLimit, s.jobPodLimitPercent, s.runsPerConductor, s.conductorMin,
     (if profileId.len > 0: profileId else: co.profileId)]])
   kickProfile(if profileId.len > 0: profileId else: co.profileId)    # a raised limit may let waiting steps go
 
@@ -410,6 +413,37 @@ proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
                    log_spool_bytes: uint64(s.logSpoolBytes), log_hold_timeout_seconds: uint32(s.logHoldTimeout),
                    pod_retention_read_seconds: uint32(max(s.podRetentionRead, 0)), pod_retention_unread_seconds: uint32(max(s.podRetentionUnread, 0)))
 
+var conductorImage*: string = getEnv("CINIM_CONDUCTOR_IMAGE")      ## the conductor image of the shard; empty: the controllers are told nothing about conductors
+const conductorDrainSeconds* = 30
+
+proc runCounts*(c: var RqClient; profileId: string): tuple[active, waiting: int] =
+  ## the organisation's runs that are not over: those that were led before (they hold a place of pod_limit) and those that have not been led yet
+  let r = c.query(%*[["SELECT COUNT(CASE WHEN lease_attempt > 0 THEN 1 END), COUNT(*) FROM runs WHERE profile_id = ? AND state = ?", profileId, protoName(rsRunning)]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0:
+    result.active = vals[0][0].getInt
+    result.waiting = max(vals[0][1].getInt - result.active, 0)
+
+proc wantedConductors*(c: var RqClient; profileId: string; s: ProfileSettings): int =
+  let n = c.runCounts(profileId)
+  desiredConductors(n.active, n.waiting, s.runsPerConductor, s.conductorMin, s.podLimit)
+
+var planCacheSeconds* = 3.0       ## how long the plan of an organisation's conductors is kept: it counts runs, and the number changes slowly
+var planCache {.threadvar.}: Table[string, tuple[at: float, plan: ConductorPlan]]
+
+proc conductorPlanOf*(c: var RqClient; profileId, master, namespace: string; s: ProfileSettings): ConductorPlan =
+  ## what the controller of the organisation is to keep (docs/conductors.md section 5); nothing without an image, or for the shard's default profile
+  if conductorImage.len == 0 or namespace.len == 0: return
+  let cached = planCache.getOrDefault(profileId)
+  if planCacheSeconds > 0 and cached.at > 0 and epochTime() - cached.at < planCacheSeconds and cached.plan.image == conductorImage and
+     cached.plan.runs_per_conductor == uint32(s.runsPerConductor):
+    return cached.plan
+  result = ConductorPlan(present: true, desired: uint32(c.wantedConductors(profileId, s)), image: conductorImage,
+                         runs_per_conductor: uint32(s.runsPerConductor), drain_seconds: uint32(conductorDrainSeconds))
+  for n in 1 .. int(result.desired):
+    result.credentials.add ConductorCredential(id: conductorId(n), credential: conductorCredential(master, namespace, conductorId(n)))
+  planCache[profileId] = (epochTime(), result)
+
 proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest; push = false; claim = true): PollResponse =
   ## `push`: the push channel (core/streamhub.nim) asks on behalf of a controller that has said nothing new - what there is to hand out now; it is
   ## not the controller's heartbeat and tells nothing about its Pods. `claim = false`: take in the controller's state and answer, but hand out no
@@ -523,7 +557,8 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     releaseAskedAt[profileId] = epochTime()
     release = releasableRuns(c, profileId, getTime().toUnix(), retentionFromEnv())
   PollResponse(header: Header(protocol: 1), commands: commands, release_storage: release, config: controllerConfigOf(shardSettingsFromEnv()),
-               gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000)
+               gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000,
+               conductors: (if push or profileId.len == 0: ConductorPlan() else: conductorPlanOf(c, profileId, master, req.namespace, settings)))
 
 # The payloads of the push channel (core/streamhub.nim). Encoding is done here, in the module that generates the message types: protobuf_serialization
 # finds the support for the enum fields of a message only where the types were generated.
@@ -535,6 +570,7 @@ proc decodeReport*(payload: string): PollRequest = Protobuf.decode(cast[seq[byte
 proc encodeWork*(resp: PollResponse): string = wireString(Protobuf.encode(resp))
 proc decodeWork*(payload: string): PollResponse = Protobuf.decode(cast[seq[byte]](payload), PollResponse)
 proc encodeConfig*(c: ControllerConfig): string = wireString(Protobuf.encode(c))
+proc encodePlan*(p: ConductorPlan): string = wireString(Protobuf.encode(p))
 # the conductor's kinds (docs/conductors.md section 12): a hello, a lease pushed, a host call or a finish, and the answer to it
 proc encodeHello*(h: ConductorHello): string = wireString(Protobuf.encode(h))
 proc decodeHello*(payload: string): ConductorHello = Protobuf.decode(cast[seq[byte]](payload), ConductorHello)
@@ -618,15 +654,28 @@ proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versi
   ## already hold a place of the organisation), then new runs while the organisation has fewer active runs than its `pod_limit` (RUN-004). Only the
   ## organisation's own runs, only of the host API versions the conductor can run.
   if places <= 0: return
-  for candidate in leaseCandidates(c, versions = versions, profileId = profileId, started = 1, limit = places):
+  # one look at what is free: the runs that were led before come first. When nothing is free (the usual case) that is the only query.
+  let r = c.query(%*[["SELECT id, lease_attempt FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND profile_id = ? " &
+    (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND id NOT IN " &
+    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY (lease_attempt > 0) DESC, created_at LIMIT ?",
+    protoName(rsRunning), getTime().toUnix(), profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), places]])
+  var led, fresh: seq[string]
+  let vals = r["results"][0]{"values"}
+  if vals != nil:
+    for row in vals:
+      if row[1].getInt > 0: led.add row[0].getStr else: fresh.add row[0].getStr
+  for candidate in led:
     let g = grantLease(c, master, candidate, owner, versions)
     if g.isSome: result.add g.get
+  if fresh.len == 0: return
   let room = loadSettings(c, profileId).podLimit - activeRuns(c, profileId)
-  let fresh = min(places - result.len, room)
-  if fresh > 0:
-    for candidate in leaseCandidates(c, versions = versions, profileId = profileId, started = 0, limit = fresh):
-      let g = grantLease(c, master, candidate, owner, versions)
-      if g.isSome: result.add g.get
+  var made = 0
+  for candidate in fresh:
+    if result.len >= places or made >= room: break
+    let g = grantLease(c, master, candidate, owner, versions)
+    if g.isSome:
+      result.add g.get
+      inc made
 
 proc handleLease*(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
   discard registryTouch("executor", "executor-service", epochTime())

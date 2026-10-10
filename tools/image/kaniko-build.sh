@@ -4,12 +4,12 @@
 # Other images: DOCKERFILE=<path in the tree> TARGETS="<stage>:<image> ..." (a `-` stage means no --target), for example the soak harness:
 #   DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak REGISTRY=... TAG=... tools/image/kaniko-build.sh
 # It makes the namespace (Pod Security baseline, the build-pod policy of deploy/examples/build-pods), sends the working tree as the build
-# context, runs tools/image/Dockerfile.kaniko twice (--target=core, --target=controller; the second run reads the cache) and pushes
-# <REGISTRY>/<image>:<TAG> for every target (by default cinim and cinim-controller). The namespace stays (the cache is in the registry); delete it when done.
+# context, runs tools/image/Dockerfile.kaniko once per target (--target=core, controller, conductor; the later runs read the cache) and pushes
+# <REGISTRY>/<image>:<TAG> for every target (by default cinim, cinim-controller and cinim-conductor). The namespace stays (the cache is in the registry); delete it when done.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 REG="${REGISTRY:?registry host:port as the Pods reach it}"; TAG="${TAG:?tag}"; NS="${NS:-cinim-build}"
-DOCKERFILE="${DOCKERFILE:-tools/image/Dockerfile.kaniko}"; TARGETS="${TARGETS:-core:cinim controller:cinim-controller}"
+DOCKERFILE="${DOCKERFILE:-tools/image/Dockerfile.kaniko}"; TARGETS="${TARGETS:-core:cinim controller:cinim-controller conductor:cinim-conductor}"
 K="${KUBECTL:-kubectl}"
 EX=deploy/examples/build-pods
 # the namespace and the policy of the example, with the namespace renamed; the policy needs the controller's account name in that namespace

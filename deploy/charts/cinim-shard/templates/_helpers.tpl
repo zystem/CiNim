@@ -53,6 +53,10 @@ http://victorialogs-0:9428,http://victorialogs-1:9428
 {{- default (printf "%s-controller:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag) .Values.controller.image -}}
 {{- end -}}
 
+{{- define "cinim-shard.conductorImage" -}}
+{{- default (printf "%s-conductor:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag) .Values.conductor.image -}}
+{{- end -}}
+
 {{- define "cinim-shard.labels" -}}
 app.kubernetes.io/part-of: cinim
 cinim.io/shard: {{ .Values.shard | quote }}

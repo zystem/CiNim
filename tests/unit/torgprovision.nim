@@ -327,3 +327,32 @@ suite "SHD-007 creating, switching off, deleting":
     check collectionPath("Namespace", "") == "/api/v1/namespaces"
     check objectPath("RoleBinding", "x", "y") == "/apis/rbac.authorization.k8s.io/v1/namespaces/x/rolebindings/y"
     expect ValueError: discard collectionPath("Pod", "x")
+
+suite "RUN-009 the namespace of an organisation with conductors (docs/conductors.md section 7)":
+  test "without conductors nothing changes: no policy for them":
+    var names: seq[string]
+    for st in organizationSteps(cfg(), "acme", curve, "BT").steps: names.add st.objectName
+    check "allow-conductor" notin names
+  test "a conductor Pod is denied everything but DNS and the core's push channel, and a step's policies do not select it":
+    var c = cfg()
+    c.conductors = true
+    var conductorPolicy: JsonNode
+    var deny: JsonNode
+    for st in organizationSteps(c, "acme", curve, "BT").steps:
+      if st.objectName == "allow-conductor": conductorPolicy = st.obj
+      if st.objectName == "default-deny": deny = st.obj
+      if st.objectName == "allow-dns-and-collector":
+        # the step Pods' opening of the collector, the step report and the artifacts is not the conductor's
+        check "cinim-conductor" in $st.obj["spec"]["podSelector"]
+        check "NotIn" in $st.obj["spec"]["podSelector"]
+    check conductorPolicy != nil
+    check conductorPolicy["spec"]["podSelector"]["matchLabels"]["app.kubernetes.io/name"].getStr == "cinim-conductor"
+    check conductorPolicy["spec"]["policyTypes"].len == 1 and conductorPolicy["spec"]["policyTypes"][0].getStr == "Egress"
+    var ports: seq[int]
+    for r in conductorPolicy["spec"]["egress"]:
+      if r["to"][0]{"podSelector"}{"matchLabels"}{"app.kubernetes.io/name"}.getStr == "cinim-core":
+        for p in r["ports"]: ports.add p["port"].getInt
+    check ports == @[19745]
+    # the default deny keeps covering the conductor (it excludes the controller only): its ingress is closed and its egress is what the policy above opens
+    check deny["spec"]["policyTypes"].len == 2
+    check "cinim-conductor" notin $deny["spec"]["podSelector"]

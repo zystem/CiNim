@@ -7,6 +7,7 @@ import crunchy
 import kubeapi, orgrules
 
 const
+  conductorName* = "cinim-conductor"            ## the label of the organisation's conductor Pods (the controller makes them, jobcontroller/conductors.nim)
   controllerName* = "cinim-job-controller"      ## the ServiceAccount, the Deployment and the label of the organisation's controller
   curveSecretName* = "cinim-controller-curve"
   bootstrapSecretName* = "cinim-controller-bootstrap"   ## the one-time token with which the controller enrols (IAM-003, common/ctrlauth.nim)
@@ -34,6 +35,7 @@ type
                                                 ## the default is closed both ways, with the openings of the build profile
     deploy*: bool                               ## the shard has the deploy profile (D-48): a step with `profile = "deploy"` is an ordinary Pod that may reach what `deployEgress` lists
     deployEgress*: JsonNode                     ## NetworkPolicy egress rules of the deploy Pods (an array, like buildEgress), or the string "all"; nil: closed
+    conductors*: bool                           ## the shard has a conductor image (CINIM_CONDUCTOR_IMAGE): the namespace gets the policy that lets a conductor Pod reach the core's push channel
     deployKubeApiServer*: bool                  ## also a CiliumNetworkPolicy that lets the deploy Pods reach the Kubernetes API server (the entity `kube-apiserver`): a NetworkPolicy cannot name it under Cilium
 
   CurveKeys* = object                           ## what the controller of an organisation needs to reach the core (D-24)
@@ -154,9 +156,11 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
   let ns = orgNamespace(cfg, slug)
   let core = %*{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": cfg.shardNamespace}},
                 "podSelector": {"matchLabels": {"app.kubernetes.io/name": coreServiceName}}}
-  let steps = %*{"matchExpressions": [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": [controllerName]}]}
+  # the Pods of steps: not the controller, and not a conductor (docs/conductors.md section 7: a conductor reaches the core's push channel and nothing else)
+  let steps = %*{"matchExpressions": [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": [controllerName, conductorName]}]}
+  let notController = %*{"matchExpressions": [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": [controllerName]}]}
   result = @[%*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "default-deny", ns),
-       "spec": {"podSelector": steps, "policyTypes": ["Ingress", "Egress"]}},
+       "spec": {"podSelector": notController, "policyTypes": ["Ingress", "Egress"]}},
     %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-dns-and-collector", ns),
        "spec": {"podSelector": steps, "policyTypes": ["Egress"], "egress": [
          {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
@@ -166,6 +170,13 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
          {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}, {"protocol": "TCP", "port": 19744}]}]}},
     %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "controller-no-ingress", ns),
        "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": controllerName}}, "policyTypes": ["Ingress"]}}]
+  if cfg.conductors:
+    result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-conductor", ns),
+       "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": conductorName}}, "policyTypes": ["Egress"], "egress": [
+         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                  "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+          "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+         {"to": [core], "ports": [{"protocol": "TCP", "port": 19745}]}]}}
   # the simple mode: one more policy each, which adds to the default-deny (policies are only ever added together), for every step Pod. The
   # controller is not among them: it keeps its own closed ingress.
   if cfg.egressOpen:

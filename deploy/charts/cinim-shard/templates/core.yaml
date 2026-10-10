@@ -49,6 +49,7 @@ spec:
             - {name: CINIM_CERTS, value: /etc/cinim}
             # what the core makes the objects of an organisation from (SHD-007)
             - {name: CINIM_CONTROLLER_IMAGE, value: {{ include "cinim-shard.controllerImage" . | quote }}}
+            - {name: CINIM_CONDUCTOR_IMAGE, value: {{ if .Values.conductor.enabled }}{{ include "cinim-shard.conductorImage" . | quote }}{{ else }}""{{ end }}}
             - {name: CINIM_CONTROLLER_STATE_CLASS, value: {{ .Values.controller.stateStorageClass | quote }}}
             - {name: CINIM_STEP_EPHEMERAL_LIMIT, value: {{ .Values.steps.ephemeralStorageLimit | quote }}}
             # the deploy profile (D-48): the namespace of an organisation gets the policies that let a step of the profile reach what the operator lists

@@ -259,6 +259,43 @@ proc backendOf*(k: K8s): Backend =
         return false
       echo "jobcontroller: released the volume of run ", runId
       true,
+    createConductor: proc (name, secretJson, podJson: string): CreateOutcome =
+      ## the conductor's Secret first (its credential; one that is there already is the same), then its Pod
+      let rs = jstr(Generic_createNamespacedResource(kk.secrets, kk.ns.cstring, secretJson.cstring, nil))
+      if rs.kind == JObject and rs{"status"}.getStr == "Failure" and rs{"reason"}.getStr != "AlreadyExists":
+        stderr.writeLine "jobcontroller: create secret " & name & " failed: " & $rs
+        return classifyCreateFailure(rs{"code"}.getInt, rs{"reason"}.getStr, rs{"message"}.getStr)
+      let raw = Generic_createNamespacedResource(kk.pods, kk.ns.cstring, podJson.cstring, nil)
+      if raw == nil:
+        stderr.writeLine "jobcontroller: create pod " & name & ": no response from the Kubernetes API client"
+        return CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "no response from the Kubernetes API client")
+      let j = jstr(raw)
+      if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "AlreadyExists":
+        stderr.writeLine "jobcontroller: create pod " & name & " failed: " & $j
+        return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
+      echo "jobcontroller: created conductor ", name
+      CreateOutcome(kind: ckOk),
+    listConductors: proc (): tuple[ok: bool, pods: seq[ConductorPod]] =
+      let q = list_createList()
+      let selector = "app.kubernetes.io/name=cinim-conductor"       # the client keeps the pointer: it must outlive the call
+      list_addElement(q, keyValuePair_create("labelSelector".cstring, cast[pointer](selector.cstring)))
+      let j = jstr(Generic_listNamespaced(kk.pods, kk.ns.cstring, q))
+      list_freeList(q)
+      if j.kind != JObject or j{"items"} == nil or j["items"].kind != JArray: return
+      result.ok = true
+      for it in j["items"]:
+        result.pods.add(ConductorPod(name: it{"metadata", "name"}.getStr, phase: it{"status", "phase"}.getStr,
+                                     image: it{"spec", "containers"}[0]{"image"}.getStr)),
+    deleteConductor: proc (name: string): bool =
+      let jp = jstr(Generic_deleteNamespacedResource(kk.pods, kk.ns.cstring, name.cstring, "{\"gracePeriodSeconds\":0}".cstring))
+      if jp.kind == JObject and jp{"status"}.getStr == "Failure" and jp{"reason"}.getStr != "NotFound":
+        stderr.writeLine "jobcontroller: delete conductor " & name & " failed: " & $jp
+        return false
+      let js = jstr(Generic_deleteNamespacedResource(kk.secrets, kk.ns.cstring, name.cstring, "{}".cstring))
+      if js.kind == JObject and js{"status"}.getStr == "Failure" and js{"reason"}.getStr != "NotFound":
+        stderr.writeLine "jobcontroller: delete secret " & name & " failed: " & $js
+      echo "jobcontroller: removed conductor ", name
+      true,
     listPods: proc (): tuple[ok: bool, pods: seq[PodSummary]] =
       let j = jstr(Generic_listNamespaced(kk.pods, kk.ns.cstring, nil))
       if j.kind != JObject or j{"items"} == nil or j["items"].kind != JArray: return

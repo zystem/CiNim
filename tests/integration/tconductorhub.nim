@@ -209,6 +209,23 @@ suite "RUN-016 conductors on the push channel":
       let l2 = second.nextKind("conductor.lease")
       check l2.isSome and decodeLeaseGranted(l2.get.payload).run_id == r
       second.close()
+    test "RUN-009 an idle conductor above the number wanted is told to drain, one within it is not, and a draining one gets no run":
+      let o = newOrg()                                     # nothing to do: one conductor is wanted (conductor_min 1)
+      conductorIdleSeconds = 1.0
+      drainPassSeconds = 1.0
+      var keep = connectStream(serverAddr, corePub, clientKeys)
+      var extra = connectStream(serverAddr, corePub, clientKeys)
+      check keep.sendFrame(hello("cd-k1-" & sfx, "cond-1", o.ns, 0))
+      check extra.sendFrame(hello("cd-k2-" & sfx, "cond-2", o.ns, 5))
+      check extra.nextKind("conductor.drain", 8000).isSome
+      check keep.nextKind("conductor.drain", 2500).isNone
+      let r = co.createRun("p", "return 1", "t1", o.profile)
+      check extra.nextKind("conductor.lease", 1500).isNone          # draining: no more runs
+      check runState(r) == "RUNNING"
+      conductorIdleSeconds = 300.0
+      drainPassSeconds = 10.0
+      keep.close()
+      extra.close()
     test "the metrics count the conductors' frames and the runs pushed":
       let m = renderHubMetrics()
       check "cinim_stream_frames_total{direction=\"in\",kind=\"hello\"}" in m

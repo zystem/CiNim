@@ -146,6 +146,22 @@ message ControllerConfig {
   uint32 pod_retention_unread_seconds = 18;  // ... when the core could not read it (the log not delivered, the end unknown)
 }
 
+message ConductorCredential {
+  string id = 1;                     // cond-<n>
+  string credential = 2;             // IAM-003: what that conductor proves itself with to the core; the controller puts it in a Secret of the conductor's Pod
+}
+
+// The conductors of the organisation (docs/conductors.md section 5). The core computes how many there should be; the controller makes the Pods cond-1 .. cond-<desired>,
+// finds the ones that exist (adoption), and removes a Pod only after it has ended: the core drains a conductor that is idle and above the number wanted.
+message ConductorPlan {
+  bool present = 1;                  // false: the answer says nothing about conductors (a core without them, or a report that carries none); the controller keeps what it has
+  uint32 desired = 2;
+  string image = 3;                  // the conductor image of the shard (CINIM_CONDUCTOR_IMAGE)
+  uint32 runs_per_conductor = 4;
+  uint32 drain_seconds = 5;          // how long a draining conductor waits for its runs before it ends them
+  repeated ConductorCredential credentials = 6;   // for cond-1 .. cond-<desired>
+}
+
 message PollResponse {
   Header header = 1;
   repeated Command commands = 2;
@@ -155,5 +171,6 @@ message PollResponse {
   string issued_credential = 6;      // answer to a valid bootstrap_token: the credential to keep and to send in every later poll
   bool unauthorized = 7;             // the namespace has a controller identity and the poll did not prove it: nothing was done
   ControllerConfig config = 9;       // the settings of the shard, in every answer (see ControllerConfig)
+  ConductorPlan conductors = 10;     // the conductors to keep (see ConductorPlan)
   repeated string release_storage = 8;  // STO-006: runs of this namespace that are over and whose retention has passed: the controller deletes the run volume of each and says so in `storage_released`
 }

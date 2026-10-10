@@ -88,7 +88,7 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
   ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet,
                   egressOpen: (if egress.len > 0: egress else: nd.egress) == "open", ingressOpen: (if ingress.len > 0: ingress else: nd.ingress) == "open",
                   build: buildOn, buildEgress: buildEgress, stepEphemeralLimit: getEnv("CINIM_STEP_EPHEMERAL_LIMIT"), buildIngress: buildIngress,
-                  deploy: deployOn, deployEgress: deployEgress, deployKubeApiServer: getEnv("CINIM_DEPLOY_KUBE_APISERVER") == "true",
+                  deploy: deployOn, deployEgress: deployEgress, conductors: conductorImage.len > 0, deployKubeApiServer: getEnv("CINIM_DEPLOY_KUBE_APISERVER") == "true",
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,
                   ingressClass: getEnv("CINIM_INGRESS_CLASS"), tlsSecret: getEnv("CINIM_INGRESS_TLS_SECRET"), annotations: annotations)
@@ -249,14 +249,15 @@ proc onRequest() {.raises: [], gcsafe.} =
         elif getMethod() == "PUT":
           let j = try: parseJson(getBody()) except JsonParsingError: nil
           if j == nil or j.kind != JObject:
-            problem(Http400, "invalid_request", "a JSON object with any of infra_retries, log_max_bytes, log_spool_bytes, log_hold_timeout, liveness_timeout, pod_limit, job_pod_limit_percent is required")
+            problem(Http400, "invalid_request", "a JSON object with any of infra_retries, log_max_bytes, log_spool_bytes, log_hold_timeout, liveness_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min is required")
             return
           let cur = coreRef.getProfileSettings(profileId)
           var s = ProfileSettings(infraRetries: cur["infra_retries"].getInt, logMaxBytes: cur["log_max_bytes"].getBiggestInt,
                                   livenessTimeout: cur["liveness_timeout"].getInt, logSpoolBytes: cur["log_spool_bytes"].getBiggestInt,
                                   logHoldTimeout: cur["log_hold_timeout"].getInt, podLimit: cur["pod_limit"].getInt,
-                                  jobPodLimitPercent: cur["job_pod_limit_percent"].getInt)
-          for k in ["infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent"]:
+                                  jobPodLimitPercent: cur["job_pod_limit_percent"].getInt, runsPerConductor: cur["runs_per_conductor"].getInt,
+                                  conductorMin: cur["conductor_min"].getInt)
+          for k in ["infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent", "runs_per_conductor", "conductor_min"]:
             if j.hasKey(k) and j[k].kind != JInt:
               problem(Http400, "invalid_request", k & " must be an integer")
               return
@@ -267,6 +268,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           if j.hasKey("log_hold_timeout"): s.logHoldTimeout = j["log_hold_timeout"].getInt
           if j.hasKey("pod_limit"): s.podLimit = j["pod_limit"].getInt
           if j.hasKey("job_pod_limit_percent"): s.jobPodLimitPercent = j["job_pod_limit_percent"].getInt
+          if j.hasKey("runs_per_conductor"): s.runsPerConductor = j["runs_per_conductor"].getInt
+          if j.hasKey("conductor_min"): s.conductorMin = j["conductor_min"].getInt
           let bad = validate(s)
           if bad.len > 0:
             problem(Http400, "invalid_request", bad)

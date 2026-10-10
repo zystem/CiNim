@@ -32,6 +32,10 @@ type
     kind*: CreateKind
     reason*, message*: string    ## the API server's Status `reason` and `message`, for the investigation
 
+  ConductorPod* = object
+    ## a conductor Pod as the cluster has it (docs/conductors.md section 5)
+    name*, phase*, image*: string
+
   Backend* = object
     createPod*: proc (r: PodRequest): CreateOutcome
     readPod*: proc (name: string): JsonNode
@@ -49,6 +53,12 @@ type
       ## the run's PersistentVolumeClaim exists afterwards (idempotent: it is made at the first step of the run); nil when the controller has no run volumes
     releaseRunVolume*: proc (runId: string): bool
       ## the claim is deleted (STO-006); true = gone afterwards, also when it never existed
+    createConductor*: proc (name, secretJson, podJson: string): CreateOutcome
+      ## the conductor's Secret (its credential) and then its Pod exist afterwards (idempotent); nil when the controller makes no conductors
+    listConductors*: proc (): tuple[ok: bool, pods: seq[ConductorPod]]
+      ## the Pods of this controller's conductors, found by label; ok = false when the list could not be read (then conclude nothing)
+    deleteConductor*: proc (name: string): bool
+      ## the conductor's Pod and its Secret are gone afterwards
     listPods*: proc (): tuple[ok: bool, pods: seq[PodSummary]]
       ## every Pod in the step namespace; ok = false when the list could not be read (then conclude nothing)
 

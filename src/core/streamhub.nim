@@ -16,14 +16,16 @@
 ## database client and its own table of controllers. Messages cross threads in shared memory (common/shmq.nim), never as Nim strings.
 import std/[tables, options, times, os, atomics, sequtils, json, hashes]
 import std/strutils
-import common/[stream, streamstate, rqlite, zmqcurve, states, shmq, podcpu, ctrlauth]
-import scheduler, schema, workkick, hubmetrics, components
+import common/[stream, streamstate, rqlite, zmqcurve, states, shmq, podcpu, ctrlauth, conductorplan]
+import scheduler, schema, workkick, hubmetrics, components, retrypolicy
 
 const
   resendAfterSeconds = 5.0
   silentAfterSeconds = 60.0
   maxPeers = 5000
 
+var drainPassSeconds* = 10.0         ## how often the conductors above the number wanted are looked at: idle times are minutes, so it is not urgent
+var conductorIdleSeconds* = (try: parseFloat(getEnv("CINIM_CONDUCTOR_IDLE_SECONDS", "300")) except ValueError: 300.0)   ## a conductor above the number wanted that has had no run for this long is told to drain (docs/conductors.md section 5)
 var safetyPassSeconds* = 3.0   ## the safety net under the kicks: a controller whose organisation has a step waiting is looked at this often (a pause that ended, a step the watchdog put back)
 
 type
@@ -32,7 +34,7 @@ type
     outbox: Outbox
     credit: Credit
     lastSeen, lastPush: float
-    lastConfig, lastGate: string      ## what the controller was last told, so that an unchanged answer is not sent again
+    lastConfig, lastGate, lastPlan: string      ## what the controller was last told, so that an unchanged answer is not sent again
 
   Cond = object
     ## a conductor (docs/conductors.md): it takes runs, not steps; its credit is its free places
@@ -41,9 +43,12 @@ type
     outbox: Outbox
     credit: Credit
     lastSeen, lastPush: float
+    idleSince: float                  ## when it last held no run (0: it holds one)
+    draining: bool                    ## told to drain: it gets no more runs
 
   Hub = object
     co: Core
+    lastDrainPass: float
     conds: Table[string, Cond]
     outq: ptr ShmQueue                ## what the worker wants sent: the I/O thread owns the socket
     idx: int
@@ -58,7 +63,8 @@ func startCount(resp: PollResponse): int =
 proc worth(resp: PollResponse; p: Peer): bool =
   ## is there anything in the answer the controller does not have: commands, volumes to release, an identity matter, a changed setting or gate
   resp.commands.len > 0 or resp.release_storage.len > 0 or resp.issued_credential.len > 0 or resp.unauthorized or
-    encodeConfig(resp.config) != p.lastConfig or $resp.gate.open & resp.gate.reason != p.lastGate
+    encodeConfig(resp.config) != p.lastConfig or $resp.gate.open & resp.gate.reason != p.lastGate or
+    (resp.conductors.present and encodePlan(resp.conductors) != p.lastPlan)
 
 func metricKind(kind: string): string =
   case kind
@@ -93,6 +99,7 @@ proc deliver(h: var Hub; p: var Peer; resp: PollResponse; re = 0'u64) =
   ## one answer, as a pushed frame; the credit goes down by the steps it carries
   p.lastConfig = encodeConfig(resp.config)
   p.lastGate = $resp.gate.open & resp.gate.reason
+  if resp.conductors.present: p.lastPlan = encodePlan(resp.conductors)
   discard p.credit.take(startCount(resp))
   h.sendNumbered(p, "controller.work", encodeWork(resp), re)
 
@@ -204,7 +211,7 @@ proc dropCond(h: var Hub; session, reason: string) =
 
 proc pushLeases(h: var Hub; c: var Cond) =
   ## give the conductor runs of its organisation within its free places (RUN-004): the core's push, the conductor never asks
-  if c.credit.available <= 0: return
+  if c.credit.available <= 0 or c.draining: return
   let t0 = epochTime()
   c.lastPush = t0
   for g in h.c.leaseForConductor(c.profileId, h.master, c.id, c.versions, c.credit.available):
@@ -248,10 +255,13 @@ proc onHello(h: var Hub; routingId: string; f: StreamFrame) =
       h.emit(c.routingId, frame("core", s.kind, s.payload, id = s.id))
       count(mResent)
   c.profileId = h.profileOfNs(c.namespace)
-  c.credit.set(int(hello.free_places))
+  let creditBefore = c.credit.available
+  c.credit.set(if c.draining: 0 else: int(hello.free_places))
+  c.idleSince = if hello.held_runs.len > 0: 0.0 elif c.idleSince == 0.0: epochTime() else: c.idleSince
   discard registryTouch("conductor", c.id, epochTime(), @[("runs", $hello.held_runs.len)])
   h.emit(routingId, frame("core", "conductor.welcome", "", re = f.id))
-  h.pushLeases(c)
+  # a hello that only says "still here, same places" asks the database nothing: the kicks and the once-a-second pass find runs for it
+  if not known or moved or c.credit.available > creditBefore: h.pushLeases(c)
   h.conds[f.session] = c
 
 proc failureReply(code, detail: string): ExecutorResponse =
@@ -365,6 +375,30 @@ proc housekeeping(h: var Hub) =
     if c.profileId in ready and now - c.lastPush >= safetyPassSeconds:
       h.pushLeases(c)
   for session in goneConds: h.dropCond(session, "silent")
+  # the conductors above the number wanted that have been idle long enough are told to drain; the controller deletes the Pod after it has exited
+  var wanted: Table[string, int]
+  var states: seq[CondState]
+  var sessions: seq[string]
+  let drainPass = h.conds.len > 0 and now - h.lastDrainPass >= drainPassSeconds       # not urgent: idle time is minutes
+  if drainPass: h.lastDrainPass = now
+  for session, c in h.conds:
+    if drainPass and c.profileId notin wanted:
+      wanted[c.profileId] = h.c.wantedConductors(c.profileId, loadSettings(h.c, c.profileId))
+  for profile, desired in wanted:
+    states.setLen 0
+    sessions.setLen 0
+    for session, c in h.conds:
+      if c.profileId == profile:
+        states.add CondState(id: c.id, idleSince: c.idleSince, draining: c.draining)
+        sessions.add session
+    for id in drainTargets(states, desired, now, conductorIdleSeconds):
+      for session in sessions:
+        if h.conds[session].id == id:
+          h.conds[session].draining = true
+          h.conds[session].credit.set(0)
+          echo "core: conductor ", id, " drains (idle, above the ", desired, " wanted)"
+  for session, c in h.conds.mpairs:
+    if c.draining: h.emit(c.routingId, frame("core", "conductor.drain"))
 
 proc onKick(h: var Hub; profileId: string; at: float; all: bool) =
   ## work was made for an organisation (or a limit changed for everyone): its controller, if this worker has it, is looked at now

@@ -149,7 +149,9 @@ proc migrate*(c: var RqClient) =
       ("runs", "lease_until", "INTEGER NOT NULL DEFAULT 0"),      # when it runs out (0: given back),
       ("runs", "lease_owner", "TEXT NOT NULL DEFAULT ''"),        # and to whom (the executor's id, for the operator)
       ("execution_profiles", "pod_limit", "INTEGER NOT NULL DEFAULT 20"),              # RUN-004, core/admission.nim: step Pods in flight of the organisation
-      ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20")]:  # the share of it one run may hold
+      ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20"),   # the share of it one run may hold
+      ("execution_profiles", "runs_per_conductor", "INTEGER NOT NULL DEFAULT 10"),      # docs/conductors.md: runs one conductor Pod leads at once
+      ("execution_profiles", "conductor_min", "INTEGER NOT NULL DEFAULT 1")]:           # conductors kept warm
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
   discard c.execute(%*[["CREATE INDEX IF NOT EXISTS runs_storage ON runs (profile_id, storage_released, state)"]])    # what the polls of the controllers ask (core/runstorage.nim)

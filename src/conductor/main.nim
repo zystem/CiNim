@@ -173,14 +173,14 @@ proc main() =
     let free = if stopping: 0 else: max(0, perConductor - runs.len)
     let hello = ConductorHello(conductor_id: conductorId, namespace: ns, credential: credential,
                                api_versions: executorApiVersions().mapIt(uint32(it)), free_places: uint32(free), held_runs: toSeq(runs.keys))
-    discard conn.sendFrame(frame(session, "conductor.hello", wireString(Protobuf.encode(hello)), id = frameNo, ack = inbox.ackValue, key = ns))
+    discard conn.sendFrame(frame(session, "conductor.hello", wireString(Protobuf.encode(hello)), id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
     helloDirty = false
     lastHello = epochTime()
 
   proc sendToCore(f: Flight) =
     inc frameNo
     flights[frameNo] = f
-    discard conn.sendFrame(frame(session, "conductor.call", f.payload, id = frameNo, ack = inbox.ackValue, key = ns))
+    discard conn.sendFrame(frame(session, "conductor.call", f.payload, id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
 
   proc onCore(f: StreamFrame) =
     case f.kind
@@ -191,9 +191,9 @@ proc main() =
         if g.run_id notin runs:
           if startRun(g): echo "conductor: run ", g.run_id, " started"
           else: stderr.writeLine "conductor: could not start a process for run " & g.run_id & "; its lease runs out and the core gives it to another"
-        discard conn.sendFrame(frame(session, "ping", ack = inbox.ackValue, key = ns))      # acknowledged at once, so that it is not sent again
+        discard conn.sendFrame(frame(session, "ping", ack = inbox.ackValue, key = ns & "#conductors"))      # acknowledged at once, so that it is not sent again
         helloDirty = true
-      of acDuplicate: discard conn.sendFrame(frame(session, "ping", ack = inbox.ackValue, key = ns))
+      of acDuplicate: discard conn.sendFrame(frame(session, "ping", ack = inbox.ackValue, key = ns & "#conductors"))
       of acGap: discard
     of "conductor.reply":
       if f.re in flights:
@@ -201,6 +201,10 @@ proc main() =
         flights.del f.re
         if not fl.isFinish and fl.runId in runs:
           discard writePipeFd(runs[fl.runId].toRun, pkReply, f.payload)
+    of "conductor.drain":
+      if not stopping:
+        stopping = true
+        echo "conductor: the core asks it to drain"
     of "conductor.welcome":
       if f.payload == "unauthorized":
         stderr.writeLine "conductor: the core does not accept this conductor's credential"
@@ -210,7 +214,7 @@ proc main() =
       inbox = initInbox()
       helloDirty = true
       for id, fl in flights:
-        discard conn.sendFrame(frame(session, "conductor.call", fl.payload, id = id, ack = inbox.ackValue, key = ns))
+        discard conn.sendFrame(frame(session, "conductor.call", fl.payload, id = id, ack = inbox.ackValue, key = ns & "#conductors"))
     else: discard
 
   proc pump() =
