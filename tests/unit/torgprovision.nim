@@ -47,8 +47,9 @@ suite "SHD-007 the objects of an organisation":
     var env = initTable[string, string]()
     for e in c["env"]: env[e["name"].getStr] = e["value"].getStr
     check env["CINIM_NAMESPACE"] == "cinim-001-acme"
-    check env["CINIM_CORE_ADDR"] == "tcp://cinim-core.cinim-001.svc:19740"
-    # what the controller needs to find the core and prove itself; the addresses for the shim and the policy come in the answers to its poll (D-49)
+    check env["CINIM_CORE_STREAM_ADDR"] == "tcp://cinim-core.cinim-001.svc:19745"      # the push channel is the controller's way to the core
+    check "CINIM_CORE_ADDR" notin env
+    # what the controller needs to find the core and prove itself; the addresses for the shim and the policy come over the push channel (D-49)
     for name in ["CINIM_COLLECTOR_ADDR", "CINIM_STEPREPORT_ADDR", "CINIM_ARTIFACTINGEST_ADDR", "CINIM_LOGINGEST_ADDR", "CINIM_LOG_SPOOL_BYTES", "CINIM_LOG_HOLD_TIMEOUT",
                  "CINIM_POD_RETENTION_READ", "CINIM_POD_RETENTION_UNREAD"]:
       check name notin env

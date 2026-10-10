@@ -8,15 +8,16 @@
 ## covers them; after a reconnect or after a few seconds without an acknowledgement they are sent again (common/streamstate.nim).
 ## A frame from a session the core does not know (a new connection, a restarted core) is answered with `resync`: the controller then sends its
 ## whole state. The core never dials a controller.
-import std/[tables, options, times, os, atomics, sequtils]
+import std/[tables, options, times, os, atomics, sequtils, json]
 import common/[stream, streamstate, rqlite, zmqcurve]
 import scheduler, schema, workkick
 
 const
   resendAfterSeconds = 5.0
-  pushEverySeconds = 3.0       ## the safety net under the kicks: a pause that ended, a step the watchdog put back
   silentAfterSeconds = 60.0
   maxPeers = 5000
+
+var safetyPassSeconds* = 3.0   ## the safety net under the kicks: a controller whose organisation has a step waiting is looked at this often (a pause that ended, a step the watchdog put back)
 
 type
   Peer = object
@@ -63,6 +64,8 @@ proc deliver(h: var Hub; p: var Peer; resp: PollResponse; re = 0'u64) =
 proc profileOfNs(h: var Hub; ns: string): string =
   if ns.len == 0: h.defaultProfile else: profileOfNamespace(h.c, ns)
 
+proc pushTo(h: var Hub; p: var Peer)
+
 proc onReport(h: var Hub; routingId: string; f: StreamFrame) =
   var req: PollRequest
   try: req = decodeReport(f.payload)
@@ -74,7 +77,7 @@ proc onReport(h: var Hub; routingId: string; f: StreamFrame) =
   p.lastSeen = epochTime()
   p.outbox.ack(f.ack)
   if moved: h.resendAll(p)
-  let resp = handlePoll(h.c, h.defaultProfile, h.master, req)
+  let resp = handlePoll(h.c, h.defaultProfile, h.master, req, claim = false)    # the state is taken in; steps are pushed below and on kicks
   if resp.unauthorized or resp.issued_credential.len > 0:
     # not registered: a controller that does not prove itself, or that is just being given its credential, has no credit and gets no pushes;
     # it reports again with the credential
@@ -84,9 +87,14 @@ proc onReport(h: var Hub; routingId: string; f: StreamFrame) =
   p.namespace = req.namespace
   if req.credential.len > 0: p.credential = req.credential
   p.profileId = h.profileOfNs(req.namespace)
+  let creditBefore = p.credit.available
   p.credit.set(int(req.free_pod_slots))
   if worth(resp, p): h.deliver(p, resp, re = f.id)
   else: discard h.conn.sendTo(routingId, frame("core", "ping", re = f.id))     # heard, nothing to tell
+  # Steps go out when a report changes what can go: the first report of a controller, an end (a place is free, so a waiting step may go), or
+  # credit where there was none. A quiet report hands out nothing and asks the database nothing about the queue.
+  if not known or req.transitions.len > 0 or (creditBefore <= 0 and req.free_pod_slots > 0):
+    h.pushTo(p)
   p.lastPush = epochTime()
   if h.peers.len < maxPeers or known: h.peers[f.session] = p
 
@@ -114,8 +122,16 @@ proc handleFrame(h: var Hub; routingId: string; f: StreamFrame) =
   else:
     discard h.conn.sendTo(routingId, frame("core", "resync"))
 
-proc housekeeping(h: var Hub; kicked: seq[string]; all: bool) =
+proc pendingProfiles(h: var Hub): seq[string] =
+  ## the profiles that have a step waiting to go: one query for all of them, so that an idle shard costs the database nothing per controller
+  let r = h.c.query(%*[["SELECT DISTINCT profile_id FROM steps WHERE state = 'PENDING' AND not_before <= ?", getTime().toUnix()]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil:
+    for row in vals: result.add row[0].getStr
+
+proc housekeeping(h: var Hub; kicked: seq[string]; all: bool; tick: bool) =
   let now = epochTime()
+  let waiting = if tick: h.pendingProfiles() else: @[]
   var gone: seq[string]
   for session, p in h.peers.mpairs:
     if now - p.lastSeen > silentAfterSeconds:
@@ -124,7 +140,7 @@ proc housekeeping(h: var Hub; kicked: seq[string]; all: bool) =
     for s in p.outbox.due(now, resendAfterSeconds):
       discard h.conn.sendTo(p.routingId, frame("core", s.kind, s.payload, id = s.id))
       p.outbox.sentAgain(@[s.id], now)
-    if all or p.profileId in kicked or now - p.lastPush >= pushEverySeconds:
+    if all or p.profileId in kicked or (tick and p.profileId in waiting and now - p.lastPush >= safetyPassSeconds):
       h.pushTo(p)
   for session in gone: h.peers.del session
 
@@ -137,15 +153,17 @@ proc serveStream*(co: Core; port: int) {.thread.} =
     h.conn = listenStream(port, secretKey)
     var lastTick = 0.0
     while not stopServers.load:
-      let got = h.conn.receiveFrom(100)
-      if got.isSome:
-        try: h.handleFrame(got.get.routingId, got.get.frame)
-        except CatchableError as e: stderr.writeLine "core: stream: " & e.msg
+      # kicks first: work that has just been made goes out before the next report is read
       let kicked = takeKicks()
       let all = kickedAll()
-      if kicked.len > 0 or all or epochTime() - lastTick >= 1.0:
-        lastTick = epochTime()
-        try: h.housekeeping(kicked, all)
+      let tick = epochTime() - lastTick >= 1.0
+      if kicked.len > 0 or all or tick:
+        if tick: lastTick = epochTime()
+        try: h.housekeeping(kicked, all, tick)
+        except CatchableError as e: stderr.writeLine "core: stream: " & e.msg
+      let got = h.conn.receiveFrom(50)
+      if got.isSome:
+        try: h.handleFrame(got.get.routingId, got.get.frame)
         except CatchableError as e: stderr.writeLine "core: stream: " & e.msg
     h.conn.close()
 

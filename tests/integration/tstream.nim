@@ -36,6 +36,7 @@ suite "RUN-016 the push channel":
     let sfx = newId()
     let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns", certs: certs)
     stopServers.store(false)
+    safetyPassSeconds = 6.0           # the test of a quiet report must be able to tell it from the safety pass, with a database that answers slowly
     var th: Thread[tuple[co: Core, port: int]]
     createThread(th, runStream, (co, port))
     let corePub = loadPublicKey(certs, "core")
@@ -61,15 +62,25 @@ suite "RUN-016 the push channel":
         if f.get.kind != "ping": return f
       none(StreamFrame)
 
-    test "a report is answered like a poll: the steps that may go, numbered":
+    proc nextStarts(cl: ZConnection; ms = 8000): Option[StreamFrame] =
+      ## the next frame that carries steps to start (the answer to a report holds the settings; the steps are pushed after it)
+      for _ in 0 ..< 10:
+        let f = cl.next(ms)
+        if f.isNone: return f
+        if f.get.starts.len > 0: return f
+      none(StreamFrame)
+
+    test "a report is answered with the settings; the steps that may go are pushed after it, numbered":
       let o = newOrg()
       let r = co.createRun("p", "return 1", "t1", o.profile)
       for i in 1 .. 3: c.addStep(r, o.profile, i)
       var cl = connectStream(serverAddr, corePub, clientKeys)
       check cl.sendFrame(report("s-a-" & sfx, o.ns, 10))
-      let w = cl.next()
-      check w.isSome and w.get.kind == "controller.work" and w.get.id == 1
-      check w.get.re == 1                                         # it answers report number 1
+      let a = cl.next()
+      check a.isSome and a.get.kind == "controller.work" and a.get.id == 1
+      check a.get.re == 1 and a.get.starts.len == 0               # the answer to report number 1: the settings, no steps
+      let w = cl.nextStarts()
+      check w.isSome and w.get.id == 2 and w.get.re == 0          # then the push, which answers nothing
       check w.get.starts.len == 3
       cl.close()
     test "work created later is pushed without the controller asking":
@@ -92,12 +103,12 @@ suite "RUN-016 the push channel":
       var cl = connectStream(serverAddr, corePub, clientKeys)
       let ses = "s-c-" & sfx
       check cl.sendFrame(report(ses, o.ns, 2))
-      let w = cl.next()
+      let w = cl.nextStarts()
       check w.isSome and w.get.starts.len == 2
       kickProfile(o.profile)
       check cl.next(1500).isNone                                  # no credit left: nothing more until it reports again
       check cl.sendFrame(report(ses, o.ns, 2, ack = w.get.id))
-      let w2 = cl.next()
+      let w2 = cl.nextStarts()
       check w2.isSome and w2.get.starts.len == 2
       cl.close()
     test "what is not acknowledged is sent again on a new connection, once acknowledged it is not":
@@ -107,19 +118,42 @@ suite "RUN-016 the push channel":
       let ses = "s-d-" & sfx
       var cl = connectStream(serverAddr, corePub, clientKeys)
       check cl.sendFrame(report(ses, o.ns, 10))
-      let w = cl.next()
-      check w.isSome and w.get.id == 1
-      cl.close()                                                   # the controller lost the frame (or its connection) without acknowledging
+      let w = cl.nextStarts()
+      check w.isSome and w.get.id == 2                             # 1: the settings, 2: the step
+      cl.close()                                                   # the controller lost the frames (or its connection) without acknowledging
       var again = connectStream(serverAddr, corePub, clientKeys)
       check again.sendFrame(report(ses, o.ns, 10, ack = 0))
-      let w2 = again.next()
-      check w2.isSome and w2.get.id == 1 and w2.get.starts == @[r]     # the same frame, the same number
-      check again.sendFrame(report(ses, o.ns, 10, ack = 1))
+      let w2 = again.nextStarts()
+      check w2.isSome and w2.get.id == 2 and w2.get.starts == @[r]    # the same frame, the same number
+      check again.sendFrame(report(ses, o.ns, 10, ack = 2))
       var third = connectStream(serverAddr, corePub, clientKeys)
-      check third.sendFrame(report(ses, o.ns, 10, ack = 1))
-      check third.next(1500).isNone                                # acknowledged: not sent again
+      check third.sendFrame(report(ses, o.ns, 10, ack = 2))
+      check third.nextStarts(1500).isNone                          # acknowledged: not sent again
       again.close()
       third.close()
+    test "a quiet report hands out nothing; the step waiting without a kick is found by the safety pass":
+      let o = newOrg()
+      var cl = connectStream(serverAddr, corePub, clientKeys)
+      let ses = "s-q-" & sfx
+      check cl.sendFrame(report(ses, o.ns, 10, id = 1))
+      discard cl.next(8000)                                       # the settings
+      # a second quiet report, and its answer: by then the core has finished everything the first report set going
+      check cl.sendFrame(report(ses, o.ns, 10, ack = 1, id = 2))
+      var answered = false
+      for _ in 0 ..< 10:
+        let f = cl.receive(8000)
+        if f.isNone: break
+        if f.get.re == 2:
+          answered = true
+          break
+      check answered
+      let r = co.createRun("p", "return 1", "t1", o.profile)
+      c.addStep(r, o.profile, 1)                                  # no kick: made behind the core's back
+      check cl.sendFrame(report(ses, o.ns, 10, ack = 1, id = 3))   # nothing changed for the controller
+      check cl.nextStarts(1200).isNone                            # a quiet report does not look at the queue
+      let found = cl.nextStarts(9000)                             # the pass that looks at the profiles with waiting steps does
+      check found.isSome and found.get.starts == @[r]
+      cl.close()
     test "a frame from a session the core does not know is answered with resync":
       var cl = connectStream(serverAddr, corePub, clientKeys)
       check cl.sendFrame(frame("nobody-" & sfx, "ping"))

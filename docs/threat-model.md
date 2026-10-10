@@ -34,7 +34,7 @@ Status values: **verified** (automated test exists), **partial**, **designed** (
 |:---|:---|:---|:---|
 | F1 UI/API | browser to UI/API | HTTPS at ingress, OIDC session, RBAC on every call (IAM-001) | GuildenStern behind ingress (D-25); `/metrics` and `/api/v1/components` are unauthenticated for now, like the rest of the API (IAM not built) |
 | F2 Webhooks | SCM to event service | HTTPS, provider signature, delivery-id dedupe, timestamp window | |
-| F3 ControllerAttach | job-controller to scheduler | ZeroMQ REQ/REP with CURVE (D-24); the server key is pinned by the client, the shared `client` keypair identifies services until the bootstrap-token exchange (IAM-003) exists; outbound only | proto `controller.proto` |
+| F3 ControllerAttach | job-controller to scheduler | ZeroMQ DEALER/ROUTER (the push channel) with CURVE (D-24); the server key is pinned by the client, the shared `client` keypair identifies services until the bootstrap-token exchange (IAM-003) exists; outbound only | proto `controller.proto` |
 | F4 LogIngest, StepReport | shim to collector and scheduler | ZeroMQ CURVE with the shared `client` keypair (mounted as a Secret); the projected job token (SEC-010) is the intended identity and is **not checked yet** (T-08); batches carry the attempt number and a per-block checksum, stale attempts cannot touch the current one | `logs.proto`, `step.proto` |
 | F5 ExecutorChannel | executor to scheduler | ZeroMQ CURVE; lease token (RUN-008) | `executor.proto` |
 | F6 State | scheduler/core to rqlite | rqlite HTTP with authentication, TLS in cluster; strict writes | client must check top-level `error` |

@@ -408,9 +408,10 @@ proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
                    log_spool_bytes: uint64(s.logSpoolBytes), log_hold_timeout_seconds: uint32(s.logHoldTimeout),
                    pod_retention_read_seconds: uint32(max(s.podRetentionRead, 0)), pod_retention_unread_seconds: uint32(max(s.podRetentionUnread, 0)))
 
-proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest; push = false): PollResponse =
+proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollRequest; push = false; claim = true): PollResponse =
   ## `push`: the push channel (core/streamhub.nim) asks on behalf of a controller that has said nothing new - what there is to hand out now; it is
-  ## not the controller's heartbeat and tells nothing about its Pods
+  ## not the controller's heartbeat and tells nothing about its Pods. `claim = false`: take in the controller's state and answer, but hand out no
+  ## steps - on the push channel steps go out when there is work for the organisation (a kick) or a free place, not at every report.
   # Who is asking (IAM-003, T-46): a namespace that has a controller identity is served only against its credential, or against the
   # bootstrap token once, in which case the credential is handed out and nothing else happens in this poll. A namespace without
   # an identity (a single-tenant setup) is trusted as before.
@@ -475,7 +476,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   #    at most free_pod_slots now, at most pod_limit in flight, at most job_pod_limit_percent of that for one run; the run with the
   #    fewest steps in flight first (core/admission.nim). No profile for the namespace: no steps.
   var toClaim: seq[string]
-  if gate.isOpen and profileId.len > 0 and req.free_pod_slots > 0:
+  if claim and gate.isOpen and profileId.len > 0 and req.free_pod_slots > 0:
     let now = getTime().toUnix()
     var pending: seq[Candidate]
     let pr = c.query(%*[["SELECT id, run_id, priority, CAST(queued_at AS INTEGER) FROM steps WHERE state = ? AND profile_id = ? AND not_before <= ? " &
@@ -531,22 +532,6 @@ proc decodeReport*(payload: string): PollRequest = Protobuf.decode(cast[seq[byte
 proc encodeWork*(resp: PollResponse): string = wireString(Protobuf.encode(resp))
 proc decodeWork*(payload: string): PollResponse = Protobuf.decode(cast[seq[byte]](payload), PollResponse)
 proc encodeConfig*(c: ControllerConfig): string = wireString(Protobuf.encode(c))
-
-proc serveControllerAttach*(co: Core; port: int) {.thread.} =
-  {.cast(gcsafe).}:
-    var c = newRq(co.rqliteUrl)
-    let (_, secretKey) = loadKeypair(co.certs, "core")
-    let conn = listenRep(port, secretKey)
-    while not stopServers.load:
-      let body = conn.receive()
-      if body.len == 0: continue
-      let req = Protobuf.decode(cast[seq[byte]](body), PollRequest)
-      let resp = handlePoll(c, co.profileId, secretKey, req)
-      let outb = Protobuf.encode(resp)
-      var s = newString(outb.len)
-      if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)
-      conn.send(s)
-    conn.close()
 
 # ------------------------------------------------------------------ ExecutorChannel (executor <-> core)
 

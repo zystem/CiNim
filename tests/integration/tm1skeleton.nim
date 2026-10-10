@@ -41,7 +41,7 @@ let
   coreHost = getEnv("CINIM_CORE_HOST")
   remoteCore = coreHost.len > 0
   host = if remoteCore: coreHost else: "127.0.0.1"
-  controllerPort = if remoteCore: 19740 else: 19760
+  streamPort = if remoteCore: 19745 else: 19765        # the push channel of the controllers
   executorPort = if remoteCore: 19741 else: 19761
   stepReportPort = if remoteCore: 19742 else: 19762
   logIngestPort = if remoteCore: 19743 else: 19763
@@ -290,17 +290,16 @@ suite "walking skeleton end to end":
     test "setup: start core, job-controller and executor-service":
       if not remoteCore:
         var coreEnv = @[("CINIM_RQLITE_URL", rqliteUrl), ("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
-          ("CINIM_CONTROLLER_PORT", $controllerPort), ("CINIM_EXECUTOR_PORT", $executorPort),
+          ("CINIM_STREAM_PORT", $streamPort), ("CINIM_EXECUTOR_PORT", $executorPort),
           ("CINIM_STEPREPORT_PORT", $stepReportPort), ("CINIM_LOGINGEST_PORT", $logIngestPort),
           ("CINIM_API_PORT", $apiPort), ("CINIM_LOG_HOLD_TIMEOUT", "20")]
         if logsReady: coreEnv.add [("CINIM_VLAGENT_URL", vlagentUrl), ("CINIM_VICTORIALOGS_URL", victoriaLogsUrl)]
         else: coreEnv.add ("CINIM_LAUNCH_GATE", "off")   # no log circuit in this setup: RUN-015 would (rightly) keep every step queued
         core = spawn(buildDir / "core", buildDir / "core.log", svcEnv(coreEnv))
       waitApiUp(apiPort)
-      # job-controller and executor-service both read CINIM_CORE_ADDR, but for core's two different
-      # REP listeners (ControllerAttach vs ExecutorChannel) - each needs its own value, not a shared one.
+      # the job-controller reaches core by its push channel, the executor-service by ExecutorChannel (CINIM_CORE_ADDR)
       var jcEnv = @[("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
-        ("CINIM_CORE_ADDR", "tcp://" & host & ":" & $controllerPort),
+        ("CINIM_CORE_STREAM_ADDR", "tcp://" & host & ":" & $streamPort),
         ("CINIM_SHIM_BIN", buildDir / (if staticShim.len > 0: "cicd-shim-logging" else: "cicd-shim")),
         ("CINIM_STATE_DIR", buildDir / "ctrl-state")]   # the controller's sqlite state stays under build/, not in the working directory
       # The addresses the Pod's shim dials and the other policy of the controller (the log wait: short, so that the logs_undelivered scenario below does not take 10 minutes)

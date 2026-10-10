@@ -1,4 +1,4 @@
-## Job-controller (RUN-002, RUN-013, D-29): the outbound-only ControllerAttach client of core. This file is the glue between
+## Job-controller (RUN-002, RUN-013, D-29): the outbound-only client of core, on the push channel (docs/conductors.md section 12). This file is the glue between
 ## the wire (PollRequest/PollResponse, Protobuf) and the controller's own parts: `logic.nim` decides (verdicts, adoption after a
 ## restart, retention of finished Pods, orphan sweep, pulling an undelivered spool out of a Pod), `backend.nim` is the seam to
 ## Kubernetes (the only implementation that talks to the API server is `k8s.nim`, on the official C client, A.6), and
@@ -11,13 +11,12 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import std/options
 import common/[zmqcurve, spoolwire, stream, streamstate]
-import backend, ctrlstate, logic, k8s, podverdict, shardsettings
+import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence
 
 import_proto3 "../../build/nimproto/all.proto"
 
 let
   ns = getEnv("CINIM_NAMESPACE", "cinim")
-  coreAddr = getEnv("CINIM_CORE_ADDR", "tcp://127.0.0.1:19740")
   certs = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
   shimBinPath = getEnv("CINIM_SHIM_BIN", "build/cicd-shim")
   # the controller's own memory (sqlite): which Pods it made and whether their end was reported - what a restarted
@@ -31,26 +30,11 @@ let
   # IAM-003: the one-time token with which this controller enrols at core (a Secret that core made with the namespace); the credential
   # that core gives in exchange is kept next to the state and sent in every poll
   bootstrapFile = getEnv("CINIM_BOOTSTRAP_FILE", "")
-  # the push channel (docs/conductors.md section 12): with this address the controller keeps a connection to the core and the core pushes work
-  # to it at once; without it the controller polls as before
+  # the push channel (docs/conductors.md section 12): the controller keeps a connection to the core, which pushes work to it at once
   streamAddr = getEnv("CINIM_CORE_STREAM_ADDR", "")
 const pollIntervalMs = 1000
 
 var logIngestAddr = ""      ## where *this* process reaches the core's LogIngest, to hand over the blocks it pulled out of a Pod's spool (the exec fallback, D-29); the core says in every answer to a poll (D-49)
-
-proc connectCore(): ZConnection =
-  let serverPub = loadPublicKey(certs, "core")
-  connectReq(coreAddr, serverPub, loadKeypair(certs, "client"), recvTimeoutMs = 10000, sendTimeoutMs = 10000)
-
-proc rpc(s: ZConnection; req: PollRequest): PollResponse =
-  let bytes = Protobuf.encode(req)
-  var msg = newString(bytes.len)
-  if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-  s.send(msg)
-  let (avail, _, body) = waitForReceive(s.socket)   # default timeout -2: use the RCVTIMEO set in connectCore
-  if not avail: raise newException(IOError, "no reply from core within the receive timeout")
-  Protobuf.decode(cast[seq[byte]](body), PollResponse)
-
 
 # ---- the push channel: a controller's end
 type
@@ -58,6 +42,7 @@ type
     conn: ZConnection
     inbox: Inbox                     ## the numbered frames of the core applied so far
     backlog: seq[PollResponse]       ## work pushed since the last report, applied with the next answer
+    session: string                  ## our session id
     reportNo: uint64
     lastGate: GateState              ## the gate as the core last said it (a bare "heard you" answer does not repeat it)
     wake: bool                       ## the core asked for our state again (`resync`)
@@ -109,6 +94,15 @@ proc exchange(p: var Push; sessionId: string; req: PollRequest): PollResponse =
     elif w.isSome: p.backlog.add w.get
   raise newException(IOError, "no answer from the core within 8 s")
 
+proc quiet(p: var Push): PollResponse =
+  ## a round with no report: only what the core pushed meanwhile, in the shape of an answer
+  result = PollResponse(header: Header(protocol: 1), poll_after_ms: pollIntervalMs, gate: p.lastGate)
+  for b in p.backlog:
+    result.commands = b.commands & result.commands
+    result.release_storage = b.release_storage & result.release_storage
+    if not result.config.present and b.config.present: result.config = b.config
+  p.backlog.setLen 0
+
 proc waitPushed(p: var Push; ms: int): bool =
   ## wait for the next round; true as soon as the core pushed work (or asked for our state), so that the round starts at once
   let deadline = epochTime() + ms.float / 1000.0
@@ -120,6 +114,7 @@ proc waitPushed(p: var Push; ms: int): bool =
       let w = p.absorb(got.get)
       if w.isSome:
         p.backlog.add w.get
+        discard p.conn.sendFrame(frame(p.session, "ping", ack = p.inbox.ackValue))     # acknowledged at once, so that it is not sent again
         return true
       if p.wake: return true
 
@@ -209,16 +204,18 @@ proc main() =
   let adopted = st.active()
   echo "jobcontroller: state in ", stateDir, ", adopted ", adopted.len, " step Pod(s) from the previous run"
   let sessionId = "jc-" & $epochTime()
-  let usePush = streamAddr.len > 0
-  var core: ZConnection = (if usePush: nil else: connectCore())
-  var push = Push(conn: (if usePush: connectPush() else: nil), inbox: initInbox())
+  if streamAddr.len == 0:
+    stderr.writeLine "jobcontroller: CINIM_CORE_STREAM_ADDR is not set: the controller has no way to reach the core (docs/conductors.md section 12)"
+    quit 2
+  var push = Push(conn: connectPush(), inbox: initInbox(), session: sessionId)
+  var cadence = Cadence()
   var credential = readTrimmed(credentialPath())
   var handBack: seq[PodTransition]       # steps assigned to us while the launch gate was closed: no Pod exists, they go back
   var ackSeq = 0'u64
   var lastSweep = 0.0
   var released: seq[string]               # run volumes deleted since the last answered poll: core is told, and stops asking (STO-006)
   var seenPhase: Table[string, string]     # pod name -> phase as of the last round (only a Running Pod has a spool worth pulling)
-  echo "jobcontroller: ", (if usePush: "push channel to " & streamAddr else: "polling " & coreAddr), ", session=", sessionId
+  echo "jobcontroller: push channel to ", streamAddr, ", session=", sessionId
   while true:
     let now = epochTime()
     let round = pollRound(be, st, cfg, now)
@@ -229,18 +226,23 @@ proc main() =
       inventory: round.inventory.map(toProto), inventory_complete: true,    # every Pod this controller tracks is listed
       kept: keptPods(st, cfg, 100), kept_total: uint32(st.unread().len), kept_complete: true,
       storage_released: released)
+    # A report is a snapshot the core takes in with some database work, so it goes out when something changed, when the core asks, and as a
+    # heartbeat; the work itself is pushed to us and needs no report to ask for it (reportcadence.nim)
+    let sig = podSignature(round.inventory.mapIt((it.podName, it.phase, it.podReason)))
+    let due = reportDue(cadence, now, Changes(transitions: round.transitions.len > 0, handedBack: handBack.len > 0,
+                                              released: released.len > 0, asked: push.wake), sig)
     var resp: PollResponse
-    try:
-      resp = (if usePush: push.exchange(sessionId, req) else: core.rpc(req))
-    except CatchableError as e:
-      # core unreachable: nothing is lost - the ends stay unreported in our state and go out with the next poll
-      stderr.writeLine "jobcontroller: core does not answer (" & e.msg & "), retrying"
-      if not usePush:
-        try: core.close() except CatchableError: discard
-      sleep 2000
-      if not usePush:
-        try: core = connectCore() except CatchableError: discard       # the push channel reconnects by itself
-      continue
+    if due:
+      try:
+        resp = push.exchange(sessionId, req)
+        cadence.sent(now, sig)
+      except CatchableError as e:
+        # core unreachable: nothing is lost - the ends stay unreported in our state and go out with the next report
+        stderr.writeLine "jobcontroller: core does not answer (" & e.msg & "), retrying"
+        sleep 2000       # the channel reconnects by itself
+        continue
+    else:
+      resp = push.quiet()
     if resp.issued_credential.len > 0:
       # enrolled: keep the credential, and from the next poll on it is the proof (the poll got nothing else, so nothing is lost)
       saveCredential(resp.issued_credential)
@@ -272,9 +274,10 @@ proc main() =
       cfg.logHoldTimeout = int(c.log_hold_timeout_seconds)
       cfg.retentionRead = int(c.pod_retention_read_seconds)
       cfg.retentionUnread = int(c.pod_retention_unread_seconds)
-    afterPoll(st, round.transitions, int64(now))
-    released.setLen(0)
-    handBack.setLen(0)
+    if due:        # what the report carried has been taken in
+      afterPoll(st, round.transitions, int64(now))
+      released.setLen(0)
+      handBack.setLen(0)
     if resp.commands.len > 0:
       stderr.writeLine "jobcontroller: poll got " & $resp.commands.len & " command(s): " & $resp.commands.mapIt($it.body.kind)
     if resp.release_storage.len > 0:
@@ -333,7 +336,6 @@ proc main() =
       if sw.expired.len > 0: echo "jobcontroller: removed finished Pod(s) after their retention: ", sw.expired.join(", ")
       if sw.orphans.len > 0: echo "jobcontroller: removed orphan Pod(s) (not in this controller's state): ", sw.orphans.join(", ")
     let pause = if resp.poll_after_ms > 0: int(resp.poll_after_ms) else: pollIntervalMs
-    if usePush: discard push.waitPushed(pause)        # work pushed by the core ends the wait
-    else: sleep(pause)
+    discard push.waitPushed(pause)        # work pushed by the core ends the wait
 
 main()

@@ -94,8 +94,7 @@ func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
   let ns = orgNamespace(cfg, slug)
   var env = @[
     %*{"name": "CINIM_NAMESPACE", "value": ns},
-    %*{"name": "CINIM_CORE_ADDR", "value": coreAddress(cfg, 19740)},
-    %*{"name": "CINIM_CORE_STREAM_ADDR", "value": coreAddress(cfg, 19745)},    # the push channel (docs/conductors.md section 12); a controller without it polls
+    %*{"name": "CINIM_CORE_STREAM_ADDR", "value": coreAddress(cfg, 19745)},    # the push channel (docs/conductors.md section 12): the controller's only way to the core
     %*{"name": "CINIM_CERTS", "value": "/etc/cinim"},
     %*{"name": "CINIM_STATE_DIR", "value": "/state"},
     %*{"name": "CINIM_BOOTSTRAP_FILE", "value": "/etc/cinim/bootstrap/token"}]

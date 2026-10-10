@@ -28,7 +28,7 @@ The core's environment variables `CINIM_LOG_SPOOL_BYTES` and `CINIM_LOG_HOLD_TIM
 
 ## Job controller environment
 
-What a controller needs to **find the core and prove who it is**, and nothing else (D-49): `CINIM_NAMESPACE` (the namespace it serves), `CINIM_CORE_ADDR` (the core's ControllerAttach), `CINIM_CORE_STREAM_ADDR` (the core's push channel, port 19745; with it the controller keeps a connection and the core pushes work to it at once, without it the controller polls), `CINIM_CERTS` (its transport keys),
+What a controller needs to **find the core and prove who it is**, and nothing else (D-49): `CINIM_NAMESPACE` (the namespace it serves), `CINIM_CORE_STREAM_ADDR` (the core's push channel, port 19745: the controller keeps a connection and the core pushes work to it; there is no other way to the core), `CINIM_CERTS` (its transport keys),
 `CINIM_BOOTSTRAP_FILE` (the one-time token), `CINIM_STATE_DIR` (its state), `CINIM_SHIM_BIN`, `CINIM_KUBECONFIG` (outside a cluster). The core makes them in the Deployment of an organisation. Everything else a controller works by,
 the build profile, the run volume, the addresses of the core that a step's shim dials, the default spool and log wait, and how long a finished Pod is kept, comes from the core in every answer to the controller's poll
 (`ControllerConfig`, see the core's environment below) and is applied to the next Pod it makes.

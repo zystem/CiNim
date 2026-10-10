@@ -33,7 +33,6 @@ spec:
           command: ["/core"]
           ports:
             - {name: http, containerPort: 18081}
-            - {name: controller, containerPort: 19740}
             - {name: executor, containerPort: 19741}
             - {name: stepreport, containerPort: 19742}
             - {name: logingest, containerPort: 19743}
@@ -189,7 +188,6 @@ spec:
     app.kubernetes.io/name: cinim-core
   ports:
     - {name: http, port: 80, targetPort: http}
-    - {name: controller, port: 19740, targetPort: controller}
     - {name: executor, port: 19741, targetPort: executor}
     - {name: stepreport, port: 19742, targetPort: stepreport}
     - {name: logingest, port: 19743, targetPort: logingest}

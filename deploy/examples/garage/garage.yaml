@@ -88,6 +88,9 @@ spec:
               for f in rpc_secret admin_token; do
                 [ -s /var/lib/garage/secrets/$f ] || (umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /var/lib/garage/secrets/$f)
               done
+              # fsGroup makes the kubelet add group read and write to every file of the volume each time the Pod is mounted, and Garage refuses to start
+              # with a secret that others can read ("world-readable! (mode: 0660)"): the modes are put back to 600 at every start, before Garage runs
+              chmod 600 /var/lib/garage/secrets/*
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           volumeMounts: [{name: data, mountPath: /var/lib/garage}]
       containers:
