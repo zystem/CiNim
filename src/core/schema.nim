@@ -142,6 +142,9 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "liveness_timeout", "INTEGER NOT NULL DEFAULT 300"),
       ("execution_profiles", "log_spool_bytes", "INTEGER NOT NULL DEFAULT 10485760"),
       ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600"),
+      ("runs", "lease_attempt", "INTEGER NOT NULL DEFAULT 0"),    # RUN-008, core/runlease.nim: the attempt of the last lease of the run,
+      ("runs", "lease_until", "INTEGER NOT NULL DEFAULT 0"),      # when it runs out (0: given back),
+      ("runs", "lease_owner", "TEXT NOT NULL DEFAULT ''"),        # and to whom (the executor's id, for the operator)
       ("execution_profiles", "pod_limit", "INTEGER NOT NULL DEFAULT 20"),              # RUN-004, core/admission.nim: step Pods in flight of the organisation
       ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20")]:  # the share of it one run may hold
     if not c.hasColumn(table, column):

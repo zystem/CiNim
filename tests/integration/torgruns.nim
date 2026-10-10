@@ -4,7 +4,7 @@ import std/[unittest, json, os]
 import common/rqlite
 import std/times
 import common/ctrlauth
-import core/[schema, scheduler, loggate, logcircuit]
+import core/[schema, scheduler, loggate, logcircuit, runlease]
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -129,8 +129,12 @@ suite "SHD-007 runs and controllers per organisation":
       withBuild.orgShard = "001"
       withBuild.buildOn = true
       proc call(core: Core; run, profile: string; seq: uint64): ExecutorResponse =
-        handleCall(c, core, HostCall(run_id: run, seq: seq, kind: "job_sh",
-          payload: cast[seq[byte]]("job-1\tkaniko\t" & profile & "\t\techo build")))
+        # the executor holds the run's lease while it calls (RUN-008): take it, or use the one a refused call left held
+        var tok = takeRunLease(c, "master", run, "test")
+        if tok.len == 0:
+          tok = leaseToken("master", run, c.query(%*[["SELECT lease_attempt FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getInt)
+        handleCall(c, core, HostCall(run_id: run, lease_token: tok, seq: seq, kind: "job_sh",
+          payload: cast[seq[byte]]("job-1\tkaniko\t" & profile & "\t\techo build")), "master")
       check call(withBuild, rd, "", 0).body.kind == ExecutorResponseBodyKind.result
       check call(withBuild, rd, "build", 1).body.kind == ExecutorResponseBodyKind.result
       # one profile, one namespace: both steps belong to it and the second one says what it is

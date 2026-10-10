@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick
+import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -562,29 +562,78 @@ proc loadJournal(c: var RqClient; runId: string): seq[JournalEntry] =
       result.add JournalEntry(seq: uint64(row[0].getInt), kind: row[1].getStr,
         payload: cast[seq[byte]](row[2].getStr), result: cast[seq[byte]](row[3].getStr))
 
-proc nextRunnableRun(c: var RqClient): string =
-  ## Any RUNNING run with no step still PENDING/STARTING/RUNNING is presumed suspended and
-  ## ready to (re)lease. Not a real lease/ownership mechanism yet (RUN-008's lease_token is unused).
-  let r = c.query(%*[["SELECT id FROM runs WHERE state = ? AND id NOT IN " &
-    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY created_at LIMIT 1",
-    protoName(rsRunning), protoName(ssPending), protoName(ssStarting), protoName(ssRunning)]])
+proc leaseStateOf(c: var RqClient; runId: string): LeaseState =
+  let r = c.query(%*[["SELECT lease_attempt, lease_until FROM runs WHERE id = ?", runId]])
   let vals = r["results"][0]{"values"}
-  if vals != nil and vals.len > 0: vals[0][0].getStr else: ""
+  if vals != nil and vals.len > 0: LeaseState(attempt: vals[0][0].getInt, until: vals[0][1].getBiggestInt) else: LeaseState()
 
-proc handleLease(c: var RqClient; profileId: string; req: LeaseRequest): ExecutorResponse =
+proc takeRunLease*(c: var RqClient; master, runId, owner: string): string =
+  ## Lease a RUNNING run that is free (never leased, given back, or run out): a new attempt, and its token. "" if the run is not free, not RUNNING,
+  ## or another executor took it in the meantime (the update is made only against the attempt that was read).
+  let now = getTime().toUnix()
+  let st = leaseStateOf(c, runId)
+  if not canTake(st, now): return ""
+  let r = c.execute(%*[["UPDATE runs SET lease_attempt = lease_attempt + 1, lease_until = ?, lease_owner = ? " &
+    "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state = ? RETURNING lease_attempt",
+    now + leaseTtlSeconds, owner, runId, st.attempt, now, protoName(rsRunning)]])
+  let vals = r["results"][0]{"values"}
+  if vals == nil or vals.len == 0: "" else: leaseToken(master, runId, vals[0][0].getInt)
+
+proc leaseCandidates*(c: var RqClient; only = ""): seq[string] =
+  ## RUNNING runs that nobody holds and that have no step still PENDING/STARTING/RUNNING: presumed suspended, ready to (re)lease
+  ## (`only`: just that run, if it is one - for the tests)
+  let r = c.query(%*[["SELECT id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND (? = '' OR id = ?) AND id NOT IN " &
+    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY created_at LIMIT 5",
+    protoName(rsRunning), getTime().toUnix(), only, only, protoName(ssPending), protoName(ssStarting), protoName(ssRunning)]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil:
+    for row in vals: result.add row[0].getStr
+
+proc handleLease(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
   discard registryTouch("executor", "executor-service", epochTime())
-  let runId = if req.run_id.len > 0: req.run_id else: nextRunnableRun(c)
+  let owner = if req.executor_id.len > 0: req.executor_id else: "executor"
+  var runId, token: string
+  for candidate in (if req.run_id.len > 0: @[req.run_id] else: leaseCandidates(c)):
+    token = takeRunLease(c, master, candidate, owner)
+    if token.len > 0:
+      runId = candidate
+      break
   if runId.len == 0:
     return ExecutorResponse(header: Header(protocol: 1),
       body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "no_run_available")))
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.lease,
-    lease: LeaseGranted(lease_token: "t-" & runId, ttl_seconds: 60, run_id: runId,
+    lease: LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: runId,
                          script: loadScript(c, runId), journal: loadJournal(c, runId),
                          params: runParams(c, runId).mapIt(ParamsEntry(key: it[0], value: it[1])))))
 
-proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
+proc leaseLost(detail: string): ExecutorResponse =
+  ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+    kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "lease_lost", detail: detail)))
+
+proc checkCaller(c: var RqClient; master, runId, token: string): tuple[ok: bool, attempt: int, why: string] =
+  ## Does the caller hold the run's lease? If so the lease is renewed (written to the database only when half of it is gone).
+  let now = getTime().toUnix()
+  let st = leaseStateOf(c, runId)
+  case checkLease(master, runId, token, st, now)
+  of lvOk:
+    if renewDue(st, now):
+      discard c.execute(%*[["UPDATE runs SET lease_until = ? WHERE id = ? AND lease_attempt = ? AND lease_until != 0",
+        now + leaseTtlSeconds, runId, st.attempt]])
+    (true, st.attempt, "")
+  of lvForged: (false, 0, "the lease token is not this run's")
+  of lvStale: (false, 0, "another executor has taken the run since")
+  of lvReleased: (false, 0, "the lease of the run was given back")
+
+proc giveBackLease(c: var RqClient; runId: string; attempt: int) =
+  ## the executor suspends or ends the run: the next one may take it at once
+  discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ? AND lease_attempt = ?", runId, attempt]])
+
+proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): ExecutorResponse =
   ## Every host call becomes a step and the run suspends: the step's result (from a job-controller's
   ## PodTransition) lands in run_journal asynchronously, and the executor re-leases the run to continue.
+  ## Only the executor that holds the run's lease may call (RUN-008); the suspension gives the lease back.
+  let caller = checkCaller(c, master, req.run_id, req.lease_token)
+  if not caller.ok: return leaseLost(caller.why)
   if req.kind == "params":
     # the complete launch parameters of the run, from the script's declarations (PIP-012): kept with the run and given to its steps as environment variables
     let json = cast[string](req.payload)
@@ -648,10 +697,13 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall): ExecutorResponse =
     "VALUES (?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
     schema.newId(), req.run_id, jobId, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, profile, now]])
   kickProfile(profileId)       # the push channel hands it to the organisation's controller at once
+  giveBackLease(c, req.run_id, caller.attempt)       # the executor suspends the run: it can be leased again as soon as the step is done
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
     kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: true)))
 
-proc handleFinish(c: var RqClient; req: FinishRun): ExecutorResponse =
+proc handleFinish*(c: var RqClient; req: FinishRun; master: string): ExecutorResponse =
+  let caller = checkCaller(c, master, req.run_id, req.lease_token)
+  if not caller.ok: return leaseLost(caller.why)
   let now = $getTime().toUnix()
   # why a run did not succeed is kept with it (the API shows it as `failure`): the script's error, the parameter that was refused, the limit
   discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = ?, fail_message = ? WHERE id = ?",
@@ -661,6 +713,7 @@ proc handleFinish(c: var RqClient; req: FinishRun): ExecutorResponse =
               else: rsInfrastructureError), now,
     (if req.state == RUN_STATE_SUCCEEDED: "" else: req.code[0 ..< min(req.code.len, 64)]),
     (if req.state == RUN_STATE_SUCCEEDED: "" else: req.message[0 ..< min(req.message.len, maxFailMessage)]), req.run_id]])
+  giveBackLease(c, req.run_id, caller.attempt)
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.result,
     result: HostResult(suspended: false)))
 
@@ -676,9 +729,9 @@ proc serveExecutorChannel*(co: Core; port: int) {.thread.} =
       # an error in one request is answered as an error of that request; it must not end the core (a REP socket also needs its answer to go on)
       let resp = try:
         case req.body.kind
-        of ExecutorRequestBodyKind.lease: handleLease(c, co.profileId, req.body.lease)
-        of ExecutorRequestBodyKind.call: handleCall(c, co, req.body.call)
-        of ExecutorRequestBodyKind.finish: handleFinish(c, req.body.finish)
+        of ExecutorRequestBodyKind.lease: handleLease(c, co.profileId, secretKey, req.body.lease)
+        of ExecutorRequestBodyKind.call: handleCall(c, co, req.body.call, secretKey)
+        of ExecutorRequestBodyKind.finish: handleFinish(c, req.body.finish, secretKey)
         of ExecutorRequestBodyKind.finish_run_id, ExecutorRequestBodyKind.notSet:
           ExecutorResponse(header: Header(protocol: 1),
             body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error")))

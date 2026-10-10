@@ -41,6 +41,7 @@ message FinishRun {
   RunState state = 2;                // terminal state: SUCCEEDED, FAILED, INFRASTRUCTURE_ERROR
   string message = 3;                 // the detail when not SUCCEEDED: the script's error, the parameter that was refused, the limit that was hit
   string code = 4;                    // script_error, script_nondeterminism, instruction_limit, ... (replay.nim ExecResult.code); "" when SUCCEEDED
+  string lease_token = 5;              // the lease of the run (RUN-008): the finish of a run one does not hold is refused
 }
 
 message ExecutorRequest {

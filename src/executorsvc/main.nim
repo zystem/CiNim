@@ -45,11 +45,15 @@ proc leaseAny(s: ZConnection): Option[tuple[runId, token, script: string, journa
 proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: seq[(string, string)]) =
   var sb = newSandbox()
   var jj = j
+  var lostLease = ""          # RUN-008: another executor has the run now; this one stops and says nothing more about it
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
     let resp = s.rpc(ExecutorRequest(header: Header(protocol: 1),
       body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.call,
         call: HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind,
                         payload: cast[seq[byte]](payload)))))
+    if resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "lease_lost":
+      lostLease = resp.body.failure.detail
+      return none(string)       # as if suspended: the run goes no further here and nothing is written about it
     if resp.body.kind == ExecutorResponseBodyKind.failure:
       # core refuses this call for good: the run fails with its words, it is not suspended
       raise (ref HostRefusal)(code: resp.body.failure.code, msg: resp.body.failure.detail)
@@ -58,6 +62,9 @@ proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: s
     if r.suspended: return none(string)
     some(cast[string](r.result))
   let r = replay.execute(sb, jj, script, host, runId = runId, params = params)
+  if lostLease.len > 0:
+    echo "executor: run ", runId, ": the lease is lost (", lostLease, "); left to its new holder"
+    return
   let finalState = case r.status
     of esDone: RUN_STATE_SUCCEEDED
     of esFailed: RUN_STATE_FAILED
@@ -65,7 +72,7 @@ proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: s
   if r.status != esSuspended:
     discard s.rpc(ExecutorRequest(header: Header(protocol: 1),
       body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.finish,
-        finish: FinishRun(run_id: runId, state: finalState, message: r.message, code: r.code))))
+        finish: FinishRun(run_id: runId, state: finalState, message: r.message, code: r.code, lease_token: token))))
     echo "executor: run ", runId, " finished ", r.code
   else:
     echo "executor: run ", runId, " suspended (", r.message, ")"
