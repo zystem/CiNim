@@ -14,7 +14,6 @@ type
     kind*, payload*, result*, hash*: string
   ChainVerdict* = enum
     cvOk
-    cvLegacy      ## rows from before the chain was kept: all without hashes, and no tip
     cvBroken
   ChainCheck* = object
     verdict*: ChainVerdict
@@ -24,13 +23,6 @@ type
 proc chainHash*(prev: string; r: Row): string =
   jr.entryHash(prev, jr.Entry(seq: r.seq, kind: r.kind, payload: r.payload, result: r.result))
 
-proc legacyHashes*(rows: seq[Row]): seq[string] =
-  ## the chain for rows that have none: it starts now, from what is there
-  var prev = ""
-  for r in rows:
-    prev = chainHash(prev, r)
-    result.add prev
-
 proc checkChain*(rows: seq[Row]; tip: string): ChainCheck =
   ## `rows` in the order of `seq`; `tip` is the hash the run keeps of its newest row
   if rows.len == 0:
@@ -38,7 +30,6 @@ proc checkChain*(rows: seq[Row]; tip: string): ChainCheck =
   var hashed = 0
   for r in rows:
     if r.hash.len > 0: inc hashed
-  if hashed == 0 and tip.len == 0: return ChainCheck(verdict: cvLegacy, at: -1)
   if hashed != rows.len: return ChainCheck(verdict: cvBroken, at: -1, why: "some rows of the journal have no hash")
   var prev = ""
   for i, r in rows:

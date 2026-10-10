@@ -146,8 +146,8 @@ proc makeStepRows(runId: string) =
     ["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at) " &
      "VALUES (?, 't1', 'p1', 'RUNNING', 1, '0', '0')", runId],
     ["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'k1', 'RUNNING', 'p1')", "job-" & runId, runId],
-    ["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, queued_at) " &
-     "VALUES (?, ?, ?, 0, 'sh', 'RUNNING', 'p1', 'x', 'x', '0')", "step-" & runId, runId, "job-" & runId]],
+    ["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, queued_at) " &
+     "VALUES (?, ?, ?, 0, 0, 'sh', 'RUNNING', 'p1', 'x', 'x', '0')", "step-" & runId, runId, "job-" & runId]],
     transaction = true)
 
 proc startShim(runId, spoolDir, termLog, command: string; spoolBytes, holdSeconds: int): Process =
@@ -394,8 +394,8 @@ suite "walking skeleton end to end":
           ["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at) " &
            "VALUES (?, 't1', 'p1', 'RUNNING', 1, '0', '0')", runId],
           ["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'k1', 'RUNNING', 'p1')", "job-" & runId, runId],
-          ["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, queued_at) " &
-           "VALUES (?, ?, ?, 0, 'sh', 'RUNNING', 'p1', 'x', 'x', '0')", "step-" & runId, runId, "job-" & runId]],
+          ["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, queued_at) " &
+           "VALUES (?, ?, ?, 0, 0, 'sh', 'RUNNING', 'p1', 'x', 'x', '0')", "step-" & runId, runId, "job-" & runId]],
           transaction = true)
 
         let termLog = buildDir / "logtest-term.json"

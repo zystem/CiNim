@@ -20,25 +20,11 @@ proc readTip*(c: var RqClient; runId: string): string =
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0: vals[0][0].getStr else: ""
 
-proc adoptLegacyLocked(c: var RqClient; runId: string; rows: seq[Row]) =
-  ## the rows of a run that was written before the chain was kept get one now, from what is there
-  let hashes = legacyHashes(rows)
-  var stmts = newJArray()
-  for i, r in rows:
-    stmts.add %*["UPDATE run_journal SET hash = ? WHERE run_id = ? AND seq = ? AND hash = ''", hashes[i], runId, r.seq]
-  if rows.len > 0: stmts.add %*["UPDATE runs SET journal_tip = ? WHERE id = ?", hashes[^1], runId]
-  if stmts.len > 0: discard c.execute(stmts, transaction = true)
-
 proc verifyJournal*(c: var RqClient; runId: string): tuple[check: ChainCheck, rows: seq[Row]] =
-  ## The journal as it stands, and whether its chain holds. A run from before the chain gets one (and passes).
+  ## The journal as it stands, and whether its chain holds.
   withLock journalLock:
-    var rows = c.readRows(runId)
-    var check = checkChain(rows, c.readTip(runId))
-    if check.verdict == cvLegacy:
-      c.adoptLegacyLocked(runId, rows)
-      rows = c.readRows(runId)
-      check = checkChain(rows, c.readTip(runId))
-    result = (check, rows)
+    let rows = c.readRows(runId)
+    result = (checkChain(rows, c.readTip(runId)), rows)
 
 proc appendRow*(c: var RqClient; runId: string; seq: int; kind, payload, outcome: string; alongside: JsonNode = nil): bool =
   ## Add a record, chained to the newest one, and keep the run's tip, in one transaction with `alongside` (statements the caller wants to
@@ -47,10 +33,7 @@ proc appendRow*(c: var RqClient; runId: string; seq: int; kind, payload, outcome
     let ex = c.query(%*[["SELECT 1 FROM run_journal WHERE run_id = ? AND seq = ?", runId, seq]])
     let exv = ex["results"][0]{"values"}
     if exv != nil and exv.len > 0: return false
-    var rows = c.readRows(runId)
-    if rows.len > 0 and rows[^1].hash.len == 0:
-      c.adoptLegacyLocked(runId, rows)       # a run written before the chain: chain it first, so the journal is never half hashed
-      rows = c.readRows(runId)
+    let rows = c.readRows(runId)
     var prev = ""
     for r in rows:
       if r.seq < seq: prev = r.hash

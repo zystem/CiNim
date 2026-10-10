@@ -12,8 +12,7 @@ func supportedApiVersions*(current = currentApiVersion): seq[int] =
   for v in max(1, current - keptApiVersions + 1) .. current: result.add v
 
 func sqlVersionList*(versions: seq[int]): string =
-  ## numbers for an `IN (...)`; an executor that sent none is one from before the versions and runs version 1 only
-  if versions.len == 0: return "1"
+  ## numbers for an `IN (...)`; the caller has at least one (an executor that names none is refused)
   var parts: seq[string]
   for v in versions: parts.add $v
   parts.join(",")

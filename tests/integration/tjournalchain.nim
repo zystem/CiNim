@@ -20,7 +20,7 @@ suite "T-03 the hash chain of the journal":
     proc failCode(run: string): string =
       c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getStr
     proc leaseIt(run: string): ExecutorResponse =
-      handleLease(c, defaultProfile, master, LeaseRequest(run_id: run, executor_id: "exec-t"))
+      handleLease(c, defaultProfile, master, LeaseRequest(run_id: run, executor_id: "exec-t", api_versions: @[1'u32]))
     proc leaseGranted(r: ExecutorResponse): bool = r.body.kind == ExecutorResponseBodyKind.lease
     proc finishStep(run: string; ordinal: int) =
       ## what the controller's report does for a step that ended with code 0
@@ -32,7 +32,7 @@ suite "T-03 the hash chain of the journal":
       var tok = c.takeRunLease(master, r, "exec-t")
       discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 0, kind: "params", payload: cast[seq[byte]]("{}")), master)
       for i in 1 .. n:
-        discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: uint64(i), kind: "job_sh",
+        discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: uint64(i), kind: "job_sh", numbered: true, step_no: uint32(i),
           payload: cast[seq[byte]]("job-" & $i & "\talpine\t\t\techo " & $i)), master)
         discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ? AND ordinal = ?", r, i]])
         finishStep(r, i)
@@ -78,20 +78,10 @@ suite "T-03 the hash chain of the journal":
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", r]])
       check not leaseIt(r).leaseGranted
       check failCode(r) == "journal_corrupt"
-    test "a run written before the chain is chained when it is next leased, and then it holds":
+    test "a journal without hashes is not adopted: the run does not go to an executor and ends with journal_corrupt":
       let r = co.createRun("p", "return 1")
       for i in 0 .. 2:
         discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) VALUES (?, ?, 'job_sh', '', ?, '0', '1')",
           r, i, "p" & $i]])
-      check c.readRows(r).allIt(it.hash.len == 0)
-      let resp = leaseIt(r)
-      check resp.leaseGranted
-      check resp.body.lease.journal.allIt(it.hash.len == 64)
-      check checkChain(c.readRows(r), c.readTip(r)).verdict == cvOk
-    test "a record added to a run written before the chain does not leave the journal half hashed":
-      let r = co.createRun("p", "return 1")
-      for i in 0 .. 1:
-        discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) VALUES (?, ?, 'job_sh', '', ?, '0', '1')",
-          r, i, "p" & $i]])
-      check c.appendRow(r, 2, "job_sh", "p2", "0\n")
-      check checkChain(c.readRows(r), c.readTip(r)).verdict == cvOk
+      check not leaseIt(r).leaseGranted
+      check stateOf(r) == "INFRASTRUCTURE_ERROR" and failCode(r) == "journal_corrupt"

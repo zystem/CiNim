@@ -59,12 +59,12 @@ message FinishRun {
 }
 
 message ExecutorRequest {
+  reserved 4;                        // was `finish_run_id`, a field nothing read
   Header header = 1;
   oneof body {
     LeaseRequest lease = 2;
     HostCall call = 3;
-    string finish_run_id = 4;          // unused (kept for wire compat, N/N-1); use finish
-    FinishRun finish = 5;               // carries the terminal state, finish_run_id did not
+    FinishRun finish = 5;               // carries the terminal state
   }
 }
 

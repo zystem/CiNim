@@ -22,7 +22,7 @@ suite "RUN-008 the lease of a run":
     proc params(run, token: string): ExecutorResponse =
       handleCall(c, co, HostCall(run_id: run, lease_token: token, seq: 0, kind: "params", payload: cast[seq[byte]]("{}")), master)
     proc jobSh(run, token: string; seq = 1'u64): ExecutorResponse =
-      handleCall(c, co, HostCall(run_id: run, lease_token: token, seq: seq, kind: "job_sh",
+      handleCall(c, co, HostCall(run_id: run, lease_token: token, seq: seq, kind: "job_sh", numbered: true, step_no: uint32(seq),
         payload: cast[seq[byte]]("job-1\talpine\t\t\techo hi")), master)
     proc refused(r: ExecutorResponse): bool =
       r.body.kind == ExecutorResponseBodyKind.failure and r.body.failure.code == "lease_lost"

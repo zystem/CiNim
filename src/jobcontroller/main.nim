@@ -219,12 +219,17 @@ proc main() =
   var ackSeq = 0'u64
   var lastSweep = 0.0
   var lastConductors = 0.0
+  var lastQuota = 0.0
+  var quota: tuple[used, hard: uint64]       # the storage quota of the namespace as last read (every 30 s): the core keeps the volumes of failed runs shorter when it is nearly full
   var conductorTried: Table[int, float]
   var released: seq[string]               # run volumes deleted since the last answered poll: core is told, and stops asking (STO-006)
   var seenPhase: Table[string, string]     # pod name -> phase as of the last round (only a Running Pod has a spool worth pulling)
   echo "jobcontroller: push channel to ", streamAddr, ", session=", sessionId
   while true:
     let now = epochTime()
+    if be.readStorageQuota != nil and now - lastQuota >= 30.0:
+      lastQuota = now
+      quota = be.readStorageQuota()
     let round = pollRound(be, st, cfg, now)
     for p in round.inventory: seenPhase[p.podName] = p.phase
     let req = PollRequest(header: Header(protocol: 1), session_id: sessionId, ack_command_seq: ackSeq, namespace: ns,
@@ -232,7 +237,7 @@ proc main() =
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
       inventory: round.inventory.map(toProto), inventory_complete: true,    # every Pod this controller tracks is listed
       kept: keptPods(st, cfg, 100), kept_total: uint32(st.unread().len), kept_complete: true,
-      storage_released: released)
+      storage_released: released, storage_used_bytes: quota.used, storage_hard_bytes: quota.hard)
     # A report is a snapshot the core takes in with some database work, so it goes out when something changed, when the core asks, and as a
     # heartbeat; the work itself is pushed to us and needs no report to ask for it (reportcadence.nim)
     let sig = podSignature(round.inventory.mapIt((it.podName, it.phase, it.podReason)))

@@ -59,6 +59,8 @@ type
       ## the Pods of this controller's conductors, found by label; ok = false when the list could not be read (then conclude nothing)
     deleteConductor*: proc (name: string): bool
       ## the conductor's Pod and its Secret are gone afterwards
+    readStorageQuota*: proc (): tuple[used, hard: uint64]
+      ## `requests.storage` of the namespace's ResourceQuota, used and hard, in bytes; (0, 0) when there is none or it could not be read; nil when the controller does not read it
     listPods*: proc (): tuple[ok: bool, pods: seq[PodSummary]]
       ## every Pod in the step namespace; ok = false when the list could not be read (then conclude nothing)
 

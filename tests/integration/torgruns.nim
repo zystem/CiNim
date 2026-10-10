@@ -12,8 +12,8 @@ proc addStep(c: var RqClient; runId, profileId: string) =
   ## what a host call of the executor leaves behind: a pending step in the profile of the run
   let jobId = newId()
   discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j', 'RUNNING', ?)", jobId, runId, profileId]])
-  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) " &
-    "VALUES (?, ?, ?, 1, 'sh', 'PENDING', ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, profileId, "1"]])
+  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, queued_at) " &
+    "VALUES (?, ?, ?, 1, 1, 'sh', 'PENDING', ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, profileId, "1"]])
 
 suite "SHD-007 runs and controllers per organisation":
   if url.len == 0:
@@ -133,7 +133,7 @@ suite "SHD-007 runs and controllers per organisation":
         var tok = takeRunLease(c, "master", run, "test")
         if tok.len == 0:
           tok = leaseToken("master", run, c.query(%*[["SELECT lease_attempt FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getInt)
-        handleCall(c, core, HostCall(run_id: run, lease_token: tok, seq: seq, kind: "job_sh",
+        handleCall(c, core, HostCall(run_id: run, lease_token: tok, seq: seq, kind: "job_sh", numbered: true, step_no: uint32(seq),
           payload: cast[seq[byte]]("job-1\tkaniko\t" & profile & "\t\techo build")), "master")
       check call(withBuild, rd, "", 0).body.kind == ExecutorResponseBodyKind.result
       check call(withBuild, rd, "build", 1).body.kind == ExecutorResponseBodyKind.result

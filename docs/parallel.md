@@ -24,6 +24,26 @@ local r = ci.parallel({
 -- r.unit.ok == true; r.lint.value == "clean"; a failed branch: r.x.ok == false, r.x.error == "step failed with code 3"
 ```
 
+A second example, the one the owner gave: five branches build five images, then five branches scan them with `trivy`. The branches of the two groups have **the same names**, so branch *k* of the scans depends on branch *k* of the builds (section 11); the ids of the steps are built with `b58f`, and `b{xx}` and `s{xx}` keep the ids of the builds and of the scans apart:
+
+```lua
+local images = { "api", "web", "worker", "cron", "docs" }
+local builds, scans = {}, {}
+for i, name in ipairs(images) do
+  local branch = b58f("i{xx}", i)                      -- the name of the branch, the same in both groups: i12, i13 ...
+  builds[branch] = function()
+    ci.job({image = "kaniko"}, function(j) j:sh("build " .. name, {id = b58f("b{xx}", i)}) end)
+  end
+  scans[branch] = function()
+    ci.job({image = "trivy"}, function(j) j:sh("trivy image " .. name, {id = b58f("s{xx}", i)}) end)
+  end
+end
+ci.parallel(builds)
+ci.parallel(scans)
+```
+
+`deploy/examples/ids/ids.lua` is the same in two plain loops, and runs today.
+
 * A **branch** is a function with the same powers as `main`: `ci.job`, `j:sh`, `ci.log`, another `ci.parallel` (depth at most 200, inside the 200 steps of the run). Branches are a table `name = function` (or a list, named `1`, `2`, …); the order of `pairs` is the stable one of PIP-005.
 * The **result** is a table, name → `{ok = true, value = <what the branch returned>}` or `{ok = false, error = <message>}`. A value must be plain data (a string, a number, a boolean, a table of those): it is journaled.
 * **Failure.** Without `fail_fast` all branches run to the end; with `fail_fast` the first failure **cancels** the branches still running (their steps are stopped, section 6). Then `ci.parallel` raises `parallel: branches failed: a, b`, as a failed step raises, so that

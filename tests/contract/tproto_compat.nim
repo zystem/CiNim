@@ -46,4 +46,4 @@ suite "N/N-1: buf breaking against the previous release":
     check breaking(proc (d: string) = removeFile(d / "cicd" / "internal" / "v1" / "directory.proto")) != 0
 
   test "adding a member to an existing oneof is allowed":
-    check breaking(proc (d: string) = edit(d, "internal/v1/executor.proto", "    string finish_run_id = 4;", "    string finish_run_id = 4;\n    string oops = 6;")) == 0   # adding a oneof member is compatible
+    check breaking(proc (d: string) = edit(d, "internal/v1/executor.proto", "    FinishRun finish = 5;", "    FinishRun finish = 5;\n    string oops = 6;")) == 0   # adding a oneof member is compatible

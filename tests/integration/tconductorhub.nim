@@ -52,7 +52,8 @@ suite "RUN-016 conductors on the push channel":
 
     proc hostCall(runId, token, kind, payload: string; seq = 1): ExecutorRequest =
       ExecutorRequest(header: Header(protocol: 1), body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.call,
-        call: HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind, payload: cast[seq[byte]](payload))))
+        call: HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind, payload: cast[seq[byte]](payload),
+                       numbered: kind == "job_sh", step_no: uint32(seq))))
 
     proc finishReq(runId, token: string): ExecutorRequest =
       ExecutorRequest(header: Header(protocol: 1), body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.finish,

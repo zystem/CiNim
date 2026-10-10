@@ -12,8 +12,8 @@ const port = 29846
 proc addStep(c: var RqClient; runId, profileId: string; ordinal: int) =
   let jobId = newId()
   discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, ?, 'RUNNING', ?)", jobId, runId, "j" & $ordinal, profileId]])
-  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) " &
-    "VALUES (?, ?, ?, ?, 'sh', 'PENDING', ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, ordinal, profileId, $ordinal]])
+  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, queued_at) " &
+    "VALUES (?, ?, ?, ?, ?, 'sh', 'PENDING', ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, ordinal, ordinal, profileId, $ordinal]])
 
 proc report(session, ns: string; slots: int; ack = 0'u64; id = 1'u64): StreamFrame =
   frame(session, "controller.report", encodeReport(PollRequest(header: Header(protocol: 1), session_id: session, namespace: ns,

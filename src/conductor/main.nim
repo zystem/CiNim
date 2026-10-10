@@ -21,11 +21,8 @@ proc wireString(b: seq[byte]): string =
 proc toJournal(entries: seq[JournalEntry]): Journal =
   # the core keeps the hash chain (T-03) and sends each record with its hash: taken as they come, and replay checks the chain
   for e in entries:
-    if e.hash.len > 0:
-      result.entries.add Entry(seq: int(e.seq), kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
-                               hash: cast[string](e.hash))
-    else:
-      discard result.append(e.kind, cast[string](e.payload), cast[string](e.result))
+    result.entries.add Entry(seq: int(e.seq), kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
+                             hash: cast[string](e.hash))
 
 # ------------------------------------------------------------------ the run process
 
@@ -59,7 +56,7 @@ proc runMode() =
   let g = Protobuf.decode(cast[seq[byte]](first.get.payload), LeaseGranted)
   let runId = g.run_id
   let token = g.lease_token
-  let apiVersion = if g.api_version == 0: 1 else: int(g.api_version)
+  let apiVersion = int(g.api_version)
   var sb = newSandbox(apiVersion = apiVersion)
   var jj = toJournal(g.journal)
   var lostLease = ""

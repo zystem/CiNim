@@ -185,3 +185,8 @@ suite "PIP-003 the table as it is stored and the numbers of a run that goes on":
       if round == 1: numbers = got
       else: check got == numbers
     check numbers == @[0, 1, 2, 10]
+
+suite "PIP-018 the example of ids built in a loop":
+  test "deploy/examples/ids/ids.lua is a valid script: ten steps, none of the ids repeated":
+    let r = buildTable(readFile("deploy/examples/ids/ids.lua"))
+    check r.ok and not r.partial and r.steps == 10

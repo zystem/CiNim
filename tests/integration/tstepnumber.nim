@@ -51,13 +51,12 @@ suite "PIP-003 the number of a step and its place in the journal":
       let rows = c.readRows(r)
       check rows.len == 2 and rows[0].seq == 0 and rows[1].seq == 1          # positions, not numbers
       check c.verifyJournal(r).check.verdict == cvOk
-    test "a step from an executor that sends no number is numbered by its place, as before":
+    test "a step without a number is refused: an executor from before the tables is too old, and nothing is made":
       let (r, tok) = newRunWithLease()
-      discard handleCall(c, co, jobSh(r, tok, 4, false), "master")
-      let row = stepRow(r, 4)
-      check row.len == 1 and row[0][0].getInt == 4
-      finish(r, 4)
-      check c.readRows(r)[0].seq == 4
+      let resp = handleCall(c, co, jobSh(r, tok, 4, false), "master")
+      check resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "executor_too_old"
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
+      check c.query(%*[["SELECT COUNT(*) FROM jobs WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
     test "the same numbered call twice is one step":
       let (r, tok) = newRunWithLease()
       discard handleCall(c, co, jobSh(r, tok, 0, true, stepNo = 7), "master")

@@ -10,8 +10,8 @@ proc addStep(c: var RqClient; runId, profileId: string; ordinal: int; queuedAt: 
   ## what a host call of the executor leaves behind: a step of the run, in the given state
   let jobId = newId()
   discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, ?, 'RUNNING', ?)", jobId, runId, "j" & $ordinal, profileId]])
-  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) " &
-    "VALUES (?, ?, ?, ?, 'sh', ?, ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, ordinal, state, profileId, $queuedAt]])
+  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, queued_at) " &
+    "VALUES (?, ?, ?, ?, ?, 'sh', ?, ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, ordinal, ordinal, state, profileId, $queuedAt]])
 
 proc handedOut(resp: PollResponse): seq[string] =
   for cmd in resp.commands:

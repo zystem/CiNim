@@ -326,3 +326,22 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let r = reconcilePass(broken, mk, curve, @[org("gone", "disabled", 1)], hooksFor(rec), 1000, 10)
     check r.purged.len == 0 and rec.forgotten.len == 0
     check r.orgs.len >= 1 and "forbidden" in r.orgs[0].error
+
+suite "SHD-008 a core that has just started deletes no organisation for good":
+  test "the retention is over, but the core has not been up for the grace: the organisation stays, and goes once the grace has passed":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "late", active = false)
+    let rec = Rec()
+    # the retention ended long ago (500 s from 100), the core started at 990 and the grace is 3600 s
+    let early = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
+    check early.purged.len == 0 and ns("late") in f.objects
+    let later = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 4600, 500, coreStarted = 990, purgeGrace = 3600)
+    check later.purged == @["late"] and ns("late") notin f.objects
+  test "an organisation that is kept for the grace is still reconciled like any other":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "late", active = false)
+    let rec = Rec()
+    let r = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
+    check r.orgs.len == 1 and r.orgs[0].slug == "late"

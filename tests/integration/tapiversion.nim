@@ -39,14 +39,10 @@ suite "PIP-001 the version of the host API of a run":
       let g = lease(r, @[3'u32, 4, 5])
       check g.granted and g.body.lease.api_version == 5
       release(r)
-    test "an executor that says nothing is one from before the versions: it is given version 1 runs only":
+    test "an executor that names no versions is refused as too old, and is given no run":
       let r1 = co.createRun("p", "return 1")
-      discard c.execute(%*[["UPDATE runs SET api_version = 1 WHERE id = ?", r1]])
-      let r2 = co.createRun("p", "return 1")
-      discard c.execute(%*[["UPDATE runs SET api_version = 2 WHERE id = ?", r2]])
-      check lease(r1, @[]).granted
-      check not lease(r2, @[]).granted
-      release(r1)
+      let resp = lease(r1, @[])
+      check not resp.granted and resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "executor_too_old"
     test "the lease says which version to replay with":
       let r = co.createRun("p", "return 1")
       let g = lease(r, @[uint32(currentApiVersion)])

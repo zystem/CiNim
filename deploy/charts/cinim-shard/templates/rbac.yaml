@@ -80,6 +80,10 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [update]
+  # the controller reads the storage quota of its namespace and reports how full it is, so that the core keeps the volumes of failed runs shorter when it is nearly full (STO-006)
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    verbs: [get]
   - apiGroups: [""]
     resources: [persistentvolumeclaims, services]
     verbs: [create, get, list, delete]

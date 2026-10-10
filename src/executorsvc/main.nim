@@ -29,13 +29,10 @@ proc rpc(s: ZConnection; req: ExecutorRequest): ExecutorResponse =
 
 proc toJournal(entries: seq[JournalEntry]): Journal =
   # The core keeps the hash chain (T-03) and sends each record with its hash: they are taken as they come, and replay checks the chain
-  # (`journal_corrupt` if a record was changed on the way or at rest). A record without a hash (a core from before the chain) is chained here.
+  # (`journal_corrupt` if a record was changed on the way or at rest, or has no hash).
   for e in entries:
-    if e.hash.len > 0:
-      result.entries.add Entry(seq: int(e.seq), kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
-                               hash: cast[string](e.hash))
-    else:
-      discard result.append(e.kind, cast[string](e.payload), cast[string](e.result))
+    result.entries.add Entry(seq: int(e.seq), kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
+                             hash: cast[string](e.hash))
 
 type Leased = tuple[runId, token, script: string, journal: Journal, params: seq[(string, string)], apiVersion: int, stepTable: string]
 
@@ -46,7 +43,7 @@ proc leaseAny(s: ZConnection): Option[Leased] =
   if resp.body.kind != ExecutorResponseBodyKind.lease: return none(Leased)
   let g = resp.body.lease
   some (g.run_id, g.lease_token, g.script, toJournal(g.journal), g.params.mapIt((it.key, it.value)),
-        (if g.api_version == 0: 1 else: int(g.api_version)),     # a core from before the versions: version 1
+        int(g.api_version),
         g.step_table)
 
 proc runOnce(s: ZConnection; runId, token, script: string; j: Journal; params: seq[(string, string)]; apiVersion: int; stepTable: string) =

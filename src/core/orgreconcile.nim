@@ -119,9 +119,11 @@ proc namespaceAlerts(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; s
       result.alerts.add Alert(code: "orphan_namespace", namespace: name, organization: slug,
                               detail: "no organisation " & slug & " in this shard's database")
 
-proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[OrganizationFull]; hooks: Hooks; now, retention: int64): PassResult =
+proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[OrganizationFull]; hooks: Hooks; now, retention: int64;
+                    coreStarted = 0'i64; purgeGrace = 0'i64): PassResult =
   ## One pass: first the retention (a switched-off organisation whose time is up is deleted for good; `retention` 0 is at once, below 0
-  ## never), then the objects of every organisation that is left, then the alerts.
+  ## never), then the objects of every organisation that is left, then the alerts. A core that has just started deletes nothing for good: the retention of an organisation
+  ## may have run out while the core was stopped, and its owner has had no chance to switch it on again; nothing is deleted before the core has been up for `purgeGrace`.
   result.at = now
   if not k.available:
     result.error = "the core does not run in a cluster, or CINIM_PROVISION is off"
@@ -133,7 +135,7 @@ proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[Org
       if o.disabledAt == 0:
         hooks.startRetention(o.slug, now)       # switched off before the time was recorded: the retention runs from now
         o.disabledAt = now
-      if retention >= 0 and now - o.disabledAt >= retention:
+      if retention >= 0 and now - o.disabledAt >= retention and now - coreStarted >= purgeGrace:
         let cfg = mk(o.egress, o.ingress)
         let p = purge(k, cfg, o.slug)
         if p.ok:
@@ -165,6 +167,7 @@ type
     rqliteUrl*, certs*: string
     mk*: ConfigMaker
     interval*, retention*: int64      ## seconds between two passes; seconds a switched-off organisation is kept (0: deleted at once, below 0: never deleted)
+    coreStarted*, purgeGrace*: int64  ## when this core started, and how long it must have been up before it deletes an organisation for good (CINIM_ORG_PURGE_GRACE, a day)
     bootstrapTtl*: int64
 
 var
@@ -205,7 +208,7 @@ proc runPass*(e: PassEnv; kube: KubeApi): PassResult =
           db.deleteCredentialRow(namespace)
           forgetKept(namespace)
           db.deleteOrganization(slug))
-      result = reconcilePass(kube, e.mk, loadCurve(e.certs), c.listOrganizationsFull(), hooks, getTime().toUnix(), e.retention)
+      result = reconcilePass(kube, e.mk, loadCurve(e.certs), c.listOrganizationsFull(), hooks, getTime().toUnix(), e.retention, e.coreStarted, e.purgeGrace)
       withLock lock: lastJson = $result.toJson
 
 proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.} =

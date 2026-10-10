@@ -55,15 +55,10 @@ suite "T-03 what the check finds":
   test "a tip that is missing from a hashed journal is broken, not a pass":
     let rs = rows(3)
     check checkChain(rs, "").verdict == cvBroken
-  test "rows from before the chain was kept are legacy: all without hashes and without a tip":
+  test "rows without hashes are broken, not passed: there is no journal from before the chain any more":
     var rs = rows(3)
     for r in rs.mitems: r.hash = ""
-    check checkChain(rs, "").verdict == cvLegacy
-    let adopted = legacyHashes(rs)
-    check adopted.len == 3
-    var again = rs
-    for i, r in again.mpairs: r.hash = adopted[i]
-    check checkChain(again, adopted[^1]).verdict == cvOk
+    check checkChain(rs, "").verdict == cvBroken
   test "some rows hashed and some not is broken":
     var rs = rows(4)
     rs[3].hash = ""

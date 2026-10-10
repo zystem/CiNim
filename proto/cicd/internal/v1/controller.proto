@@ -82,6 +82,8 @@ message PollRequest {
   repeated KeptPod kept = 12;        // the Pods kept because they were not fully read, newest first, at most 100 (the whole list is `kept_total`)
   uint32 kept_total = 13;
   bool kept_complete = 14;           // true: `kept` and `kept_total` are the whole picture (an empty list then means "none"); core replaces what it had
+  uint64 storage_hard_bytes = 16;    // STO-006: `requests.storage` of the namespace's ResourceQuota (0: none, or it could not be read) and how much of it is used, so that the core knows when
+  uint64 storage_used_bytes = 17;    // the organisation's storage is short of space (less than 15 % free) and keeps the volumes of failed runs for a minute only
   repeated string storage_released = 15;  // STO-006: the runs whose volume this controller deleted after core asked (`PollResponse.release_storage`); a run that had none counts too
 }
 

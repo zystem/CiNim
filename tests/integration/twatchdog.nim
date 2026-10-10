@@ -21,8 +21,8 @@ suite "RUN-017 the watchdog counts heartbeats":
       let long = getTime().toUnix() - 1200
       let jobId = newId()
       discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j', 'RUNNING', ?)", jobId, r, defaultProfile]])
-      discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at, claimed_at, shim_n, shim_phase, shim_seen_at) " &
-        "VALUES (?, ?, ?, 7, 'sh', 'RUNNING', ?, 'alpine', 'true', '', '1', ?, 3, 'running', ?)", newId(), r, jobId, defaultProfile, long, long]])
+      discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, queued_at, claimed_at, shim_n, shim_phase, shim_seen_at) " &
+        "VALUES (?, ?, ?, 7, 7, 'sh', 'RUNNING', ?, 'alpine', 'true', '', '1', ?, 3, 'running', ?)", newId(), r, jobId, defaultProfile, long, long]])
       (r, 7)
     proc stateOf(r: string): string =
       c.query(%*[["SELECT state FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getStr

@@ -1,13 +1,13 @@
 ## The real Backend: the official Kubernetes C client (A.6, D-26). The only module of the controller that knows
 ## Kubernetes; it turns the platform's PodRequest into a Pod spec and answers the questions logic.nim asks of the cluster.
 ## SEC-010 per-job projected tokens are deferred: the shim gets the shared CURVE "client" identity through a Secret.
-import std/[os, json, strutils, times, base64, atomics, sequtils]
-import ../common/[k8sbind, envname]
+import std/[os, json, strutils, times, base64, atomics, sequtils, options]
+import ../common/[k8sbind, envname, quantity]
 import backend, podsec, runvolume, shardsettings
 
 type K8s* = object
   api: ptr apiClient_t
-  pods, configmaps, secrets, claims: ptr genericClient_t
+  pods, configmaps, secrets, claims, quotas: ptr genericClient_t
   tailQuery: ptr list_t       ## ?tailLines=40, built once and reused: the client does not consume it
   ns: string
 
@@ -45,6 +45,7 @@ proc connectK8s*(ns, kubeconfig: string): K8s =
   result.configmaps = genericClient_create(result.api, "".cstring, "v1".cstring, "configmaps".cstring)
   result.secrets = genericClient_create(result.api, "".cstring, "v1".cstring, "secrets".cstring)
   result.claims = genericClient_create(result.api, "".cstring, "v1".cstring, "persistentvolumeclaims".cstring)
+  result.quotas = genericClient_create(result.api, "".cstring, "v1".cstring, "resourcequotas".cstring)
   result.tailQuery = list_createList()
   list_addElement(result.tailQuery, keyValuePair_create("tailLines".cstring, cast[pointer]("40".cstring)))
 
@@ -275,6 +276,14 @@ proc backendOf*(k: K8s): Backend =
         return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
       echo "jobcontroller: created conductor ", name
       CreateOutcome(kind: ckOk),
+    readStorageQuota: proc (): tuple[used, hard: uint64] =
+      ## the namespace's ResourceQuota `cinim-default` (core/orgprovision.nim): requests.storage, used and hard
+      let j = jstr(Generic_readNamespacedResource(kk.quotas, kk.ns.cstring, "cinim-default".cstring))
+      if j.kind != JObject or j{"status"}.isNil: return
+      let hard = parseQuantity(j{"status", "hard", "requests.storage"}.getStr)
+      let used = parseQuantity(j{"status", "used", "requests.storage"}.getStr)
+      if hard.isSome and used.isSome:
+        result = (used.get, hard.get),
     listConductors: proc (): tuple[ok: bool, pods: seq[ConductorPod]] =
       let q = list_createList()
       let selector = "app.kubernetes.io/name=cinim-conductor"       # the client keeps the pointer: it must outlive the call

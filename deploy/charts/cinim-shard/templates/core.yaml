@@ -66,6 +66,7 @@ spec:
             - {name: CINIM_RUN_STORAGE_ACCESS, value: {{ .Values.runStorage.accessMode | quote }}}
             - {name: CINIM_STORAGE_RETENTION_SUCCEEDED, value: {{ .Values.runStorage.retention.succeeded | quote }}}
             - {name: CINIM_STORAGE_RETENTION_FAILED, value: {{ .Values.runStorage.retention.failed | quote }}}
+            - {name: CINIM_STORAGE_RETENTION_PRESSURE, value: {{ .Values.runStorage.retention.pressure | quote }}}
             {{- end }}
             - {name: CINIM_INGRESS_CLASS, value: {{ .Values.ingress.className | quote }}}
             - {name: CINIM_INGRESS_TLS_SECRET, value: {{ .Values.ingress.tls.secretName | quote }}}
@@ -109,6 +110,7 @@ spec:
             - {name: CINIM_ORG_RECONCILE_INTERVAL, value: {{ int64 .Values.organizations.reconcileInterval | quote }}}
             # int64: Helm reads a YAML integer as a float, and 1209600 would be printed as 1.2096e+06
             - {name: CINIM_ORG_RETENTION, value: {{ int64 .Values.organizations.retention | quote }}}
+            - {name: CINIM_ORG_PURGE_GRACE, value: {{ int64 .Values.organizations.purgeGrace | quote }}}
             # the simple mode of a small organisation (SHD-009): every step Pod may reach any address / be reached from any
             - {name: CINIM_NETWORK_EGRESS, value: {{ .Values.network.egress | quote }}}
             - {name: CINIM_NETWORK_INGRESS, value: {{ .Values.network.ingress | quote }}}

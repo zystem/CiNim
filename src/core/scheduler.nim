@@ -292,7 +292,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
     # as a different call than the one in the journal and fails script_nondeterminism - steps.command
     # alone is missing the job key and image, so join jobs for the key.
-    let pl = c.query(%*[["SELECT j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command, COALESCE(s.journal_seq, s.ordinal) " &
+    let pl = c.query(%*[["SELECT j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command, s.journal_seq " &
       "FROM steps s JOIN jobs j ON j.id = s.job_id WHERE s.run_id = ? AND s.ordinal = ?", t.step.run_id, int(t.step.seq)]])
     let plv = pl["results"][0]{"values"}
     if plv != nil and plv.len > 0:
@@ -553,6 +553,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     inc seq
   # STO-006: the controller deleted these volumes; and the runs whose volume may go now (it is told again until it says it is done)
   markReleased(c, req.storage_released)
+  notePressure(profileId, req.storage_used_bytes, req.storage_hard_bytes)      # a report without a quota says nothing
   var release: seq[string]
   if epochTime() - releaseAskedAt.getOrDefault(profileId, 0.0) >= 10.0 or req.storage_released.len > 0:   # a few seconds' delay in deleting a volume costs nothing
     releaseAskedAt[profileId] = epochTime()
@@ -682,8 +683,11 @@ proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versi
 proc handleLease*(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
   discard registryTouch("executor", "executor-service", epochTime())
   let owner = if req.executor_id.len > 0: req.executor_id else: "executor"
-  # the versions of the host API this executor can run (PIP-001); one from before them knows version 1 only
-  let versions = if req.api_versions.len > 0: req.api_versions.mapIt(int(it)) else: @[1]
+  # the versions of the host API this executor can run (PIP-001); an executor that names none is too old to be served
+  if req.api_versions.len == 0:
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure,
+      failure: Failure(code: "executor_too_old", detail: "the lease request names no versions of the Lua API (api_versions); rebuild the executor")))
+  let versions = req.api_versions.mapIt(int(it))
   for candidate in (if req.run_id.len > 0: @[req.run_id] else: leaseCandidates(c, versions = versions)):
     let g = grantLease(c, master, candidate, owner, versions)
     if g.isSome:
@@ -742,6 +746,9 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
   if req.kind != "job_sh":
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "unknown host call " & req.kind)))
+  if not req.numbered:
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure,
+      failure: Failure(code: "executor_too_old", detail: "the step has no number from a table of step numbers; rebuild the executor")))
   let parts = cast[string](req.payload).split('\t', 4)   # key, image, profile ("" = ordinary), options JSON ("" = none), command (bootstrap.lua)
   let jobKey = parts[0]
   let image = if parts.len > 1: parts[1] else: ""
@@ -785,9 +792,8 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
   let jr = c.query(%*[["SELECT id FROM jobs WHERE run_id = ? AND key = ?", req.run_id, jobKey]])
   let jobId = jr["results"][0]{"values"}[0][0].getStr
   # OR IGNORE: the same call twice (two executors met the same run during a rollout, or one asked again after a lost answer) is one step, not a crash of the core
-  # the number of the step is the one the executor gave it from its table (an executor from before the tables sends none: the number is then the place); the place in the
-  # journal, where the step's result is written, is `seq`
-  let number = if req.numbered: int(req.step_no) else: int(req.seq)
+  # the number of the step is the one the executor gave it from its table; the place in the journal, where the step's result is written, is `seq`
+  let number = int(req.step_no)
   discard c.execute(%*[["INSERT OR IGNORE INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, profile, queued_at) " &
     "VALUES (?, ?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
     schema.newId(), req.run_id, jobId, number, int(req.seq), protoName(ssPending), profileId, image, cmd, opts, profile, now]])
@@ -827,7 +833,7 @@ proc serveExecutorChannel*(co: Core; port: int) {.thread.} =
         of ExecutorRequestBodyKind.lease: handleLease(c, co.profileId, secretKey, req.body.lease)
         of ExecutorRequestBodyKind.call: handleCall(c, co, req.body.call, secretKey)
         of ExecutorRequestBodyKind.finish: handleFinish(c, req.body.finish, secretKey)
-        of ExecutorRequestBodyKind.finish_run_id, ExecutorRequestBodyKind.notSet:
+        of ExecutorRequestBodyKind.notSet:
           ExecutorResponse(header: Header(protocol: 1),
             body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error")))
       except CatchableError as e:

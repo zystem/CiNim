@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
 import guildenstern/[dispatcher, httpserver]
-import scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
+import runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -99,7 +99,8 @@ proc reconcileEnv(co: Core): PassEnv =
           mk: proc (egress, ingress: string): ProvisionConfig {.gcsafe.} =
             {.cast(gcsafe).}: provisionConfig(currentConfig(), egress, ingress),
           interval: max(10, parseInt(getEnv("CINIM_ORG_RECONCILE_INTERVAL", "300"))),
-          retention: parseBiggestInt(getEnv("CINIM_ORG_RETENTION", $(14 * 86400))))
+          retention: parseBiggestInt(getEnv("CINIM_ORG_RETENTION", $(14 * 86400))),
+          coreStarted: runstorage.coreStartedAt, purgeGrace: parseBiggestInt(getEnv("CINIM_ORG_PURGE_GRACE", $(86400))))
 
 var reconcilerThread: Thread[tuple[env: PassEnv, stop: ptr Atomic[bool]]]
 var reconcilerRunning = false

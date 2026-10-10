@@ -78,8 +78,8 @@ suite "RUN-004 leases to a conductor":
       let r = co.createRun("p", "return 1", "t1", a)
       let jobId = newId()
       discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j', 'RUNNING', ?)", jobId, r, a]])
-      discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) " &
-        "VALUES (?, ?, ?, 1, 'sh', 'PENDING', ?, 'alpine', 'true', '', '1')", newId(), r, jobId, a]])
+      discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, queued_at) " &
+        "VALUES (?, ?, ?, 1, 1, 'sh', 'PENDING', ?, 'alpine', 'true', '', '1')", newId(), r, jobId, a]])
       check lease(a, "c-a", 5).len == 0
     test "the executor service still leases any run, as before":
       let a = newOrg()

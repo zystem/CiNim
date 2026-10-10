@@ -16,7 +16,6 @@ suite "PIP-001 versions of the Lua host API":
     check currentApiVersion in supportedApiVersions()
   test "a list of versions for a query is made of numbers only":
     check sqlVersionList(@[1, 2, 3]) == "1,2,3"
-    check sqlVersionList(@[]) == "1"                 # an executor that says nothing is an old one: it knows version 1 only
     check sqlVersionList(@[3]) == "3"
 
 suite "PIP-001 the prelude of a version":

@@ -149,7 +149,9 @@ steps:
 # The volume the steps of a run share (STO-001, STO-002): the controller of an organisation makes one claim per run and mounts it in the Pod of every step
 # (`/cicd/workspace`, and `/cicd/state` for the env file), so that a later step finds what an earlier one wrote. `accessMode` ReadWriteMany lets the Pods
 # of a run run on different nodes; with ReadWriteOnce (the usual class) they are kept on one node. The claim is deleted when the run is over and
-# `retention` seconds have passed (STO-006): 0 at once for a run that succeeded, a day for one that did not, to look at what it left; a negative value never.
+# `retention` seconds have passed (STO-006): 0 at once for a run that succeeded, 10 minutes for one that did not, so that it can be continued with only the failed steps
+# (docs/parallel.md section 11); a negative value never. The core releases nothing of a failed run before it has itself been up that long. When less than 15 % of the
+# organisation's storage quota is free (until more than 20 % is) a failed run keeps its volume `pressure` seconds only.
 # Counts against the organisation's quota of claims and storage. `enabled: false` gives every step an emptyDir of its own (artifacts are then the way between steps).
 runStorage:
   enabled: true
@@ -158,7 +160,8 @@ runStorage:
   accessMode: ReadWriteOnce
   retention:
     succeeded: 0
-    failed: 86400
+    failed: 600
+    pressure: 60
 
 # The organisations (SHD-007, SHD-008). The core compares them with their Kubernetes objects at start and every `reconcileInterval` seconds and
 # makes again what is missing (it deletes nothing; what differs, or belongs to no organisation, is an alert in `GET /api/v1/organizations:reconcile`).
@@ -167,6 +170,7 @@ runStorage:
 organizations:
   reconcileInterval: 300
   retention: 1209600
+  purgeGrace: 86400                   # the core deletes no organisation for good before it has been up this long: the retention may have run out while it was stopped
 
 # The network of the step Pods of an organisation (SHD-009). By default they are closed both ways (default-deny, with DNS and the log collector,
 # and the openings of the build profile above). For a simple case or a small organisation: `egress: open` lets every step Pod reach any address
