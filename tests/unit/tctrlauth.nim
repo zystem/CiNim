@@ -45,3 +45,13 @@ suite "IAM-003 controller identity":
     check decide(row(gen = 2), master, "ns", controllerCredential(master, "ns", 2), "", t0).verdict == vOk
   test "the comparison looks at every byte":
     check constantTimeEqual("abc", "abc") and not constantTimeEqual("abc", "abd") and not constantTimeEqual("abc", "ab")
+
+suite "IAM-003 the credential of a conductor":
+  test "a conductor credential is of one namespace and one conductor, and is not a controller's":
+    check conductorCredential(master, "ns", "c-1") == conductorCredential(master, "ns", "c-1")
+    check conductorCredential(master, "ns", "c-1") != conductorCredential(master, "ns", "c-2")
+    check conductorCredential(master, "ns", "c-1") != conductorCredential(master, "other", "c-1")
+    check conductorCredential(master, "ns", "c-1") != controllerCredential(master, "ns", 1)
+    check conductorCredential("another master", "ns", "c-1") != conductorCredential(master, "ns", "c-1")
+  test "the boundary between the namespace and the id cannot be shifted":
+    check conductorCredential(master, "a", "b|c") != conductorCredential(master, "a|b", "c")

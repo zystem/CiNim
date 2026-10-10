@@ -154,6 +154,7 @@ suite "RUN-016 the push channel":
           break
       check answered
       let r = co.createRun("p", "return 1", "t1", o.profile)
+      sleep 800                                                   # creating the run kicks the organisation (a conductor may be waiting for it): let that pass
       c.addStep(r, o.profile, 1)                                  # no kick: made behind the core's back
       check cl.sendFrame(report(ses, o.ns, 10, ack = 1, id = 3))   # nothing changed for the controller
       check cl.nextStarts(1200).isNone                            # a quiet report does not look at the queue

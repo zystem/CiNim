@@ -4,7 +4,7 @@
 ## runs as another thread, and a watchdog thread enforces liveness_timeout and probes rqlite and the log circuit (D-29).
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
-import common/rqlite
+import common/[rqlite, ctrlauth]
 import apiauth, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
 if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
@@ -12,6 +12,12 @@ if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
   # one has to be changed at first use, the other tokens stay
   var rc = newRq(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
   echo bootstrapAdminToken(rc, getTime().toUnix(), force = true)
+  quit 0
+
+if paramCount() >= 3 and paramStr(1) == "conductor-credential":
+  # `/core conductor-credential <namespace> <conductor id>`: what a conductor of that organisation proves itself with (IAM-003). The controller will
+  # hand it to the conductors it makes (docs/conductors.md phase 3); a conductor started by hand is given it this way.
+  echo conductorCredential(coreSecretKey(getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")), paramStr(2), paramStr(3))
   quit 0
 
 let

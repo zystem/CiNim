@@ -15,8 +15,9 @@
 ## session, the credit, the pushes - is done by one worker, in order, and the workers share nothing but the database. Every worker has its own
 ## database client and its own table of controllers. Messages cross threads in shared memory (common/shmq.nim), never as Nim strings.
 import std/[tables, options, times, os, atomics, sequtils, json, hashes]
-import common/[stream, streamstate, rqlite, zmqcurve, states, shmq, podcpu]
-import scheduler, schema, workkick, hubmetrics
+import std/strutils
+import common/[stream, streamstate, rqlite, zmqcurve, states, shmq, podcpu, ctrlauth]
+import scheduler, schema, workkick, hubmetrics, components
 
 const
   resendAfterSeconds = 5.0
@@ -33,7 +34,17 @@ type
     lastSeen, lastPush: float
     lastConfig, lastGate: string      ## what the controller was last told, so that an unchanged answer is not sent again
 
+  Cond = object
+    ## a conductor (docs/conductors.md): it takes runs, not steps; its credit is its free places
+    session, routingId, id, namespace, profileId: string
+    versions: seq[int]
+    outbox: Outbox
+    credit: Credit
+    lastSeen, lastPush: float
+
   Hub = object
+    co: Core
+    conds: Table[string, Cond]
     outq: ptr ShmQueue                ## what the worker wants sent: the I/O thread owns the socket
     idx: int
     peers: Table[string, Peer]
@@ -53,6 +64,10 @@ func metricKind(kind: string): string =
   case kind
   of "controller.report": "report"
   of "controller.work": "work"
+  of "conductor.hello": "hello"
+  of "conductor.call": "call"
+  of "conductor.lease": "lease"
+  of "conductor.reply": "reply"
   of "ping", "resync": kind
   else: "other"
 
@@ -155,6 +170,133 @@ proc pushTo(h: var Hub; p: var Peer) =
     h.deliver(p, resp)
   observe(hPush, epochTime() - t0)
 
+
+# ------------------------------------------------------------------ conductors
+
+proc condEmit(h: var Hub; c: var Cond; kind, payload: string; re = 0'u64; numbered = false) =
+  if numbered:
+    let sent = c.outbox.push(kind, payload, epochTime())
+    h.emit(c.routingId, frame("core", kind, payload, id = sent.id, re = re))
+  else:
+    h.emit(c.routingId, frame("core", kind, payload, re = re))
+
+proc attemptOfToken(token: string): int =
+  ## the attempt a lease token is for (`<attempt>.<mac>`, core/runlease.nim)
+  try: parseInt(token.split('.')[0]) except ValueError: 0
+
+proc giveBackLeases(h: var Hub; c: Cond; unackedOnly: bool) =
+  ## A conductor that is gone (replaced, silent) leaves runs that were leased to it. Those whose lease frame it never acknowledged were never started
+  ## by anybody and go back at once; the others are given back too once the conductor itself is dropped, instead of waiting for the lease to run out.
+  if unackedOnly:
+    for s in c.outbox.unacked:
+      if s.kind != "conductor.lease": continue
+      let g = try: decodeLeaseGranted(s.payload) except CatchableError: continue
+      discard h.c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ? AND lease_attempt = ? AND lease_owner = ?", g.run_id, attemptOfToken(g.lease_token), c.id]])
+  else:
+    discard h.c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE lease_owner = ? AND state = ? AND lease_until != 0", c.id, protoName(rsRunning)]])
+
+proc dropCond(h: var Hub; session, reason: string) =
+  if session in h.conds:
+    # a replaced conductor is alive somewhere else and says what it still holds in its hello; a silent one is gone, and all it held is given back
+    h.giveBackLeases(h.conds[session], unackedOnly = reason == "replaced")
+    h.conds.del session
+    count(mDroppedPeers, reason)
+
+proc pushLeases(h: var Hub; c: var Cond) =
+  ## give the conductor runs of its organisation within its free places (RUN-004): the core's push, the conductor never asks
+  if c.credit.available <= 0: return
+  let t0 = epochTime()
+  c.lastPush = t0
+  for g in h.c.leaseForConductor(c.profileId, h.master, c.id, c.versions, c.credit.available):
+    discard c.credit.take(1)
+    h.condEmit(c, "conductor.lease", encodeLeaseGranted(g), numbered = true)
+    count(mPushedRuns)
+  observe(hPush, epochTime() - t0)
+
+proc onHello(h: var Hub; routingId: string; f: StreamFrame) =
+  var hello: ConductorHello
+  try: hello = decodeHello(f.payload)
+  except CatchableError: return
+  let wrong = hello.conductor_id.len == 0 or hello.namespace.len == 0 or
+              not constantTimeEqual(hello.credential, conductorCredential(h.master, hello.namespace, hello.conductor_id))
+  if wrong:
+    h.emit(routingId, frame("core", "conductor.welcome", "unauthorized", re = f.id))
+    h.conds.del f.session
+    return
+  let known = f.session in h.conds
+  var c = if known: h.conds[f.session] else: Cond(session: f.session, outbox: initOutbox())
+  let moved = known and c.routingId != routingId
+  c.routingId = routingId
+  c.lastSeen = epochTime()
+  c.id = hello.conductor_id
+  c.namespace = hello.namespace
+  c.versions = hello.api_versions.mapIt(int(it))
+  c.outbox.ack(f.ack)
+  if not known:
+    # the same conductor on a newer connection replaces the older one: what it held is given back, the new one reports what it still has
+    var older: seq[string]
+    for session, other in h.conds:
+      if session != f.session and other.id == c.id: older.add session
+    for session in older: h.dropCond(session, "replaced")
+    # runs the core thinks this conductor holds and that it does not hold any more (it restarted) are given back at once
+    var held = ""
+    for r in hello.held_runs: held.add "'" & r.replace("'", "") & "',"
+    discard h.c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE lease_owner = ? AND state = ? AND lease_until != 0 AND id NOT IN (" &
+      held & "'')", c.id, protoName(rsRunning)]])
+  if moved: 
+    for s in c.outbox.unacked:
+      h.emit(c.routingId, frame("core", s.kind, s.payload, id = s.id))
+      count(mResent)
+  c.profileId = h.profileOfNs(c.namespace)
+  c.credit.set(int(hello.free_places))
+  discard registryTouch("conductor", c.id, epochTime(), @[("runs", $hello.held_runs.len)])
+  h.emit(routingId, frame("core", "conductor.welcome", "", re = f.id))
+  h.pushLeases(c)
+  h.conds[f.session] = c
+
+proc failureReply(code, detail: string): ExecutorResponse =
+  ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure,
+                                                                            failure: Failure(code: code, detail: detail)))
+
+proc runOwnedBy(h: var Hub; c: Cond; runId: string): string =
+  ## "" if the run is of the conductor's organisation and leased to this conductor; else the failure code to answer with. A conductor cannot name
+  ## the run of another organisation (SEC-007, docs/conductors.md section 7).
+  let r = h.c.query(%*[["SELECT profile_id, lease_owner FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
+  if r == nil or r.len == 0 or r[0][0].getStr != c.profileId: return "forbidden"
+  if r[0][1].getStr != c.id: return "lease_lost"
+  ""
+
+proc onCall(h: var Hub; routingId: string; f: StreamFrame) =
+  if f.session notin h.conds:
+    h.emit(routingId, frame("core", "resync"))
+    return
+  var c = h.conds[f.session]
+  c.routingId = routingId
+  c.lastSeen = epochTime()
+  c.outbox.ack(f.ack)
+  let t0 = epochTime()
+  var req: ExecutorRequest
+  try: req = decodeExecRequest(f.payload)
+  except CatchableError: return
+  let runId = case req.body.kind
+    of ExecutorRequestBodyKind.call: req.body.call.run_id
+    of ExecutorRequestBodyKind.finish: req.body.finish.run_id
+    else: ""
+  var resp: ExecutorResponse
+  let refused = if runId.len == 0: "script_error" else: h.runOwnedBy(c, runId)
+  if refused.len > 0: resp = failureReply(refused, "this conductor does not hold the run")
+  else:
+    resp = try:
+      case req.body.kind
+      of ExecutorRequestBodyKind.call: handleCall(h.c, h.co, req.body.call, h.master)
+      else: handleFinish(h.c, req.body.finish, h.master)
+    except CatchableError as e:
+      stderr.writeLine "core: conductor call: " & e.msg
+      failureReply("internal", e.msg)
+  h.condEmit(c, "conductor.reply", encodeExecResponse(resp), re = f.id)
+  h.conds[f.session] = c
+  observe(hReport, epochTime() - t0)
+
 proc handleFrame(h: var Hub; routingId: string; f: StreamFrame) =
   count(mFramesIn, metricKind(f.kind))
   case f.kind
@@ -162,11 +304,17 @@ proc handleFrame(h: var Hub; routingId: string; f: StreamFrame) =
     let t0 = epochTime()
     h.onReport(routingId, f)
     observe(hReport, epochTime() - t0)
+  of "conductor.hello": h.onHello(routingId, f)
+  of "conductor.call": h.onCall(routingId, f)
   of "ping":
     if f.session in h.peers:
       h.peers[f.session].routingId = routingId
       h.peers[f.session].lastSeen = epochTime()
       h.peers[f.session].outbox.ack(f.ack)
+    elif f.session in h.conds:
+      h.conds[f.session].routingId = routingId
+      h.conds[f.session].lastSeen = epochTime()
+      h.conds[f.session].outbox.ack(f.ack)
     else:
       h.emit(routingId, frame("core", "resync"))
   else:
@@ -175,6 +323,13 @@ proc handleFrame(h: var Hub; routingId: string; f: StreamFrame) =
 proc pendingProfiles(h: var Hub): seq[string] =
   ## the profiles that have a step waiting to go: one query for all of them, so that an idle shard costs the database nothing per controller
   let r = h.c.query(%*[["SELECT DISTINCT profile_id FROM steps WHERE state = 'PENDING' AND not_before <= ?", getTime().toUnix()]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil:
+    for row in vals: result.add row[0].getStr
+
+proc leasableProfiles(h: var Hub): seq[string] =
+  ## the profiles with a run that nobody holds: one query for all conductors
+  let r = h.c.query(%*[["SELECT DISTINCT profile_id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?)", protoName(rsRunning), getTime().toUnix()]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for row in vals: result.add row[0].getStr
@@ -196,6 +351,20 @@ proc housekeeping(h: var Hub) =
     if p.profileId in waiting and now - p.lastPush >= safetyPassSeconds:
       h.pushTo(p)
   for session in gone: h.dropPeer(session, "silent")
+  # conductors: the same upkeep, and a look at the runs of the organisations that have one ready
+  let ready = if h.conds.len > 0: h.leasableProfiles() else: @[]
+  var goneConds: seq[string]
+  for session, c in h.conds.mpairs:
+    if now - c.lastSeen > silentAfterSeconds:
+      goneConds.add session
+      continue
+    for s in c.outbox.due(now, resendAfterSeconds):
+      h.emit(c.routingId, frame("core", s.kind, s.payload, id = s.id))
+      count(mResent)
+      c.outbox.sentAgain(@[s.id], now)
+    if c.profileId in ready and now - c.lastPush >= safetyPassSeconds:
+      h.pushLeases(c)
+  for session in goneConds: h.dropCond(session, "silent")
 
 proc onKick(h: var Hub; profileId: string; at: float; all: bool) =
   ## work was made for an organisation (or a limit changed for everyone): its controller, if this worker has it, is looked at now
@@ -207,6 +376,12 @@ proc onKick(h: var Hub; profileId: string; at: float; all: bool) =
         seen = true
         if at > 0: observe(hKickWait, t0 - at)
       h.pushTo(p)
+  for session, c in h.conds.mpairs:
+    if all or c.profileId == profileId:
+      if not seen and at > 0:
+        seen = true
+        observe(hKickWait, t0 - at)
+      h.pushLeases(c)
 
 const
   msgOut = 0       # to the I/O thread: a = routing id, b = the encoded frame
@@ -230,7 +405,8 @@ func unpackTime(s: string): float =
 
 proc runWorker(a: WorkerArgs) {.thread.} =
   {.cast(gcsafe).}:
-    var h = Hub(c: newRq(a.co.rqliteUrl), defaultProfile: a.co.profileId, peers: initTable[string, Peer](), outq: a.outq, idx: a.idx)
+    var h = Hub(co: a.co, c: newRq(a.co.rqliteUrl), defaultProfile: a.co.profileId, peers: initTable[string, Peer](), conds: initTable[string, Cond](),
+                outq: a.outq, idx: a.idx)
     let (_, secretKey) = loadKeypair(a.co.certs, "core")
     h.master = secretKey
     var lastTick = epochTime()
@@ -258,6 +434,8 @@ proc runWorker(a: WorkerArgs) {.thread.} =
         count(mBusyMicros, n = int((epochTime() - now) * 1e6))
         var unacked = 0
         for _, p in h.peers: unacked += p.outbox.unacked.len
+        for _, c in h.conds: unacked += c.outbox.unacked.len
+        setGauge(gConductors, h.conds.len.float, h.idx)
         setGauge(gPeers, h.peers.len.float, h.idx)
         setGauge(gUnacked, unacked.float, h.idx)
         setGauge(gQueued, a.inq[].len.float, h.idx)

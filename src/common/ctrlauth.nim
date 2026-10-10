@@ -36,6 +36,12 @@ proc derive(master, purpose, namespace: string; generation: int): string =
 proc bootstrapToken*(master, namespace: string; generation: int): string = derive(master, "bootstrap", namespace, generation)
 proc controllerCredential*(master, namespace: string; generation: int): string = derive(master, "credential", namespace, generation)
 
+proc conductorCredential*(master, namespace, conductorId: string): string =
+  ## What a conductor (docs/conductors.md) proves itself with: of one namespace and one conductor, under the core's key; nothing is stored. The core
+  ## makes it for the controller of the namespace, which hands it to the conductor's Pod in a Secret. The lengths are in the text, so that the
+  ## boundary between the namespace and the id cannot be moved.
+  toHex(hmacSha256(master, "cinim/conductor/v1|" & $namespace.len & "|" & namespace & "|" & conductorId))
+
 proc coreSecretKey*(certs: string): string =
   ## the core's own secret key (the CURVE `core` key): the master of the controller identities and the step credentials; it leaves the core nowhere
   readFile(certs & "/curve/core.key").strip

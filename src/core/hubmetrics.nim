@@ -13,11 +13,11 @@ type
     hFrameWait   ## from a frame being read from the socket to a worker starting on it (the queue of the pool)
   Metric* = enum
     mFramesIn, mFramesOut
-    mSendFailures, mResent, mRequeuedSteps, mPushedSteps
+    mSendFailures, mResent, mRequeuedSteps, mPushedSteps, mPushedRuns
     mDroppedPeers
     mBusyMicros  ## time the hub spent handling frames and kicks, in microseconds
   Gauge* = enum
-    gPeers, gUnacked, gQueued, gWorkers
+    gPeers, gUnacked, gQueued, gWorkers, gConductors
 
 const
   maxSlots = 64                                                 # the most workers; a gauge of the pool is the sum of the workers' own
@@ -25,10 +25,12 @@ const
                                     "cinim_stream_frame_wait_seconds"]
   histHelp: array[Hist, string] = ["time to take in a report and answer it", "time to look at one controller for work",
                                    "time from a kick to a worker looking at it", "time from a frame being read to a worker starting on it"]
-  gaugeNames: array[Gauge, string] = ["cinim_stream_peers", "cinim_stream_unacked_frames", "cinim_stream_queued_messages", "cinim_stream_workers"]
+  gaugeNames: array[Gauge, string] = ["cinim_stream_peers", "cinim_stream_unacked_frames", "cinim_stream_queued_messages", "cinim_stream_workers",
+                                     "cinim_stream_conductors"]
   gaugeHelp: array[Gauge, string] = ["controllers connected to the push channel", "numbered frames sent to controllers and not acknowledged yet",
-                                     "messages waiting in the queues of the workers", "workers of the push channel"]
-  kinds = ["report", "ping", "work", "resync", "other"]        # the label of the frame counters
+                                     "messages waiting in the queues of the workers", "workers of the push channel",
+                                     "conductors connected to the push channel"]
+  kinds = ["report", "ping", "work", "resync", "hello", "call", "lease", "reply", "other"]        # the label of the frame counters
   reasons = ["replaced", "silent"]                              # the label of the dropped peers
 
 var
@@ -105,8 +107,8 @@ proc renderHubMetrics*(): string =
       for i, k in kinds:
         result.add "cinim_stream_frames_total{direction=\"out\",kind=\"" & k & "\"} " & $framesOut[i] & "\n"
       const singleNames: array[Metric, string] = ["", "", "cinim_stream_send_failures_total", "cinim_stream_resent_frames_total",
-        "cinim_stream_requeued_steps_total", "cinim_stream_pushed_steps_total", "", "cinim_stream_busy_seconds_total"]
-      for m in [mSendFailures, mResent, mRequeuedSteps, mPushedSteps]:
+        "cinim_stream_requeued_steps_total", "cinim_stream_pushed_steps_total", "cinim_stream_pushed_runs_total", "", "cinim_stream_busy_seconds_total"]
+      for m in [mSendFailures, mResent, mRequeuedSteps, mPushedSteps, mPushedRuns]:
         result.add "# TYPE " & singleNames[m] & " counter\n" & singleNames[m] & " " & $singles[m] & "\n"
       result.add "# TYPE cinim_stream_dropped_peers_total counter\n"
       for i, r in reasons:

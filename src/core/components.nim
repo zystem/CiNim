@@ -65,7 +65,7 @@ proc remove*(r: var Registry; kind, id: string) = r.items.del(key(kind, id))
 proc silenceLimit(kind: string; lim: Limits): float =
   case kind
   of "job-controller": lim.controllerDown
-  of "executor": lim.executorDown
+  of "executor", "conductor": lim.executorDown
   of "shim": lim.shimDown
   else: 0.0                 # probed kinds are judged by their poller, not by silence
 

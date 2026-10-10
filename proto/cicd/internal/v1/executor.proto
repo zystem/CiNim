@@ -22,6 +22,17 @@ message LeaseRequest {
   repeated uint32 api_versions = 4;  // the versions of the Lua host API this executor can run (PIP-001); none: an executor from before them, version 1
 }
 
+// What a conductor (docs/conductors.md) says to the core on the push channel when it connects, when its free places change, and every few seconds.
+// The credential is the conductor's (IAM-003): the core makes it for the namespace's controller, which gives it to the conductor's Pod.
+message ConductorHello {
+  string conductor_id = 1;
+  string namespace = 2;               // the organisation's namespace; the conductor leads the runs of that organisation only
+  string credential = 3;
+  repeated uint32 api_versions = 4;   // the versions of the Lua host API it can run (PIP-001)
+  uint32 free_places = 5;             // how many more runs it can take (of runs_per_conductor): the credit of the core's leases
+  repeated string held_runs = 6;      // the runs it holds now, so that the core and the conductor agree after a reconnect
+}
+
 message HostCall {
   string run_id = 1;
   string lease_token = 2;

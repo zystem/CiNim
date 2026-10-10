@@ -58,6 +58,7 @@ proc absorb(p: var Push; f: StreamFrame): Option[PollResponse] =
   ## the work in a frame, if it is to be applied now: the next numbered frame, or one that is not numbered (an answer about identity)
   if f.kind == "resync":
     p.wake = true
+    p.inbox = initInbox()      # the core does not know the session (a restarted core): what it sends next is numbered from 1 again
     return none(PollResponse)
   if f.kind != "controller.work": return none(PollResponse)
   if f.id != 0 and p.inbox.accept(f.id) != acApply: return none(PollResponse)

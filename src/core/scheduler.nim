@@ -69,6 +69,7 @@ proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId 
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
     "VALUES (?, -1, 'script', '', ?, '', ?)", result, script, now]])
+  kickProfile(if profileId.len > 0: profileId else: co.profileId)     # after the script: a conductor of the organisation takes it at once
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
@@ -332,6 +333,7 @@ proc finalizeFromShim*(c: var RqClient; profileId, runId: string; seq, attempt: 
   applyTransition(c, loadPolicy(c, profileOfRun(c, runId, profileId)), PodTransition(
     step: StepRef(run_id: runId, seq: uint32(seq), attempt: uint32(attempt)), state: state, exit_code: int32(exitCode),
     termination_reason: reason, shim_state_json: stateJson))
+  kickProfile(profileOfRun(c, runId, profileId))      # a step ended: its run may be ready for a conductor again
 
 proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
   ## Core's own look at every step in flight (D-29): a Pod that never came up, or a shim that went quiet, for longer than
@@ -445,6 +447,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   let profileId = if req.namespace.len == 0: defaultProfile else: profileOfNamespace(c, req.namespace)
   # 1. Apply reported Pod transitions (results, losses to retry, steps handed back because the gate closed).
   for t in req.transitions: applyTransition(c, loadPolicy(c, profileOfRun(c, t.step.run_id, defaultProfile)), t)
+  if req.transitions.len > 0 and profileId.len > 0: kickProfile(profileId)      # steps ended: their runs may be ready for a conductor again
   # 2. Launch gate (RUN-015): while it is closed nothing is assigned; queued steps stay queued and say why.
   #    Run creation, cancellation and everything else is untouched, and running steps are never interrupted.
   let gate = currentGate()
@@ -532,6 +535,15 @@ proc decodeReport*(payload: string): PollRequest = Protobuf.decode(cast[seq[byte
 proc encodeWork*(resp: PollResponse): string = wireString(Protobuf.encode(resp))
 proc decodeWork*(payload: string): PollResponse = Protobuf.decode(cast[seq[byte]](payload), PollResponse)
 proc encodeConfig*(c: ControllerConfig): string = wireString(Protobuf.encode(c))
+# the conductor's kinds (docs/conductors.md section 12): a hello, a lease pushed, a host call or a finish, and the answer to it
+proc encodeHello*(h: ConductorHello): string = wireString(Protobuf.encode(h))
+proc decodeHello*(payload: string): ConductorHello = Protobuf.decode(cast[seq[byte]](payload), ConductorHello)
+proc encodeLeaseGranted*(g: LeaseGranted): string = wireString(Protobuf.encode(g))
+proc decodeLeaseGranted*(payload: string): LeaseGranted = Protobuf.decode(cast[seq[byte]](payload), LeaseGranted)
+proc encodeExecRequest*(r: ExecutorRequest): string = wireString(Protobuf.encode(r))
+proc decodeExecRequest*(payload: string): ExecutorRequest = Protobuf.decode(cast[seq[byte]](payload), ExecutorRequest)
+proc encodeExecResponse*(r: ExecutorResponse): string = wireString(Protobuf.encode(r))
+proc decodeExecResponse*(payload: string): ExecutorResponse = Protobuf.decode(cast[seq[byte]](payload), ExecutorResponse)
 
 # ------------------------------------------------------------------ ExecutorChannel (executor <-> core)
 
@@ -563,47 +575,70 @@ proc takeRunLease*(c: var RqClient; master, runId, owner: string; versions: seq[
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: "" else: leaseToken(master, runId, vals[0][0].getInt)
 
-proc leaseCandidates*(c: var RqClient; only = ""; versions: seq[int] = @[]): seq[string] =
+proc leaseCandidates*(c: var RqClient; only = ""; versions: seq[int] = @[]; profileId = ""; started = -1; limit = 5): seq[string] =
   ## RUNNING runs that nobody holds and that have no step still PENDING/STARTING/RUNNING: presumed suspended, ready to (re)lease
-  ## (`only`: just that run, if it is one - for the tests)
-  let r = c.query(%*[["SELECT id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND (? = '' OR id = ?) " &
+  ## (`only`: just that run, if it is one - for the tests; `profileId`: the runs of one organisation's profile; `started` 1: only runs that were led
+  ## before, 0: only runs never led)
+  let r = c.query(%*[["SELECT id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND (? = '' OR id = ?) AND (? = '' OR profile_id = ?) " &
+    (if started == 1: "AND lease_attempt > 0 " elif started == 0: "AND lease_attempt = 0 " else: "") &
     (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND id NOT IN " &
-    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY created_at LIMIT 5",
-    protoName(rsRunning), getTime().toUnix(), only, only, protoName(ssPending), protoName(ssStarting), protoName(ssRunning)]])
+    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY created_at LIMIT ?",
+    protoName(rsRunning), getTime().toUnix(), only, only, profileId, profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), limit]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for row in vals: result.add row[0].getStr
+
+proc activeRuns*(c: var RqClient; profileId: string): int =
+  ## the runs of an organisation that have been led and are not over: they hold a place of `pod_limit` (docs/conductors.md section 4), whether a
+  ## conductor has them this moment or they wait for a step
+  let r = c.query(%*[["SELECT COUNT(*) FROM runs WHERE profile_id = ? AND state = ? AND lease_attempt > 0", profileId, protoName(rsRunning)]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil and vals.len > 0: vals[0][0].getInt else: 0
+
+proc grantLease*(c: var RqClient; master, candidate, owner: string; versions: seq[int]): Option[LeaseGranted] =
+  ## Lease one run to `owner` and build what it needs to lead it: the token, the script, the checked journal, the parameters, the version of the API.
+  ## None if the run is not free any more (another holder was faster), or if its journal is corrupt (the run then ends, T-03).
+  let token = takeRunLease(c, master, candidate, owner, versions)
+  if token.len == 0: return none(LeaseGranted)
+  # the journal is checked before the run goes to an executor (T-03): the core wrote it, the core vouches for it
+  let v = c.verifyJournal(candidate)
+  if v.check.verdict == cvBroken:
+    stderr.writeLine "core: the journal of run " & candidate & " is corrupt: " & v.check.why & "; the run ends"
+    discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = 'journal_corrupt', fail_message = ?, lease_until = 0 " &
+      "WHERE id = ? AND state = ?", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsRunning)]])
+    return none(LeaseGranted)
+  let vr = c.query(%*[["SELECT api_version FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
+  some LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: candidate,
+                    api_version: uint32(if vr != nil and vr.len > 0: vr[0][0].getInt(1) else: 1),
+                    script: loadScript(c, candidate), journal: journalEntries(v.rows),
+                    params: runParams(c, candidate).mapIt(ParamsEntry(key: it[0], value: it[1])))
+
+proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versions: seq[int]; places: int): seq[LeaseGranted] =
+  ## What the core pushes to a conductor of an organisation that has `places` free: first the runs that were led before and whose wait is over (they
+  ## already hold a place of the organisation), then new runs while the organisation has fewer active runs than its `pod_limit` (RUN-004). Only the
+  ## organisation's own runs, only of the host API versions the conductor can run.
+  if places <= 0: return
+  for candidate in leaseCandidates(c, versions = versions, profileId = profileId, started = 1, limit = places):
+    let g = grantLease(c, master, candidate, owner, versions)
+    if g.isSome: result.add g.get
+  let room = loadSettings(c, profileId).podLimit - activeRuns(c, profileId)
+  let fresh = min(places - result.len, room)
+  if fresh > 0:
+    for candidate in leaseCandidates(c, versions = versions, profileId = profileId, started = 0, limit = fresh):
+      let g = grantLease(c, master, candidate, owner, versions)
+      if g.isSome: result.add g.get
 
 proc handleLease*(c: var RqClient; profileId, master: string; req: LeaseRequest): ExecutorResponse =
   discard registryTouch("executor", "executor-service", epochTime())
   let owner = if req.executor_id.len > 0: req.executor_id else: "executor"
   # the versions of the host API this executor can run (PIP-001); one from before them knows version 1 only
   let versions = if req.api_versions.len > 0: req.api_versions.mapIt(int(it)) else: @[1]
-  var runId, token: string
-  var rows: seq[Row]
   for candidate in (if req.run_id.len > 0: @[req.run_id] else: leaseCandidates(c, versions = versions)):
-    token = takeRunLease(c, master, candidate, owner, versions)
-    if token.len == 0: continue
-    # the journal is checked before the run goes to an executor (T-03): the core wrote it, the core vouches for it
-    let v = c.verifyJournal(candidate)
-    if v.check.verdict == cvBroken:
-      stderr.writeLine "core: the journal of run " & candidate & " is corrupt: " & v.check.why & "; the run ends"
-      discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = 'journal_corrupt', fail_message = ?, lease_until = 0 " &
-        "WHERE id = ? AND state = ?", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsRunning)]])
-      token = ""
-      continue
-    runId = candidate
-    rows = v.rows
-    break
-  if runId.len == 0:
-    return ExecutorResponse(header: Header(protocol: 1),
-      body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "no_run_available")))
-  let vr = c.query(%*[["SELECT api_version FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
-  ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.lease,
-    lease: LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: runId,
-                         api_version: uint32(if vr != nil and vr.len > 0: vr[0][0].getInt(1) else: 1),
-                         script: loadScript(c, runId), journal: journalEntries(rows),
-                         params: runParams(c, runId).mapIt(ParamsEntry(key: it[0], value: it[1])))))
+    let g = grantLease(c, master, candidate, owner, versions)
+    if g.isSome:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.lease, lease: g.get))
+  ExecutorResponse(header: Header(protocol: 1),
+    body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "no_run_available")))
 
 proc leaseLost(detail: string): ExecutorResponse =
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
