@@ -1,11 +1,11 @@
 ## IAM-001, basic RBAC (D-50): the roles admin, rw, ro and what each may do. Pure.
-import std/[unittest, strutils]
+import std/[unittest, strutils, json]
 import ../../src/core/rbac
 
 suite "IAM-001 the roles of the shard":
-  test "there are three, and no other word is a role":
-    check shardRoles == ["admin", "rw", "ro"]
-    check validRole("admin") and validRole("rw") and validRole("ro")
+  test "there are four, and no other word is a role":
+    check shardRoles == ["admin", "rw", "dev", "ro"]
+    check validRole("admin") and validRole("rw") and validRole("dev") and validRole("ro")
     check not validRole("") and not validRole("root") and not validRole("Admin")
   test "an administrator may do anything, a made-up role nothing":
     for (m, p) in [("GET", "/api/v1/tokens"), ("POST", "/api/v1/users/rw:reset-credentials"), ("PUT", "/api/v1/storage"), ("DELETE", "/api/v1/organizations/acme")]:
@@ -28,6 +28,25 @@ suite "IAM-001 what ro may do":
               "/api/v1/organizations/acme/secrets/TOKEN", "/api/v1/organizations:reconcile", "/api/v1/unknown", "/healthz-not-a-route"]:
       check not roleMay("ro", "GET", p)
 
+suite "IAM-001 what dev may do":
+  test "everything ro reads":
+    for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/components", "/api/v1/organizations",
+              "/api/v1/organizations/acme/triggers"]:
+      check roleMay("dev", "GET", p)
+  test "start a run, directly or by firing a manual trigger of an organisation":
+    check roleMay("dev", "POST", "/api/v1/runs")
+    check roleMay("dev", "POST", "/api/v1/organizations/acme/triggers/t1:fire")
+  test "change or stop nothing: no cancel, no delete, no settings, no triggers made or switched, nothing of an administrator":
+    for (m, p) in [("POST", "/api/v1/runs/s1_x:cancel"), ("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
+                   ("POST", "/api/v1/organizations/acme/triggers"), ("POST", "/api/v1/organizations/acme/triggers/t1:disable"),
+                   ("DELETE", "/api/v1/organizations/acme/triggers/t1"), ("POST", "/api/v1/organizations"), ("POST", "/api/v1/users"),
+                   ("DELETE", "/api/v1/users/ro"), ("POST", "/api/v1/tokens"), ("PUT", "/api/v1/storage"), ("PUT", "/api/v1/users/dev/password")]:
+      check not roleMay("dev", m, p)
+    for p in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/storage", "/api/v1/organizations/acme/secrets"]:
+      check not roleMay("dev", "GET", p)
+  test "a dev is not a rw: the same user with both roles may do what rw may":
+    check not roleMay("dev", "DELETE", "/api/v1/runs/s1_x") and rolesMay(["dev", "rw"], "DELETE", "/api/v1/runs/s1_x")
+
 suite "IAM-001 what rw may do":
   test "everything ro reads":
     for p in ["/api/v1/runs/s1_x", "/api/v1/components", "/api/v1/organizations", "/api/v1/organizations/acme/triggers"]:
@@ -48,6 +67,19 @@ suite "IAM-001 what rw may do":
     check rolesMay(["ro", "rw"], "POST", "/api/v1/runs")
     check not rolesMay(["ro"], "POST", "/api/v1/runs")
     check not rolesMay(newSeq[string](), "GET", "/api/v1/runs")
+
+suite "IAM-001 a body that lacks the field is a bad request, not a crash":
+  test "a missing key is nil in a JSON object, and isString copes with it":
+    check not parseJson("{}").isString("password")
+    check not parseJson("""{"other": "x"}""").isString("password")
+    check not parseJson("""{"password": 5}""").isString("password")
+    check not parseJson("""{"password": null}""").isString("password")
+    check not parseJson("""{"password": ["a"]}""").isString("password")
+    check not parseJson("[]").isString("password")
+    check not parseJson("\"password\"").isString("password")
+    check not (nil.JsonNode).isString("password")                           # a body that did not parse
+    check parseJson("""{"password": "x"}""").isString("password")
+    check parseJson("""{"password": ""}""").isString("password")
 
 suite "IAM-001 users and the line in the log":
   test "names of users":

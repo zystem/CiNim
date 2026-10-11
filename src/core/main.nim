@@ -7,16 +7,9 @@ import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
 import apiauth, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
-if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
-  # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token-reset`: a lost administrator token is made again (IAM-003, core/apiauth.nim); the new
-  # one has to be changed at first use, the other tokens stay
-  var rc = newRq(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
-  echo bootstrapAdminToken(rc, getTime().toUnix(), force = true)
-  quit 0
-
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
-  # of the first start; every token of that user is revoked. This is the only way to reset the administrator's credentials: the API refuses it, so a shell in the
+  # of the first start; every token of that user is revoked, and the password has to be changed at the next login. This is the only way to reset the administrator's credentials: the API refuses it, so a shell in the
   # core's Pod is needed (the other users' credentials are reset by an administrator through the API).
   var uc = newRq(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
   let made = uc.resetUserCredentials(roleAdmin, getTime().toUnix())

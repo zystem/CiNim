@@ -186,7 +186,8 @@ proc onRequest() {.raises: [], gcsafe.} =
         if not li.ok:
           unauthorized("bad_credentials")
           return
-        jsonOk(Http200, %*{"token": li.token, "user": lj["user"].getStr, "roles": li.roles, "expires_at": li.expiresAt})
+        jsonOk(Http200, %*{"token": li.token, "user": lj["user"].getStr, "roles": li.roles, "expires_at": li.expiresAt,
+                           "password_change_required": li.mustChange})
         return
       # IAM-003: every route but /metrics and /healthz wants a token. An administrator may use all of them; a token of an organisation, only the runs of
       # that organisation (checked where the run is known)
@@ -196,6 +197,10 @@ proc onRequest() {.raises: [], gcsafe.} =
         who = authenticate(ac, adminToken, bearerOf(getRequest()), getTime().toUnix())
         if not who.ok:
           unauthorized(who.why)
+          return
+        if who.mustChange and not selfService(who.user, getMethod(), path):
+          # IAM-001: the password of this user has to be changed first (the administrator after the first login): that is the one thing allowed
+          problem(Http403, "password_change_required", "change the password first: PUT " & passwordPath(who.user) & " {\"current_password\": \"...\", \"password\": \"...\"}")
           return
         if path == "/api/v1/token:rotate":
           # a token replaces itself: the first one has to (IAM-003), any other may at any time
@@ -211,12 +216,9 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           jsonOk(Http200, %*{"id": made.id, "token": made.token, "replaced": who.id})
           return
-        if who.mustChange:
-          problem(Http403, "token_change_required", "this is the first token of the shard: change it first, POST /api/v1/token:rotate answers with a new one and revokes this one")
-          return
         if not who.admin:
           if who.roles.len > 0:
-            # IAM-001: the roles of the user (rw, ro) are the shard's, and every organisation inherits them; what each may do is in rbac.nim
+            # IAM-001: the roles of the user (rw, dev, ro) are the shard's, and every organisation inherits them; what each may do is in rbac.nim
             if not rolesMay(who.roles, getMethod(), path) and not selfService(who.user, getMethod(), path):
               problem(Http403, "forbidden", "the role of " & who.user & " (" & who.roles.join(", ") & ") does not allow " & getMethod() & " " & path)
               return
@@ -229,12 +231,46 @@ proc onRequest() {.raises: [], gcsafe.} =
         let umeth = getMethod()
         if umeth == "GET" and path == "/api/v1/users":
           jsonOk(Http200, %*{"users": uc.listUsers()})
+        elif umeth == "POST" and path == "/api/v1/users":
+          # an administrator makes a user: {name, role, password}; the user can log in at once
+          let nj = try: parseJson(getBody()) except JsonParsingError: nil
+          if not (nj.isString("name") and nj.isString("role") and nj.isString("password")):
+            problem(Http400, "invalid_request", "{\"name\": \"...\", \"role\": \"" & shardRoles.join("|") & "\", \"password\": \"...\"} is required")
+            return
+          let name = nj["name"].getStr
+          if not validUserName(name):
+            problem(Http400, "invalid_request", "a user name is lowercase letters, digits, - and _, starting with a letter, at most 32 characters")
+            return
+          if not validRole(nj["role"].getStr):
+            problem(Http400, "invalid_request", "role is one of " & shardRoles.join(", "))
+            return
+          let lenBad = passwordProblem(nj["password"].getStr)
+          if lenBad.len > 0:
+            problem(Http400, "invalid_password", lenBad)
+            return
+          let nv = checkPassword(pwnedCfg, nj["password"].getStr)
+          if nv.problem.len > 0:
+            problem(Http400, nv.code, nv.problem)
+            return
+          if not uc.createUser(name, nj["role"].getStr, nj["password"].getStr, getTime().toUnix()):
+            problem(Http409, "user_exists", "there is a user " & name & " already")
+            return
+          jsonOk(Http201, %*{"name": name, "role": nj["role"].getStr, "scope": shardScope, "breach_check": nv.breachCheck})
+        elif umeth == "DELETE" and path.startsWith("/api/v1/users/") and path.count('/') == 4:
+          let name = path["/api/v1/users/".len .. ^1]
+          if name == roleAdmin:
+            problem(Http403, "forbidden", "the user admin cannot be deleted")
+            return
+          if not uc.deleteUser(name, getTime().toUnix()):
+            problem(Http404, "not_found", "no such user")
+            return
+          jsonOk(Http200, %*{"name": name, "deleted": true})
         elif umeth == "PUT" and userOfPasswordPath(path).len > 0:
           # a user changes their own password (the gate lets a user of any role in for exactly this), an administrator anyone's. A user changing their own
           # also proves the current one, so that a stolen token does not take the account over.
           let name = userOfPasswordPath(path)
           let pj = try: parseJson(getBody()) except JsonParsingError: nil
-          if pj == nil or pj.kind != JObject or pj{"password"}.kind != JString:
+          if not pj.isString("password"):
             problem(Http400, "invalid_request", "{\"password\": \"...\"} is required" & (if who.user == name: ", with \"current_password\"" else: ""))
             return
           let bad = passwordProblem(pj["password"].getStr)
@@ -243,6 +279,9 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           if who.user == name and not uc.passwordIs(name, pj{"current_password"}.getStr("")):
             problem(Http403, "wrong_password", "the current password is not right")
+            return
+          if who.user == name and pj["password"].getStr == pj{"current_password"}.getStr(""):
+            problem(Http400, "invalid_password", "the new password must differ from the current one")
             return
           # too simple (local rules) or known from breaches (Pwned Passwords; if it does not answer, the local rules decided and the answer says so)
           let verdict = checkPassword(pwnedCfg, pj["password"].getStr)
@@ -258,6 +297,14 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"user": name, "changed": true, "sessions_revoked": done.sessionsRevoked, "breach_check": verdict.breachCheck})
         else:
           problem(Http404, "not_found", "no such route")
+        return
+      if path == "/api/v1/roles":
+        # IAM-001: the roles of the shard, which every organisation inherits (administrator)
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        var rc = newRq(coreRef.rqliteUrl)
+        jsonOk(Http200, %*{"roles": rc.listRoles()})
         return
       if path == "/api/v1/tokens" or path.startsWith("/api/v1/tokens/"):
         var c = newRq(coreRef.rqliteUrl)
@@ -873,20 +920,13 @@ proc serveApi*(co: Core; port: int) =
   coreRef = co
   createThread(vaultThread, runVaultSetup, (co.rqliteUrl, co.certs, addr stopServers))
   vaultThreadRunning = true
-  if authOn and adminToken.len == 0:
-    # the first start: the first administrator token, once, in the log (as TeamCity writes its super user token); it has to be changed at first use
-    var c = newRq(co.rqliteUrl)
-    let first = c.bootstrapAdminToken(getTime().toUnix())
-    if first.len > 0:
-      echo "core: FIRST START. The administrator's API token (shown only now): ", first
-      echo "core: it works for one thing, to be changed: POST /api/v1/token:rotate with 'Authorization: Bearer <this token>' answers with a new one"
   if authOn:
-    # IAM-001: a user for each role of the shard (admin, rw, ro) at the first start; the passwords and tokens are written once, one line each, that a test can parse
+    # IAM-001: the user `admin` at the first start; the password and the token are written once, in a line that a test can parse. The password has to be changed first.
     var uc = newRq(co.rqliteUrl)
-    let made = uc.bootstrapShardUsers(getTime().toUnix())
+    let made = uc.bootstrapAdminUser(getTime().toUnix())
     if made.len > 0:
-      echo "core: the users of the shard (first start), one line each, shown only now: ", shardRoles.join(", "),
-        "; the password is for POST /api/v1/login, the token for 'Authorization: Bearer'"
+      echo "core: FIRST START. The administrator (shown only now): the password is for POST /api/v1/login, the token for 'Authorization: Bearer'; the password has to be changed first,"
+      echo "core: PUT /api/v1/users/admin/password {\"current_password\", \"password\"} - until then nothing else is allowed"
       for m in made: echo credentialLine(m)
   if not authOn:
     stderr.writeLine "core: neither CINIM_ADMIN_TOKEN nor CINIM_AUTH=on is set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"

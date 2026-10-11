@@ -115,11 +115,11 @@ deploy:
   egress: []
   kubeApiServer: false
 
-# The REST API (IAM-003). With `enabled` every route but /metrics and /healthz wants `Authorization: Bearer <token>`. The first administrator token is made by
-# the core at its first start and written to its log once (`kubectl logs deploy/cinim-core | grep "FIRST START"`); it may only be changed (`POST
-# /api/v1/token:rotate`) before anything else. Nothing is generated at render time. To give a token yourself, from your secret store, set `adminToken`
-# (the chart makes the Secret `cinim-admin-token` of it) or `adminTokenSecret` (an existing Secret with the key `token`): it needs no change.
-# The administrator makes the tokens for people and for organisations (`POST /api/v1/tokens`, scope `admin` or `org:<slug>`).
+# The REST API (IAM-003). With `enabled` every route but /metrics and /healthz wants `Authorization: Bearer <token>`. The core makes the user `admin` at its first start and
+# writes its password and token to its log once (`kubectl logs deploy/cinim-core | grep '^cinim-credentials'`); the password must be changed before anything else
+# (`PUT /api/v1/users/admin/password`). Nothing is generated at render time. To give a token yourself, from your secret store, set `adminToken`
+# (the chart makes the Secret `cinim-admin-token` of it) or `adminTokenSecret` (an existing Secret with the key `token`).
+# The administrator makes the other users (`POST /api/v1/users`, roles `rw`, `dev`, `ro`, `admin`) and the tokens for organisations (`POST /api/v1/tokens`, scope `org:<slug>`).
 # `enabled: false` leaves the API open (development only).
 auth:
   enabled: true

@@ -1,19 +1,21 @@
-## IAM-001, basic RBAC (D-50): three roles of the shard - `admin`, `rw`, `ro` - and a user of each name. A role is given at the **shard** level and is inherited by
+## IAM-001, basic RBAC (D-50): four roles of the shard - `admin`, `rw`, `dev`, `ro` - given to users. A role is given at the **shard** level and is inherited by
 ## every organisation of the shard: the scope of a binding is `shard` (an organisation-level binding, `org:<slug>`, is the next step and is not built).
 ##
 ##   admin  every route (what the `admin` scope of an API token is)
 ##   rw     reads what `ro` reads, and starts and changes runs (POST, PUT, PATCH, DELETE under /api/v1/runs) in every organisation
+##   dev    reads what `ro` reads, and starts runs (POST /api/v1/runs, and a manual trigger of an organisation: POST .../triggers/{id}:fire), nothing else
 ##   ro     reads runs (state, steps, logs, artifacts), the components, the launch gate, the profile settings, the alerts, the organisations and their triggers
 ##
 ## Everything not named here is the administrator's: users, tokens, the object store, secrets, organisations (create, switch off, controller credentials),
 ## the settings. The rule is an allow-list, so a route added later is closed to `rw` and `ro` until it is named. Pure; tested in tests/unit/trbac.nim.
-import std/[strutils, unicode]
+import std/[strutils, unicode, json]
 
 const
   roleAdmin* = "admin"
   roleRw* = "rw"
   roleRo* = "ro"
-  shardRoles* = [roleAdmin, roleRw, roleRo]
+  roleDev* = "dev"
+  shardRoles* = [roleAdmin, roleRw, roleDev, roleRo]
   shardScope* = "shard"               ## a binding of this scope applies to every organisation of the shard
   userScopePrefix* = "user:"          ## the scope of an API token that stands for a user: its rights are the user's roles as they are when the request comes
   runsBase = "/api/v1/runs"
@@ -23,6 +25,11 @@ const
 type UserCredential* = object
   ## what the core makes for a user and shows once
   user*, role*, password*, token*: string
+
+func isString*(j: JsonNode; key: string): bool =
+  ## whether `j` is an object that has `key` with a string in it. `j{key}` is **nil** when the key is missing, and `.kind` of nil is a crash that takes a thread of the
+  ## server with it: a body like `{}` must be asked about this way.
+  j != nil and j.kind == JObject and (let v = j{key}; v != nil and v.kind == JString)
 
 func validRole*(role: string): bool = role in shardRoles
 
@@ -53,9 +60,16 @@ func readablePath(path: string): bool =
               "/api/v1/organizations:check"]: return true
   path.startsWith("/api/v1/organizations/") and path.endsWith("/triggers")
 
+func startsRun(meth, path: string): bool =
+  ## what a developer may do besides reading: start a run, directly or by firing a manual trigger of an organisation
+  if meth != "POST": return false
+  if path == runsBase: return true
+  path.startsWith("/api/v1/organizations/") and "/triggers/" in path and path.endsWith(":fire")
+
 func roleMay*(role, meth, path: string): bool =
   case role
   of roleAdmin: true
+  of roleDev: (isRead(meth) and readablePath(path)) or startsRun(meth, path)
   of roleRw: (isRead(meth) and readablePath(path)) or (isWrite(meth) and underRuns(path))
   of roleRo: isRead(meth) and readablePath(path)
   else: false

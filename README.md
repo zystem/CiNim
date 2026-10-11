@@ -6,7 +6,7 @@ Working today, through the REST API only: Lua pipelines with a replay journal (`
 `ci.sleep`), typed launch parameters (`ci.string`, `ci.number`, `ci.bool`, `ci.choice`) that reach the steps as environment variables, a Pod per step,
 the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the launch gate (RUN-015), component liveness, step metrics, diagnostics of a Pod's end
 (reason, message, events, node), organisations with a namespace and a job controller each (SHD-001 to SHD-009: create, switch off, delete, the reconciliation with
-their Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), API tokens with scopes (IAM-003), the users admin, rw, ro with passwords and tokens (basic RBAC, IAM-001), step secrets sealed in the
+their Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), API tokens with scopes (IAM-003), users with the roles admin, rw, dev, ro (basic RBAC, IAM-001), step secrets sealed in the
 database under a master key that can live in a hardware token (D-45, `docs/hardware-key.md`), triggers (schedule, webhook, manual), artifacts that go through the core
 to an S3-compatible store (Garage, D-46), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
 (SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). The steps of a run share a volume (STO-001: a claim per run, `/cicd/workspace` and `/cicd/state`). Not built yet: the UI (apart from the router page), `j.checkout`,

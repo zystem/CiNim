@@ -37,6 +37,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 - The kube API proxy eats the `Authorization` header: reach the core API through a port-forward or an Ingress.
 - Kubernetes `exec` (the controller's spool fallback) goes through the API server; the controller has no direct channel to a step Pod.
 - After `helm upgrade` delete the conductor Pods only when the old controller Pods are gone from the list (`rollout status` answers while they still terminate and make a Pod from the old plan); from then on a conductor of another image is drained by the core by itself.
+- The core's HTTP layer (patched GuildenStern) drops new connections after about two dozen POSTs with a body, until the core is restarted (reproduced on the commit before the RBAC work; HIBP, Argon2 and slow handlers are excluded). `kubectl port-forward` dies with the first reset, so a long run of API calls through it fails with `000`: start the forward again (`tools/test/rbac-smoke.sh` takes `ON_DROP` for that). Open as a task; remove the workaround when it is fixed.
 - Do not use `.gitignore` patterns that can catch source files (`tests/**/t[!.]*[!.nim]` caught `*.nim.cfg`; there is a negation now).
 
 ## Where things are
@@ -56,6 +57,6 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 4. Artifacts: a sweeper for retention and for abandoned multipart uploads, quotas per organisation, artifacts between runs, caches (DAT-004).
 5. TLS and authentication of the registry and one registry name for the images; a deploy step; reproducible pinning; run cancellation (`concurrency: cancel_previous`).
 6. UI tests (layer 1: render the Nimja templates and parse them with `nimquery`; Hurl against the server).
-7. RBAC beyond the basic part (IAM-001, D-50): roles at the level of an organisation, groups, a required change of the password, a rate limit on `/api/v1/login`, the audit of denied requests; whether the initial administrator token (D-44) stays beside the user `admin`. Check a running core with `tools/test/rbac-smoke.sh`.
+7. RBAC beyond the basic part (IAM-001, D-50): roles at the level of an organisation, groups, custom roles, a rate limit on `/api/v1/login`, the audit of denied requests and of logins, OIDC. Check a running core with `tools/test/rbac-smoke.sh` (it changes the password of `admin` the first time; the administrator makes the users it tests with).
 8. Compatibility code to delete when its condition is met: `docs/compat.md` (the list is the memory; strike a line in the commit that deletes the code).
 9. The 72-hour soak on the second test cluster: summarise with `tools/soak/summarize.sh` and record in `docs/specification.md` A.12 and `docs/threat-model.md` T-27.
