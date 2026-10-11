@@ -125,6 +125,11 @@ auth:
   enabled: true
   adminToken: ""
   adminTokenSecret: ""
+  # IAM-001: a password a user chooses is refused when it is too simple (local rules, always) or appears in known breaches (Have I Been Pwned, Pwned Passwords, the range
+  # API: only the first 5 digits of the SHA-1 leave the core). When the service does not answer, the local rules alone decide. "off" does not ask it (a shard with no
+  # route out); `pwnedUrl` points to a mirror of the range API (ending with a slash).
+  pwnedCheck: "on"
+  pwnedUrl: ""
 
 # The step secrets (6.7): sealed in the database with XChaCha20-Poly1305, a data key per organisation, wrapped by a master key that is NOT in the database.
 # `keySecret` names a Secret whose key `key` holds 64 hexadecimal digits (32 bytes; `openssl rand -hex 32`): keep it apart from the database backup. A database

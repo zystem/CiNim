@@ -241,13 +241,15 @@ suite "RUN-016 conductors on the push channel":
       let was = conductorImage
       conductorImage = "reg/cinim-conductor:new"
       conductorIdleSeconds = 300.0
-      drainPassSeconds = 1.0
+      drainPassSeconds = 10.0                                       # no pass until all three are known: their frames come over three connections, in no set order
       var old1 = connectStream(serverAddr, corePub, clientKeys)
       var old2 = connectStream(serverAddr, corePub, clientKeys)
       var fresh = connectStream(serverAddr, corePub, clientKeys)
       check old1.sendFrame(hello("cd-i1-" & sfx, "cond-1", o.ns, 5, image = "reg/cinim-conductor:old"))
       check old2.sendFrame(hello("cd-i2-" & sfx, "cond-2", o.ns, 5, image = "reg/cinim-conductor:old"))
       check fresh.sendFrame(hello("cd-i3-" & sfx, "cond-3", o.ns, 5, image = "reg/cinim-conductor:new"))
+      sleep 800
+      drainPassSeconds = 1.0
       check old1.nextKind("conductor.drain", 8000).isSome           # the first by name
       check old2.nextKind("conductor.drain", 2500).isNone           # one at a time
       check fresh.nextKind("conductor.drain", 100).isNone

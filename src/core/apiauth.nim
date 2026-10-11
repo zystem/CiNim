@@ -15,6 +15,9 @@
 import std/[json, strutils, times, sysrand]
 import crunchy
 import ../common/[rqlite, ctrlauth]
+import rbac
+import ../common/sodiumpw
+export rbac
 
 const
   tokenPrefix* = "cnm_"
@@ -28,6 +31,9 @@ type
     org*: string             ## the slug of an `org:<slug>` token
     name*, id*: string
     operator*: bool          ## the token of `CINIM_ADMIN_TOKEN`, which is not a row
+    user*: string            ## the user a `user:<name>` token stands for (IAM-001)
+    roles*: seq[string]      ## that user's roles at the shard level, read when the request came
+    shardWide*: bool         ## a role of the shard that is not `admin`: the rights of `rw` or `ro` hold in every organisation
     mustChange*: bool        ## the first token: good for rotating itself, nothing else
     why*: string             ## when not ok: `missing`, `malformed`, `unknown`, `expired`, `revoked`
 
@@ -73,8 +79,9 @@ func bearerOf*(rawRequest: string): string =
   ""
 
 func validScope*(scope: string): bool =
-  ## `admin`, or `org:<slug>` with a slug of the rules of SHD-001 (lowercase letters, digits and hyphens, starting with a letter)
+  ## `admin`, `user:<name>` (the rights of that user), or `org:<slug>` with a slug of the rules of SHD-001 (lowercase letters, digits and hyphens, starting with a letter)
   if scope == "admin": return true
+  if scope.startsWith(userScopePrefix): return userOfScope(scope).len > 0
   if not scope.startsWith("org:"): return false
   let slug = scope[4 .. ^1]
   if slug.len < 1 or slug.len > 40 or slug[0] notin {'a' .. 'z'}: return false
@@ -87,9 +94,12 @@ func principalOf*(scope: string): Principal =
   elif scope.startsWith("org:"): Principal(ok: true, org: scope[4 .. ^1])
   else: Principal(why: "unknown")
 
+func acrossOrgs*(p: Principal): bool = p.ok and (p.admin or p.shardWide)
+  ## the rights hold in every organisation: an administrator's, and the shard-level roles (which every organisation inherits)
+
 func mayUseOrg*(p: Principal; org: string): bool =
-  ## whether this principal may touch the runs of this organisation: an administrator any, an organisation's token its own
-  p.ok and (p.admin or (p.org.len > 0 and p.org == org))
+  ## whether this principal may touch the runs of this organisation: an administrator or a shard-level role any, an organisation's token its own
+  p.acrossOrgs or (p.ok and p.org.len > 0 and p.org == org)
 
 # ------------------------------------------------------------------ the rows
 
@@ -138,6 +148,102 @@ proc revokeApiToken*(c: var RqClient; id: string; now: int64): bool =
   let r = c.execute(%*[["UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at = 0", now, id]])
   r["results"][0]{"rows_affected"}.getInt > 0
 
+# ------------------------------------------------------------------ users and roles (IAM-001)
+
+const
+  sessionSeconds* = 8 * 3600        ## how long a token from POST /api/v1/login is good
+  roleDescriptions = [(roleAdmin, "every route"), (roleRw, "reads, and starts and changes runs, in every organisation"),
+                      (roleRo, "reads runs and the plain facts of the shard")]
+
+proc mintPassword*(): string = randomHex(32)
+  ## the password the core makes for a user: 256 random bits (a person changes it for one of their own; either is stored as an Argon2id string, common/sodiumpw.nim)
+
+proc userRoles*(c: var RqClient; name: string): tuple[found, disabled: bool, roles: seq[string]] =
+  ## the user, and the roles it has at the shard level (the ones every organisation inherits)
+  let r = c.query(%*[["SELECT disabled FROM users WHERE name = ?", name], ["SELECT role FROM role_bindings WHERE user_name = ? AND scope = ? ORDER BY role", name, shardScope]])
+  let u = r["results"][0]{"values"}
+  if u == nil or u.len == 0: return
+  result.found = true
+  result.disabled = u[0][0].getInt > 0
+  let rs = r["results"][1]{"values"}
+  if rs != nil:
+    for v in rs: result.roles.add v[0].getStr
+
+proc ensureRoles*(c: var RqClient) =
+  var stmts = newJArray()
+  for (role, text) in roleDescriptions: stmts.add %*["INSERT OR IGNORE INTO roles (name, description) VALUES (?, ?)", role, text]
+  discard c.execute(stmts, transaction = true)
+
+proc newUserToken(c: var RqClient; user: string; now: int64): string =
+  c.createApiToken("user " & user, userScope(user), 0, now).token
+
+proc bootstrapShardUsers*(c: var RqClient; now: int64): seq[UserCredential] =
+  ## The first start (no user exists): a user for each role of the shard - `admin`, `rw`, `ro` - with a password and a token made here, returned for the log
+  ## once. Nothing is made if there is a user already. Changing the password at the first login is not required (not built).
+  c.ensureRoles()
+  let have = c.query(%*[["SELECT count(*) FROM users"]])["results"][0]{"values"}[0][0].getInt
+  if have > 0: return
+  var stmts = newJArray()
+  var made: seq[UserCredential]
+  for role in shardRoles:
+    let pw = mintPassword()
+    stmts.add %*["INSERT OR IGNORE INTO users (name, password_hash, created_at) VALUES (?, ?, ?)", role, passwordHash(pw), now]
+    stmts.add %*["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", role, role, shardScope]
+    made.add UserCredential(user: role, role: role, password: pw)
+  discard c.execute(stmts, transaction = true)
+  for m in made.mitems:
+    m.token = c.newUserToken(m.user, now)
+  made
+
+proc resetUserCredentials*(c: var RqClient; user: string; now: int64): tuple[ok: bool, cred: UserCredential] =
+  ## A new password and a new token for a user (a lost one, a leaked one): every token of that user, also the ones from a login, is revoked.
+  let u = c.userRoles(user)
+  if not u.found: return
+  let pw = mintPassword()
+  discard c.execute(%*[
+    ["UPDATE users SET password_hash = ? WHERE name = ?", passwordHash(pw), user],
+    ["UPDATE api_tokens SET revoked_at = ? WHERE scope = ? AND revoked_at = 0", now, userScope(user)]], transaction = true)
+  let role = if u.roles.len > 0: u.roles[0] else: ""
+  (true, UserCredential(user: user, role: role, password: pw, token: c.newUserToken(user, now)))
+
+proc listUsers*(c: var RqClient): JsonNode =
+  ## the users with their roles; never a password or a hash
+  result = newJArray()
+  let r = c.query(%*[["SELECT name, created_at, disabled FROM users ORDER BY name"]])
+  let vals = r["results"][0]{"values"}
+  if vals != nil:
+    for v in vals:
+      let u = c.userRoles(v[0].getStr)
+      result.add %*{"name": v[0].getStr, "roles": u.roles, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0}
+
+proc passwordIs*(c: var RqClient; user, password: string): bool =
+  ## whether this is the user's password. For a user who does not exist the same work is done (a hash is made), so that the time does not tell.
+  let r = c.query(%*[["SELECT password_hash FROM users WHERE name = ?", user]])
+  let vals = r["results"][0]{"values"}
+  if vals == nil or vals.len == 0:
+    discard passwordHash(password)
+    return false
+  passwordMatches(vals[0][0].getStr, password)
+
+proc changePassword*(c: var RqClient; user, password: string; now: int64; keepToken = ""): tuple[ok: bool, sessionsRevoked: int] =
+  ## The user's password is replaced (the caller has checked the rights and the length). The tokens that logins made are revoked, except `keepToken`, the one the
+  ## change was asked with; the tokens made for the user (`user <name>`) stay.
+  if not c.userRoles(user).found: return
+  let r = c.execute(%*[
+    ["UPDATE users SET password_hash = ? WHERE name = ?", passwordHash(password), user],
+    ["UPDATE api_tokens SET revoked_at = ? WHERE scope = ? AND name = ? AND id != ? AND revoked_at = 0", now, userScope(user), "login " & user, keepToken]],
+    transaction = true)
+  (true, r["results"][1]{"rows_affected"}.getInt)
+
+proc login*(c: var RqClient; user, password: string; now: int64): tuple[ok: bool, token: string, expiresAt: int64, roles: seq[string]] =
+  ## A token for a user who proves the password: good for `sessionSeconds`, with the rights of the user's roles. An unknown user, a wrong password and a
+  ## switched-off user are the same answer, and the same work is done for each.
+  let same = c.passwordIs(user, password)
+  let u = c.userRoles(user)
+  if not (same and u.found and not u.disabled and u.roles.len > 0): return
+  let t = c.createApiToken("login " & user, userScope(user), now + sessionSeconds, now)
+  (true, t.token, now + sessionSeconds, u.roles)
+
 proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Principal =
   ## the principal of a request. The administrator token of the chart is compared in constant time on its hash; every other token is looked up
   ## by its id and its secret compared the same way.
@@ -153,7 +259,14 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
   if not constantTimeEqual(secretHash(t.secret), row[0].getStr): return Principal(why: "unknown")
   if row[4].getBiggestInt > 0: return Principal(why: "revoked")
   if row[3].getBiggestInt > 0 and now >= row[3].getBiggestInt: return Principal(why: "expired")
-  result = principalOf(row[1].getStr)
+  let userName = userOfScope(row[1].getStr)
+  if userName.len > 0:
+    # a token of a user: the rights are the user's roles now, so that taking a role away or switching the user off works at once
+    let u = c.userRoles(userName)
+    if not u.found or u.disabled or u.roles.len == 0: return Principal(why: "revoked")
+    result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, shardWide: roleAdmin notin u.roles)
+  else:
+    result = principalOf(row[1].getStr)
   result.name = row[2].getStr
   result.id = t.id
   result.mustChange = row[6].getInt > 0

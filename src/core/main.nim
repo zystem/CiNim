@@ -14,6 +14,18 @@ if paramCount() >= 1 and paramStr(1) == "admin-token-reset":
   echo bootstrapAdminToken(rc, getTime().toUnix(), force = true)
   quit 0
 
+if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
+  # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
+  # of the first start; every token of that user is revoked. This is the only way to reset the administrator's credentials: the API refuses it, so a shell in the
+  # core's Pod is needed (the other users' credentials are reset by an administrator through the API).
+  var uc = newRq(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
+  let made = uc.resetUserCredentials(roleAdmin, getTime().toUnix())
+  if not made.ok:
+    stderr.writeLine "core: there is no user admin (the users are made at the first start with the API authentication on)"
+    quit 1
+  echo credentialLine(made.cred)
+  quit 0
+
 if paramCount() >= 3 and paramStr(1) == "conductor-credential":
   # `/core conductor-credential <namespace> <conductor id>`: what a conductor of that organisation proves itself with (IAM-003). The controller will
   # hand it to the conductors it makes (docs/conductors.md phase 3); a conductor started by hand is given it this way.

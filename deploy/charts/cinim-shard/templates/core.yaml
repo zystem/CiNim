@@ -97,6 +97,10 @@ spec:
             {{- if .Values.auth.enabled }}
             # IAM-003: without a token or CINIM_AUTH=on the API is open
             - {name: CINIM_AUTH, value: "on"}
+            - {name: CINIM_PWNED_CHECK, value: {{ .Values.auth.pwnedCheck | quote }}}     # IAM-001: a new password is looked up in Pwned Passwords (k-anonymity); "off" for a shard with no way out
+            {{- if .Values.auth.pwnedUrl }}
+            - {name: CINIM_PWNED_URL, value: {{ .Values.auth.pwnedUrl | quote }}}
+            {{- end }}
             {{- if or .Values.auth.adminToken .Values.auth.adminTokenSecret }}
             - name: CINIM_ADMIN_TOKEN
               valueFrom:

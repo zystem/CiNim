@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
 import guildenstern/[dispatcher, httpserver]
-import runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
+import pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -28,6 +28,7 @@ let
   metricsOn = getEnv("CINIM_METRICS", "true") != "false"   ## the Helm value `metrics.enabled` (SPEC section 15); false makes /metrics a 404
 
 let
+  pwnedCfg = pwnedConfigFromEnv()               ## IAM-001: the check of a chosen password against Pwned Passwords (core/pwcheck.nim)
   adminToken = getEnv("CINIM_ADMIN_TOKEN")      ## a token of the operator's own (IAM-003); empty: the first start makes one and writes it to the log
   authOn* = adminToken.len > 0 or getEnv("CINIM_AUTH") == "on"     ## otherwise the API is open (development)
 
@@ -167,6 +168,26 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem(Http409, fired.reason, "no run was started: " & fired.reason)
         return
+      if path == "/api/v1/login":
+        # IAM-001: a user proves the password and gets a token with the rights of the user's roles (it needs no token itself)
+        if getMethod() != "POST":
+          problem(Http405, "method_not_allowed", "POST")
+          return
+        if not authOn:
+          problem(Http409, "auth_off", "this API is open (neither CINIM_AUTH=on nor CINIM_ADMIN_TOKEN is set): there is nothing to log in to")
+          return
+        let lj = try: parseJson(getBody()) except JsonParsingError: nil
+        if lj == nil or lj.kind != JObject or lj{"user"}.getStr("").len == 0 or lj{"password"}.getStr("").len == 0:
+          problem(Http400, "invalid_request", "{\"user\": \"...\", \"password\": \"...\"} is required")
+          return
+        var lc = newRq(coreRef.rqliteUrl)
+        let now = getTime().toUnix()
+        let li = lc.login(lj["user"].getStr, lj["password"].getStr, now)
+        if not li.ok:
+          unauthorized("bad_credentials")
+          return
+        jsonOk(Http200, %*{"token": li.token, "user": lj["user"].getStr, "roles": li.roles, "expires_at": li.expiresAt})
+        return
       # IAM-003: every route but /metrics and /healthz wants a token. An administrator may use all of them; a token of an organisation, only the runs of
       # that organisation (checked where the run is known)
       var who = Principal(ok: true, admin: true, name: "open API")
@@ -193,9 +214,51 @@ proc onRequest() {.raises: [], gcsafe.} =
         if who.mustChange:
           problem(Http403, "token_change_required", "this is the first token of the shard: change it first, POST /api/v1/token:rotate answers with a new one and revokes this one")
           return
-        if not who.admin and not path.startsWith(base):
-          problem(Http403, "forbidden", "this token is for the runs of one organisation only")
-          return
+        if not who.admin:
+          if who.roles.len > 0:
+            # IAM-001: the roles of the user (rw, ro) are the shard's, and every organisation inherits them; what each may do is in rbac.nim
+            if not rolesMay(who.roles, getMethod(), path) and not selfService(who.user, getMethod(), path):
+              problem(Http403, "forbidden", "the role of " & who.user & " (" & who.roles.join(", ") & ") does not allow " & getMethod() & " " & path)
+              return
+          elif not path.startsWith(base):
+            problem(Http403, "forbidden", "this token is for the runs of one organisation only")
+            return
+      if path == "/api/v1/users" or path.startsWith("/api/v1/users/"):
+        # IAM-001: the users of the shard and their roles, for an administrator (the gate above lets no one else here)
+        var uc = newRq(coreRef.rqliteUrl)
+        let umeth = getMethod()
+        if umeth == "GET" and path == "/api/v1/users":
+          jsonOk(Http200, %*{"users": uc.listUsers()})
+        elif umeth == "PUT" and userOfPasswordPath(path).len > 0:
+          # a user changes their own password (the gate lets a user of any role in for exactly this), an administrator anyone's. A user changing their own
+          # also proves the current one, so that a stolen token does not take the account over.
+          let name = userOfPasswordPath(path)
+          let pj = try: parseJson(getBody()) except JsonParsingError: nil
+          if pj == nil or pj.kind != JObject or pj{"password"}.kind != JString:
+            problem(Http400, "invalid_request", "{\"password\": \"...\"} is required" & (if who.user == name: ", with \"current_password\"" else: ""))
+            return
+          let bad = passwordProblem(pj["password"].getStr)
+          if bad.len > 0:
+            problem(Http400, "invalid_password", bad)
+            return
+          if who.user == name and not uc.passwordIs(name, pj{"current_password"}.getStr("")):
+            problem(Http403, "wrong_password", "the current password is not right")
+            return
+          # too simple (local rules) or known from breaches (Pwned Passwords; if it does not answer, the local rules decided and the answer says so)
+          let verdict = checkPassword(pwnedCfg, pj["password"].getStr)
+          if verdict.problem.len > 0:
+            problem(Http400, verdict.code, verdict.problem)
+            return
+          if verdict.breachCheck == "local":
+            stderr.writeLine "core: the breach service did not answer; the password of " & name & " was checked by the local rules only"
+          let done = uc.changePassword(name, pj["password"].getStr, getTime().toUnix(), keepToken = who.id)
+          if not done.ok:
+            problem(Http404, "not_found", "no such user")
+            return
+          jsonOk(Http200, %*{"user": name, "changed": true, "sessions_revoked": done.sessionsRevoked, "breach_check": verdict.breachCheck})
+        else:
+          problem(Http404, "not_found", "no such route")
+        return
       if path == "/api/v1/tokens" or path.startsWith("/api/v1/tokens/"):
         var c = newRq(coreRef.rqliteUrl)
         let tmeth = getMethod()
@@ -695,7 +758,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
-        if not who.admin and (not j.hasKey("organization") or j["organization"].getStr != who.org):
+        if not who.acrossOrgs and (not j.hasKey("organization") or j["organization"].getStr != who.org):
           problem(Http403, "forbidden", "this token may start runs of the organisation " & who.org & " only")
           return
         var tenant = "t1"
@@ -817,7 +880,15 @@ proc serveApi*(co: Core; port: int) =
     if first.len > 0:
       echo "core: FIRST START. The administrator's API token (shown only now): ", first
       echo "core: it works for one thing, to be changed: POST /api/v1/token:rotate with 'Authorization: Bearer <this token>' answers with a new one"
-  elif not authOn:
+  if authOn:
+    # IAM-001: a user for each role of the shard (admin, rw, ro) at the first start; the passwords and tokens are written once, one line each, that a test can parse
+    var uc = newRq(co.rqliteUrl)
+    let made = uc.bootstrapShardUsers(getTime().toUnix())
+    if made.len > 0:
+      echo "core: the users of the shard (first start), one line each, shown only now: ", shardRoles.join(", "),
+        "; the password is for POST /api/v1/login, the token for 'Authorization: Bearer'"
+      for m in made: echo credentialLine(m)
+  if not authOn:
     stderr.writeLine "core: neither CINIM_ADMIN_TOKEN nor CINIM_AUTH=on is set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"
   let s = newHttpServer(onRequest)
   s.start(port, 64)

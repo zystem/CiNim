@@ -32,6 +32,12 @@ const ddl = [
        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER NOT NULL DEFAULT 0,
        revoked_at INTEGER NOT NULL DEFAULT 0, must_change INTEGER NOT NULL DEFAULT 0)""",
+  # IAM-001 (D-49): the users of the shard, the roles, and which user has which role at which level (`shard`: every organisation inherits it)
+  """CREATE TABLE IF NOT EXISTS users (
+       name TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL, disabled INTEGER NOT NULL DEFAULT 0)""",
+  """CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '')""",
+  """CREATE TABLE IF NOT EXISTS role_bindings (
+       user_name TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'shard', PRIMARY KEY (user_name, role, scope))""",
   # the identity of the job controller of an organisation's namespace (IAM-003, common/ctrlauth.nim): a generation, no secrets
   """CREATE TABLE IF NOT EXISTS controller_credentials (
        namespace TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1, confirmed INTEGER NOT NULL DEFAULT 0,
