@@ -70,8 +70,10 @@ suite "IAM-001 users, roles and their tokens":
       let rw = who(makeUser("u-rw", "rw")).roles
       let dev = who(makeUser("u-dev", "dev")).roles
       let ro = who(makeUser("u-ro", "ro")).roles
-      check rolesMay(rw, "POST", "/api/v1/runs") and rolesMay(rw, "DELETE", "/api/v1/runs/x") and not rolesMay(rw, "PUT", "/api/v1/profile")
-      check rolesMay(dev, "POST", "/api/v1/runs") and not rolesMay(dev, "DELETE", "/api/v1/runs/x") and rolesMay(dev, "GET", "/api/v1/runs/x")
+      check rolesMay(rw, "POST", "/api/v1/runs") and rolesMay(rw, "DELETE", "/api/v1/runs/x") and rolesMay(rw, "PUT", "/api/v1/profile")
+      check not rolesMay(rw, "POST", "/api/v1/users") and not rolesMay(rw, "GET", "/api/v1/tokens")
+      check rolesMay(dev, "POST", "/api/v1/runs") and rolesMay(dev, "POST", "/api/v1/runs/x:cancel") and not rolesMay(dev, "DELETE", "/api/v1/runs/x")
+      check rolesMay(dev, "GET", "/api/v1/runs/x") and not rolesMay(dev, "PUT", "/api/v1/profile")
       check rolesMay(ro, "GET", "/api/v1/runs/x") and not rolesMay(ro, "POST", "/api/v1/runs")
     test "a user's role taken away, or the user switched off: the token stops working at once; another user is not touched":
       discard first()

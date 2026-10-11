@@ -296,8 +296,8 @@ curl -X PUT .../api/v1/users/admin/password -H "Authorization: Bearer <the token
 kubectl -n cinim-001 exec deploy/cinim-core -- /core admin-password-reset            # the administrator's lost password: a new line, the old tokens are revoked, to be changed again
 ```
 
-**Roles and users (IAM-001, D-50).** The roles of the shard, which every organisation inherits: `admin` may do everything, `rw` reads and starts and changes runs, `dev` reads and starts runs
-(also by a manual trigger), `ro` reads (the list is in the specification, IAM-001). The administrator makes the other users and deletes them:
+**Roles and users (IAM-001, D-50).** The roles of the shard, which every organisation inherits: `admin` may do everything, `rw` is almost an administrator (everything but the users, the roles, the API tokens and the object store), `dev` does what a developer does
+(reads, starts and stops runs, also by a manual trigger), `ro` reads (the list is in the specification, IAM-001). The administrator makes the other users and deletes them:
 
 ```bash
 curl -X POST .../api/v1/users -H "Authorization: Bearer $ADMIN" -d '{"name":"ann","role":"dev","password":"<16 or more characters>"}'

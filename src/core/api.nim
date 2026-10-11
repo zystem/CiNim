@@ -7,7 +7,7 @@
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
-import guildenstern/[dispatcher, httpserver]
+import ../common/httpsrv
 import pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
@@ -930,5 +930,5 @@ proc serveApi*(co: Core; port: int) =
       for m in made: echo credentialLine(m)
   if not authOn:
     stderr.writeLine "core: neither CINIM_ADMIN_TOKEN nor CINIM_AUTH=on is set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"
-  let s = newHttpServer(onRequest)
+  let s = newService(onRequest)      # common/httpsrv.nim: the one way the server is made
   s.start(port, 64)

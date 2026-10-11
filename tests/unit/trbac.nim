@@ -33,11 +33,13 @@ suite "IAM-001 what dev may do":
     for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/components", "/api/v1/organizations",
               "/api/v1/organizations/acme/triggers"]:
       check roleMay("dev", "GET", p)
-  test "start a run, directly or by firing a manual trigger of an organisation":
+  test "start a run, directly or by firing a manual trigger; stop a run; start a failed one again":
     check roleMay("dev", "POST", "/api/v1/runs")
     check roleMay("dev", "POST", "/api/v1/organizations/acme/triggers/t1:fire")
-  test "change or stop nothing: no cancel, no delete, no settings, no triggers made or switched, nothing of an administrator":
-    for (m, p) in [("POST", "/api/v1/runs/s1_x:cancel"), ("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
+    check roleMay("dev", "POST", "/api/v1/runs/s1_x:cancel")
+    check roleMay("dev", "POST", "/api/v1/runs/s1_x:retry")
+  test "delete or change nothing: no delete of a run, no settings, no triggers made or switched, nothing of an administrator":
+    for (m, p) in [("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/runs/s1_x"), ("POST", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
                    ("POST", "/api/v1/organizations/acme/triggers"), ("POST", "/api/v1/organizations/acme/triggers/t1:disable"),
                    ("DELETE", "/api/v1/organizations/acme/triggers/t1"), ("POST", "/api/v1/organizations"), ("POST", "/api/v1/users"),
                    ("DELETE", "/api/v1/users/ro"), ("POST", "/api/v1/tokens"), ("PUT", "/api/v1/storage"), ("PUT", "/api/v1/users/dev/password")]:
@@ -48,24 +50,26 @@ suite "IAM-001 what dev may do":
     check not roleMay("dev", "DELETE", "/api/v1/runs/s1_x") and rolesMay(["dev", "rw"], "DELETE", "/api/v1/runs/s1_x")
 
 suite "IAM-001 what rw may do":
-  test "everything ro reads":
-    for p in ["/api/v1/runs/s1_x", "/api/v1/components", "/api/v1/organizations", "/api/v1/organizations/acme/triggers"]:
+  test "everything that is read, also what ro and dev do not see":
+    for p in ["/api/v1/runs/s1_x", "/api/v1/components", "/api/v1/organizations", "/api/v1/organizations/acme/triggers",
+              "/api/v1/organizations/acme/secrets", "/api/v1/organizations:reconcile"]:
       check roleMay("rw", "GET", p)
-  test "start and change runs, in any organisation (the role is the shard's)":
-    check roleMay("rw", "POST", "/api/v1/runs")
-    check roleMay("rw", "POST", "/api/v1/runs/s1_x:cancel")
-    check roleMay("rw", "DELETE", "/api/v1/runs/s1_x")
-  test "change nothing but runs":
-    for (m, p) in [("PUT", "/api/v1/profile"), ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/acme"), ("POST", "/api/v1/tokens"),
-                   ("PUT", "/api/v1/organizations/acme/secrets/TOKEN"), ("POST", "/api/v1/organizations/acme/triggers"), ("PUT", "/api/v1/storage"),
-                   ("POST", "/api/v1/users/ro:reset-credentials")]:
+  test "everything that is written: runs, settings, organisations, triggers, secrets, the store - delete and edit":
+    for (m, p) in [("POST", "/api/v1/runs"), ("POST", "/api/v1/runs/s1_x:cancel"), ("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
+                   ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/acme"), ("POST", "/api/v1/organizations/acme/triggers"),
+                   ("PUT", "/api/v1/organizations/acme/secrets/TOKEN"), ("POST", "/api/v1/organizations:reconcile"),
+                   ("POST", "/api/v1/organizations/acme:rotate-controller-credential")]:
+      check roleMay("rw", m, p)
+  test "but not what is the shard's own: who may do what (the users, the roles, the API tokens) and the object store":
+    for (m, p) in [("GET", "/api/v1/storage"), ("PUT", "/api/v1/storage"), ("POST", "/api/v1/storage:check"), ("GET", "/api/v1/users"), ("POST", "/api/v1/users"), ("DELETE", "/api/v1/users/ann"), ("PUT", "/api/v1/users/ann/password"),
+                   ("GET", "/api/v1/roles"), ("GET", "/api/v1/tokens"), ("POST", "/api/v1/tokens"), ("DELETE", "/api/v1/tokens/abc")]:
       check not roleMay("rw", m, p)
-  test "see none of the administrator's reads":
-    for p in ["/api/v1/users", "/api/v1/tokens", "/api/v1/storage", "/api/v1/organizations/acme/secrets"]:
-      check not roleMay("rw", "GET", p)
+  test "the own password is every user's (the gate asks selfService), the own token is replaced before the gate":
+    check selfService("rw", "PUT", "/api/v1/users/rw/password")
   test "a user with several roles may do what any of them may":
-    check rolesMay(["ro", "rw"], "POST", "/api/v1/runs")
+    check rolesMay(["ro", "dev"], "POST", "/api/v1/runs")
     check not rolesMay(["ro"], "POST", "/api/v1/runs")
+    check rolesMay(["ro", "rw"], "DELETE", "/api/v1/runs/x")
     check not rolesMay(newSeq[string](), "GET", "/api/v1/runs")
 
 suite "IAM-001 a body that lacks the field is a bad request, not a crash":

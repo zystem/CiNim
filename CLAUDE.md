@@ -37,7 +37,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 - The kube API proxy eats the `Authorization` header: reach the core API through a port-forward or an Ingress.
 - Kubernetes `exec` (the controller's spool fallback) goes through the API server; the controller has no direct channel to a step Pod.
 - After `helm upgrade` delete the conductor Pods only when the old controller Pods are gone from the list (`rollout status` answers while they still terminate and make a Pod from the old plan); from then on a conductor of another image is drained by the core by itself.
-- The core's HTTP layer (patched GuildenStern) drops new connections after about two dozen POSTs with a body, until the core is restarted (reproduced on the commit before the RBAC work; HIBP, Argon2 and slow handlers are excluded). `kubectl port-forward` dies with the first reset, so a long run of API calls through it fails with `000`: start the forward again (`tools/test/rbac-smoke.sh` takes `ON_DROP` for that). Open as a task; remove the workaround when it is fixed.
+- Make every HTTP server with `newService` of `src/common/httpsrv.nim`, not with `newHttpServer`: GuildenStern 9.0.1 looks for `content-length: ` in the whole receive buffer of a thread, finds the header of an earlier POST behind the end of a shorter request and closes the connection, so a third of the connections were dropped after a few dozen POSTs (and `kubectl port-forward` died at the first). `tests/integration/thttp.nim` fails without the fix.
 - Do not use `.gitignore` patterns that can catch source files (`tests/**/t[!.]*[!.nim]` caught `*.nim.cfg`; there is a negation now).
 
 ## Where things are

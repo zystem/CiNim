@@ -3,7 +3,8 @@
 ## what it can be told to do (`POST /emu/fault`): not answer, be slow, say the token is locked, or change the key as if another card had been put in, so that the
 ## core's waiting, retrying, caching and refusing can be seen. It is not secure and holds nothing that matters; never run it where it could be mistaken for the real one.
 import std/[json, strutils, os, locks, times]
-import guildenstern/[dispatcher, httpserver, guildenserver]
+import ../common/httpsrv
+import guildenstern/guildenserver
 import crunchy
 import ../common/sodiumaead
 
@@ -129,7 +130,7 @@ proc onRequest() {.raises: [], gcsafe.} =
 proc startEmulator*(port: int; key: seq[byte] = @[]) =
   ## returns at once: GuildenStern runs its own threads
   setKey(if key.len == keyBytes: key else: randomBytes(keyBytes))
-  let s = newHttpServer(onRequest)
+  let s = newService(onRequest)
   discard s.start(port, 8)
 
 proc stopEmulator*() =

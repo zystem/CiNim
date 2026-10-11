@@ -136,8 +136,8 @@ proc revokeApiToken*(c: var RqClient; id: string; now: int64): bool =
 
 const
   sessionSeconds* = 8 * 3600        ## how long a token from POST /api/v1/login is good
-  roleDescriptions = [(roleAdmin, "every route"), (roleRw, "reads, and starts and changes runs, in every organisation"),
-                      (roleDev, "reads, and starts runs (also by a manual trigger), in every organisation"),
+  roleDescriptions = [(roleAdmin, "every route"), (roleRw, "almost an administrator: everything but the users, the roles, the API tokens and the object store"),
+                      (roleDev, "reads, starts and stops runs (also by a manual trigger), in every organisation"),
                       (roleRo, "reads runs and the plain facts of the shard")]
 
 proc mintPassword*(): string = randomHex(32)

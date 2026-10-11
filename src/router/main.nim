@@ -8,7 +8,7 @@
 ##   ROUTER_LIST_PAGE      "true"; "false" turns the page off (router.listOrganizations)
 ##   ROUTER_METRICS        "true"; "false" turns /metrics off (router.metrics)
 import std/[os, strutils, times, locks, atomics, posix]
-import guildenstern/[dispatcher, httpserver]
+import ../common/httpsrv
 import ../common/memstats
 import registry, routes
 
@@ -70,7 +70,7 @@ proc main() =
     reg = newRegistry(ttl.int64)
   var t: Thread[void]
   createThread(t, sampler)
-  let s = newHttpServer(onRequest)
+  let s = newService(onRequest)
   s.start(port, 8)
   echo "router: listening on ", port, ", base path '", cfg.basePath, "', ttl ", ttl, " s, page ", cfg.listOrganizations, ", rss ", rssBytes()
   proc onSignal(sig: cint) {.noconv.} = stop.store(true)

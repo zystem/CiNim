@@ -2,12 +2,15 @@
 ## every organisation of the shard: the scope of a binding is `shard` (an organisation-level binding, `org:<slug>`, is the next step and is not built).
 ##
 ##   admin  every route (what the `admin` scope of an API token is)
-##   rw     reads what `ro` reads, and starts and changes runs (POST, PUT, PATCH, DELETE under /api/v1/runs) in every organisation
-##   dev    reads what `ro` reads, and starts runs (POST /api/v1/runs, and a manual trigger of an organisation: POST .../triggers/{id}:fire), nothing else
+##   rw     almost an administrator: everything, reads and writes, deletes and edits (as GitLab's Maintainer and GitHub's Maintain: runs, triggers, secrets, settings,
+##          organisations), except what is the shard's own: the management of who may do what - the users, the roles and the API tokens - and the object store
+##          (its endpoint and keys are infrastructure, as GitLab keeps them in the instance's admin area); the own password every user changes
+##   dev    what a developer does: reads what `ro` reads, starts runs (POST /api/v1/runs, and a manual trigger of an organisation: POST .../triggers/{id}:fire), stops them
+##          (POST .../runs/{id}:cancel) and starts the failed ones again (POST .../runs/{id}:retry); nothing is deleted or changed
 ##   ro     reads runs (state, steps, logs, artifacts), the components, the launch gate, the profile settings, the alerts, the organisations and their triggers
 ##
-## Everything not named here is the administrator's: users, tokens, the object store, secrets, organisations (create, switch off, controller credentials),
-## the settings. The rule is an allow-list, so a route added later is closed to `rw` and `ro` until it is named. Pure; tested in tests/unit/trbac.nim.
+## `dev` and `ro` are allow-lists, so a route added later is closed to them until it is named; `rw` is a deny-list (`adminOnlyPath`), so a route added later is open
+## to it - a route that belongs to the shard's own things must be named in `adminOnlyPath`. Pure; tested in tests/unit/trbac.nim.
 import std/[strutils, unicode, json]
 
 const
@@ -49,7 +52,6 @@ func userOfPasswordPath*(path: string): string =
     if validUserName(name): return name
 
 func isRead(meth: string): bool = meth in ["GET", "HEAD"]
-func isWrite(meth: string): bool = meth in ["POST", "PUT", "PATCH", "DELETE"]
 
 func underRuns(path: string): bool = path.startsWith(runsBase)
 
@@ -60,17 +62,23 @@ func readablePath(path: string): bool =
               "/api/v1/organizations:check"]: return true
   path.startsWith("/api/v1/organizations/") and path.endsWith("/triggers")
 
-func startsRun(meth, path: string): bool =
-  ## what a developer may do besides reading: start a run, directly or by firing a manual trigger of an organisation
+func adminOnlyPath(path: string): bool =
+  ## what is the shard's own and only an administrator's: the management of who may do what (the users, the roles, the API tokens) and the object store of the shard
+  for head in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/storage"]:
+    if path == head or path.startsWith(head & "/") or path.startsWith(head & ":"): return true
+
+func developerMay(meth, path: string): bool =
+  ## what a developer may do besides reading: start a run, directly or by firing a manual trigger of an organisation, stop a run, start a failed one again
   if meth != "POST": return false
   if path == runsBase: return true
+  if path.startsWith(runsBase & "/") and (path.endsWith(":cancel") or path.endsWith(":retry")): return true
   path.startsWith("/api/v1/organizations/") and "/triggers/" in path and path.endsWith(":fire")
 
 func roleMay*(role, meth, path: string): bool =
   case role
   of roleAdmin: true
-  of roleDev: (isRead(meth) and readablePath(path)) or startsRun(meth, path)
-  of roleRw: (isRead(meth) and readablePath(path)) or (isWrite(meth) and underRuns(path))
+  of roleDev: (isRead(meth) and readablePath(path)) or developerMay(meth, path)
+  of roleRw: not adminOnlyPath(path)
   of roleRo: isRead(meth) and readablePath(path)
   else: false
 

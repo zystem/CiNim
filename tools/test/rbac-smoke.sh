@@ -6,7 +6,6 @@
 # before anything else is allowed; if that has not been done yet, the script checks that, and changes it to $ADMIN_NEW_PASSWORD (or to a random one, which it prints once).
 # If it has been done, give the current password in $ADMIN_PASSWORD. Then, under the administrator, it makes the users smoke-rw, smoke-dev and smoke-ro, asks routes of every
 # kind with each of them, and deletes them (also when it fails). It changes nothing else. Exit code: the number of failures.
-# Through `kubectl port-forward` set ON_DROP to the command that starts the forward again.
 base=${1:?base url}; src=${2:--}
 LOGPW=; LOGTOKEN=
 while read -r line; do
@@ -15,32 +14,13 @@ while read -r line; do
 done < <(cat "$src")
 fails=0
 check() { if [ "$2" = "$3" ]; then echo "ok    $1 -> $3"; else echo "FAIL  $1: expected $2, got $3"; fails=$((fails + 1)); fi; }
-retried=0
-ON_DROP=${ON_DROP:-}   # a command to run when a connection was dropped (e.g. to start a `kubectl port-forward` again, which does not survive it)
-# curl, and again (up to 5 times) when the connection was dropped before any answer (code 000): after a number of requests with a body the HTTP layer of the core drops the next
-# connections now and then (a known defect of the server library, not of RBAC); a refusal of the request has a status, so it is never retried. The retries are counted and shown.
-curlr() {
-  local out i
-  for i in 1 2 3 4 5; do
-    out=$(curl -s "$@"); [ "$out" != 000 ] && break
-    retried=$((retried + 1)); [ -z "$ON_DROP" ] || eval "$ON_DROP" >/dev/null 2>&1; sleep 0.3
-  done
-  echo -n "$out"
-}
 code() {   # token method path [body]
-  curlr -o /dev/null -w '%{http_code}' -X "$2" "$base$3" ${1:+-H "Authorization: Bearer $1"} ${4:+-H 'Content-Type: application/json' -d "$4"}
+  curl -s -o /dev/null -w '%{http_code}' -X "$2" "$base$3" ${1:+-H "Authorization: Bearer $1"} ${4:+-H 'Content-Type: application/json' -d "$4"}
 }
-status() { curlr -o /dev/null -w '%{http_code}' "$@"; }
+status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 field() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p"; }
 rand() { head -c 18 /dev/urandom | base64 | tr '+/' 'Aa' | tr -d '=\n'; echo -n "x9"; }
-login() {
-  local out i
-  for i in 1 2 3 4 5; do
-    out=$(curl -s -X POST "$base/api/v1/login" -d "{\"user\":\"$1\",\"password\":\"$2\"}"); [ -n "$out" ] && break
-    retried=$((retried + 1)); [ -z "$ON_DROP" ] || eval "$ON_DROP" >/dev/null 2>&1; sleep 0.3
-  done
-  echo -n "$out"
-}
+login() { curl -s -X POST "$base/api/v1/login" -d "{\"user\":\"$1\",\"password\":\"$2\"}"; }
 declare -A TOKEN PASS
 
 # --- the administrator
@@ -97,8 +77,8 @@ rows=(
   "GET /api/v1/organizations||200 200 200 200"
   "POST /api/v1/runs|{}|400 400 400 403"
   "DELETE /api/v1/runs/no-such-run||404 404 403 403"
-  "POST /api/v1/runs/no-such-run:cancel||404 404 403 403"
-  "DELETE /api/v1/organizations/no-such-org||404 403 403 403"
+  "POST /api/v1/runs/no-such-run:cancel||404 404 404 403"
+  "DELETE /api/v1/organizations/no-such-org||404 404 403 403"
   "POST /api/v1/users|{}|400 403 403 403"
   "DELETE /api/v1/users/admin||403 403 403 403"
   "DELETE /api/v1/users/no-such-user||404 403 403 403"
@@ -124,6 +104,5 @@ check "dev logs in with it" 200 "$(status -X POST "$base/api/v1/login" -d "{\"us
 check "login with a wrong password" 401 "$(status -X POST "$base/api/v1/login" -d '{"user":"smoke-ro","password":"wrong"}')"
 check "login of a user that does not exist" 401 "$(status -X POST "$base/api/v1/login" -d '{"user":"nobody","password":"x"}')"
 check "a deleted user's token stops working" 401 "$(code "$ADMIN" DELETE /api/v1/users/smoke-ro >/dev/null; code "${TOKEN[ro]}" GET /api/v1/components)"
-[ $retried -eq 0 ] || echo "note  $retried request(s) were sent again because the core dropped the connection before answering"
 echo "$fails failures"
 exit $fails
