@@ -9,9 +9,9 @@ proc spec(extra: JsonNode = nil): JsonNode =
 
 suite "TRG-002 trigger definitions":
   test "TRG-002 a schedule trigger with parameters is accepted":
-    let r = parseTriggerSpec(spec(%*{"params": {"BRANCH": "main", "JOBS": 4}, "concurrency": "skip"}))
+    let r = parseTriggerSpec(spec(%*{"params": {"BRANCH": "main", "JOBS": 4}, "concurrency": "cancel_newest"}))
     check r.error == ""
-    check r.spec.kind == "schedule" and r.spec.concurrency == "skip" and r.spec.enabled
+    check r.spec.kind == "schedule" and r.spec.concurrency == "cancel_newest" and r.spec.enabled
     check r.spec.params == @[("BRANCH", "main"), ("JOBS", "4")]
 
   test "TRG-002 a webhook trigger has no schedule":
@@ -30,6 +30,10 @@ suite "TRG-002 trigger definitions":
     check parseTriggerSpec(spec(%*{"name": ""})).error.contains("name")
     check parseTriggerSpec(spec(%*{"kind": "manual"})).error.contains("kind")
     check parseTriggerSpec(spec(%*{"concurrency": "cancel"})).error.contains("concurrency")
+    for ok in ["parallel", "cancel_newest", "cancel_previous"]:
+      let r = parseTriggerSpec(spec(%*{"concurrency": ok}))
+      check r.error == "" and r.spec.concurrency == ok
+    check parseTriggerSpec(spec(%*{"concurrency": "queue"})).error == "concurrency is parallel, cancel_newest or cancel_previous"
     check parseTriggerSpec(spec(%*{"project_id": ""})).error.contains("project_id")
     check parseTriggerSpec(spec(%*{"script": ""})).error.contains("script")
     check parseTriggerSpec(spec(%*{"script": "x".repeat(maxScriptBytes + 1)})).error.contains("longer")
@@ -44,7 +48,7 @@ suite "TRG-002 trigger definitions":
 
   test "TRG-002 the view never shows the secret, its hash or the script":
     let t = TriggerRow(id: "s1_x", slug: "acme", name: "hook", kind: "webhook", secretHash: "deadbeef", script: "secret script",
-                       projectId: "p", concurrency: "allow", enabled: true, params: @[("A", "1")], lastRunId: "s1_r", lastResult: "started")
+                       projectId: "p", concurrency: "parallel", enabled: true, params: @[("A", "1")], lastRunId: "s1_r", lastResult: "started")
     let v = view(t)
     check $v notin ["deadbeef"] and "deadbeef" notin $v and "secret script" notin $v
     check v["hook"].getStr == "/api/v1/hooks/s1_x" and v["params"]["A"].getStr == "1" and v["script_bytes"].getInt == 13

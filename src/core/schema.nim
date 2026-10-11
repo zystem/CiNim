@@ -32,7 +32,14 @@ const ddl = [
        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER NOT NULL DEFAULT 0,
        revoked_at INTEGER NOT NULL DEFAULT 0)""",
-  # IAM-001 (D-49): the users of the shard, the roles, and which user has which role at which level (`shard`: every organisation inherits it)
+  # PIP-014, core/joblocks.nim: who holds the lock of a name in an organisation, and who waits for it, in the order of coming
+  """CREATE TABLE IF NOT EXISTS run_locks (
+       profile_id TEXT NOT NULL, name TEXT NOT NULL, run_id TEXT NOT NULL, depth INTEGER NOT NULL DEFAULT 1, acquired_at INTEGER NOT NULL,
+       job_key TEXT NOT NULL DEFAULT '', PRIMARY KEY (profile_id, name))""",
+  """CREATE TABLE IF NOT EXISTS lock_waiters (
+       id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, profile_id TEXT NOT NULL, name TEXT NOT NULL, call_key TEXT NOT NULL,
+       payload TEXT NOT NULL, since INTEGER NOT NULL, job_key TEXT NOT NULL DEFAULT '')""",
+  # IAM-001 (D-50): the users of the shard, the roles, and which user has which role at which level (`shard`: every organisation inherits it)
   """CREATE TABLE IF NOT EXISTS users (
        name TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL, disabled INTEGER NOT NULL DEFAULT 0,
        must_change INTEGER NOT NULL DEFAULT 0)""",
@@ -52,7 +59,7 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS triggers (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, schedule TEXT NOT NULL DEFAULT '',
        secret_hash TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL, script TEXT NOT NULL, params TEXT NOT NULL DEFAULT '',
-       concurrency TEXT NOT NULL DEFAULT 'allow', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+       concurrency TEXT NOT NULL DEFAULT 'parallel', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
        last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '')""",
   # the artifacts of runs (DAT-003, core/objectstore.nim): the object is in the store, this is what the platform knows about it; a path is one artifact of a run
   """CREATE TABLE IF NOT EXISTS artifacts (
@@ -133,6 +140,7 @@ proc migrate*(c: var RqClient) =
       # what Kubernetes said about the end of the step's Pod (status.reason, status.message), kept for investigations
       ("steps", "pod_reason", "TEXT NOT NULL DEFAULT ''"), ("steps", "pod_message", "TEXT NOT NULL DEFAULT ''"),
       ("steps", "pod_diag", "TEXT NOT NULL DEFAULT ''"),
+      ("run_locks", "job_key", "TEXT NOT NULL DEFAULT ''"), ("lock_waiters", "job_key", "TEXT NOT NULL DEFAULT ''"),     # the job (its key in the run) that holds or waits for the lock
       ("users", "must_change", "INTEGER NOT NULL DEFAULT 0"),      # IAM-001: the password must be changed before anything else (the administrator after the first login)
       ("step_secrets", "value_enc", "TEXT NOT NULL DEFAULT ''"),      # the sealed value (core/secretvault.nim)     # the first administrator token: it may only be changed (IAM-003)     # JSON: the containers' states, the Pod's conditions, node, events (RUN-017)
       ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)

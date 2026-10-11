@@ -75,6 +75,7 @@ rows=(
   "GET /api/v1/components||200 200 200 200"
   "GET /api/v1/launch-gate||200 200 200 200"
   "GET /api/v1/organizations||200 200 200 200"
+  "GET /api/v1/organizations/no-such-org/locks||404 404 404 404"
   "POST /api/v1/runs|{}|400 400 400 403"
   "DELETE /api/v1/runs/no-such-run||404 404 403 403"
   "POST /api/v1/runs/no-such-run:cancel||404 404 404 403"

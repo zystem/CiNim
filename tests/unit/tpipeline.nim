@@ -272,3 +272,63 @@ suite "step options: mask and timeout (docs/secrets-masking.md)":
     for o in ["{mask = 'yes'}", "{mask = {runtime = 'x'}}", "{mask = {min_length = 2}}", "{mask = {typo = 1}}",
               "{timeout = 0}", "{timeout = '5x'}", "{timeout = 100000}"]:
       check metricsRun("j:sh('x', " & o & ")").code != "ok"
+
+suite "PIP-014 the lock of a job (ci.job{lock = ...})":
+  const lockedJob = "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = 'stand'}, function(j) j:sh('deploy') j:sh('test') end) return 'done' end})"
+  proc kindsOf(j: Journal): seq[string] =
+    for e in j.entries: result.add e.kind
+
+  test "the job asks for the lock before its first step and lets go after its last: lock, steps, unlock; the names are in the journal":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, lockedJob, fakeHost, runId = "s1_abc")
+    check r.code == "ok" and r.value == "done"
+    check kindsOf(j) == @["lock", "job_sh", "job_sh", "unlock"]
+    check j.entries[0].payload == "stand\tjob-1" and j.entries[3].payload == "stand"       # the lock names the job that asks, the unlock only the lock
+    check j.entries[0].key == "lock#0" and j.entries[3].key == "unlock#0"
+  test "a job without a lock makes no lock calls":
+    var sb = newSandbox()
+    var j = Journal()
+    discard sb.execute(j, pipelineOneStep, fakeHost, runId = "s1_abc")
+    check kindsOf(j) == @["job_sh"]
+  test "the lock is let go also when the job ends with an error, and the error goes on":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = 'stand'}, function(j) j:sh('fail') end) end})", fakeHost, runId = "s1_abc")
+    check r.code == "script_error" and "step failed" in r.message
+    check kindsOf(j) == @["lock", "job_sh", "unlock"]
+  test "a job in a job with the same lock asks twice and lets go twice (the core counts the depth)":
+    var sb = newSandbox()
+    var j = Journal()
+    let s = "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = 'x'}, function(j) ci.job({image = 'b', lock = 'x'}, function(k) k:sh('in') end) end) end})"
+    check sb.execute(j, s, fakeHost, runId = "s1_abc").code == "ok"
+    check kindsOf(j) == @["lock", "lock", "job_sh", "unlock", "unlock"]
+    check j.entries[1].key == "lock#1" and j.entries[4].key == "unlock#1"
+  test "a lock the core cannot give yet suspends the run at that call, and nothing after it is done":
+    var sb = newSandbox()
+    var j = Journal()
+    var called: seq[string]
+    let busy = proc (seq: int; kind, payload: string): Option[string] =
+      called.add kind
+      if kind == "lock": none(string) else: fakeHost(seq, kind, payload)
+    let r = sb.execute(j, lockedJob, busy, runId = "s1_abc")
+    check r.status == esSuspended
+    check called == @["lock"] and j.entries.len == 0
+  test "when the lock has been granted (the core wrote its record) the run goes on from there and does not ask again":
+    var j = Journal()
+    discard j.append("lock#0", "lock", "stand\tjob-1", "")           # what the core writes when it is the waiter's turn
+    var called: seq[string]
+    let host = proc (seq: int; kind, payload: string): Option[string] =
+      called.add kind
+      fakeHost(seq, kind, payload)
+    var sb = newSandbox()
+    let r = sb.execute(j, lockedJob, host, runId = "s1_abc")
+    check r.code == "ok"
+    check called == @["job_sh", "job_sh", "unlock"]
+  test "a lock that is not a name is refused when the job is made":
+    for bad in ["''", "'a b'", "'x/y'", "5", "true", "'" & "n".repeat(65) & "'"]:
+      var sb = newSandbox()
+      var j = Journal()
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = " & bad & "}, function(j) j:sh('x') end) end})", fakeHost, runId = "s1_abc")
+      check r.code == "script_error" and "lock is a name" in r.message
+      check j.entries.len == 0

@@ -239,11 +239,11 @@ in-cluster one of `deploy/registry`: its address is the one the Pods reach it at
 ### By the clock, every night
 
 The same script as a **schedule trigger** of the organisation (docs/triggers.md): the platform then builds its own images every night without anyone starting it. The trigger holds the
-script and its parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (UTC) and `"concurrency": "skip"`, so that a night is skipped while the last one is still running:
+script and its parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (UTC) and `"concurrency": "cancel_newest"`, so that a night is skipped while the last one is still running:
 
 ```bash
 curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "self-build-nightly", "kind": "schedule", "schedule": "0 2 * * *",
-  "project_id": "cinim", "concurrency": "skip", "script": "<self-build.lua>", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
+  "project_id": "cinim", "concurrency": "cancel_newest", "script": "<self-build.lua>", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
 ```
 
 With no `TAG` the images are tagged `<date>-<commit>` (`20261009-eefb939`): the clone step writes `IMAGE_TAG` to `$CICD_ENV` and the later steps of the run read it, so a night's images are not the last night's.

@@ -25,7 +25,7 @@ type
     message*: string
     value*: string
 
-const hostKinds = ["now", "random", "sh", "sleep", "job_sh", "params"]
+const hostKinds = ["now", "random", "sh", "sleep", "job_sh", "params", "lock", "unlock"]
 
 proc failed(code, msg: string): ExecResult =
   ExecResult(status: esFailed, code: code, message: msg)

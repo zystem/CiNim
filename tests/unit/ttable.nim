@@ -58,6 +58,15 @@ suite "PIP-003 the table made by a pass of the script":
       end)""")
     check r.ok and r.steps == 5
     check r.table.blocks.len == 1 and r.table.blocks[0].observed == 5 and r.table.blocks[0].size == 10
+  test "PIP-014 a job with a lock is numbered like any other: the stub grants the lock at once, and the lock calls are not steps":
+    let r = buildTable("""
+      ci.job({image = "a", lock = "stand"}, function(j)
+        j:sh("deploy")
+        j:sh("test")
+      end)
+      ci.job({image = "b"}, function(j) j:sh("after") end)""")
+    check r.ok and r.steps == 3
+    check r.table.blocks.mapIt(it.start) == @[0, 1, 2]
   test "a helper called twice is one place with two instances":
     let r = buildTable("""
       local function build(t) ci.job({image = "a"}, function(j) j:sh("make " .. t) end) end

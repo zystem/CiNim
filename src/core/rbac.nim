@@ -60,7 +60,7 @@ func readablePath(path: string): bool =
   if underRuns(path): return true
   if path in ["/api/v1/components", "/api/v1/launch-gate", "/api/v1/profile", "/api/v1/alerts", "/api/v1/router", "/api/v1/organizations",
               "/api/v1/organizations:check"]: return true
-  path.startsWith("/api/v1/organizations/") and path.endsWith("/triggers")
+  path.startsWith("/api/v1/organizations/") and (path.endsWith("/triggers") or path.endsWith("/locks") or "/locks/" in path)
 
 func adminOnlyPath(path: string): bool =
   ## what is the shard's own and only an administrator's: the management of who may do what (the users, the roles, the API tokens) and the object store of the shard

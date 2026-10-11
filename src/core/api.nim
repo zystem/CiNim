@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
 import ../common/httpsrv
-import pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
+import joblocks, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -166,7 +166,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         if fired.started:
           jsonOk(Http201, %*{"id": fired.runId, "organization": hook.row.slug, "trigger_id": hook.row.id, "state": "RUNNING"})
         else:
-          problem(Http409, fired.reason, "no run was started: " & fired.reason)
+          problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         return
       if path == "/api/v1/login":
         # IAM-001: a user proves the password and gets a token with the rights of the user's roles (it needs no token itself)
@@ -591,6 +591,35 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem(Http405, "method_not_allowed", "GET, PUT, DELETE, or POST :check")
         return
+      if path.startsWith("/api/v1/organizations/") and (path.endsWith("/locks") or "/locks/" in path):
+        # PIP-014: the jobs in which the locks of an organisation are present - who holds a lock and who waits for it, in the order they will get it
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        let restL = path["/api/v1/organizations/".len .. ^1]
+        let partsL = restL.split("/locks", maxsplit = 1)
+        let slugL = partsL[0]
+        let lockName = if partsL.len > 1: partsL[1].strip(chars = {'/'}) else: ""
+        var lc = newRq(coreRef.rqliteUrl)
+        let orgL = lc.organizationRow(slugL)
+        if slugL.len == 0 or orgL.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugL)
+          return
+        if lockName.len > 0 and not validLockName(lockName):
+          problem(Http400, "invalid_request", "a lock is a name of 1 to 64 letters, digits and . _ : -")
+          return
+        let profileL = lc.ensureOrganizationProfile(orgL.id, namespaceName(orgPrefix, orgShard, slugL))
+        let view = lc.lockView(profileL, lockName)
+        if lockName.len > 0:
+          if view.len == 0:
+            jsonOk(Http200, %*{"organization": slugL, "name": lockName, "holder": nil, "waiting": []})
+          else:
+            var one = view[0]
+            one["organization"] = %slugL
+            jsonOk(Http200, one)
+        else:
+          jsonOk(Http200, %*{"organization": slugL, "locks": view})
+        return
       if path.startsWith("/api/v1/organizations/") and "/triggers" in path:
         # the triggers of an organisation (core/triggers.nim): an administrator's calls
         let rest = path["/api/v1/organizations/".len .. ^1]
@@ -672,7 +701,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if fired.started:
             jsonOk(Http201, %*{"id": fired.runId, "organization": slug, "trigger_id": tid, "state": "RUNNING"})
           else:
-            problem(Http409, fired.reason, "no run was started: " & fired.reason)
+            problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         else:
           problem(Http405, "method_not_allowed", "GET, DELETE, or POST :enable :disable :rotate-secret :fire")
         return
@@ -829,6 +858,10 @@ proc onRequest() {.raises: [], gcsafe.} =
         let given = checkParams(j{"params"})
         if given.error.len > 0:
           problem(Http400, "invalid_params", given.error)
+          return
+        var qc = newRq(coreRef.rqliteUrl)
+        if qc.queueIsFull(if profile.len > 0: profile else: coreRef.profileId):
+          problem(Http429, "queue_full", "this organisation has " & $maxUnfinishedRuns & " runs that have not ended; try again when some have")
           return
         let id = coreRef.createRun(j["project_id"].getStr, j["script"].getStr, tenant, profile, given.pairs)
         jsonOk(Http201, %*{"id": id, "organization": orgSlug, "state": "RUNNING"})

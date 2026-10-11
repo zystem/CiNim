@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
+import joblocks, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -74,6 +74,15 @@ proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId 
     "VALUES (?, -1, 'script', '', ?, '', ?)", result, script, now]])
   kickProfile(if profileId.len > 0: profileId else: co.profileId)     # after the script: a conductor of the organisation takes it at once
 
+var maxUnfinishedRuns* = (try: parseInt(getEnv("CINIM_MAX_UNFINISHED_RUNS", "65000")) except ValueError: 65000)
+  ## the queue of an organisation is not in memory, it is rows in the database, so it may be long (a slow test environment, a night's work to get through), but a webhook that
+  ## has gone mad must not fill the database: a run that is not in a final state counts, whether it is led, waits for a place or waits for a lock of a job
+
+proc queueIsFull*(c: var RqClient; profileId: string): bool =
+  ## the organisation (its profile) has `maxUnfinishedRuns` runs that have not ended: no new run is made until some end
+  let r = c.query(%*[["SELECT count(*) FROM runs WHERE profile_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED', 'SKIPPED', 'TIMED_OUT', 'INFRASTRUCTURE_ERROR')", profileId]])
+  r["results"][0]{"values"}[0][0].getBiggestInt >= maxUnfinishedRuns
+
 type CancelOutcome* = enum
   coNotFound, coCanceled, coAlreadyFinished
 
@@ -97,6 +106,7 @@ proc cancelRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Canc
     # the run moved on between the read and the write (it ended): say what it is now
     let again = c.query(%*[["SELECT state FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
     return (coAlreadyFinished, if again != nil and again.len > 0: again[0][0].getStr else: was)
+  c.releaseRun(runId, now)                       # it holds no lock of a job and waits for none (core/joblocks.nim)
   kickProfile(profileOfRun(c, runId, ""))       # the controllers hear of it now, not at their next poll
   (coCanceled, protoName(rsCanceled))
 
@@ -113,6 +123,8 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
   if row[6].getStr.len > 0:
     result["params"] = (try: parseJson(row[6].getStr) except JsonParsingError: newJObject())
+  let lockWait = c.waitingFor(runId)
+  if lockWait.waiting: result["waiting_for_lock"] = %*{"name": lockWait.name, "held_by": lockWait.heldBy}
   # RUN-015: a queued step that waits for the log circuit says so (API shows the reason)
   let w = c.query(%*[["SELECT wait_reason FROM steps WHERE run_id = ? AND wait_reason IS NOT NULL LIMIT 1", runId]])
   let wv = w["results"][0]{"values"}
@@ -371,6 +383,7 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
   ## unknown outcome and is not restarted); the Pod itself is removed by the CancelStep that the next controller poll
   ## brings back, because the step is no longer wanted.
   let now = getTime().toUnix()
+  c.settle(now)       # locks of jobs: what a run that has ended held is let go, and the lists are looked at (core/joblocks.nim)
   # the profile of a step is that of its run's organisation (SHD-007): its liveness_timeout and retry policy
   let r = c.query(%*[["SELECT s.run_id, s.ordinal, s.attempt, s.state, s.claimed_at, s.shim_n, s.shim_seen_at, COALESCE(r.profile_id, ''), s.shim_phase, s.shim_json " &
     "FROM steps s LEFT JOIN runs r ON r.id = s.run_id WHERE s.state IN (?, ?)", protoName(ssStarting), protoName(ssRunning)]])
@@ -673,7 +686,7 @@ proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versi
   # one look at what is free: the runs that were led before come first. When nothing is free (the usual case) that is the only query.
   let r = c.query(%*[["SELECT id, lease_attempt FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND profile_id = ? " &
     (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND id NOT IN " &
-    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) ORDER BY (lease_attempt > 0) DESC, created_at LIMIT ?",
+    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) AND id NOT IN (SELECT run_id FROM lock_waiters) ORDER BY (lease_attempt > 0) DESC, created_at LIMIT ?",
     protoName(rsRunning), getTime().toUnix(), profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), places]])
   var led, fresh: seq[string]
   let vals = r["results"][0]{"values"}
@@ -742,6 +755,28 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "the table of step numbers is too large")))
     discard c.execute(%*[["UPDATE runs SET step_table = ? WHERE id = ? AND step_table = ''", cast[string](req.payload), req.run_id]])
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
+  if req.kind == lockKind or req.kind == unlockKind:
+    # PIP-014: the lock of a job (core/joblocks.nim). `lock` answers at once when the lock is the run's, and suspends the run (no place, no Pod) when it is not; the record
+    # of the call is written when the lock is granted. `unlock` lets go of one level and answers at once.
+    let payloadParts = cast[string](req.payload).split('\t', 1)         # `lock`: the name and the job (its key in the run); `unlock`: the name
+    let name = payloadParts[0]
+    let jobKey = if payloadParts.len > 1: payloadParts[1] else: ""
+    let bad = if req.key.len == 0: "a host call without its key in the journal" elif not validLockName(name): "a lock is a name of 1 to " & $maxLockName & " letters, digits and . _ : -" else: ""
+    if bad.len > 0:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: bad)))
+    let lockProfile = profileOfRun(c, req.run_id, co.profileId)
+    let nowL = getTime().toUnix()
+    if req.kind == lockKind:
+      if not c.acquire(req.run_id, lockProfile, name, req.key, cast[string](req.payload), nowL, jobKey):
+        giveBackLease(c, req.run_id, caller.attempt)
+        return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+          kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: true)))
+    else:
+      c.release(req.run_id, lockProfile, name, nowL)
+      discard c.appendRow(req.run_id, req.key, unlockKind, name, "")
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind != "job_sh":
@@ -816,6 +851,7 @@ proc handleFinish*(c: var RqClient; req: FinishRun; master: string): ExecutorRes
     (if req.state == RUN_STATE_SUCCEEDED: "" else: req.code[0 ..< min(req.code.len, 64)]),
     (if req.state == RUN_STATE_SUCCEEDED: "" else: req.message[0 ..< min(req.message.len, maxFailMessage)]), req.run_id]])
   giveBackLease(c, req.run_id, caller.attempt)
+  c.releaseRun(req.run_id, getTime().toUnix())          # a run that has ended holds no lock of a job (core/joblocks.nim)
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.result,
     result: HostResult(suspended: false)))
 

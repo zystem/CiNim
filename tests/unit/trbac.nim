@@ -16,7 +16,7 @@ suite "IAM-001 what ro may do":
   test "read runs, steps, logs, artifacts, and the plain facts of the shard":
     for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/components", "/api/v1/launch-gate",
               "/api/v1/profile", "/api/v1/alerts", "/api/v1/router", "/api/v1/organizations", "/api/v1/organizations:check",
-              "/api/v1/organizations/acme/triggers"]:
+              "/api/v1/organizations/acme/triggers", "/api/v1/organizations/acme/locks", "/api/v1/organizations/acme/locks/stand"]:
       check roleMay("ro", "GET", p)
       check roleMay("ro", "HEAD", p)
   test "write nothing, anywhere":

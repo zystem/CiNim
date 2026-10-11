@@ -49,7 +49,7 @@ All calls are an administrator's: `Authorization: Bearer <admin token>`.
 ```
 POST /api/v1/organizations/acme/triggers
 {"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "project_id": "p1",
- "script": "...", "params": {"TARGET": "staging"}, "concurrency": "skip"}
+ "script": "...", "params": {"TARGET": "staging"}, "concurrency": "cancel_newest"}
 ```
 
 Five fields, **UTC**: minute hour day-of-month month day-of-week. `*`, lists `1,15`, ranges `9-17`, steps `*/15` and `10-50/10`, names (`jan`, `mon`), and `@hourly @daily @weekly @monthly @yearly`. If both day fields are restricted a day matches when either does (as in Vixie cron). Core looks every 20 seconds. A core that was down fires a schedule **once** when it is back. Switching a schedule off and on again starts its clock from that moment.
@@ -80,7 +80,26 @@ DELETE /api/v1/organizations/acme/triggers/{id}
 
 ### Concurrency
 
-`"concurrency": "allow"` (default) starts a run for every firing; `"skip"` skips a firing while an earlier run of the same trigger is still running and says so in `last_result`. Cancelling the earlier run instead needs run cancellation, which is not built.
+What a firing does when an earlier run of the same trigger has not ended (it is in any state that is not final: created, queued, running, waiting):
+
+* `"concurrency": "parallel"` (default) starts a run for every firing at once, whatever the earlier ones are doing; when the organisation has no room for more (its `pod_limit`, RUN-004) the runs wait for room in turn, which is the queue. Jobs that must not run together - one test environment - are held back by a `lock` (see below), not by the trigger.
+* `"cancel_newest"` **cancels the new firing**: no run is started while an earlier run has not ended, and `last_result` says so (`cancelled the new firing: the previous run has not ended`; a manual `:fire` answers 409 `still_running`). A slow nightly never overlaps itself.
+* `"cancel_previous"` **cancels the earlier runs that have not ended** (`POST /api/v1/runs/{id}:cancel`, their Pods are removed) and starts the new one; `last_result` says which runs it cancelled (`started; cancelled the earlier run <id>`). The answer to a push storm: only the newest commit is built.
+
+Only the runs of the same trigger count; a run that has ended is never touched.
+
+### Jobs that must not run together: `lock`
+
+The scenario: every commit has to be tested, a new commit does not cancel the test of the one before it (it brought other changes), but the test environment exists once and can be used by one job at a time. The trigger is `parallel` (a run for every firing); the **job** names a lock:
+
+```lua
+ci.job({ image = "registry/tests:1", lock = "stand" }, function(j)
+  j:sh("deploy-to-stand")
+  j:sh("run-the-tests")          -- the deploy and the tests that follow it stay together
+end)
+```
+
+The jobs of an organisation with the same lock run **one at a time, in turn** (first come, first served), whatever runs they belong to. A run that waits is suspended - it takes no place of a conductor and no Pod - and `GET /api/v1/runs/{id}` says `waiting_for_lock: {name, held_by}`. **Which jobs have the lock:** `GET /api/v1/organizations/{slug}/locks` (every lock that is held or waited for) and `.../locks/{name}` (one) answer with the job that holds it (`run_id`, `job`, `since`) and the jobs that wait, in the order they will get it (`place`). The lock is let go when the job's function ends (also with an error), when the run ends, and when it is cancelled. Different names do not meet; a job in a job with the same name does not wait for itself. A queue is not limited by the lock; the organisation as a whole may have 65000 runs that have not ended (`CINIM_MAX_UNFINISHED_RUNS`), then a new run is `429 queue_full`.
 
 ### What a trigger stores
 
@@ -88,4 +107,4 @@ The project, the **script** and the parameters (until pipelines are read from re
 
 ## Checked on the TESTING cluster
 
-Parameters (a run with `JOBS=8` and `BRANCH` given: the step printed the given values and the default of `TARGET`; `JOBS=0` ended the run `FAILED` before any step; `PATH` as a parameter was `400`), a webhook (wrong secret, no secret and an administrator token all `404`, the right secret `201` with a parameter, `LD_PRELOAD` as a parameter `400`), a schedule (`* * * * *` started a run in the first minute; switched off afterwards), `:fire`. Not checked: `concurrency = skip` against a long run, two cores at once, a core that was down over a firing.
+Parameters (a run with `JOBS=8` and `BRANCH` given: the step printed the given values and the default of `TARGET`; `JOBS=0` ended the run `FAILED` before any step; `PATH` as a parameter was `400`), a webhook (wrong secret, no secret and an administrator token all `404`, the right secret `201` with a parameter, `LD_PRELOAD` as a parameter `400`), a schedule (`* * * * *` started a run in the first minute; switched off afterwards), `:fire`. Not checked: `concurrency = cancel_newest` against a long run, two cores at once, a core that was down over a firing.

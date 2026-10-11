@@ -253,6 +253,15 @@ local function norm_mask(m)
 end
 
 -- The step's timeout: whole seconds or "90s" / "15m" / "2h"; the shim ends the build after it (docs/ci-pitfalls.md)
+-- `lock = "name"` of ci.job (PIP-014, core/joblocks.nim): the jobs of the organisation with the same lock run one at a time, in turn, also when they belong to different runs
+local function norm_lock(v)
+  if v == nil or v == false then return nil end
+  if type(v) ~= "string" or #v < 1 or #v > 64 or v:find("[^%w%._:%-]") then
+    error("ci.job: lock is a name of 1 to 64 letters, digits and . _ : -", 3)
+  end
+  return v
+end
+
 local function norm_timeout(v)
   if v == nil or v == false then return nil end
   local s = parse_duration(v, "timeout")
@@ -632,7 +641,10 @@ G.ci = {
     job_seq = job_seq + 1
     local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
       __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3) }, Job_mt)
+    local lock = norm_lock(opts.lock)
+    if lock then call("lock", lock .. "\t" .. j.__key) end   -- the run waits here, suspended, until the lock is its turn; the job is named so that the lock can show who holds it
     local ok, err = pcall(fn, j)
+    if lock then call("unlock", lock) end           -- also when the job ended with an error
     if not ok then error(err, 0) end
     return { ok = true, outputs = {} }
   end,
