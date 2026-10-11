@@ -55,7 +55,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 2. The real key service (`kekd`) for the SmartCard-HSM 4K with an OMNIKEY 3121 reader: same protocol as the emulator (`docs/hardware-key.md`); first run `tools/hsm/card-check.sh` on the card.
 3. Plain variables of the four levels (VAR-001), the log header of the effective values (VAR-005), the check of launch parameters at the API before a run exists (needs preflight, PIP-016).
 4. Artifacts: a sweeper for retention and for abandoned multipart uploads, quotas per organisation, artifacts between runs, caches (DAT-004).
-5. TLS and authentication of the registry and one registry name for the images; a deploy step; reproducible pinning; run cancellation (`concurrency: cancel_previous`).
+5. TLS and authentication of the registry and one registry name for the images; a deploy step; reproducible pinning; the cancel of a run by a newer run (`concurrency: cancel_previous`; the cancel itself, `POST /api/v1/runs/{id}:cancel`, is built), the exception into `main` and `ci.finally` (RUN-006), the restart of failed steps only (`:retry`, docs/parallel.md section 11).
 6. UI tests (layer 1: render the Nimja templates and parse them with `nimquery`; Hurl against the server).
 7. RBAC beyond the basic part (IAM-001, D-50): roles at the level of an organisation, groups, custom roles, a rate limit on `/api/v1/login`, the audit of denied requests and of logins, OIDC. Check a running core with `tools/test/rbac-smoke.sh` (it changes the password of `admin` the first time; the administrator makes the users it tests with).
 8. Compatibility code to delete when its condition is met: `docs/compat.md` (the list is the memory; strike a line in the commit that deletes the code).

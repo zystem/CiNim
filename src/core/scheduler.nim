@@ -74,6 +74,32 @@ proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId 
     "VALUES (?, -1, 'script', '', ?, '', ?)", result, script, now]])
   kickProfile(if profileId.len > 0: profileId else: co.profileId)     # after the script: a conductor of the organisation takes it at once
 
+type CancelOutcome* = enum
+  coNotFound, coCanceled, coAlreadyFinished
+
+proc cancelRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: CancelOutcome, state: string] =
+  ## RUN-006: the run ends as CANCELED, its steps that have not ended are CANCELED, its lease is given back. The Pods are removed by the controllers: a step that is CANCELED is
+  ## not wanted, so the next poll of the controller that has its Pod says so at once (`unwantedPods`); the shim gets SIGTERM and the build is asked to stop. A report about such a
+  ## step that comes later changes nothing (`applyTransition`). A run that has ended is left as it is.
+  let r = c.query(%*[["SELECT state FROM runs WHERE id = ?", runId]])
+  let vals = r["results"][0]{"values"}
+  if vals == nil or vals.len == 0: return (coNotFound, "")
+  let was = vals[0][0].getStr
+  var cur = rsCreated
+  for s in states.RunState:
+    if protoName(s) == was: cur = s
+  if not canRun(cur, rsCanceled): return (coAlreadyFinished, was)
+  let res = c.execute(%*[
+    ["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0 WHERE id = ? AND state = ?", protoName(rsCanceled), $now, runId, was],
+    ["UPDATE steps SET state = ?, finished_at = ?, version = version + 1 WHERE run_id = ? AND state IN (?, ?, ?) AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND state = ?)",
+     protoName(ssCanceled), $now, runId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), runId, protoName(rsCanceled)]], transaction = true)
+  if res["results"][0]{"rows_affected"}.getInt == 0:
+    # the run moved on between the read and the write (it ended): say what it is now
+    let again = c.query(%*[["SELECT state FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
+    return (coAlreadyFinished, if again != nil and again.len > 0: again[0][0].getStr else: was)
+  kickProfile(profileOfRun(c, runId, ""))       # the controllers hear of it now, not at their next poll
+  (coCanceled, protoName(rsCanceled))
+
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
   let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message " &
@@ -208,7 +234,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let cur = c.query(%*[["SELECT attempt, state FROM steps WHERE run_id = ? AND ordinal = ?", t.step.run_id, int(t.step.seq)]])
   let cv = cur["results"][0]{"values"}
   if cv == nil or cv.len == 0 or cv[0][0].getInt != attempt: return
-  if cv[0][1].getStr in [protoName(ssSucceeded), protoName(ssFailed), protoName(ssLost)]:
+  if cv[0][1].getStr in [protoName(ssSucceeded), protoName(ssFailed), protoName(ssLost), protoName(ssCanceled)]:
     # Already final, usually because the shim reported the result before the Pod's end was seen: the result stands, but what Kubernetes
     # said about the Pod arrives only now (the events go in an hour) and is kept for the investigation, once.
     if t.pod_diag.len > 0:
@@ -371,7 +397,7 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
     applyTransition(c, policy, PodTransition(step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[2].getInt)),
                                              state: STEP_STATE_LOST, exit_code: -1, termination_reason: reason))
 
-proc unwantedPods(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
+proc unwantedPods*(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
   ## Pods the controller has that no step wants any more: the step moved on to a later attempt, or finished (a short while
   ## ago - a Pod that is just exiting by itself is left alone), or core has no such step at all (an orphan).
   if inventory.len == 0: return
@@ -396,7 +422,7 @@ proc unwantedPods(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
         let attempt = row[2].getInt
         let state = row[3].getStr
         if attempt > int(p.step.attempt): wanted = false
-        elif attempt == int(p.step.attempt) and state == protoName(ssLost): wanted = false     # core gave up on it: no grace needed
+        elif attempt == int(p.step.attempt) and state in [protoName(ssLost), protoName(ssCanceled)]: wanted = false     # core gave up on it, or it was cancelled: no grace needed
         elif attempt == int(p.step.attempt) and state notin [protoName(ssStarting), protoName(ssRunning), protoName(ssPending)] and
              now - row[4].getBiggestInt > 30: wanted = false     # finished by itself: its shim is exiting, leave it a little time
     if not found or not wanted: result.add p.step
