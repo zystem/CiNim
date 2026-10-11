@@ -45,6 +45,7 @@ type
     lastSeen, lastPush: float
     idleSince: float                  ## when it last held no run (0: it holds one)
     draining: bool                    ## told to drain: it gets no more runs
+    image: string                     ## the image it runs from, as it said in its hello ("": an older conductor, taken for up to date)
 
   Hub = object
     co: Core
@@ -280,6 +281,7 @@ proc onHello(h: var Hub; routingId: string; f: StreamFrame) =
       count(mResent)
   c.profileId = h.profileOfNs(c.namespace)
   let creditBefore = c.credit.available
+  c.image = hello.image
   c.credit.set(if c.draining: 0 else: int(hello.free_places))
   c.idleSince = if hello.held_runs.len > 0: 0.0 elif c.idleSince == 0.0: epochTime() else: c.idleSince
   discard registryTouch("conductor", c.namespace & "/" & c.id, epochTime(), @[("runs", $hello.held_runs.len)])
@@ -413,14 +415,15 @@ proc housekeeping(h: var Hub) =
     sessions.setLen 0
     for session, c in h.conds:
       if c.profileId == profile:
-        states.add CondState(id: c.id, idleSince: c.idleSince, draining: c.draining)
+        states.add CondState(id: c.id, idleSince: c.idleSince, draining: c.draining,
+                             outdated: c.image.len > 0 and conductorImage.len > 0 and c.image != conductorImage)
         sessions.add session
     for id in drainTargets(states, desired, now, conductorIdleSeconds):
       for session in sessions:
         if h.conds[session].id == id:
           h.conds[session].draining = true
           h.conds[session].credit.set(0)
-          echo "core: conductor ", id, " drains (idle, above the ", desired, " wanted)"
+          echo "core: conductor ", id, " drains (idle above the ", desired, " wanted, or not from the image ", conductorImage, ")"
   for session, c in h.conds.mpairs:
     if c.draining: h.emit(c.routingId, frame("core", "conductor.drain"))
 

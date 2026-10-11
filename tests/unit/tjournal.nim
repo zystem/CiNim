@@ -151,3 +151,60 @@ suite "NFR-014 replay speed":
     let dt = epochTime() - t0
     check r.code == "ok"
     check dt <= 2.0
+
+suite "PIP-003/PIP-004 the journal is found by the key of a call, not by place":
+  test "every entry has a key: steps s<number>, the others <kind>#<n> in the order of that kind":
+    let (_, j) = runClean()
+    check j.entries[0].key == "now#0"
+    check j.entries[1].key == "sh#0"
+    var seen: seq[string]
+    for e in j.entries:
+      check e.key.len > 0
+      check e.key notin seen
+      seen.add e.key
+  test "the key is part of the chain: another key under the same hash is found":
+    var (_, j) = runClean()
+    j.entries[1].key = "sh#9"
+    check not j.verify()
+  test "replay finds an entry whatever its place: the entries in another order give the same run":
+    let (r1, j) = runClean()
+    var shuffled = Journal()
+    # the same records appended in reverse order of the call: positions and hashes differ, keys and results are the same
+    for i in countdown(j.entries.len - 1, 0):
+      let e = j.entries[i]
+      discard shuffled.append(e.key, e.kind, e.payload, e.result)
+    var calls = 0
+    let counting: HostCallProc = proc(seq: int; kind, payload: string): Option[string] =
+      inc calls
+      fakeHost(seq, kind, payload)
+    var sb = newSandbox()
+    let r2 = sb.execute(shuffled, scriptSrc, counting)
+    check calls == 0 and r2.code == "ok" and r2.value == r1.value
+  test "an entry that is missing is a call to the host, and the rest of the journal is used: a gap is not a stop":
+    let (r1, j) = runClean()
+    var gap = Journal()
+    for i, e in j.entries:
+      if i != 2: discard gap.append(e.key, e.kind, e.payload, e.result)       # the third call has no record
+    var asked: seq[string]
+    let host: HostCallProc = proc(seq: int; kind, payload: string): Option[string] =
+      asked.add kind
+      fakeHost(seq, kind, payload)
+    var sb = newSandbox()
+    let r2 = sb.execute(gap, scriptSrc, host)
+    check asked.len == 1 and r2.code == "ok" and r2.value == r1.value
+  test "a call whose key is found with another kind or payload is script_nondeterminism naming the key":
+    let (_, j) = runClean()
+    var sb = newSandbox()
+    var j2 = j
+    let r = sb.execute(j2, scriptSrc.replace("echo one", "echo two"), fakeHost)
+    check r.code == "script_nondeterminism" and "sh#0" in r.message
+  test "the key of a step is the number the caller gives it":
+    var sb = newSandbox()
+    var j = Journal()
+    var numbers = @[7, 3]
+    var next = 0
+    let host: HostCallProc = proc(seq: int; kind, payload: string): Option[string] = some("0\n")
+    let r = sb.execute(j, "ci.job({image='a'}, function(x) x:sh('one'); x:sh('two') end)", host,
+                       stepKey = proc (): string = (let n = numbers[next]; inc next; "s" & $n))
+    check r.code == "ok"
+    check j.entries.mapIt(it.key) == @["s7", "s3"]

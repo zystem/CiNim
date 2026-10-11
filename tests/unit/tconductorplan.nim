@@ -62,3 +62,20 @@ suite "RUN-009 the settings of the conductors":
     check "conductor_min" in validate(s)
     s.conductorMin = 2
     check validate(s) == ""
+
+suite "RUN-009 replacing conductors of an old image":
+  proc cs(n: int; idleSince: float; draining = false; outdated = false): CondState =
+    CondState(id: conductorId(n), idleSince: idleSince, draining: draining, outdated: outdated)
+  test "an outdated conductor is drained, whatever the wanted number and whether it leads runs":
+    check drainTargets(@[cs(1, 0.0, outdated = true), cs(2, 0.0)], desired = 2, now = 10.0, idleSeconds = 300.0) == @["cond-1"]
+    check drainTargets(@[cs(1, 0.0, outdated = true)], 1, 10.0, 300.0) == @["cond-1"]
+  test "an idle outdated conductor goes before a busy one, then by name":
+    check drainTargets(@[cs(1, 0.0, outdated = true), cs(2, 5.0, outdated = true)], 2, 10.0, 300.0) == @["cond-2"]
+    check drainTargets(@[cs(3, 0.0, outdated = true), cs(2, 0.0, outdated = true)], 3, 10.0, 300.0) == @["cond-2"]
+  test "one at a time: nothing is told while another conductor drains, or when the idle rule has chosen one":
+    check drainTargets(@[cs(1, 0.0, outdated = true), cs(2, 0.0, outdated = true), cs(3, 0.0, draining = true)], 3, 10.0, 300.0).len == 0
+    check drainTargets(@[cs(1, 0.0, outdated = true), cs(2, 0.0, outdated = true)], 2, 10.0, 300.0) == @["cond-1"]
+    check drainTargets(@[cs(1, 0.0, outdated = true), cs(2, 0.0, outdated = true), cs(3, 1.0)], 2, 1000.0, 300.0) == @["cond-3"]
+  test "up-to-date conductors are never drained for the image, and one already draining is not told again":
+    check drainTargets(@[cs(1, 0.0), cs(2, 0.0)], 2, 10.0, 300.0).len == 0
+    check drainTargets(@[cs(1, 0.0, draining = true, outdated = true), cs(2, 0.0)], 2, 10.0, 300.0).len == 0

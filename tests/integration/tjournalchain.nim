@@ -29,7 +29,7 @@ suite "T-03 the hash chain of the journal":
       ## a run whose script has asked for `n` steps in turn, each answered: params at 0, then job_sh at 1..n
       let r = co.createRun("p", "return 1")
       var tok = c.takeRunLease(master, r, "exec-t")
-      discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 0, kind: "params", payload: cast[seq[byte]]("{}")), master)
+      discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 0, key: "params#0", kind: "params", payload: cast[seq[byte]]("{}")), master)
       for i in 1 .. n:
         discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: uint64(i), kind: "job_sh", numbered: true, step_no: uint32(i),
           payload: cast[seq[byte]]("job-" & $i & "\talpine\t\t\techo " & $i)), master)
@@ -55,9 +55,21 @@ suite "T-03 the hash chain of the journal":
       check g.journal.allIt(it.hash.len == 64)
     test "the same record twice is one record":
       let r = runWithSteps(1)
-      check not c.appendRow(r, 1, "job_sh", "again", "0\n")
+      check not c.appendRow(r, "s1", "job_sh", "again", "0\n")
       check c.readRows(r).len == 2
       check checkChain(c.readRows(r), c.readTip(r)).verdict == cvOk
+    test "a record is told by its key: the order of appending is only the order, and a call without a key is refused":
+      let r = runWithSteps(2)
+      let rows = c.readRows(r)
+      check rows.mapIt(it.key) == @["params#0", "s1", "s2"]
+      check rows.mapIt(it.seq) == @[0, 1, 2]
+      check not c.appendRow(r, "s2", "job_sh", "other", "1\n")           # the key is taken: the record stays as it was
+      check c.appendRow(r, "now#0", "now", "{}", "1")
+      check c.readRows(r).mapIt(it.key) == @["params#0", "s1", "s2", "now#0"]
+      discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", r]])
+      let tok = c.takeRunLease(master, r, "exec-t")
+      let resp = handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 9, kind: "params", payload: cast[seq[byte]]("{}")), master)
+      check resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "script_error"
     test "a result changed in the database: the run does not go to an executor and ends with journal_corrupt":
       let r = runWithSteps(3)
       discard c.execute(%*[["UPDATE run_journal SET result = '0' || char(10) || 'x' WHERE run_id = ? AND seq = 2", r]])

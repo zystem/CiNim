@@ -4,7 +4,8 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 
 ## Rules of the project
 
-- Tests first; the name of a test contains the ID of the requirement it verifies. Unit tests are `nimble test` (about 5 minutes); run a single file with
+- Tests first; the name of a test contains the ID of the requirement it verifies. All unit and integration tests, in parallel, about 2 minutes: `tools/test/run.sh` (`-j 8` workers by default, more gains little; every worker has its own rqlite in a Docker container, made new at each run;
+  `-u`/`-i` only unit/integration; `texec`, `tdrain`, `tm1skeleton` need the Kubernetes client and a cluster: name them on the command line). `nimble test` runs the unit tests in turn (about 5 minutes). Run a single file with
   `nim c -r --hints:off --warnings:off --outdir:build/tests tests/unit/<file>.nim`.
 - Text in the repository is English. Docs and answers to the owner are in Russian; `docs-tr/` is the owner's gitignored Russian mirror of `docs/` (not in git: update it
   when a doc changes if it exists on your machine).
@@ -32,9 +33,10 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 - `std/net` `recv(pointer, size, timeout)` insists on all `size` bytes even on an unbuffered socket: wait with `poll` and `recv` without a timeout (`src/shim/artifacts.nim: readSome`).
 - A string made in one thread and freed in another crashes tests that use threads: use fixed arrays for what crosses.
 - Tools that write a file from itself (`open(p,'w').write(open(p).read())`) truncate it. Edit with a script that reads first, check `git diff --stat` before a commit.
-- Integration tests (`CINIM_RQLITE_URL`) need a scratch rqlite: one node, 1Gi (`helm install rqlite rqlite/rqlite --version 2.0.0 --set replicaCount=1,persistence.size=1Gi`). Port-forward to the Pod (`pod/rqlite-0 24555:4001`), not to `svc/rqlite`: through the Service the requests hang.
+- Integration tests (`CINIM_RQLITE_URL`) need a scratch rqlite; `tools/test/run.sh` starts them in Docker (RAM-backed, faster than a port-forward). By hand: `docker run -d -p 127.0.0.1:24600:4001 --tmpfs /rqlite/file:rw,size=512m,mode=1777 rqlite/rqlite -fk -disco-mode=`. Against a cluster: one node, 1Gi (`helm install rqlite rqlite/rqlite --version 2.0.0 --set replicaCount=1,persistence.size=1Gi`) and a port-forward to the Pod (`pod/rqlite-0 24555:4001`), not to `svc/rqlite`: through the Service the requests hang. A test that makes tables of its own gives them its own names (`bench_...`): the schema's names belong to the other tests.
 - The kube API proxy eats the `Authorization` header: reach the core API through a port-forward or an Ingress.
 - Kubernetes `exec` (the controller's spool fallback) goes through the API server; the controller has no direct channel to a step Pod.
+- After `helm upgrade` delete the conductor Pods only when the old controller Pods are gone from the list (`rollout status` answers while they still terminate and make a Pod from the old plan); from then on a conductor of another image is drained by the core by itself.
 - Do not use `.gitignore` patterns that can catch source files (`tests/**/t[!.]*[!.nim]` caught `*.nim.cfg`; there is a negation now).
 
 ## Where things are

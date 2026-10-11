@@ -4,7 +4,7 @@
 ## Calls with a journal record are answered from the journal (replay), the
 ## first call without one goes to the host and is appended.
 
-import std/[options, strutils]
+import std/[options, strutils, tables]
 import luac, sandbox, journal
 
 type
@@ -33,9 +33,14 @@ proc failed(code, msg: string): ExecResult =
 proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
               onAppend: proc (e: Entry) = nil; maxEntries = 100_000; runId = "";
               params: seq[(string, string)] = @[];
-              onSite: proc (seq: int; kind: string; line: int) = nil): ExecResult =
+              onSite: proc (seq: int; kind: string; line: int) = nil;
+              onCall: proc (seq: int; kind, key: string) = nil;
+              stepKey: proc (): string = nil): ExecResult =
   ## `params` are the launch parameters given when the run was created, as text. `onSite` is told, for every host call that has one, the line of the script it was made on
-  ## (a step: docs/parallel.md section 3.4); the table of step numbers is made from it.
+  ## (a step: docs/parallel.md section 3.4); the table of step numbers is made from it. Every call has a **key**, the identity under which the journal keeps its answer: for a
+  ## step `stepKey()` (the caller's `s<number>`; without one `s<n>`, the n-th step), for any other call `<kind>#<n>`, the n-th call of that kind. The journal is found by key, so
+  ## a record may be missing or be anywhere (a retry of only the failed steps, branches that end in any order): a call without a record goes to the host. `onCall` is told
+  ## the key before the host is.
   ## `runId` is passed to a real (`ci.pipeline`) script's `main(run)` as `run.run_id` (`lua/stdlib/cicd.d.lua`'s `Run` is a bigger table; only `run_id` exists so far). A script that
   ## returns a plain value directly, as the sandbox test fixtures do, ignores the extra argument.
   if not j.verify():
@@ -62,6 +67,9 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
 
   var nargs = 2.cint
   var seq = 0
+  var kindCount = initTable[string, int]()
+  var index = initTable[string, int]()           # key -> place in j.entries, so that a long journal is not searched at every call
+  for i, e in j.entries: index[e.key] = i
   while true:
     sb.resetBudget()
     var nres: cint
@@ -81,11 +89,16 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
         return failed("script_error", "unknown host call '" & kind & "'")
       if onSite != nil: onSite(seq, kind, line)          # line 0: the host call has none (a step without one is numbered from the overflow)
       var res: string
-      if seq < j.entries.len:
-        let e = j.entries[seq]
+      let n = kindCount.getOrDefault(kind, 0)
+      kindCount[kind] = n + 1
+      let key = if kind == "job_sh": (if stepKey != nil: stepKey() else: "s" & $n) else: kind & "#" & $n
+      if onCall != nil: onCall(seq, kind, key)
+      let at = index.getOrDefault(key, -1)
+      if at >= 0:
+        let e = j.entries[at]
         if e.kind != kind or e.payload != payload:
           return failed("script_nondeterminism",
-            "seq " & $seq & ": journal has " & e.kind & "(" & e.payload &
+            "seq " & $seq & " (key " & key & "): journal has " & e.kind & "(" & e.payload &
             "), script called " & kind & "(" & payload & ")")
         res = e.result
       else:
@@ -100,7 +113,8 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
           return ExecResult(status: esSuspended, code: "suspended",
                             message: "waiting on seq " & $seq & " " & kind)
         res = r.get
-        let e = j.append(kind, payload, res)
+        let e = j.append(key, kind, payload, res)
+        index[key] = j.entries.len - 1
         if onAppend != nil: onAppend(e)
       inc seq
       discard lua_pushlstring(co, res.cstring, csize_t(res.len))

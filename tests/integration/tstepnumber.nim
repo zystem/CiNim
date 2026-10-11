@@ -26,7 +26,7 @@ suite "PIP-003 the number of a step and its place in the journal":
                payload: cast[seq[byte]](key & "\talpine\t\t\techo hi"))
 
     proc stepRow(run: string; ordinal: int): JsonNode =
-      let v = c.query(%*[["SELECT ordinal, journal_seq, state FROM steps WHERE run_id = ? AND ordinal = ?", run, ordinal]])["results"][0]{"values"}
+      let v = c.query(%*[["SELECT ordinal, state FROM steps WHERE run_id = ? AND ordinal = ?", run, ordinal]])["results"][0]{"values"}
       if v == nil: newJArray() else: v
 
     proc finish(run: string; ordinal: int) =
@@ -34,14 +34,14 @@ suite "PIP-003 the number of a step and its place in the journal":
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: run, seq: uint32(ordinal), attempt: 1),
                                                          state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
 
-    test "a numbered step has the number it was given, and remembers its place in the journal":
+    test "a numbered step has the number it was given, and nothing is made at the place number":
       let (r, tok) = newRunWithLease()
       let resp = handleCall(c, co, jobSh(r, tok, 3, true, stepNo = 10), "master")
       check resp.body.kind == ExecutorResponseBodyKind.result and resp.body.result.suspended
       let row = stepRow(r, 10)
-      check row.len == 1 and row[0][0].getInt == 10 and row[0][1].getInt == 3
+      check row.len == 1 and row[0][0].getInt == 10
       check stepRow(r, 3).len == 0                     # nothing at the place number
-    test "the result of a numbered step is written at its place in the journal, and the chain holds":
+    test "the result of a numbered step is written under the key s<number>, in the order of appending, and the chain holds":
       let (r, tok) = newRunWithLease()
       discard handleCall(c, co, jobSh(r, tok, 0, true, stepNo = 0, key = "job-1"), "master")
       finish(r, 0)
@@ -49,7 +49,8 @@ suite "PIP-003 the number of a step and its place in the journal":
       discard handleCall(c, co, jobSh(r, tok2, 1, true, stepNo = 10, key = "job-2"), "master")
       finish(r, 10)
       let rows = c.readRows(r)
-      check rows.len == 2 and rows[0].seq == 0 and rows[1].seq == 1          # positions, not numbers
+      check rows.len == 2 and rows[0].seq == 0 and rows[1].seq == 1          # the order of appending
+      check rows[0].key == "s0" and rows[1].key == "s10"                     # the identity of the calls
       check c.verifyJournal(r).check.verdict == cvOk
     test "a step without a number is refused: an executor from before the tables is too old, and nothing is made":
       let (r, tok) = newRunWithLease()

@@ -11,7 +11,7 @@ import ../executor/journal as jr
 type
   Row* = object
     seq*: int
-    kind*, payload*, result*, hash*: string
+    key*, kind*, payload*, result*, hash*: string
   ChainVerdict* = enum
     cvOk
     cvBroken
@@ -21,7 +21,7 @@ type
     why*: string
 
 proc chainHash*(prev: string; r: Row): string =
-  jr.entryHash(prev, jr.Entry(seq: r.seq, kind: r.kind, payload: r.payload, result: r.result))
+  jr.entryHash(prev, jr.Entry(seq: r.seq, key: r.key, kind: r.kind, payload: r.payload, result: r.result))
 
 proc checkChain*(rows: seq[Row]; tip: string): ChainCheck =
   ## `rows` in the order of `seq`; `tip` is the hash the run keeps of its newest row

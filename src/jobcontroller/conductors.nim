@@ -77,6 +77,7 @@ func conductorPodBody*(spec: ConductorSpec; n: int): JsonNode =
            {"name": "CINIM_CONDUCTOR_ID", "value": "cond-" & $n},
            {"name": "CINIM_CONDUCTOR_CREDENTIAL", "valueFrom": {"secretKeyRef": {"name": conductorPodName(n), "key": "credential"}}},
            {"name": "CINIM_CERTS", "value": "/etc/cinim"},
+           {"name": "CINIM_CONDUCTOR_IMAGE", "value": spec.image},
            {"name": "CINIM_RUNS_PER_CONDUCTOR", "value": $spec.runsPerConductor},
            {"name": "CINIM_DRAIN_SECONDS", "value": $spec.drainSeconds}],
          "volumeMounts": [{"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true}],

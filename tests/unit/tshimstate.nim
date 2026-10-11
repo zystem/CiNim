@@ -78,8 +78,8 @@ suite "wire form and merge":
 
 suite "the real shim writes exactly this vocabulary":
   test "a run of the shim: every line parses, n counts 1..k, each event is an allowed successor of the previous":
-    let exe = getTempDir() / "cinim-shim-test"
-    check execCmd("nim c --hints:off --warnings:off -o:" & exe & " src/shim/shim.nim") == 0
+    let exe = getTempDir() / "cinim-shim-test-state"
+    check execCmd("nim c --hints:off --warnings:off --nimcache:" & exe & ".nc -o:" & exe & " src/shim/shim.nim") == 0
     for (cmd, args) in [("echo hi", newSeq[string]()), ("exit 3", newSeq[string]()),
                         ("sleep 30", @["--timeout", "1", "--term-grace", "1"])]:
       let d = getTempDir() / "shimstate-run"

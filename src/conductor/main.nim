@@ -21,7 +21,7 @@ proc wireString(b: seq[byte]): string =
 proc toJournal(entries: seq[JournalEntry]): Journal =
   # the core keeps the hash chain (T-03) and sends each record with its hash: taken as they come, and replay checks the chain
   for e in entries:
-    result.entries.add Entry(seq: int(e.seq), kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
+    result.entries.add Entry(seq: int(e.seq), key: e.key, kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
                              hash: cast[string](e.hash))
 
 # ------------------------------------------------------------------ the run process
@@ -66,9 +66,10 @@ proc runMode() =
     # more than 200 steps, or an id used twice: an error for the author, before anything is made
     send(pkFinish, wireString(Protobuf.encode(FinishRun(run_id: runId, state: RUN_STATE_FAILED, message: prep.message, code: prep.code, lease_token: token))))
     quit(0)
-  proc callCore(seq: int; kind, payload: string; numbered = false; stepNo = 0): ExecutorResponse =
+  var lastKey = ""                      # the key of the call being made, told by replay.execute before the host is asked
+  proc callCore(seq: int; kind, payload: string; numbered = false; stepNo = 0; key = ""): ExecutorResponse =
     send(pkCall, wireString(Protobuf.encode(HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind,
-                                                       payload: cast[seq[byte]](payload), numbered: numbered, step_no: uint32(stepNo)))))
+                                                       payload: cast[seq[byte]](payload), numbered: numbered, step_no: uint32(stepNo), key: key))))
     let back = readPipeFd(0)
     if back.isNone or back.get.kind != pkReply: quit(2)         # the supervisor is gone: nothing more to do here
     Protobuf.decode(cast[seq[byte]](back.get.payload), ExecutorResponse)
@@ -78,7 +79,7 @@ proc runMode() =
       send(pkLost, sent.body.failure.detail)
       quit(0)
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
-    let resp = callCore(seq, kind, payload, numbered = kind == "job_sh" and prep.numbering.lastNo >= 0, stepNo = max(prep.numbering.lastNo, 0))
+    let resp = callCore(seq, kind, payload, numbered = kind == "job_sh" and prep.numbering.lastNo >= 0, stepNo = max(prep.numbering.lastNo, 0), key = lastKey)
     if resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "lease_lost":
       lostLease = resp.body.failure.detail
       return none(string)
@@ -88,7 +89,9 @@ proc runMode() =
     if resp.body.result.suspended: return none(string)
     some(cast[string](resp.body.result.result))
   let r = replay.execute(sb, jj, g.script, host, runId = runId, params = g.params.mapIt((it.key, it.value)),
-                         onSite = proc (seq: int; kind: string; line: int) = prep.numbering.onSite(kind, line))
+                         onSite = proc (seq: int; kind: string; line: int) = prep.numbering.onSite(kind, line),
+                         onCall = proc (seq: int; kind, key: string) = (lastKey = key),
+                         stepKey = proc (): string = "s" & $max(prep.numbering.lastNo, 0))
   if lostLease.len > 0:
     send(pkLost, lostLease)
   elif r.status == esSuspended:
@@ -183,7 +186,7 @@ proc main() =
   proc sendHello() =
     inc frameNo
     let free = if stopping: 0 else: max(0, perConductor - runs.len)
-    let hello = ConductorHello(conductor_id: conductorId, namespace: ns, credential: credential,
+    let hello = ConductorHello(conductor_id: conductorId, namespace: ns, credential: credential, image: getEnv("CINIM_CONDUCTOR_IMAGE"),
                                api_versions: executorApiVersions().mapIt(uint32(it)), free_places: uint32(free), held_runs: toSeq(runs.keys))
     discard conn.sendFrame(frame(session, "conductor.hello", wireString(Protobuf.encode(hello)), id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
     helloDirty = false

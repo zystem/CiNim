@@ -18,19 +18,19 @@ type ClaimArgs = tuple[url, ctrl: string; claimed: ptr seq[int]]
 proc claimer(a: ClaimArgs) {.thread.} =
   var c = newRq(a.url)
   while true:
-    let r = c.execute(%*[["UPDATE steps SET state='dispatched', controller_id=?, pod_name='pod-'||id, version=version+1 " &
-      "WHERE id=(SELECT id FROM steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, queued_at LIMIT 1) " &
+    let r = c.execute(%*[["UPDATE bench_steps SET state='dispatched', controller_id=?, pod_name='pod-'||id, version=version+1 " &
+      "WHERE id=(SELECT id FROM bench_steps WHERE state='queued' AND profile_id='p' ORDER BY priority DESC, queued_at LIMIT 1) " &
       "AND state='queued' RETURNING id", a.ctrl]])
     let vals = r["results"][0]{"values"}
     if vals == nil or vals.len == 0: break
     a.claimed[].add vals[0][0].getInt
 
 proc setupSteps(c: var RqClient; n: int) =
-  discard c.execute(%*["DROP TABLE IF EXISTS steps",
-    "CREATE TABLE steps(id INTEGER PRIMARY KEY, state TEXT, profile_id TEXT, priority INT, queued_at INT, controller_id TEXT, pod_name TEXT, version INT DEFAULT 0)"])
+  discard c.execute(%*["DROP TABLE IF EXISTS bench_steps",
+    "CREATE TABLE bench_steps(id INTEGER PRIMARY KEY, state TEXT, profile_id TEXT, priority INT, queued_at INT, controller_id TEXT, pod_name TEXT, version INT DEFAULT 0)"])
   var stmts = newJArray()
   for i in 1 .. n:
-    stmts.add %*[ "INSERT INTO steps(state,profile_id,priority,queued_at) VALUES ('queued','p',?,?)", i mod 5, i]
+    stmts.add %*[ "INSERT INTO bench_steps(state,profile_id,priority,queued_at) VALUES ('queued','p',?,?)", i mod 5, i]
   discard c.execute(stmts, transaction = true)
 
 suite "7.2 rqlite as state store":
@@ -56,30 +56,30 @@ suite "7.2 rqlite as state store":
       check total == 300
       check all.len == 300   # no id claimed twice
       report "claim_300_steps_8_clients_s", dt.formatFloat(ffDecimal, 2)
-      let q = c.query(%*["SELECT count(*) FROM steps WHERE state='queued'"])
+      let q = c.query(%*["SELECT count(*) FROM bench_steps WHERE state='queued'"])
       check q["results"][0]["values"][0][0].getInt == 0
 
     test "7.2 CAS on version: of two racing writers exactly one wins":
       var c = newRq(url)
       setupSteps(c, 1)
-      let a = c.execute(%*[["UPDATE steps SET state='running', version=version+1 WHERE id=1 AND version=?", 0]])
-      let b = c.execute(%*[["UPDATE steps SET state='cancelled', version=version+1 WHERE id=1 AND version=?", 0]])
+      let a = c.execute(%*[["UPDATE bench_steps SET state='running', version=version+1 WHERE id=1 AND version=?", 0]])
+      let b = c.execute(%*[["UPDATE bench_steps SET state='cancelled', version=version+1 WHERE id=1 AND version=?", 0]])
       check a["results"][0]{"rows_affected"}.getInt(0) == 1
       check b["results"][0]{"rows_affected"}.getInt(0) == 0  # rqlite omits the field at 0
 
     test "7.2 journal batch and state change commit atomically":
       var c = newRq(url)
-      discard c.execute(%*["DROP TABLE IF EXISTS journal", "CREATE TABLE journal(run INT, seq INT, body TEXT, PRIMARY KEY(run, seq))"])
+      discard c.execute(%*["DROP TABLE IF EXISTS bench_journal", "CREATE TABLE bench_journal(run INT, seq INT, body TEXT, PRIMARY KEY(run, seq))"])
       setupSteps(c, 1)
       # the last statement violates the primary key: nothing of the batch may persist
-      discard c.execute(%*["INSERT INTO journal VALUES (1, 0, 'x')"])
+      discard c.execute(%*["INSERT INTO bench_journal VALUES (1, 0, 'x')"])
       var failed = false
       try:
-        discard c.execute(%*[["UPDATE steps SET state='done', version=version+1 WHERE id=1"],
-          ["INSERT INTO journal VALUES (1, 1, 'y')"], ["INSERT INTO journal VALUES (1, 0, 'dup')"]], transaction = true)
+        discard c.execute(%*[["UPDATE bench_steps SET state='done', version=version+1 WHERE id=1"],
+          ["INSERT INTO bench_journal VALUES (1, 1, 'y')"], ["INSERT INTO bench_journal VALUES (1, 0, 'dup')"]], transaction = true)
       except RqError: failed = true
       check failed
-      let s = c.query(%*["SELECT state FROM steps WHERE id=1", "SELECT count(*) FROM journal"])
+      let s = c.query(%*["SELECT state FROM bench_steps WHERE id=1", "SELECT count(*) FROM bench_journal"])
       check s["results"][0]["values"][0][0].getStr == "queued"
       check s["results"][1]["values"][0][0].getInt == 1
 

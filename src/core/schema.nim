@@ -144,9 +144,9 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600"),
       ("runs", "api_version", "INTEGER NOT NULL DEFAULT 1"),      # PIP-001, common/luaapi.nim: the version of the Lua host API the run was made with
       ("runs", "journal_tip", "TEXT NOT NULL DEFAULT ''"),        # T-03, core/journalchain.nim: the hash of the newest record of the run's journal
+      ("run_journal", "call_key", "TEXT NOT NULL DEFAULT ''"),    # the identity of the call the record answers (docs/parallel.md section 4); seq is the order of appending
       ("run_journal", "hash", "TEXT NOT NULL DEFAULT ''"),        # the chain: SHA-256 of the previous hash and this record
       ("runs", "step_table", "TEXT NOT NULL DEFAULT ''"),         # docs/parallel.md section 3.4: the table of step numbers, sent by the executor with the first lease
-      ("steps", "journal_seq", "INTEGER"),                       # the place of the step in the run journal; NULL: the same as ordinal (a step made before the tables)
       ("runs", "lease_attempt", "INTEGER NOT NULL DEFAULT 0"),    # RUN-008, core/runlease.nim: the attempt of the last lease of the run,
       ("runs", "lease_until", "INTEGER NOT NULL DEFAULT 0"),      # when it runs out (0: given back),
       ("runs", "lease_owner", "TEXT NOT NULL DEFAULT ''"),        # and to whom (the executor's id, for the operator)
@@ -156,6 +156,7 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "conductor_min", "INTEGER NOT NULL DEFAULT 1")]:           # conductors kept warm
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
+  discard c.execute(%*[["CREATE UNIQUE INDEX IF NOT EXISTS run_journal_key ON run_journal (run_id, call_key) WHERE call_key != ''"]])      # a call has one record
   discard c.execute(%*[["CREATE INDEX IF NOT EXISTS runs_storage ON runs (profile_id, storage_released, state)"]])    # what the polls of the controllers ask (core/runstorage.nim)
 
 proc seedDefaultProfile*(c: var RqClient; namespace: string; id = "default"): string =

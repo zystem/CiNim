@@ -15,7 +15,8 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 ## Deleted (2026-10-11)
 
 * The shared executor service (`src/executorsvc`, `ExecutorChannel` on port 19741, the chart's executor Deployment, the lease request of the protocol, `handleLease`, `leaseCandidates`): the conductors lead every run; the chart has no `conductor.enabled` any more.
-* A step with `journal_seq` NULL at `ordinal`, a host call with `numbered` false: the core refuses a `job_sh` without a number (`executor_too_old`); the column is always set; the live database was filled in by hand before the rollout.
+* A host call with `numbered` false: the core refuses a `job_sh` without a number (`executor_too_old`); `steps.journal_seq` is gone.
+* A journal record without a key (the plan was to read it as `m#<seq + 1>`): there is no such reading; the keys came in the same rollout and the runs with journals from before were deleted from the live database. `run_journal.call_key` is `''` only in the tests that forge a record.
 * A journal without a hash chain (`cvLegacy`, `adoptLegacyLocked`, `legacyHashes`): such a journal is `journal_corrupt` like any other that does not hold; the runs of the live database that had one were deleted.
 * The executors chain no record of their own: a record without a hash is `journal_corrupt` at replay.
 * An empty `api_versions` as version 1, and `api_version` 0 as 1: a lease request that names no versions is refused (`executor_too_old`).

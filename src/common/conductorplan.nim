@@ -3,7 +3,7 @@
 ## The number is computed, not set: `ceil(runs that are active or wait / runs_per_conductor)`, with at most `pod_limit` runs counted (an organisation
 ## never has more active runs than that), at least `conductor_min`, at most `ceil(pod_limit / runs_per_conductor)`. The conductors are named
 ## `cond-1` .. `cond-N`; the controller makes the first N, and the core drains the ones above N when they have been idle for the idle time.
-import std/[strutils, options]
+import std/[strutils, options, algorithm, sequtils]
 
 const
   defaultRunsPerConductor* = 10
@@ -15,6 +15,7 @@ type CondState* = object
   id*: string
   idleSince*: float          ## when it last had no run to lead; 0 while it holds one
   draining*: bool            ## it was told to drain
+  outdated*: bool            ## it runs from another image than the one the core hands out now
 
 func maxConductors*(podLimit, perConductor: int): int =
   let per = max(perConductor, 1)
@@ -41,3 +42,13 @@ func drainTargets*(conds: seq[CondState]; desired: int; now, idleSeconds: float)
     let n = conductorNumber(c.id)
     if n.isNone or n.get <= desired or c.draining: continue
     if c.idleSince > 0 and now - c.idleSince >= idleSeconds: result.add c.id
+  # replacement by a new image (docs/conductors.md section 5): one at a time, nothing is told while another conductor drains; an idle one goes first,
+  # then the others by name; the runs a busy one holds are suspended by its drain and taken by another conductor. The number wanted does not matter
+  if result.len > 0 or conds.anyIt(it.draining): return
+  var outdated: seq[CondState]
+  for c in conds:
+    if c.outdated: outdated.add c
+  if outdated.len == 0: return
+  func rank(c: CondState): (int, string) = ((if c.idleSince > 0: 0 else: 1), c.id)
+  outdated.sort(proc (a, b: CondState): int = cmp(rank(a), rank(b)))
+  result.add outdated[0].id

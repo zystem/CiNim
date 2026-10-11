@@ -42,10 +42,10 @@ suite "RUN-016 conductors on the push channel":
       co.setProfileSettings(s, prof)
       (prof, ns)
 
-    proc hello(session, id, ns: string; places: int; ack = 0'u64; fid = 1'u64; held: seq[string] = @[]; credential = ""): StreamFrame =
+    proc hello(session, id, ns: string; places: int; ack = 0'u64; fid = 1'u64; held: seq[string] = @[]; credential = ""; image = ""): StreamFrame =
       let cred = if credential.len > 0: credential else: conductorCredential(master, ns, id)
       frame(session, "conductor.hello", encodeHello(ConductorHello(conductor_id: id, namespace: ns, credential: cred, api_versions: @[1'u32],
-        free_places: uint32(places), held_runs: held)), id = fid, ack = ack, key = ns)
+        free_places: uint32(places), held_runs: held, image: image)), id = fid, ack = ack, key = ns)
 
     proc call(session, ns: string; fid: uint64; req: ExecutorRequest; ack = 0'u64): StreamFrame =
       frame(session, "conductor.call", encodeExecRequest(req), id = fid, ack = ack, key = ns)
@@ -53,7 +53,7 @@ suite "RUN-016 conductors on the push channel":
     proc hostCall(runId, token, kind, payload: string; seq = 1): ExecutorRequest =
       ExecutorRequest(header: Header(protocol: 1), body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.call,
         call: HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind, payload: cast[seq[byte]](payload),
-                       numbered: kind == "job_sh", step_no: uint32(seq))))
+                       numbered: kind == "job_sh", step_no: uint32(seq), key: (if kind == "params": "params#0" else: ""))))
 
     proc finishReq(runId, token: string): ExecutorRequest =
       ExecutorRequest(header: Header(protocol: 1), body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.finish,
@@ -236,6 +236,26 @@ suite "RUN-016 conductors on the push channel":
       drainPassSeconds = 10.0
       keep.close()
       extra.close()
+    test "RUN-009 a conductor of another image than the core hands out is told to drain, one at a time, while an up-to-date one is left alone":
+      let o = newOrg()
+      let was = conductorImage
+      conductorImage = "reg/cinim-conductor:new"
+      conductorIdleSeconds = 300.0
+      drainPassSeconds = 1.0
+      var old1 = connectStream(serverAddr, corePub, clientKeys)
+      var old2 = connectStream(serverAddr, corePub, clientKeys)
+      var fresh = connectStream(serverAddr, corePub, clientKeys)
+      check old1.sendFrame(hello("cd-i1-" & sfx, "cond-1", o.ns, 5, image = "reg/cinim-conductor:old"))
+      check old2.sendFrame(hello("cd-i2-" & sfx, "cond-2", o.ns, 5, image = "reg/cinim-conductor:old"))
+      check fresh.sendFrame(hello("cd-i3-" & sfx, "cond-3", o.ns, 5, image = "reg/cinim-conductor:new"))
+      check old1.nextKind("conductor.drain", 8000).isSome           # the first by name
+      check old2.nextKind("conductor.drain", 2500).isNone           # one at a time
+      check fresh.nextKind("conductor.drain", 100).isNone
+      old1.close()
+      conductorImage = was
+      drainPassSeconds = 10.0
+      old2.close()
+      fresh.close()
     test "a hello from a session the core does not know, with an acknowledgement above 0, is told to start again, and is welcomed when it does":
       let o = newOrg()
       let r = co.createRun("p", "return 1", "t1", o.profile)

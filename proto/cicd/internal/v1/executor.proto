@@ -12,7 +12,8 @@ message JournalEntry {
   string kind = 2;                   // now | random | sleep | job | sh | use | env | parallel | spawn | wait | input | run | ...
   bytes payload = 3;                 // canonical JSON of the call arguments (sorted keys); part of the fingerprint
   bytes result = 4;                  // canonical JSON of the result
-  bytes hash = 5;                    // SHA-256(prev_hash || seq || kind || payload || result), length-prefixed fields
+  bytes hash = 5;                    // SHA-256(prev_hash || seq || key || kind || payload || result), length-prefixed fields
+  string key = 6;                    // the identity of the call this record answers (`s<step number>`, `<kind>#<n>`); `seq` is only the place in which it was appended
 }
 
 // What a conductor (docs/conductors.md) says to the core on the push channel when it connects, when its free places change, and every few seconds.
@@ -24,6 +25,7 @@ message ConductorHello {
   repeated uint32 api_versions = 4;   // the versions of the Lua host API it can run (PIP-001)
   uint32 free_places = 5;             // how many more runs it can take (of runs_per_conductor): the credit of the core's leases
   repeated string held_runs = 6;      // the runs it holds now, so that the core and the conductor agree after a reconnect
+  string image = 7;                   // the image it runs from (CINIM_CONDUCTOR_IMAGE of its Pod); the core drains a conductor whose image is not the one it hands out
 }
 
 message HostCall {
@@ -34,6 +36,7 @@ message HostCall {
   bytes payload = 5;
   bool numbered = 6;                 // the executor gave this step a number from its table (docs/parallel.md section 3): `step_no`; false: an executor from before the tables, the number is `seq`
   uint32 step_no = 7;                // the number of the step (StepRef.seq); need not be `seq`, the place in the journal
+  string key = 8;                    // the key of the call in the journal (`params#0`); a step's key is made by the core from `step_no`
 }
 
 message HostResult {

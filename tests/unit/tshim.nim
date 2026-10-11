@@ -16,7 +16,7 @@ proc runShim(dir: string; cmd: string; extraArgs: seq[string] = @[]): tuple[code
 
 suite "RUN-010 runner shim":
   test "setup: compile the shim":
-    check execCmd("nim c --hints:off --warnings:off -o:" & shimExe & " src/shim/shim.nim") == 0
+    check execCmd("nim c --hints:off --warnings:off --nimcache:" & shimExe & ".nc -o:" & shimExe & " src/shim/shim.nim") == 0
 
   test "RUN-010 successful step: exit 0, termination message with outputs digest":
     let d = getTempDir() / "shim-t1"; createDir(d)
@@ -204,7 +204,7 @@ suite "secret masking through the log pipeline (docs/secrets-masking.md)":
   var available = false
 
   test "setup: compile the logging shim":
-    available = execCmd("nim c --hints:off --warnings:off -d:shimLogging -o:" & logExe & " src/shim/shim.nim") == 0 and
+    available = execCmd("nim c --hints:off --warnings:off -d:shimLogging --nimcache:" & logExe & ".nc -o:" & logExe & " src/shim/shim.nim") == 0 and
                 dirExists(certs / "curve")
     if not available: skip()
 

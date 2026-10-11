@@ -12,8 +12,8 @@ proc addStep(c: var RqClient; runId, profileId: string) =
   ## what a host call of the executor leaves behind: a pending step in the profile of the run
   let jobId = newId()
   discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j', 'RUNNING', ?)", jobId, runId, profileId]])
-  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, journal_seq, type, state, profile_id, image, command, opts, queued_at) " &
-    "VALUES (?, ?, ?, 1, 1, 'sh', 'PENDING', ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, profileId, "1"]])
+  discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) " &
+    "VALUES (?, ?, ?, 1, 'sh', 'PENDING', ?, 'alpine', 'true', '', ?)", newId(), runId, jobId, profileId, "1"]])
 
 suite "SHD-007 runs and controllers per organisation":
   if url.len == 0:

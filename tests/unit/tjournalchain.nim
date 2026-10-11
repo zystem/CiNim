@@ -8,7 +8,7 @@ proc rows(n: int): seq[Row] =
   ## a journal of n entries as the core would have stored it
   var prev = ""
   for i in 0 ..< n:
-    var r = Row(seq: i, kind: (if i == 0: "params" else: "job_sh"), payload: "payload-" & $i, result: "result-" & $i)
+    var r = Row(seq: i, key: (if i == 0: "params#0" else: "s" & $i), kind: (if i == 0: "params" else: "job_sh"), payload: "payload-" & $i, result: "result-" & $i)
     r.hash = chainHash(prev, r)
     prev = r.hash
     result.add r
@@ -17,7 +17,7 @@ suite "T-03 the hash chain computed by the core":
   test "it is the very chain the executor builds, so an executor can check what the core stored":
     var j = Journal()
     let rs = rows(4)
-    for r in rs: discard j.append(r.kind, r.payload, r.result)
+    for r in rs: discard j.append(r.key, r.kind, r.payload, r.result)
     for i, r in rs: check r.hash == j.entries[i].hash
   test "a journal that was written properly is whole":
     let rs = rows(5)
