@@ -17,7 +17,7 @@ suite "PIP-003 the number of a step and its place in the journal":
     let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns")
 
     proc newRunWithLease(): tuple[run, token: string] =
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       let g = c.grantLease("master", r, "exec", @[1])
       (r, g.get.lease_token)
 
@@ -64,6 +64,15 @@ suite "PIP-003 the number of a step and its place in the journal":
       discard handleCall(c, co, jobSh(r, tok, 0, true, stepNo = 7), "master")
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 1
 
+    test "VAR-004 a step whose env names something a step may not set (STO-004) is refused with the reason, and nothing is made":
+      let (r, tok) = newRunWithLease()
+      for opts in ["""{"env":{"PATH":"/x"}}""", """{"step_env":{"LD_PRELOAD":"/x.so"}}""", """{"env":{"CICD_ENV":"x"}}"""]:
+        let call = HostCall(run_id: r, lease_token: tok, seq: 0, kind: "job_sh", numbered: true, step_no: 0,
+                            payload: cast[seq[byte]]("job-1\talpine\t\t" & opts & "\techo hi"))
+        let resp = handleCall(c, co, call, "master")
+        check resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "script_error" and "STO-004" in resp.body.failure.detail
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
+
 suite "PIP-003 the table is kept with the run":
   if url.len == 0:
     echo "  skipped: CINIM_RQLITE_URL is not set"
@@ -76,7 +85,7 @@ suite "PIP-003 the table is kept with the run":
       HostCall(run_id: run, lease_token: token, seq: 0, kind: "table", payload: cast[seq[byte]](text))
 
     test "the table sent by the executor is stored once and goes with every lease of the run":
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       let g = c.grantLease("master", r, "exec", @[1]).get
       check g.step_table == ""                          # nothing yet: the executor makes it
       let resp = handleCall(c, co, tableCall(r, g.lease_token, "{\"v\":1,\"b\":[[3,0,1,1]]}"), "master")
@@ -85,19 +94,19 @@ suite "PIP-003 the table is kept with the run":
       let again = c.grantLease("master", r, "exec", @[1]).get
       check again.step_table == "{\"v\":1,\"b\":[[3,0,1,1]]}"
     test "the first table stays: a second one is answered and ignored":
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       let g = c.grantLease("master", r, "exec", @[1]).get
       discard handleCall(c, co, tableCall(r, g.lease_token, "FIRST"), "master")
       discard handleCall(c, co, tableCall(r, g.lease_token, "SECOND"), "master")
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", r]])
       check c.grantLease("master", r, "exec", @[1]).get.step_table == "FIRST"
     test "only the holder of the lease may send it":
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       discard c.grantLease("master", r, "exec", @[1])
       let resp = handleCall(c, co, tableCall(r, "forged", "X"), "master")
       check resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "lease_lost"
     test "a table that is too large is refused":
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       let g = c.grantLease("master", r, "exec", @[1]).get
       let resp = handleCall(c, co, tableCall(r, g.lease_token, 'x'.repeat(70_000)), "master")
       check resp.body.kind == ExecutorResponseBodyKind.failure

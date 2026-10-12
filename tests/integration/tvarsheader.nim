@@ -39,7 +39,7 @@ suite "VAR-005 which step names the variables":
     test "the first step of the run gets the list of the names, the next ones do not":
       let o = newOrg()
       check c.setVariable(o.id, "REGION", "eu", getTime().toUnix()) == ""
-      let r = co.createRun("p", "return 1", o.id, o.profile, @[("TARGET", "staging")])
+      let r = co.createRun("return 1", o.id, o.profile, @[("TARGET", "staging")])
       addStep(r, o.profile, 0)
       addStep(r, o.profile, 1)
       let first = poll(o.ns)
@@ -51,16 +51,32 @@ suite "VAR-005 which step names the variables":
       check second[0].env.filterIt(it.startsWith("CICD_VARIABLES")).len == 0 and "REGION=eu" in second[0].env
     test "a run with no variables and no parameters has no header to print":
       let o = newOrg()
-      let r = co.createRun("p", "return 1", o.id, o.profile)
+      let r = co.createRun("return 1", o.id, o.profile)
       addStep(r, o.profile, 0)
       let got = poll(o.ns)
       check got.len == 1 and got[0].env.len == 0
     test "a step that is run again (a new attempt) does not print the header again":
       let o = newOrg()
       check c.setVariable(o.id, "A", "1", getTime().toUnix()) == ""
-      let r = co.createRun("p", "return 1", o.id, o.profile)
+      let r = co.createRun("return 1", o.id, o.profile)
       addStep(r, o.profile, 0)
       check poll(o.ns).len == 1
       discard c.execute(%*[["UPDATE steps SET state = 'PENDING', attempt = 2, claimed_at = 0 WHERE run_id = ?", r]])
       let again = poll(o.ns)
       check again.len == 1 and again[0].env.filterIt(it.startsWith("CICD_VARIABLES")).len == 0
+
+    test "VAR-004 the env of the pipeline and of the job is above the variables of the organisation and the launch parameters, and in the header's names":
+      let o = newOrg()
+      check c.setVariable(o.id, "REGION", "eu", getTime().toUnix()) == ""
+      check c.setVariable(o.id, "TARGET", "from-the-organisation", getTime().toUnix()) == ""
+      let r = co.createRun("return 1", o.id, o.profile, @[("TARGET", "staging"), ("MODE", "launch")])
+      let jobId = newId()
+      discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j9', 'RUNNING', ?)", jobId, r, o.profile]])
+      discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) VALUES (?, ?, ?, 0, 'sh', 'PENDING', ?, 'alpine', 'true', ?, '1')",
+        newId(), r, jobId, o.profile, """{"env":{"MODE":"job","NEW":"n"},"step_env":{"ONLY":"shim"}}"""]])
+      let got = poll(o.ns)
+      check got.len == 1
+      check "REGION=eu" in got[0].env and "TARGET=staging" in got[0].env           # the launch parameter is above the organisation
+      check "MODE=job" in got[0].env and "MODE=launch" notin got[0].env and "NEW=n" in got[0].env       # the env of the job is above the launch parameter
+      check "ONLY=shim" notin got[0].env                                          # the step's own env is the shim's to apply, after $CICD_ENV
+      check "CICD_VARIABLES=MODE,NEW,REGION,TARGET" in got[0].env.mapIt(it) or got[0].env.anyIt(it.startsWith("CICD_VARIABLES=") and "NEW" in it and "MODE" in it)

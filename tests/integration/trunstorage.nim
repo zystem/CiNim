@@ -29,10 +29,10 @@ suite "STO-006 the volume of a finished run":
       handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-s-" & sfx, namespace: ns, free_pod_slots: 0, storage_released: released)).release_storage
 
     test "a run that is still going keeps its volume; one that succeeded releases it at once; one that failed a day later":
-      let going = co.createRun("p", "return 1", org, prof)
-      let ok = co.createRun("p", "return 1", org, prof)
-      let failedNow = co.createRun("p", "return 1", org, prof)
-      let failedOld = co.createRun("p", "return 1", org, prof)
+      let going = co.createRun("return 1", org, prof)
+      let ok = co.createRun("return 1", org, prof)
+      let failedNow = co.createRun("return 1", org, prof)
+      let failedOld = co.createRun("return 1", org, prof)
       setState(ok, "SUCCEEDED", 5)
       setState(failedNow, "FAILED", 60)
       setState(failedOld, "FAILED", 7200)
@@ -40,20 +40,20 @@ suite "STO-006 the volume of a finished run":
       check ok in named and failedOld in named
       check going notin named and failedNow notin named
     test "the controller's answer ends it: a released run is not named again, the others are until their turn":
-      let a = co.createRun("p", "return 1", org, prof)
+      let a = co.createRun("return 1", org, prof)
       setState(a, "SUCCEEDED", 5)
       check a in poll(@["s1_nothing"])    # a poll that carries an answer looks at once; without one it looks every ten seconds
       check a notin poll(@[a])
       check a notin poll(@[a])
     test "another organisation's controller is not told about this one's runs":
-      let r = co.createRun("p", "return 1", org, prof)
+      let r = co.createRun("return 1", org, prof)
       setState(r, "SUCCEEDED", 5)
       let other = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-o-" & sfx, namespace: "cinim-001-nobody-" & sfx, free_pod_slots: 0,
         storage_released: @[]))
       check r notin other.release_storage
     test "a negative retention keeps the volume for good":
       putEnv("CINIM_STORAGE_RETENTION_FAILED", "-1")
-      let r = co.createRun("p", "return 1", org, prof)
+      let r = co.createRun("return 1", org, prof)
       setState(r, "FAILED", 100000)
       check r notin poll(@["s1_nothing"])
       putEnv("CINIM_STORAGE_RETENTION_FAILED", "3600")
@@ -77,7 +77,7 @@ suite "STO-006 the volume of a failed run: the grace after a start and the press
     putEnv("CINIM_STORAGE_RETENTION_FAILED", "600")
     putEnv("CINIM_STORAGE_RETENTION_PRESSURE", "60")
     proc failed(endedAgo: int): string =
-      result = co.createRun("p", "return 1", org, prof)
+      result = co.createRun("return 1", org, prof)
       discard c.execute(%*[["UPDATE runs SET state = 'FAILED', updated_at = ? WHERE id = ?", $(getTime().toUnix() - endedAgo), result]])
     proc poll(used = 0'u64, hard = 0'u64): seq[string] =
       handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-sp-" & sfx, namespace: ns, free_pod_slots: 0,

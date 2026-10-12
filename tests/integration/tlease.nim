@@ -34,18 +34,18 @@ suite "RUN-008 the lease of a run":
       v != nil and v.len > 0
 
     test "a run is leased to one executor; the second is told it is taken":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let a = c.takeRunLease(master, r, "exec-a")
       check a.len > 0 and a.startsWith("1.")
       check c.takeRunLease(master, r, "exec-b") == ""
       check attemptOf(r) == 1 and untilOf(r) > getTime().toUnix()
     test "a run that is not RUNNING cannot be leased":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", r]])
       check c.takeRunLease(master, r, "exec-a") == ""
     test "the holder's calls are answered; a made-up token and the token of another run are refused":
-      let r = co.createRun("p", "return 1")
-      let other = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
+      let other = co.createRun("return 1")
       let tok = c.takeRunLease(master, r, "exec-a")
       let otherTok = c.takeRunLease(master, other, "exec-a")
       check params(r, tok).answered
@@ -54,7 +54,7 @@ suite "RUN-008 the lease of a run":
       check params(r, otherTok).refused
       check params(r, tok).answered                       # the refusals did not harm the holder
     test "suspending the run gives the lease back, and the old token is worth nothing":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let tok = c.takeRunLease(master, r, "exec-a")
       let resp = jobSh(r, tok)
       check resp.answered and resp.body.result.suspended
@@ -68,7 +68,7 @@ suite "RUN-008 the lease of a run":
       check params(r, tok).refused                         # the first token is of attempt 1
       check params(r, b).answered
     test "a lease that ran out is taken by another executor, and the first one is refused when it comes back":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let a = c.takeRunLease(master, r, "exec-a")
       discard c.execute(%*[["UPDATE runs SET lease_until = ? WHERE id = ?", getTime().toUnix() - 5, r]])
       check leasable(r)
@@ -77,13 +77,13 @@ suite "RUN-008 the lease of a run":
       check params(r, a).refused
       check params(r, b).answered
     test "a lease that ran out and was not taken goes on for its holder, and is renewed":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let a = c.takeRunLease(master, r, "exec-a")
       discard c.execute(%*[["UPDATE runs SET lease_until = ? WHERE id = ?", getTime().toUnix() - 5, r]])
       check params(r, a).answered
       check untilOf(r) > getTime().toUnix() + 30
     test "the lease is written again only when half of it is gone":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let a = c.takeRunLease(master, r, "exec-a")
       let first = untilOf(r)
       discard params(r, a)
@@ -92,7 +92,7 @@ suite "RUN-008 the lease of a run":
       discard params(r, a)
       check untilOf(r) > getTime().toUnix() + 50
     test "only the holder can end the run":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let a = c.takeRunLease(master, r, "exec-a")
       let fin = proc (token: string): ExecutorResponse =
         handleFinish(c, FinishRun(run_id: r, state: RUN_STATE_SUCCEEDED, lease_token: token), master)

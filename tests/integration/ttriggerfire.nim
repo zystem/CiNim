@@ -20,7 +20,7 @@ suite "TRG-004 concurrency of a trigger":
     var n = 0
     proc newTrigger(concurrency: string): TriggerRow =
       inc n
-      let made = c.createTrigger(orgId, TriggerSpec(name: "t" & $n, kind: "webhook", projectId: "p", script: "return 1", concurrency: concurrency, enabled: true), getTime().toUnix())
+      let made = c.createTrigger(orgId, TriggerSpec(name: "t" & $n, kind: "webhook", script: "return 1", concurrency: concurrency, enabled: true), getTime().toUnix())
       c.getTriggerById(made.id).row
     proc stateOf(run: string): string =
       c.query(%*[["SELECT state FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getStr

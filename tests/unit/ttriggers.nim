@@ -3,7 +3,7 @@ import std/[unittest, json, strutils]
 import core/triggers
 
 proc spec(extra: JsonNode = nil): JsonNode =
-  result = %*{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "project_id": "p1", "script": "return ci.pipeline({main=function() end})"}
+  result = %*{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "script": "return ci.pipeline({main=function() end})"}
   if extra != nil:
     for k, v in extra: result[k] = v
 
@@ -34,7 +34,9 @@ suite "TRG-002 trigger definitions":
       let r = parseTriggerSpec(spec(%*{"concurrency": ok}))
       check r.error == "" and r.spec.concurrency == ok
     check parseTriggerSpec(spec(%*{"concurrency": "queue"})).error == "concurrency is parallel, cancel_newest or cancel_previous"
-    check parseTriggerSpec(spec(%*{"project_id": ""})).error.contains("project_id")
+    check parseTriggerSpec(spec(%*{"group": "/team//backend/"})).spec.groupPath == "team/backend"         # the group is named by its path; the API looks it up
+    check parseTriggerSpec(spec()).spec.groupPath == ""                                                    # none: the organisation itself
+    check parseTriggerSpec(spec(%*{"group": 5})).error.contains("string")
     check parseTriggerSpec(spec(%*{"script": ""})).error.contains("script")
     check parseTriggerSpec(spec(%*{"script": "x".repeat(maxScriptBytes + 1)})).error.contains("longer")
     check parseTriggerSpec(spec(%*{"enabled": "yes"})).error.contains("boolean")
@@ -48,7 +50,7 @@ suite "TRG-002 trigger definitions":
 
   test "TRG-002 the view never shows the secret, its hash or the script":
     let t = TriggerRow(id: "s1_x", slug: "acme", name: "hook", kind: "webhook", secretHash: "deadbeef", script: "secret script",
-                       projectId: "p", concurrency: "parallel", enabled: true, params: @[("A", "1")], lastRunId: "s1_r", lastResult: "started")
+                       groupPath: "", groupId: "", concurrency: "parallel", enabled: true, params: @[("A", "1")], lastRunId: "s1_r", lastResult: "started")
     let v = view(t)
     check $v notin ["deadbeef"] and "deadbeef" notin $v and "secret script" notin $v
     check v["hook"].getStr == "/api/v1/hooks/s1_x" and v["params"]["A"].getStr == "1" and v["script_bytes"].getInt == 13

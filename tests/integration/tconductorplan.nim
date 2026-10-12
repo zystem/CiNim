@@ -48,17 +48,17 @@ suite "RUN-009 the plan of the conductors in the answer to a report":
       check p.credentials[0].credential == conductorCredential("master", o.ns, "cond-1")
     test "the number follows the runs: 25 runs with 10 to a conductor are 3, cut to what pod_limit allows":
       let o = newOrg(podLimit = 20)
-      for i in 0 ..< 25: discard co.createRun("p", "return 1", "t1", o.profile)
+      for i in 0 ..< 25: discard co.createRun("return 1", "t1", o.profile)
       let p = report(o.ns).conductors
       check p.desired == 2                                # at most 20 runs are active, 10 to a conductor
       check p.credentials.mapIt(it.id) == @["cond-1", "cond-2"]
       let o2 = newOrg(podLimit = 100)
-      for i in 0 ..< 25: discard co.createRun("p", "return 1", "t1", o2.profile)
+      for i in 0 ..< 25: discard co.createRun("return 1", "t1", o2.profile)
       check report(o2.ns).conductors.desired == 3
     test "conductor_min 0 lets an organisation scale to zero, and the first run brings a conductor":
       let o = newOrg(minimum = 0)
       check report(o.ns).conductors.desired == 0
-      discard co.createRun("p", "return 1", "t1", o.profile)
+      discard co.createRun("return 1", "t1", o.profile)
       check report(o.ns).conductors.desired == 1
     test "the credential of one organisation's conductor is not another's":
       let a = newOrg()

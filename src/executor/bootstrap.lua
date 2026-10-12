@@ -385,12 +385,66 @@ local function norm_profile(v)
   return v
 end
 
+-- The environment a script gives to steps (VAR-004). Three places, from the lower to the higher: `ci.pipeline{ env = {...} }` and `ci.job{ env = {...} }` / `j:env{...}`
+-- (together the "env of the job": the steps of the job get them as ordinary variables, above the launch parameters and below what a step writes to $CICD_ENV), and the
+-- `env` option of one `Job:sh` (above $CICD_ENV: the step's own word). Values are text, numbers or booleans, shown as text; the core refuses a name that a step may not
+-- set (STO-004). Returns a new table, or nil when nothing was given.
+local ENV_MAX_COUNT, ENV_MAX_VALUE, ENV_MAX_TOTAL = 100, 8192, 65536
+local pipeline_env = nil
+local function norm_env(v, what, depth)
+  if v == nil then return nil end
+  if type(v) ~= "table" then error(what .. ": a table NAME = \"value\" expected", depth) end
+  local out, n, total = {}, 0, 0
+  for k, val in rawnext, v do
+    if type(k) ~= "string" or #k > 64 or not k:match("^[A-Z_][A-Z0-9_]*$") then
+      error(what .. ": a name is capital letters, digits and _, not starting with a digit, at most 64 characters", depth)
+    end
+    local t = type(val)
+    if t == "number" then val = (mtype(val) == "integer") and format_("%d", val) or format_("%.14g", val)
+    elseif t == "boolean" then val = val and "true" or "false"
+    elseif t ~= "string" then error(what .. ": the value of " .. k .. " is a string, a number or a boolean", depth) end
+    if #val > ENV_MAX_VALUE then error(what .. ": the value of " .. k .. " is longer than " .. ENV_MAX_VALUE .. " bytes", depth) end
+    if val:find("[\0-\8\11\12\14-\31\127]") then error(what .. ": the value of " .. k .. " has a control character", depth) end
+    n = n + 1
+    total = total + #val
+    out[k] = val
+  end
+  if n > ENV_MAX_COUNT then error(what .. ": at most " .. ENV_MAX_COUNT .. " variables", depth) end
+  if total > ENV_MAX_TOTAL then error(what .. ": the values are at most " .. ENV_MAX_TOTAL .. " bytes in all", depth) end
+  if n == 0 then return nil end
+  return out
+end
+
+local function merge_env(a, b, what)
+  if a == nil then return b end
+  if b == nil then return a end
+  local out, n, total = {}, 0, 0
+  for k = 1, 2 do
+    for name, val in rawnext, (k == 1) and a or b do out[name] = val end
+  end
+  for _, val in rawnext, out do n = n + 1; total = total + #val end
+  if n > ENV_MAX_COUNT then error(what .. ": at most " .. ENV_MAX_COUNT .. " variables", 4) end
+  if total > ENV_MAX_TOTAL then error(what .. ": the values are at most " .. ENV_MAX_TOTAL .. " bytes in all", 4) end
+  return out
+end
+
+local function env_json(t)
+  local names = {}
+  for k in rawnext, t do names[#names + 1] = k end
+  tsort(names)
+  local parts = {}
+  for i = 1, #names do parts[i] = jstr(names[i]) .. ":" .. jstr(t[names[i]]) end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
 -- The step's options reach the shim as one canonical JSON object (keys sorted, only what is set): "" when nothing is.
 local function step_opts(job, opts)
   local metrics, mask, timeout = job.__metrics, job.__mask, job.__timeout
   local secrets = job.__secrets
   local artifacts = job.__artifacts
+  local env, step_env = job.__env, nil
   if opts then
+    if opts.env ~= nil then step_env = norm_env(opts.env, "Job:sh env", 4) end
     if opts.artifacts ~= nil then artifacts = merge_artifacts(artifacts, norm_artifacts(opts.artifacts, 4)) end
     if opts.secrets ~= nil then secrets = merge_secrets(secrets, norm_secrets(opts.secrets, 4)) end
     if opts.metrics ~= nil then metrics = norm_metrics(opts.metrics) end
@@ -400,15 +454,22 @@ local function step_opts(job, opts)
   local parts = {}
   local art = artifacts and artifacts_json(artifacts)
   if art then parts[#parts + 1] = '"artifacts":' .. art end
+  if env then parts[#parts + 1] = '"env":' .. env_json(env) end
   if mask ~= "" then parts[#parts + 1] = '"mask":' .. mask end
   if metrics ~= "" then parts[#parts + 1] = '"metrics":' .. metrics end
   if secrets and #secrets > 0 then parts[#parts + 1] = '"secrets":' .. secrets_json(secrets) end
+  if step_env then parts[#parts + 1] = '"step_env":' .. env_json(step_env) end
   if timeout then parts[#parts + 1] = '"timeout":' .. timeout end
   if #parts == 0 then return "" end
   return "{" .. table.concat(parts, ",") .. "}"
 end
 
 local Job_mt = { __index = {
+  -- `j:env{ NAME = "value" }`: variables for the steps of this job that follow (no Pod is started); the env of the job in VAR-004
+  env = function(self, tbl)
+    if type(tbl) ~= "table" then error("Job:env: a table NAME = \"value\" expected", 2) end
+    self.__env = merge_env(self.__env, norm_env(tbl, "Job:env", 3), "Job:env")
+  end,
   sh = function(self, cmd, opts)
     if type(cmd) ~= "string" then error("Job:sh: string expected", 2) end
     local line = getline()
@@ -640,7 +701,8 @@ G.ci = {
     if opts.id ~= nil then claim_id(check_id(opts.id, "ci.job"), getline()) end
     job_seq = job_seq + 1
     local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
-      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3) }, Job_mt)
+      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
+      __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env") }, Job_mt)
     local lock = norm_lock(opts.lock)
     if lock then call("lock", lock .. "\t" .. j.__key) end   -- the run waits here, suspended, until the lock is its turn; the job is named so that the lock can show who holds it
     local ok, err = pcall(fn, j)
@@ -658,6 +720,7 @@ local function run_main(fn, run)
   rawset(run, "__given", nil)
   local v = fn()
   if type(v) == "table" and type(rawget(v, "main")) == "function" then
+    pipeline_env = norm_env(rawget(v, "env"), "ci.pipeline env", 0)
     local typed, json = resolve_params(rawget(v, "params"), given)
     if json ~= "" then call("params", json) end
     run.params = typed

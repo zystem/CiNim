@@ -5,7 +5,7 @@
 --   4. a deploy step (profile = "deploy"): an ordinary, non-root Pod that may reach the Kubernetes API server and change the image of the core and the
 --      executor with a narrow token (deployer.yaml). The step is left out when DEPLOY is false, the builds when BUILD is false.
 -- Submit it through the API:
---   POST /api/v1/runs  {"project_id": "cinim", "organization": "<slug>", "script": "<this file>",
+--   POST /api/v1/runs  {"organization": "<slug>", "script": "<this file>",
 --                       "params": {"REGISTRY": "<host:port the build Pods push to>", "TAG": "dev-1", "PULL_REGISTRY": "<the name the nodes pull from>"}}
 -- Or by the clock, as a trigger of the organisation (docs/triggers.md): the same script and parameters, `"kind": "schedule", "schedule": "0 2 * * *"`, `"concurrency": "skip"`. Leave TAG out
 -- and every run tags its images <date>-<commit> (the clone step writes IMAGE_TAG to $CICD_ENV, which the later steps of the run read), so that a night's images are not the last night's.

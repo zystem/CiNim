@@ -24,6 +24,16 @@ suite "IAM-001 what ro may do":
     for role in ["ro", "dev"]:
       check not roleMay(role, "PUT", "/api/v1/organizations/acme/variables/URL") and not roleMay(role, "DELETE", "/api/v1/organizations/acme/variables/URL")
     check roleMay("rw", "PUT", "/api/v1/organizations/acme/variables/URL") and roleMay("rw", "DELETE", "/api/v1/organizations/acme/variables/URL")
+  test "D-54 groups and their variables are read by every role that reads, made and changed by rw and admin; the shard's variables are written by an administrator only":
+    for p in ["/api/v1/organizations/acme/groups", "/api/v1/organizations/acme/groups/team/backend", "/api/v1/organizations/acme/groups/team/variables",
+              "/api/v1/organizations/acme/groups/team/backend/variables", "/api/v1/variables"]:
+      for role in ["ro", "dev", "rw", "admin"]: check roleMay(role, "GET", p)
+    for p in ["/api/v1/organizations/acme/groups/team", "/api/v1/organizations/acme/groups/team/variables/URL"]:
+      for m in ["PUT", "DELETE"]:
+        check roleMay("rw", m, p) and roleMay("admin", m, p) and not roleMay("ro", m, p) and not roleMay("dev", m, p)
+    for m in ["PUT", "DELETE"]:
+      check roleMay("admin", m, "/api/v1/variables/URL") and not roleMay("rw", m, "/api/v1/variables/URL")
+      check not roleMay("ro", m, "/api/v1/variables/URL") and not roleMay("dev", m, "/api/v1/variables/URL")
   test "write nothing, anywhere":
     for m in ["POST", "PUT", "PATCH", "DELETE"]:
       for p in ["/api/v1/runs", "/api/v1/runs/s1_x", "/api/v1/profile", "/api/v1/organizations/acme/triggers"]:

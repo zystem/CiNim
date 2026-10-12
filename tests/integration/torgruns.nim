@@ -39,15 +39,15 @@ suite "SHD-007 runs and controllers per organisation":
       check c.profileOfNamespace(nsA) == profA and c.profileOfNamespace(nsB) == profB
       check c.profileOfNamespace("no-such-namespace") == ""
     test "a run keeps the organisation and the profile it was made with":
-      let r = co.createRun("p", "return 1", orgA, profA)
+      let r = co.createRun("return 1", orgA, profA)
       check c.profileOfRun(r, "x") == profA
       let j = co.getRun(r)
       check j["organization"].getStr == "a-" & sfx
-      let legacy = co.createRun("p", "return 1")                        # no organisation: the default tenant and profile
+      let legacy = co.createRun("return 1")                        # no organisation: the default tenant and profile
       check c.profileOfRun(legacy, "x") == defaultProfile and co.getRun(legacy)["organization"].getStr == ""
     test "a controller gets the steps of its own namespace and of no other":
-      let ra = co.createRun("p", "return 1", orgA, profA)
-      let rb = co.createRun("p", "return 1", orgB, profB)
+      let ra = co.createRun("return 1", orgA, profA)
+      let rb = co.createRun("return 1", orgB, profB)
       c.addStep(ra, profA)
       c.addStep(rb, profB)
       let forB = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-b-" & sfx, namespace: nsB, free_pod_slots: 10))
@@ -76,7 +76,7 @@ suite "SHD-007 runs and controllers per organisation":
       let plain = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-cfg2-" & sfx, namespace: nsA, free_pod_slots: 0))
       check plain.config.present and not plain.config.build_enabled and not plain.config.run_storage_enabled
     test "a controller of a namespace without a profile gets nothing":
-      let r = co.createRun("p", "return 1", orgA, profA)
+      let r = co.createRun("return 1", orgA, profA)
       c.addStep(r, profA)
       let resp = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-x-" & sfx, namespace: "elsewhere-" & sfx, free_pod_slots: 10))
       for cmd in resp.commands: check cmd.body.kind != CommandBodyKind.start
@@ -85,7 +85,7 @@ suite "SHD-007 runs and controllers per organisation":
       let nsC = "cinim-001-c-" & sfx
       let profC = c.ensureOrganizationProfile(orgC, nsC)
       c.ensureCredentialRow(nsC, getTime().toUnix() + 3600)
-      let rc = co.createRun("p", "return 1", orgC, profC)
+      let rc = co.createRun("return 1", orgC, profC)
       c.addStep(rc, profC)
       proc startsIn(resp: PollResponse): seq[string] =
         for cmd in resp.commands:
@@ -124,7 +124,7 @@ suite "SHD-007 runs and controllers per organisation":
       let orgD = c.addOrganization("d-" & sfx, "D")
       let nsD = "cinim-001-d-" & sfx
       let profD = c.ensureOrganizationProfile(orgD, nsD)
-      let rd = co.createRun("p", "return 1", orgD, profD)
+      let rd = co.createRun("return 1", orgD, profD)
       var withBuild = co
       withBuild.orgPrefix = "cinim"
       withBuild.orgShard = "001"
@@ -149,7 +149,7 @@ suite "SHD-007 runs and controllers per organisation":
       check profiles.len == 2 and "build" in profiles and "" in profiles      # claimed by queue time, which two steps may share
       # a shard without a build profile, and a run without an organisation, refuse it
       check call(co, rd, "build", 2).body.kind == ExecutorResponseBodyKind.failure
-      let legacy = co.createRun("p", "return 1")
+      let legacy = co.createRun("return 1")
       check call(withBuild, legacy, "build", 0).body.kind == ExecutorResponseBodyKind.failure
       c.deleteOrganization("d-" & sfx)
     test "deleting an organisation takes its profile along":

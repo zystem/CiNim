@@ -32,6 +32,16 @@ suite "RUN-010 runner shim":
     let r = runShim(d, "test \"$FOO\" = bar")
     check r.code == 0 and r.msg["reason"].getStr == "ok"
 
+  test "VAR-004 the step's own env is above what the steps wrote to $CICD_ENV, which is above the environment of the Pod; a name a step may not set is not applied":
+    let d = getTempDir() / "shim-t-stepenv"; removeDir(d); createDir(d)
+    writeFile(d / "CICD_ENV", "FOO=file\nBAR=file\n")
+    putEnv("FOO", "pod")
+    putEnv("BAR", "pod")
+    putEnv("BAZ", "pod")
+    let r = runShim(d, "echo \"$FOO $BAR $BAZ $QUX\" > " & (d / "seen"), @["--opts-json", """{"step_env":{"FOO":"step","QUX":"q","PATH":"/nowhere"}}"""])
+    delEnv("FOO"); delEnv("BAR"); delEnv("BAZ")
+    check r.code == 0 and r.msg["reason"].getStr == "ok"
+    check readFile(d / "seen").strip == "step file pod q"
   test "STO-002 with the run volume the env file is the run's, the step's own files are not, and the workspace is told to the command":
     let root = getTempDir() / "shim-t-vol"; removeDir(root)
     createDir(root / "run1"); createDir(root / "run2"); createDir(root / "ws"); createDir(root / "state")

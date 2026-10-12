@@ -243,7 +243,7 @@ script and its parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (U
 
 ```bash
 curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "self-build-nightly", "kind": "schedule", "schedule": "0 2 * * *",
-  "project_id": "cinim", "concurrency": "cancel_newest", "script": "<self-build.lua>", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
+  "concurrency": "cancel_newest", "script": "<self-build.lua>", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
 ```
 
 With no `TAG` the images are tagged `<date>-<commit>` (`20261009-eefb939`): the clone step writes `IMAGE_TAG` to `$CICD_ENV` and the later steps of the run read it, so a night's images are not the last night's.

@@ -21,7 +21,7 @@ suite "VAR-001 variables of an organisation":
     proc get(name: string; org = orgA): string =
       for (k, v) in c.listVariables(org):
         if k == name: return v
-    proc sourceOf(env: seq[tuple[name, value, source: string]]; name: string): string =
+    proc sourceOf(env: seq[EffectiveVariable]; name: string): string =
       for e in env:
         if e.name == name: return e.source & ":" & e.value
 
@@ -55,7 +55,7 @@ suite "VAR-001 variables of an organisation":
     test "a step's environment is the variables of the organisation, and a launch parameter of the same name wins; the run's view says which came from where":
       check c.setVariable(orgA, "TARGET", "from-the-organisation", now) == ""
       check c.setVariable(orgA, "REGION", "eu", now) == ""
-      let r = co.createRun("p", "return 1", orgA, defaultProfile, @[("TARGET", "from-the-launch"), ("JOBS", "4")])
+      let r = co.createRun("return 1", orgA, defaultProfile, @[("TARGET", "from-the-launch"), ("JOBS", "4")])
       let env = c.effectiveVariables(r)
       check sourceOf(env, "TARGET") == "launch:from-the-launch"
       check sourceOf(env, "REGION") == "organization:eu"
@@ -68,13 +68,13 @@ suite "VAR-001 variables of an organisation":
       for v in view["variables"]: seen.add v["name"].getStr & ":" & v["source"].getStr
       check "TARGET:launch" in seen and "REGION:organization" in seen
     test "a run of another organisation, or of none, gets none of them":
-      let other = co.createRun("p", "return 1", orgB, defaultProfile)
+      let other = co.createRun("return 1", orgB, defaultProfile)
       check sourceOf(c.effectiveVariables(other), "REGION") == ""
-      let none = co.createRun("p", "return 1", "t1", defaultProfile)
+      let none = co.createRun("return 1", "t1", defaultProfile)
       check c.effectiveVariables(none).len == 0
       check not co.getRun(none).hasKey("variables")
     test "a variable changed after a run began is seen by the steps that start after the change (VAR-002: the current value)":
-      let r = co.createRun("p", "return 1", orgA, defaultProfile)
+      let r = co.createRun("return 1", orgA, defaultProfile)
       check c.setVariable(orgA, "LATE", "one", now) == ""
       check sourceOf(c.effectiveVariables(r), "LATE") == "organization:one"
       check c.setVariable(orgA, "LATE", "two", now) == ""

@@ -67,14 +67,14 @@ const ddl = [
        namespace TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1, confirmed INTEGER NOT NULL DEFAULT 0,
        bootstrap_expires_at INTEGER NOT NULL)""",
   """CREATE TABLE IF NOT EXISTS runs (
-       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, bundle_id TEXT,
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', bundle_id TEXT,
        trigger_id TEXT, parent_run_id TEXT, state TEXT NOT NULL, actor_id TEXT,
        version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
   # the triggers of an organisation (6.3, core/triggers.nim): a stored way to start a run, by the clock (`schedule`), by a call with the trigger's own secret (`webhook`),
   # or by hand; `secret_hash` is the SHA-256 of the webhook's secret (shown once)
   """CREATE TABLE IF NOT EXISTS triggers (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, schedule TEXT NOT NULL DEFAULT '',
-       secret_hash TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL, script TEXT NOT NULL, params TEXT NOT NULL DEFAULT '',
+       secret_hash TEXT NOT NULL DEFAULT '', group_id TEXT NOT NULL DEFAULT '', script TEXT NOT NULL, params TEXT NOT NULL DEFAULT '',
        concurrency TEXT NOT NULL DEFAULT 'parallel', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
        last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '')""",
   # the artifacts of runs (DAT-003, core/objectstore.nim): the object is in the store, this is what the platform knows about it; a path is one artifact of a run
@@ -84,7 +84,18 @@ const ddl = [
   "CREATE UNIQUE INDEX IF NOT EXISTS artifacts_run_path ON artifacts (run_id, path)",
   "CREATE UNIQUE INDEX IF NOT EXISTS triggers_tenant_name ON triggers (tenant_id, name)",
   "CREATE INDEX IF NOT EXISTS runs_trigger ON runs (trigger_id, state)",
-  "CREATE INDEX IF NOT EXISTS runs_project_created ON runs (project_id, created_at)",
+  # PRJ-001, D-54, core/groups.nim: the groups of an organisation, nested up to 8 levels (the organisation itself is the root and has no row; a run or a trigger with group_id ''
+  # belongs to it). `path` is the slugs from the top joined by '/'; the variables of a group (VAR-001) are inherited by the groups below it and by its runs
+  """CREATE TABLE IF NOT EXISTS groups (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL,
+       created_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS groups_tenant_path ON groups (tenant_id, path)",
+  "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
+  """CREATE TABLE IF NOT EXISTS group_variables (
+       group_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (group_id, name))""",
+  # the variables of the shard itself, the lowest level (VAR-001, D-54): every step of every organisation of the shard gets them
+  """CREATE TABLE IF NOT EXISTS shard_variables (
+       name TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)""",
   """CREATE TABLE IF NOT EXISTS run_journal (
        run_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL, fingerprint TEXT NOT NULL,
        payload TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -144,6 +155,13 @@ proc migrate*(c: var RqClient) =
   var stmts = newJArray()
   for s in ddl: stmts.add %s
   discard c.execute(stmts, transaction = true)
+  # D-54: there is no project; a run and a trigger belong to a group (or to the organisation). A shard made before has the column and an index on it
+  for table in ["runs", "triggers"]:
+    if c.hasColumn(table, "project_id"):
+      discard c.execute(%*[["DROP INDEX IF EXISTS runs_project_created"]])
+      if not c.hasColumn(table, "group_id"): discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN group_id TEXT NOT NULL DEFAULT ''"]])
+      discard c.execute(%*[["ALTER TABLE " & table & " DROP COLUMN project_id"]])
+  discard c.execute(%*[["CREATE INDEX IF NOT EXISTS runs_group ON runs (tenant_id, group_id)"]])      # after the column exists in a shard made before
   # columns added after a table already existed in a shard (CREATE TABLE IF NOT EXISTS leaves old tables alone)
   for (table, column, definition) in [
       ("steps", "retries", "INTEGER NOT NULL DEFAULT 0"),      # how many times a person asked to run the step again (docs/parallel.md section 11): its journal key is s<n>~<retries>

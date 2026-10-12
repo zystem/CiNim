@@ -74,7 +74,7 @@ suite "RUN-016 the push channel":
 
     test "a report is answered with the settings; the steps that may go are pushed after it, numbered":
       let o = newOrg()
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 3: c.addStep(r, o.profile, i)
       var cl = connectStream(serverAddr, corePub, clientKeys)
       check cl.sendFrame(report("s-a-" & sfx, o.ns, 10))
@@ -96,7 +96,7 @@ suite "RUN-016 the push channel":
       for _ in 0 ..< 10:
         let f = cl.receive(8000)
         if f.isNone or f.get.re == 2: break
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       kickProfile(o.profile)
       let w = cl.nextStarts()
@@ -105,7 +105,7 @@ suite "RUN-016 the push channel":
       cl.close()
     test "the controller's credit is not exceeded: a push carries at most the free slots it reported":
       let o = newOrg()
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 5: c.addStep(r, o.profile, i)
       var cl = connectStream(serverAddr, corePub, clientKeys)
       let ses = "s-c-" & sfx
@@ -120,7 +120,7 @@ suite "RUN-016 the push channel":
       cl.close()
     test "what is not acknowledged is sent again on a new connection, once acknowledged it is not":
       let o = newOrg()
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       let ses = "s-d-" & sfx
       var cl = connectStream(serverAddr, corePub, clientKeys)
@@ -154,7 +154,7 @@ suite "RUN-016 the push channel":
           answered = true
           break
       check answered
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       sleep 800                                                   # creating the run kicks the organisation (a conductor may be waiting for it): let that pass
       c.addStep(r, o.profile, 1)                                  # no kick: made behind the core's back
       check cl.sendFrame(report(ses, o.ns, 10, ack = 1, id = 3))   # nothing changed for the controller
@@ -168,7 +168,7 @@ suite "RUN-016 the push channel":
       let sOld = "s-old-" & sfx
       check old.sendFrame(report(sOld, o.ns, 10))
       discard old.next(8000)                                       # the settings
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       kickProfile(o.profile)
       let pushed = old.nextStarts()
@@ -191,7 +191,7 @@ suite "RUN-016 the push channel":
     test "a controller of another organisation gets none of this one's work":
       let a = newOrg()
       let b = newOrg()
-      let ra = co.createRun("p", "return 1", "t1", a.profile)
+      let ra = co.createRun("return 1", "t1", a.profile)
       c.addStep(ra, a.profile, 1)
       var cb = connectStream(serverAddr, corePub, clientKeys)
       check cb.sendFrame(report("s-e-" & sfx, b.ns, 10))
@@ -207,7 +207,7 @@ suite "RUN-016 the push channel":
       var runs: seq[string]
       for i in 0 ..< 8:
         let o = newOrg()
-        let r = co.createRun("p", "return 1", "t1", o.profile)
+        let r = co.createRun("return 1", "t1", o.profile)
         for k in 1 .. 2: c.addStep(r, o.profile, k)
         orgs.add o
         runs.add r
@@ -231,7 +231,7 @@ suite "RUN-016 the push channel":
       # the core lost the controller's record (a restart, a replaced session) while the controller still counts the frames it had: numbers would start again from 1 and
       # be taken for repeats, and the steps in them would be acknowledged without being seen
       let o = newOrg()
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       var cl = connectStream(serverAddr, corePub, clientKeys)
       check cl.sendFrame(report("jc-9100.5", o.ns, 10, ack = 5, id = 7))
@@ -244,7 +244,7 @@ suite "RUN-016 the push channel":
       cl.close()
     test "an older session of an organisation does not displace the newer one: it is heard and gets no work":
       let o = newOrg()
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       var fresh = connectStream(serverAddr, corePub, clientKeys)
       var old = connectStream(serverAddr, corePub, clientKeys)

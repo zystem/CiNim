@@ -1,14 +1,14 @@
 ## REST API of core (9.1): runs (POST /api/v1/runs, GET /api/v1/runs/{id} with the steps' attempts, states and the reason each
 ## ended the way it did), the bare step-log read (GET /api/v1/runs/{id}/steps/{seq}/log; from/around/search/tail/download are later
 ## slices, DAT-007), the launch gate, the execution profile's settings (GET/PUT /api/v1/profile, docs/settings.md), the component
-## list (/api/v1/components) and Prometheus metrics (/metrics, docs/metrics.md). Bearer tokens (apiauth.nim, IAM-003; OIDC/RBAC are not implemented yet); `project_id`
+## list (/api/v1/components) and Prometheus metrics (/metrics, docs/metrics.md). Bearer tokens (apiauth.nim, IAM-003; OIDC/RBAC are not implemented yet); `group`
 ## and `script` (Lua source) are accepted directly in the body since there is no directory, no repositories and no blob storage yet.
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
 import ../common/httpsrv
-import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
+import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -21,6 +21,39 @@ proc problem(status: HttpCode; code, detail: string) =
 
 proc jsonOk(status: HttpCode; body: JsonNode) =
   reply(status, $body, ["Content-Type: application/json"])
+
+proc withLabel(label: JsonNode; extra: JsonNode): JsonNode =
+  result = newJObject()
+  for k, v in label.pairs: result[k] = v
+  for k, v in extra.pairs: result[k] = v
+
+proc serveVariables(vc: var RqClient; scope: VarScope; key, varName: string; label: JsonNode) =
+  ## The variables of one level (VAR-001, core/orgvars.nim): GET lists them, PUT and DELETE name one (`/variables/{NAME}`). `label` says whose they are in the answers.
+  let vmeth = getMethod()
+  if vmeth == "GET" and varName.len == 0:
+    var list = newJArray()
+    for (k, v) in vc.listScopeVariables(scope, key): list.add %*{"name": k, "value": v}
+    jsonOk(Http200, withLabel(label, %*{"variables": list}))
+  elif varName.len == 0:
+    problem(Http405, "method_not_allowed", "GET lists, PUT and DELETE name a variable: /variables/{NAME}")
+  elif vmeth == "PUT":
+    let vj = try: parseJson(getBody()) except JsonParsingError: nil
+    if not vj.isString("value"):
+      problem(Http400, "invalid_request", "{\"value\": \"...\"} is required")
+      return
+    let bad = vc.setScopeVariable(scope, key, varName, vj["value"].getStr, getTime().toUnix())
+    if bad.len > 0:
+      problem(Http400, "invalid_variable", bad)
+      return
+    jsonOk(Http200, withLabel(label, %*{"name": varName, "value": vj["value"].getStr}))
+  elif vmeth == "DELETE":
+    if not vc.deleteScopeVariable(scope, key, varName):
+      problem(Http404, "not_found", "no such variable")
+      return
+    jsonOk(Http200, withLabel(label, %*{"name": varName, "deleted": true}))
+  else:
+    problem(Http405, "method_not_allowed", "GET, PUT or DELETE")
+
 
 let
   orgShard = getEnv("CINIM_SHARD", "001")                  ## the name of this shard: digits only (SHD-001)
@@ -631,6 +664,76 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem(Http405, "method_not_allowed", "GET, PUT, DELETE, or POST :check")
         return
+      if path == "/api/v1/variables" or path.startsWith("/api/v1/variables/"):
+        # VAR-001, D-54: the variables of the shard, the lowest level: every step of every organisation gets them. An administrator writes them (rbac.nim)
+        var sc = newRq(coreRef.rqliteUrl)
+        sc.serveVariables(vsShard, "", path["/api/v1/variables".len .. ^1].strip(chars = {'/'}), %*{"level": "shard"})
+        return
+      if path.startsWith("/api/v1/organizations/") and "/groups" in path:
+        # PRJ-001, D-54: the groups of an organisation, nested up to 8 levels, and their variables (inherited by the groups below and by the runs in them).
+        #   GET /groups                      the groups, by path
+        #   PUT|GET|DELETE /groups/{path}    make (the parent has to exist), show, remove (only an empty one) the group at a path such as team/backend
+        #   /groups/{path}/variables[/NAME]  the variables of the group
+        let restG = path["/api/v1/organizations/".len .. ^1]
+        let slugG = restG.split("/groups")[0]
+        let afterG = restG[slugG.len .. ^1]            # "/groups", "/groups/a/b", "/groups/a/b/variables/NAME"
+        if slugG.len == 0 or not (afterG == "/groups" or afterG.startsWith("/groups/")):
+          problem(Http404, "not_found", "no such route")
+          return
+        var gc = newRq(coreRef.rqliteUrl)
+        let orgG = gc.organizationRow(slugG)
+        if orgG.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugG)
+          return
+        let gpath = afterG["/groups".len .. ^1].strip(chars = {'/'})
+        let gmeth = getMethod()
+        if gpath.len == 0:
+          if gmeth != "GET":
+            problem(Http405, "method_not_allowed", "GET lists the groups; PUT /groups/{path} makes one")
+            return
+          var items = newJArray()
+          for g in gc.listGroups(orgG.id): items.add %*{"path": g.path, "depth": g.depth}
+          jsonOk(Http200, %*{"organization": slugG, "groups": items})
+          return
+        # a path, and perhaps /variables and a name after it ('variables' cannot be the name of a group)
+        let segs = gpath.split('/')
+        let vpos = segs.find("variables")
+        let groupPath = if vpos >= 0: segs[0 ..< vpos].join("/") else: gpath
+        let varName = if vpos >= 0 and vpos + 1 < segs.len: segs[vpos + 1 .. ^1].join("/") else: ""
+        if vpos >= 0 and (vpos == 0 or vpos + 2 < segs.len):
+          problem(Http404, "not_found", "no such route")
+          return
+        if vpos >= 0:
+          let g = gc.groupIdOf(orgG.id, groupPath)
+          if not g.found or g.id.len == 0:
+            problem(Http404, "group_not_found", "the organisation " & slugG & " has no group " & groupPath)
+            return
+          gc.serveVariables(vsGroup, g.id, varName, %*{"organization": slugG, "group": normalPath(groupPath)})
+          return
+        if gmeth == "PUT":
+          let made = gc.createGroup(orgG.id, groupPath, getTime().toUnix())
+          if made.error.len > 0:
+            problem(Http400, "invalid_group", made.error)
+            return
+          jsonOk(if made.created: Http201 else: Http200, %*{"organization": slugG, "group": normalPath(groupPath), "created": made.created})
+        elif gmeth == "GET":
+          let g = gc.groupIdOf(orgG.id, groupPath)
+          if not g.found:
+            problem(Http404, "group_not_found", "the organisation " & slugG & " has no group " & groupPath)
+            return
+          jsonOk(Http200, %*{"organization": slugG, "group": normalPath(groupPath)})
+        elif gmeth == "DELETE":
+          let gone = gc.deleteGroup(orgG.id, groupPath)
+          if gone.error.len > 0:
+            problem(Http409, "group_not_empty", gone.error)
+            return
+          if not gone.deleted:
+            problem(Http404, "group_not_found", "the organisation " & slugG & " has no group " & groupPath)
+            return
+          jsonOk(Http200, %*{"organization": slugG, "group": normalPath(groupPath), "deleted": true})
+        else:
+          problem(Http405, "method_not_allowed", "GET, PUT or DELETE")
+        return
       if path.startsWith("/api/v1/organizations/") and "/variables" in path:
         # VAR-001: the plain variables of an organisation, for its steps' environment (core/orgvars.nim). GET lists (any role that reads), PUT and DELETE name one: /variables/{NAME}
         let restV = path["/api/v1/organizations/".len .. ^1]
@@ -645,30 +748,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         if orgV.id.len == 0:
           problem(Http404, "organization_not_found", "this shard has no organisation " & slugV)
           return
-        let vmeth = getMethod()
-        if vmeth == "GET" and varName.len == 0:
-          var list = newJArray()
-          for (k, v) in vc.listVariables(orgV.id): list.add %*{"name": k, "value": v}
-          jsonOk(Http200, %*{"organization": slugV, "variables": list})
-        elif varName.len == 0:
-          problem(Http405, "method_not_allowed", "GET lists, PUT and DELETE name a variable: /variables/{NAME}")
-        elif vmeth == "PUT":
-          let vj = try: parseJson(getBody()) except JsonParsingError: nil
-          if not vj.isString("value"):
-            problem(Http400, "invalid_request", "{\"value\": \"...\"} is required")
-            return
-          let bad = vc.setVariable(orgV.id, varName, vj["value"].getStr, getTime().toUnix())
-          if bad.len > 0:
-            problem(Http400, "invalid_variable", bad)
-            return
-          jsonOk(Http200, %*{"organization": slugV, "name": varName, "value": vj["value"].getStr})
-        elif vmeth == "DELETE":
-          if not vc.deleteVariable(orgV.id, varName):
-            problem(Http404, "not_found", "no such variable")
-            return
-          jsonOk(Http200, %*{"organization": slugV, "name": varName, "deleted": true})
-        else:
-          problem(Http405, "method_not_allowed", "GET, PUT or DELETE")
+        vc.serveVariables(vsOrganization, orgV.id, varName, %*{"organization": slugV})
         return
       if path.startsWith("/api/v1/organizations/") and (path.endsWith("/locks") or "/locks/" in path):
         # PIP-014: the jobs in which the locks of an organisation are present - who holds a lock and who waits for it, in the order they will get it
@@ -737,7 +817,11 @@ proc onRequest() {.raises: [], gcsafe.} =
             if c.countTriggers(org.id) >= maxTriggersPerOrg:
               problem(Http409, "too_many_triggers", "at most " & $maxTriggersPerOrg & " triggers per organisation")
               return
-            let made = c.createTrigger(org.id, spec.spec, getTime().toUnix())
+            let tg = c.groupIdOf(org.id, spec.spec.groupPath)
+            if not tg.found:
+              problem(Http404, "group_not_found", "the organisation " & slug & " has no group " & spec.spec.groupPath)
+              return
+            let made = c.createTrigger(org.id, spec.spec, getTime().toUnix(), tg.id)
             let created = c.getTrigger(org.id, made.id)
             var body = created.row.view
             if made.secret.len > 0:
@@ -908,8 +992,8 @@ proc onRequest() {.raises: [], gcsafe.} =
       let meth = getMethod()
       if meth == "POST" and rest == "":
         let j = try: parseJson(getBody()) except JsonParsingError: nil
-        if j == nil or not j.hasKey("project_id") or not j.hasKey("script"):
-          problem(Http400, "invalid_request", "project_id and script are required")
+        if j == nil or not j.hasKey("script"):
+          problem(Http400, "invalid_request", "script is required")
           return
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
@@ -938,11 +1022,26 @@ proc onRequest() {.raises: [], gcsafe.} =
         if given.error.len > 0:
           problem(Http400, "invalid_params", given.error)
           return
+        # PRJ-001, D-54: the run belongs to a group of the organisation (by its path), or to the organisation itself
+        var groupId = ""
+        if j.hasKey("group") and not (j["group"].kind == JString and j["group"].getStr.strip(chars = {'/'}).len == 0):
+          if j["group"].kind != JString:
+            problem(Http400, "invalid_request", "group must be the path of a group, for example team/backend")
+            return
+          if orgSlug.len == 0:
+            problem(Http400, "invalid_request", "a group belongs to an organisation: give organization")
+            return
+          var gq = newRq(coreRef.rqliteUrl)
+          let g = gq.groupIdOf(tenant, j["group"].getStr)
+          if not g.found:
+            problem(Http404, "group_not_found", "the organisation " & orgSlug & " has no group " & normalPath(j["group"].getStr))
+            return
+          groupId = g.id
         var qc = newRq(coreRef.rqliteUrl)
         if qc.queueIsFull(if profile.len > 0: profile else: coreRef.profileId):
           problem(Http429, "queue_full", "this organisation has " & $maxUnfinishedRuns & " runs that have not ended; try again when some have")
           return
-        let id = coreRef.createRun(j["project_id"].getStr, j["script"].getStr, tenant, profile, given.pairs)
+        let id = coreRef.createRun(j["script"].getStr, tenant, profile, given.pairs, groupId = groupId)
         jsonOk(Http201, %*{"id": id, "organization": orgSlug, "state": "RUNNING"})
       elif meth == "GET" and "/steps/" in rest and rest.endsWith("/log"):
         let parts = rest.split("/steps/", maxsplit = 1)

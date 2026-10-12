@@ -23,20 +23,20 @@ suite "PIP-001 the version of the host API of a run":
       discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ?", run]])
 
     test "a new run records the current version":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       check versionOf(r) == currentApiVersion
     test "a run from before the versions is version 1":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       discard c.execute(%*[["UPDATE runs SET api_version = 1 WHERE id = ?", r]])
       check versionOf(r) == 1
     test "a run of a version the executor cannot run is not leased to it, and is to one that can":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       discard c.execute(%*[["UPDATE runs SET api_version = 5 WHERE id = ?", r]])
       check lease(r, @[1, 2, 3]).isNone
       let g = lease(r, @[3, 4, 5])
       check g.isSome and g.get.api_version == 5
       release(r)
     test "the lease says which version to replay with":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let g = lease(r, @[currentApiVersion])
       check g.isSome and g.get.api_version == uint32(currentApiVersion)

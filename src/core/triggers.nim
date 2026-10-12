@@ -6,14 +6,14 @@
 ##             can start this trigger's run and nothing else: it is no API token. The call may carry `{"params": {...}}`, checked as launch parameters.
 ##   manual    `POST /api/v1/organizations/{slug}/triggers/{id}:fire` by an administrator, for any trigger (and for trying one out).
 ##
-## A trigger keeps the project, the pipeline script and the launch parameters of the runs it starts (until pipelines are read from repositories,
+## A trigger keeps the group, the pipeline script and the launch parameters of the runs it starts (until pipelines are read from repositories,
 ## PRJ-003, the script lives here). `concurrency` is `parallel` (every firing starts a run at once; when the organisation has no room, the run waits for it, which is the queue), `cancel_newest` (the new firing is cancelled - no run is started - while an earlier run of the same
 ## trigger has not ended - any run that is not in a final state, not only a RUNNING one: the usual answer to a slow nightly, and "never start a new one while the old one works")
 ## or `cancel_previous` (the earlier runs of the trigger that have not ended are cancelled, RUN-006, and the new one is started: the usual answer to a push storm, where
 ## only the newest commit matters). A run started by a trigger carries `trigger_id`.
 import std/[json, strutils, times, atomics, os, tables]
 import ../common/[rqlite, states, cron, ctrlauth]
-import schema, scheduler, runparams, orgrules, apiauth
+import schema, scheduler, runparams, orgrules, apiauth, groups
 
 const
   maxScriptBytes* = 256 * 1024
@@ -22,12 +22,12 @@ const
 
 type
   TriggerSpec* = object
-    name*, kind*, schedule*, projectId*, script*, concurrency*: string
+    name*, kind*, schedule*, groupPath*, script*, concurrency*: string        ## groupPath: the group the runs belong to ("" = the organisation)
     params*: seq[(string, string)]
     enabled*: bool
 
   TriggerRow* = object
-    id*, tenantId*, slug*, name*, kind*, schedule*, secretHash*, projectId*, script*, concurrency*, lastRunId*, lastResult*: string
+    id*, tenantId*, slug*, name*, kind*, schedule*, secretHash*, groupId*, groupPath*, script*, concurrency*, lastRunId*, lastResult*: string
     params*: seq[(string, string)]
     enabled*: bool
     createdAt*, lastFiredAt*: int64
@@ -52,7 +52,7 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
     elif required: return (key & " is required", result.spec)
   str("name", result.spec.name)
   str("kind", result.spec.kind)
-  str("project_id", result.spec.projectId)
+  str("group", result.spec.groupPath, required = false)
   str("script", result.spec.script)
   str("schedule", result.spec.schedule, required = false)
   result.spec.concurrency = "parallel"
@@ -65,7 +65,8 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
     return ("name is 1..64 characters: lowercase letters, digits, - _ .", result.spec)
   if result.spec.kind notin ["schedule", "webhook"]: return ("kind is schedule or webhook (a manual start is the :fire call on either)", result.spec)
   if result.spec.concurrency notin ["parallel", "cancel_newest", "cancel_previous"]: return ("concurrency is parallel, cancel_newest or cancel_previous", result.spec)
-  if result.spec.projectId.len == 0 or result.spec.projectId.len > 128: return ("project_id is 1..128 characters", result.spec)
+  result.spec.groupPath = normalPath(result.spec.groupPath)
+  if result.spec.groupPath.len > 400: return ("group is too long", result.spec)
   if result.spec.script.len == 0: return ("script is empty", result.spec)
   if result.spec.script.len > maxScriptBytes: return ("script is longer than " & $maxScriptBytes & " bytes", result.spec)
   if result.spec.kind == "schedule":
@@ -78,18 +79,18 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
 
 # ------------------------------------------------------------------ the rows
 
-const columns = "t.id, t.tenant_id, o.slug, t.name, t.kind, t.schedule, t.secret_hash, t.project_id, t.script, t.concurrency, t.last_run_id, " &
-                "t.last_result, t.params, t.enabled, t.created_at, t.last_fired_at"
+const columns = "t.id, t.tenant_id, o.slug, t.name, t.kind, t.schedule, t.secret_hash, t.group_id, t.script, t.concurrency, t.last_run_id, " &
+                "t.last_result, t.params, t.enabled, t.created_at, t.last_fired_at, COALESCE((SELECT g.path FROM groups g WHERE g.id = t.group_id), '')"
 
 proc rowOf(v: JsonNode): TriggerRow =
   TriggerRow(id: v[0].getStr, tenantId: v[1].getStr, slug: v[2].getStr, name: v[3].getStr, kind: v[4].getStr, schedule: v[5].getStr,
-             secretHash: v[6].getStr, projectId: v[7].getStr, script: v[8].getStr, concurrency: v[9].getStr, lastRunId: v[10].getStr,
+             secretHash: v[6].getStr, groupId: v[7].getStr, groupPath: v[16].getStr, script: v[8].getStr, concurrency: v[9].getStr, lastRunId: v[10].getStr,
              lastResult: v[11].getStr, params: fromJson(v[12].getStr), enabled: v[13].getInt > 0, createdAt: v[14].getBiggestInt,
              lastFiredAt: v[15].getBiggestInt)
 
 proc view*(t: TriggerRow): JsonNode =
   ## what the API shows; never the secret or its hash
-  result = %*{"id": t.id, "organization": t.slug, "name": t.name, "kind": t.kind, "project_id": t.projectId, "concurrency": t.concurrency,
+  result = %*{"id": t.id, "organization": t.slug, "name": t.name, "kind": t.kind, "group": t.groupPath, "concurrency": t.concurrency,
               "enabled": t.enabled, "created_at": t.createdAt, "last_fired_at": t.lastFiredAt, "script_bytes": t.script.len}
   if t.kind == "schedule": result["schedule"] = %t.schedule
   if t.kind == "webhook": result["hook"] = %("/api/v1/hooks/" & t.id)
@@ -122,15 +123,15 @@ proc countTriggers*(c: var RqClient; tenantId: string): int =
 proc nameTaken*(c: var RqClient; tenantId, name: string): bool =
   c.query(%*[["SELECT count(*) FROM triggers WHERE tenant_id = ? AND name = ?", tenantId, name]])["results"][0]{"values"}[0][0].getInt > 0
 
-proc createTrigger*(c: var RqClient; tenantId: string; s: TriggerSpec; now: int64): tuple[id, secret: string] =
-  ## `secret` is the webhook's secret, shown once ("" for a schedule)
+proc createTrigger*(c: var RqClient; tenantId: string; s: TriggerSpec; now: int64; groupId = ""): tuple[id, secret: string] =
+  ## `secret` is the webhook's secret, shown once ("" for a schedule); `groupId` is the id of the group named by `s.groupPath` ("" = the organisation), which the caller has looked up
   result.id = newId()
   var hash = ""
   if s.kind == "webhook":
     result.secret = mintToken().secret
     hash = secretHash(result.secret)
-  discard c.execute(%*[["INSERT INTO triggers (id, tenant_id, name, kind, schedule, secret_hash, project_id, script, params, concurrency, enabled, created_at, last_fired_at) " &
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result.id, tenantId, s.name, s.kind, s.schedule, hash, s.projectId, s.script,
+  discard c.execute(%*[["INSERT INTO triggers (id, tenant_id, name, kind, schedule, secret_hash, group_id, script, params, concurrency, enabled, created_at, last_fired_at) " &
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result.id, tenantId, s.name, s.kind, s.schedule, hash, groupId, s.script,
     (if s.params.len > 0: toJson(s.params) else: ""), s.concurrency, (if s.enabled: 1 else: 0), now, now]])
 
 proc deleteTrigger*(c: var RqClient; tenantId, id: string): bool =
@@ -194,7 +195,7 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
   if c.queueIsFull(profile):
     discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: the organisation has " & $maxUnfinishedRuns & " runs that have not ended", t.id]])
     return Fired(reason: "queue_full")
-  let id = co.createRun(t.projectId, t.script, t.tenantId, profile, pairs, t.id)
+  let id = co.createRun(t.script, t.tenantId, profile, pairs, t.id, t.groupId)
   let result = if cancelled.len == 0: "started" else: "started; cancelled the earlier run" & (if cancelled.len > 1: "s " else: " ") & cancelled.join(", ")
   discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_run_id = ?, last_result = ? WHERE id = ?", clock, id, result, t.id]])
   Fired(started: true, runId: id)

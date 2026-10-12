@@ -8,6 +8,7 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 |---|---|---|---|
 | The columns of the controller's state added by `ALTER TABLE` | `jobcontroller/ctrlstate.nim` (line "state files from before these columns") | controller state files from before | the state volumes of the controllers are made again, or a migration number replaces the ALTERs |
 | The `ALTER TABLE … ADD COLUMN` list of the core | `core/schema.nim` (`migrate`) | databases from before each column | when there is a first release: fold the columns into `CREATE TABLE` and number the migrations |
+| `project_id` dropped from `runs` and `triggers`, and its index (D-54) | `core/schema.nim` (`migrate`, the loop over `runs` and `triggers`) | a shard made before D-54 has the column, which is NOT NULL and has no default | every shard has migrated (the TESTING cluster's has); then the loop goes |
 | The host call `sh` and `ci.sh` (a fixture of the tests) | `executor/replay.nim` (`hostKinds`), `executor/bootstrap.lua`, `tests/unit/tluaapi.nim` (`fixtureOnly`) | the early tests of the sandbox | the tests use `Job:sh` |
 
 ## Deleted (2026-10-11)

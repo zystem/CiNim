@@ -60,12 +60,18 @@ func readablePath(path: string): bool =
   if underRuns(path): return true
   if path in ["/api/v1/components", "/api/v1/launch-gate", "/api/v1/profile", "/api/v1/alerts", "/api/v1/router", "/api/v1/organizations",
               "/api/v1/organizations:check"]: return true
-  path.startsWith("/api/v1/organizations/") and (path.endsWith("/triggers") or path.endsWith("/locks") or "/locks/" in path or path.endsWith("/variables"))
+  if path == "/api/v1/variables": return true
+  path.startsWith("/api/v1/organizations/") and (path.endsWith("/triggers") or path.endsWith("/locks") or "/locks/" in path or path.endsWith("/variables") or
+                                                 path.endsWith("/groups") or "/groups/" in path)
 
 func adminOnlyPath(path: string): bool =
   ## what is the shard's own and only an administrator's: the management of who may do what (the users, the roles, the API tokens) and the object store of the shard
   for head in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/storage", "/api/v1/audit"]:
     if path == head or path.startsWith(head & "/") or path.startsWith(head & ":"): return true
+
+func shardVariableWrite(meth, path: string): bool =
+  ## the variables of the shard are every organisation's: an administrator writes them (a person who reads reads them)
+  not isRead(meth) and (path == "/api/v1/variables" or path.startsWith("/api/v1/variables/"))
 
 func developerMay(meth, path: string): bool =
   ## what a developer may do besides reading: start a run, directly or by firing a manual trigger of an organisation, stop a run, start a failed one again
@@ -78,7 +84,7 @@ func roleMay*(role, meth, path: string): bool =
   case role
   of roleAdmin: true
   of roleDev: (isRead(meth) and readablePath(path)) or developerMay(meth, path)
-  of roleRw: not adminOnlyPath(path)
+  of roleRw: not adminOnlyPath(path) and not shardVariableWrite(meth, path)
   of roleRo: isRead(meth) and readablePath(path)
   else: false
 

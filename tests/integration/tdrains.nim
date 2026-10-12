@@ -27,7 +27,7 @@ suite "DAT-003 the drain of a step's leavings":
     proc now(): int64 = getTime().toUnix()
     const uploads = """{"artifacts":{"upload":["dist/**"]}}"""
     proc runWithStep(opts: string): string =
-      let r = co.createRun("p", "return 1", org, prof)
+      let r = co.createRun("return 1", org, prof)
       let jobId = newId()
       discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'job-1', 'RUNNING', ?)", jobId, r, prof]])
       discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at, attempt, claimed_at) " &

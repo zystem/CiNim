@@ -33,7 +33,7 @@ suite "PIP-015 running again only what failed":
       for r in c.readRows(run): result.add r.key
     proc failedRun(): string =
       ## a run whose first step succeeded and whose second failed, and which ended FAILED
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       addStep(r, 0, "SUCCEEDED")
       addStep(r, 1, "FAILED", 1)
       journalStep(r, 0, 0)
@@ -79,7 +79,7 @@ suite "PIP-015 running again only what failed":
       check keys(r) == @["s0", "s1", "retry#0", "s1~1", "retry#1", "s1~2"]
       check c.verifyJournal(r).check.verdict == cvOk
     test "a step that was lost (no record of its own) is run again too, and the keys still agree":
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       addStep(r, 0, "LOST", -1)
       setState(r, "INFRASTRUCTURE_ERROR")
       check c.retryRun(r, now()).outcome == roRetried
@@ -91,13 +91,13 @@ suite "PIP-015 running again only what failed":
       check c.retryRun(r, now()).outcome == roRetried
       check c.retryRun(r, now()).outcome == roNotRetryable                 # it is RUNNING now
       check keys(r) == @["s0", "s1", "retry#0"]
-      let ok = co.createRun("p", "return 1", "t1", defaultProfile)
+      let ok = co.createRun("return 1", "t1", defaultProfile)
       check c.retryRun(ok, now()).outcome == roNotRetryable                 # RUNNING
       setState(ok, "SUCCEEDED")
       check c.retryRun(ok, now()).outcome == roNotRetryable
       setState(ok, "CANCELED")
       check c.retryRun(ok, now()).outcome == roNotRetryable                 # a run that was cancelled on purpose is not run again
-      let noStep = co.createRun("p", "return 1", "t1", defaultProfile)
+      let noStep = co.createRun("return 1", "t1", defaultProfile)
       addStep(noStep, 0, "SUCCEEDED")
       setState(noStep, "FAILED")
       check c.retryRun(noStep, now()).outcome == roNothingToRetry            # the script itself ended it

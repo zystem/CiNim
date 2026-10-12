@@ -21,7 +21,7 @@ suite "PIP-014 locks of jobs":
     proc lockName(): string =
       inc n
       "stand-" & sfx & "-" & $n
-    proc newRun(): string = co.createRun("p", "return 1", "t1", defaultProfile)
+    proc newRun(): string = co.createRun("return 1", "t1", defaultProfile)
     proc rowsOf(run: string): seq[string] =
       for r in c.readRows(run): result.add r.key & ":" & r.kind & ":" & r.payload
     proc now(): int64 = getTime().toUnix()
@@ -261,12 +261,12 @@ suite "PIP-014 locks of jobs":
       maxUnfinishedRuns = 3
       check not c.queueIsFull(profile)
       var runs: seq[string]
-      for i in 1 .. 3: runs.add co.createRun("p", "return 1", "t1", profile)
+      for i in 1 .. 3: runs.add co.createRun("return 1", "t1", profile)
       check c.queueIsFull(profile)
       check not c.queueIsFull("limit-profile-other-" & sfx)
       setState(runs[0], "SUCCEEDED")
       check not c.queueIsFull(profile)
-      let again = co.createRun("p", "return 1", "t1", profile)
+      let again = co.createRun("return 1", "t1", profile)
       check c.queueIsFull(profile)
       setState(again, "CANCELED")
       check not c.queueIsFull(profile)

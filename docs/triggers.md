@@ -28,7 +28,7 @@ Start it with values:
 
 ```
 POST /api/v1/runs
-{"organization": "acme", "project_id": "p1", "script": "...", "params": {"TICKET": "CI-7", "JOBS": 8, "RELEASE": true}}
+{"organization": "acme", "group": "team/backend", "script": "...", "params": {"TICKET": "CI-7", "JOBS": 8, "RELEASE": true}}
 ```
 
 What happens:
@@ -38,7 +38,7 @@ What happens:
 * The complete set, defaults included, is journaled once and kept with the run (`GET /api/v1/runs/{id}` shows it as `params`). A replay after an executor restart gets the same values from the journal.
 * Every step of the run gets them as plain environment variables of the container. They are in the Pod's specification, so **a parameter is not a place for a secret**: a step asks for those by name (`secrets = {"NAME"}`, `docs/secrets-masking.md`). A secret of the same name wins.
 
-Not built: `ci.list`, `ci.map`, `ci.secret` parameters, the variables of the four levels (organisation, group, project, pipeline; VAR-001), the log header with the effective values (VAR-005).
+Not built: `ci.list`, `ci.map`, `ci.secret` parameters, the log header with the effective values (VAR-005).
 
 ## Triggers
 
@@ -48,7 +48,7 @@ All calls are an administrator's: `Authorization: Bearer <admin token>`.
 
 ```
 POST /api/v1/organizations/acme/triggers
-{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "project_id": "p1",
+{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "group": "team/backend",
  "script": "...", "params": {"TARGET": "staging"}, "concurrency": "cancel_newest"}
 ```
 
@@ -58,7 +58,7 @@ Five fields, **UTC**: minute hour day-of-month month day-of-week. `*`, lists `1,
 
 ```
 POST /api/v1/organizations/acme/triggers
-{"name": "on-push", "kind": "webhook", "project_id": "p1", "script": "..."}
+{"name": "on-push", "kind": "webhook", "group": "team/backend", "script": "..."}
 → 201 {"id": "s1_…", "hook": "/api/v1/hooks/s1_…", "secret": "<shown once>", …}
 
 POST /api/v1/hooks/s1_…
@@ -103,7 +103,7 @@ The jobs of an organisation with the same lock run **one at a time, in turn** (f
 
 ### What a trigger stores
 
-The project, the **script** and the parameters (until pipelines are read from repositories). The script is up to 256 KiB. A trigger of an organisation that is switched off starts nothing; deleting the organisation deletes its triggers.
+The **group** (optional: the path of one of the organisation's groups, docs/variables.md; none is the organisation itself), the **script** and the parameters (until pipelines are read from repositories). The script is up to 256 KiB. A trigger of an organisation that is switched off starts nothing; deleting the organisation deletes its triggers.
 
 ## Checked on the TESTING cluster
 

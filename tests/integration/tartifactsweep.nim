@@ -33,7 +33,7 @@ suite "DAT-006 the sweep of the artifacts":
     let now = getTime().toUnix()
     proc newStore(): MemStore = MemStore(objects: initTable[string, string](), uploads: initTable[string, string]())
     proc newRun(state = "SUCCEEDED"): string =
-      let r = co.createRun("p", "return 1", "t1", defaultProfile)
+      let r = co.createRun("return 1", "t1", defaultProfile)
       discard c.execute(%*[["UPDATE runs SET state = ? WHERE id = ?", state, r]])
       r
     proc add(be: MemStore; run, path, state: string; age: int64; uploadId = ""): string =
@@ -117,8 +117,8 @@ suite "DAT-006 the sweep of the artifacts":
       let p90 = c.ensureOrganizationProfile(org90, "cinim-001-rt90-" & newId()[^6 .. ^1].toLowerAscii)
       co.setProfileSettings(s7, p7)
       co.setProfileSettings(s90, p90)
-      let r7 = co.createRun("p", "return 1", org7, p7)
-      let r90 = co.createRun("p", "return 1", org90, p90)
+      let r7 = co.createRun("return 1", org7, p7)
+      let r90 = co.createRun("return 1", org90, p90)
       let rDefault = newRun()
       for r in [r7, r90]: discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", r]])
       let a7 = be.add(r7, "a.txt", "stored", 10 * day)             # 10 days old: past 7, within 90 and within the shard's 30
@@ -133,7 +133,7 @@ suite "DAT-006 the sweep of the artifacts":
       var s = defaultSettings()
       s.artifactRetentionDays = 5
       co.setProfileSettings(s, p)
-      let mine = co.createRun("p", "return 1", org, p)
+      let mine = co.createRun("return 1", org, p)
       discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", mine]])
       let other = newRun()
       let a = be.add(mine, "a.txt", "stored", 6 * day)
@@ -159,9 +159,9 @@ suite "DAT-006 the quota of an organisation":
       var s = defaultSettings()
       s.artifactQuotaBytes = 5 * 1024 * 1024
       co.setProfileSettings(s, p)
-      let r1 = co.createRun("p", "return 1", org, p)
-      let r2 = co.createRun("p", "return 1", org, p)
-      let rOther = co.createRun("p", "return 1", other, c.ensureOrganizationProfile(other, "cinim-001-qb-" & sfx))
+      let r1 = co.createRun("return 1", org, p)
+      let r2 = co.createRun("return 1", org, p)
+      let rOther = co.createRun("return 1", other, c.ensureOrganizationProfile(other, "cinim-001-qb-" & sfx))
       check c.orgQuota(r1) == 5 * 1024 * 1024 and c.orgQuota(rOther) == 0
       add(org, r1, "a.bin", 2 * 1024 * 1024)
       add(org, r2, "b.bin", 1024 * 1024, "uploading")

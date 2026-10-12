@@ -27,7 +27,7 @@ suite "T-03 the hash chain of the journal":
         state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
     proc runWithSteps(n: int): string =
       ## a run whose script has asked for `n` steps in turn, each answered: params at 0, then job_sh at 1..n
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       var tok = c.takeRunLease(master, r, "exec-t")
       discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 0, key: "params#0", kind: "params", payload: cast[seq[byte]]("{}")), master)
       for i in 1 .. n:
@@ -90,7 +90,7 @@ suite "T-03 the hash chain of the journal":
       check leaseIt(r).isNone
       check failCode(r) == "journal_corrupt"
     test "a journal without hashes is not adopted: the run does not go to an executor and ends with journal_corrupt":
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       for i in 0 .. 2:
         discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) VALUES (?, ?, 'job_sh', '', ?, '0', '1')",
           r, i, "p" & $i]])

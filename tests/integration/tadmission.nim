@@ -55,14 +55,14 @@ suite "RUN-004 the limits of an organisation and of a run":
       check co.getProfileSettings(o.profile)["job_pod_limit_percent"].getInt == 50
     test "a run does not get more than its share, however many steps wait and however many slots the controller has":
       let o = newOrg(20, 20)                       # a run may hold 4
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 10: c.addStep(r, o.profile, i, i)
       check poll(o.ns, 100).handedOut.len == 4
       check poll(o.ns, 100).handedOut.len == 0     # the four are in flight; nothing more for this run
     test "the organisation does not get more than its limit, spread across its runs":
       let o = newOrg(6, 100)                       # a run may hold all 6, the organisation 6
-      let ra = co.createRun("p", "return 1", "t1", o.profile)
-      let rb = co.createRun("p", "return 1", "t1", o.profile)
+      let ra = co.createRun("return 1", "t1", o.profile)
+      let rb = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 8: c.addStep(ra, o.profile, i, i)
       for i in 1 .. 8: c.addStep(rb, o.profile, i, 100 + i)
       let got = poll(o.ns, 100).handedOut
@@ -71,15 +71,15 @@ suite "RUN-004 the limits of an organisation and of a run":
       check poll(o.ns, 100).handedOut.len == 0
     test "a finished step frees its place":
       let o = newOrg(2, 100)
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 4: c.addStep(r, o.profile, i, i)
       check poll(o.ns, 100).handedOut.len == 2
       discard c.execute(%*[["UPDATE steps SET state = 'SUCCEEDED' WHERE run_id = ? AND state = 'STARTING' AND ordinal = 1", r]])
       check poll(o.ns, 100).handedOut.len == 1
     test "the run with the fewest steps in flight goes first":
       let o = newOrg(10, 100)
-      let busy = co.createRun("p", "return 1", "t1", o.profile)
-      let idle = co.createRun("p", "return 1", "t1", o.profile)
+      let busy = co.createRun("return 1", "t1", o.profile)
+      let idle = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 3: c.addStep(busy, o.profile, i, i, "RUNNING")
       c.addStep(busy, o.profile, 4, 1)             # the oldest waiting step is the busy run's
       c.addStep(idle, o.profile, 1, 50)
@@ -87,14 +87,14 @@ suite "RUN-004 the limits of an organisation and of a run":
       check got == @[idle]
     test "the controller's free slots still bound one poll":
       let o = newOrg(20, 100)
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 5: c.addStep(r, o.profile, i, i)
       check poll(o.ns, 2).handedOut.len == 2
     test "another organisation's limit does not touch this one":
       let a = newOrg(1, 100)
       let b = newOrg(20, 100)
-      let ra = co.createRun("p", "return 1", "t1", a.profile)
-      let rb = co.createRun("p", "return 1", "t1", b.profile)
+      let ra = co.createRun("return 1", "t1", a.profile)
+      let rb = co.createRun("return 1", "t1", b.profile)
       for i in 1 .. 3: c.addStep(ra, a.profile, i, i)
       for i in 1 .. 3: c.addStep(rb, b.profile, i, i)
       check poll(a.ns, 10).handedOut.len == 1

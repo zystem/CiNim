@@ -108,6 +108,29 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     discard sb.execute(j, pipelineOneStep, fakeHost, runId = "s1_abc")
     check "secrets" notin j.entries[0].payload
 
+  test "VAR-004 the env of the pipeline, of the job, of j:env and of the step are in the journalled options: the first three together as env (the pipeline's under the job's), the step's apart":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, "return ci.pipeline({env = {A = 'pipeline', B = 'pipeline'}, main = function(run) ci.job({image = 'a', env = {B = 'job', C = 3}}, function(j) j:sh('x'); j:env({D = true, A = 'later'}); j:sh('y', {env = {E = 'step', B = 'step'}}) end) end})", fakeHost, runId = "s1_abc")
+    check r.code == "ok"
+    check j.entries[0].payload == "job-1\ta\t\t{\"env\":{\"A\":\"pipeline\",\"B\":\"job\",\"C\":\"3\"}}\tx"
+    check j.entries[1].payload == "job-1\ta\t\t{\"env\":{\"A\":\"later\",\"B\":\"job\",\"C\":\"3\",\"D\":\"true\"},\"step_env\":{\"B\":\"step\",\"E\":\"step\"}}\ty"
+  test "VAR-004 a step with no env has no env key, so the journal of an older run still replays":
+    var sb = newSandbox()
+    var j = Journal()
+    discard sb.execute(j, pipelineOneStep, fakeHost, runId = "s1_abc")
+    check "env" notin j.entries[0].payload
+  test "VAR-004 a name that is not an environment name, a value that is not text, a control character and too many variables are refused before the run goes on":
+    for bad in ["{lower = 'x'}", "{['1A'] = 'x'}", "{A = {}}", "{A = 'x\\1'}", "{A = string.rep('x', 9000)}", "'text'"]:
+      var sb = newSandbox()
+      var j = Journal()
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', env = " & bad & "}, function(j) j:sh('x') end) end})", fakeHost, runId = "s1_abc")
+      check r.code == "script_error" and "env" in r.message
+    var sb = newSandbox()
+    var j = Journal()
+    let many = sb.execute(j, "local t = {} for i = 1, 101 do t['V' .. i] = 'x' end return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:env(t) end) end})", fakeHost, runId = "s1_abc")
+    check many.code == "script_error" and "at most 100" in many.message
+
   test "a call that the core refuses for good fails the run with the core's words; it is not suspended":
     var sb = newSandbox()
     var j = Journal()

@@ -66,8 +66,8 @@ suite "RUN-009 the conductor":
     test "RUN-009 a run is led by a run process of the conductor to its end":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t1")
-      let ok = co.createRun("p", "return 1", "t1", o.profile)
-      let bad = co.createRun("p", "error('boom')", "t1", o.profile)
+      let ok = co.createRun("return 1", "t1", o.profile)
+      let bad = co.createRun("error('boom')", "t1", o.profile)
       check waitState(ok, "SUCCEEDED")
       check waitState(bad, "FAILED")
       stop p
@@ -75,7 +75,7 @@ suite "RUN-009 the conductor":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t2")
       let script = "return ci.pipeline({name='m', main=function(run) ci.job({image='busybox:1.36'}, function(j) j:sh('echo hi') end) return 'ok' end})"
-      let r = co.createRun("p", script, "t1", o.profile)
+      let r = co.createRun(script, "t1", o.profile)
       let deadline = epochTime() + 30
       var steps = 0
       while epochTime() < deadline and steps == 0:
@@ -93,7 +93,7 @@ suite "RUN-009 the conductor":
       stop p
     test "IAM-003 a conductor with a credential the core does not accept stops with a refusal and leads nothing":
       let o = newOrg()
-      let r = co.createRun("p", "return 1", "t1", o.profile)
+      let r = co.createRun("return 1", "t1", o.profile)
       let p = startConductor(o.ns, "c-t3", credential = "wrong")
       check p.waitForExit(15000) == 3
       check stateOf(r) == "RUNNING"
@@ -101,7 +101,7 @@ suite "RUN-009 the conductor":
     test "RUN-009 a conductor holds at most its places: more runs wait in the queue":
       let o = newOrg()
       var ids: seq[string]
-      for i in 0 ..< 4: ids.add co.createRun("p", "return " & $i, "t1", o.profile)
+      for i in 0 ..< 4: ids.add co.createRun("return " & $i, "t1", o.profile)
       let p = startConductor(o.ns, "c-t4", places = 2)
       for r in ids: check waitState(r, "SUCCEEDED", 40)      # two at a time, the others as places free up
       stop p
@@ -126,7 +126,7 @@ suite "RUN-009 the conductor":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t6")
       let script = "ci.job({image='a'}, function(j)\n  for i = 1, 3 do j:sh('x' .. i) end\n  j:sh('tail')\nend)"
-      let r = co.createRun("p", script, "t1", o.profile)
+      let r = co.createRun(script, "t1", o.profile)
       var seen: seq[int]
       let deadline = epochTime() + 90
       while epochTime() < deadline and stateOf(r) == "RUNNING":
@@ -143,7 +143,7 @@ suite "RUN-009 the conductor":
     test "PIP-006 a script with more than 200 steps ends before it makes a single one, with step_limit":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t7")
-      let r = co.createRun("p", "ci.job({image='a'}, function(j) for i = 1, 201 do j:sh('x') end end)", "t1", o.profile)
+      let r = co.createRun("ci.job({image='a'}, function(j) for i = 1, 201 do j:sh('x') end end)", "t1", o.profile)
       check waitState(r, "FAILED")
       check c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "step_limit"
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
@@ -151,7 +151,7 @@ suite "RUN-009 the conductor":
     test "PIP-018 an id used twice ends the run with duplicate_id before any step is made":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t8")
-      let r = co.createRun("p", "ci.job({image='a'}, function(j)\n j:sh('x', {id='same'})\n j:sh('y', {id='same'})\nend)", "t1", o.profile)
+      let r = co.createRun("ci.job({image='a'}, function(j)\n j:sh('x', {id='same'})\n j:sh('y', {id='same'})\nend)", "t1", o.profile)
       check waitState(r, "FAILED")
       check c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "duplicate_id"
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0

@@ -19,6 +19,7 @@
 import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options, base64, sequtils]
 import checksums/sha2
 import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts, varsheader
+import ../common/stepenv
 when defined(shimLogging):
   import logclient   ## also brings in StepRef (import_proto3-generated) for the calls below
 else:
@@ -598,6 +599,7 @@ proc main(): int =
   var childEnv = newStringTable(modeCaseSensitive)
   for k, v in envPairs(): childEnv[k] = v
   for e in inherited: childEnv[e.name] = e.value
+  for (n, v) in envOf(optsJson, "step_env"): childEnv[n] = v      # the step's own `env`: above what the steps wrote to $CICD_ENV (VAR-004)
   for (n, v) in fetched: childEnv[n] = v          # after the inherited ones: a secret is not overridden by an earlier step's file
   childEnv.del variablesEnv                      # the core's list of variable names is for the header, not for the command
   childEnv["CICD_ENV"] = envFile

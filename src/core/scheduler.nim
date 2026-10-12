@@ -9,7 +9,7 @@
 import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan]
+import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import audit, drains, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
@@ -60,14 +60,14 @@ proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
 
 # ------------------------------------------------------------------ run creation and lookup (REST API)
 
-proc createRun*(co: Core; projectId, script: string; tenantId = "t1"; profileId = ""; params: seq[(string, string)] = @[]; triggerId = ""): string =
+proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; params: seq[(string, string)] = @[]; triggerId = ""; groupId = ""): string =
   ## `tenantId` is the organisation's id and `profileId` its execution profile (SHD-007); without them the run belongs to the
-  ## shard's default tenant and profile (single-tenant setups and tests).
+  ## shard's default tenant and profile (single-tenant setups and tests). `groupId` is the group the run belongs to (PRJ-001, D-54; "" = the organisation itself).
   var c = newRq(co.rqliteUrl)
   result = newId()
   let now = $getTime().toUnix()
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version) " &
-    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)", result, tenantId, projectId, protoName(rsRunning), now, now,
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, protoName(rsRunning), now, now,
     (if profileId.len > 0: profileId else: co.profileId), (if params.len > 0: toJson(params) else: ""),
     (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
@@ -152,12 +152,12 @@ proc retryRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Retry
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message " &
+  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
   let row = vals[0]
-  result = %*{"id": row[0].getStr, "organization": row[5].getStr, "project_id": row[1].getStr, "state": row[2].getStr,
+  result = %*{"id": row[0].getStr, "organization": row[5].getStr, "group": row[1].getStr, "state": row[2].getStr,
               "created_at": row[3].getStr, "updated_at": row[4].getStr}
   if row[7].getStr.len > 0: result["trigger_id"] = %row[7].getStr
   if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
@@ -167,7 +167,10 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if vars.len > 0:
     # VAR-001: what the steps see, and where each value came from (an override at a lower level is shown, not hidden)
     var vj = newJArray()
-    for e in vars: vj.add %*{"name": e.name, "value": e.value, "source": e.source}
+    for e in vars:
+      var item = %*{"name": e.name, "value": e.value, "source": e.source}
+      if e.group.len > 0: item["group"] = %e.group
+      vj.add item
     result["variables"] = vj
   let lockWait = c.waitingFor(runId)
   if lockWait.waiting: result["waiting_for_lock"] = %*{"name": lockWait.name, "held_by": lockWait.heldBy}
@@ -466,11 +469,19 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
     applyTransition(c, policy, PodTransition(step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[2].getInt)),
                                              state: STEP_STATE_LOST, exit_code: -1, termination_reason: reason))
 
-proc startEnv(c: var RqClient; runId: string; ordinal, attempt: int; claimedAt: int64): seq[(string, string)] =
-  ## The environment of a step: the plain variables of the run (core/orgvars.nim), and for the first step of the run only, in `CICD_VARIABLES`, their names, so that its shim
-  ## prints the header of VAR-005. The first step is the one with no step claimed before it (two claimed in the same second: the lower number); two steps claimed together may both
-  ## print it, which is harmless; a step that is run again does not.
+proc startEnv(c: var RqClient; runId: string; ordinal, attempt: int; claimedAt: int64; optsJson = ""): seq[(string, string)] =
+  ## The environment of a step, from the lowest (VAR-004): the plain variables of the run's organisation and its launch parameters (core/orgvars.nim), then the `env` of the
+  ## pipeline and of the job that the script put in the step's options. And for the first step of the run only, in `CICD_VARIABLES`, their names, so that its shim prints the
+  ## header of VAR-005. The first step is the one with no step claimed before it (two claimed in the same second: the lower number); two steps claimed together may both
+  ## print it, which is harmless; a step that is run again does not. (What a step writes to $CICD_ENV and its own `env` are applied by the shim, above these.)
   result = c.stepEnv(runId)
+  for (k, v) in envOf(optsJson, "env"):
+    var found = false
+    for i in 0 ..< result.len:
+      if result[i][0] == k:
+        result[i] = (k, v)
+        found = true
+    if not found: result.add (k, v)
   if attempt != 1 or result.len == 0: return
   let earlier = c.query(%*[["SELECT count(*) FROM steps WHERE run_id = ? AND claimed_at > 0 AND (claimed_at < ? OR (claimed_at = ? AND ordinal < ?))", runId, claimedAt, claimedAt, ordinal]])
   if earlier["results"][0]{"values"}[0][0].getInt > 0: return
@@ -661,7 +672,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
-      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow).mapIt(EnvEntry(key: it[0], value: it[1])),
+      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow, row[5].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
       step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr): stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   # STO-006: the controller deleted these volumes; and the runs whose volume may go now (it is told again until it says it is done)
@@ -887,6 +898,10 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",
         detail: "the step declares artifacts, and this shard has no object store (PUT /api/v1/storage)")))
+  let badEnv = checkEnv(opts)
+  if badEnv.len > 0:
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: badEnv)))
   let wantedSecrets = secretNamesOf(opts)
   if wantedSecrets.len > 0:
     # the step asks for secrets of the organisation (6.7): they must exist now, and the run must belong to an organisation

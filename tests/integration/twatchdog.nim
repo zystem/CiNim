@@ -17,7 +17,7 @@ suite "RUN-017 the watchdog counts heartbeats":
     let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns")
     proc runningStep(): tuple[run: string, seq: int] =
       ## a step that has been RUNNING for 20 minutes, its last event 20 minutes ago
-      let r = co.createRun("p", "return 1")
+      let r = co.createRun("return 1")
       let long = getTime().toUnix() - 1200
       let jobId = newId()
       discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j', 'RUNNING', ?)", jobId, r, defaultProfile]])

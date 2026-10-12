@@ -98,10 +98,10 @@ proc waitApiUp(port: int; timeoutMs = 20000) =
     waited += 200
   doAssert false, "core's API on " & $port & " never came up"
 
-proc postRun(port: int; projectId, script: string): JsonNode =
+proc postRun(port: int; group, script: string): JsonNode =
   let c = newHttpClient()
   defer: c.close()
-  let body = $(%*{"project_id": projectId, "script": script})
+  let body = $(%*{"group": group, "script": script})
   let resp = c.request("http://" & host & ":" & $port & "/api/v1/runs", HttpPost, body,
     headers = newHttpHeaders({"Content-Type": "application/json"}))
   doAssert resp.code == Http201, "POST /api/v1/runs: " & $resp.code & " " & resp.body
@@ -142,7 +142,7 @@ proc makeStepRows(runId: string) =
   ## a run/job/step row so core can resolve the step of a log stream (what the executor would have created)
   var c = newRq(rqliteUrl)
   discard c.execute(%*[
-    ["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at) " &
+    ["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at) " &
      "VALUES (?, 't1', 'p1', 'RUNNING', 1, '0', '0')", runId],
     ["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'k1', 'RUNNING', 'p1')", "job-" & runId, runId],
     ["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, queued_at) " &
@@ -325,7 +325,7 @@ suite "walking skeleton end to end":
           ci.job({image = "busybox:1.36"}, function(j) r = j:sh("echo hello-from-m1-skeleton") end)
           return "code=" .. tostring(r.code)
         end})"""
-      let created = postRun(apiPort, "p1", script)
+      let created = postRun(apiPort, "", script)
       let runId = created["id"].getStr
       check created["state"].getStr == "RUNNING"
 
@@ -394,7 +394,7 @@ suite "walking skeleton end to end":
         let runId = "s1_logtest" & $int(epochTime())
         var c = newRq(rqliteUrl)
         discard c.execute(%*[
-          ["INSERT INTO runs (id, tenant_id, project_id, state, version, created_at, updated_at) " &
+          ["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at) " &
            "VALUES (?, 't1', 'p1', 'RUNNING', 1, '0', '0')", runId],
           ["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'k1', 'RUNNING', 'p1')", "job-" & runId, runId],
           ["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, queued_at) " &
@@ -446,7 +446,7 @@ suite "walking skeleton end to end":
               ci.job({image = "busybox:1.36"}, function(j) r = j:sh("echo gate-test-step") end)
               return "code=" .. tostring(r.code)
             end})"""
-          runId = postRun(apiPort, "p1", script)["id"].getStr   # creating a run is not blocked (RUN-015 b)
+          runId = postRun(apiPort, "", script)["id"].getStr   # creating a run is not blocked (RUN-015 b)
           sleep 8000
           let run = getRun(apiPort, runId)
           check run["state"].getStr == "RUNNING"
@@ -527,7 +527,7 @@ suite "walking skeleton end to end":
 
     if remoteCore:
       test "D-28: the Pod vanishes after its command started -> NOT restarted (fate unknown), the reason is in the API":
-        let runId = postRun(apiPort, "p1", sleepScript)["id"].getStr
+        let runId = postRun(apiPort, "", sleepScript)["id"].getStr
         check waitPodPhase(podName(runId, 0, 1), "Running", 90000)
         check waitShimEvent(runId, 2, 60000)                    # command_started: the command is known to have run
         killPod(podName(runId, 0, 1))
@@ -545,7 +545,7 @@ suite "walking skeleton end to end":
           end})"""
         try:
           check setProfile(1){"infra_retries"}.getInt == 1
-          let runId = postRun(apiPort, "p1", never)["id"].getStr
+          let runId = postRun(apiPort, "", never)["id"].getStr
           check waitPodPhase(podName(runId, 0, 1), "Pending", 90000)   # the image can never be pulled: the container never starts
           killPod(podName(runId, 0, 1))
           check waitAttempt(runId, 2, 60000)                          # provably never started: repeated
@@ -566,7 +566,7 @@ suite "walking skeleton end to end":
             ci.job({image = "busybox:1.36"}, function(j) r = j:sh("sleep 25; echo result-is-known") end)
             return "code=" .. tostring(r.code)
           end})"""
-        let runId = postRun(apiPort, "p1", script)["id"].getStr
+        let runId = postRun(apiPort, "", script)["id"].getStr
         check waitPodPhase(podName(runId, 0, 1), "Running", 90000)
         scaleAgent(0)                                              # vlagent is gone while the command runs and ends
         var final: JsonNode
@@ -587,7 +587,7 @@ suite "walking skeleton end to end":
             ci.job({image = "busybox:1.36"}, function(j) r = j:sh("sleep 6; echo finished-while-core-was-away") end)
             return "code=" .. tostring(r.code)
           end})"""
-        let runId = postRun(apiPort, "p1", script)["id"].getStr
+        let runId = postRun(apiPort, "", script)["id"].getStr
         check waitPodPhase(podName(runId, 0, 1), "Running", 90000)
         check waitShimEvent(runId, 2, 60000)
         coreService("stop")
@@ -617,7 +617,7 @@ suite "walking skeleton end to end":
           end})"""
         try:
           check putProfile(%*{"liveness_timeout": 30}){"liveness_timeout"}.getInt == 30
-          let runId = postRun(apiPort, "p1", never)["id"].getStr
+          let runId = postRun(apiPort, "", never)["id"].getStr
           check waitPodPhase(podName(runId, 0, 1), "Pending", 90000)
           let final = waitTerminal(apiPort, runId, 120000)
           check final["state"].getStr == "INFRASTRUCTURE_ERROR"
@@ -643,7 +643,7 @@ suite "walking skeleton end to end":
         let np = buildDir / "cutoff-np.yaml"
         try:
           check putProfile(%*{"liveness_timeout": 30}){"liveness_timeout"}.getInt == 30
-          let runId = postRun(apiPort, "p1", script)["id"].getStr
+          let runId = postRun(apiPort, "", script)["id"].getStr
           check waitPodPhase(podName(runId, 0, 1), "Running", 90000)
           check waitShimEvent(runId, 2, 60000)
           var n0 = 0
@@ -686,7 +686,7 @@ suite "walking skeleton end to end":
             ci.job({image = "busybox:1.36"}, function(j) r = j:sh("sleep 120", {timeout = 8}) end)
             return "code=" .. tostring(r.code)
           end})"""
-        let runId = postRun(apiPort, "p1", script)["id"].getStr
+        let runId = postRun(apiPort, "", script)["id"].getStr
         let final = waitTerminal(apiPort, runId, 120000)        # a step that exits non-zero fails the job and so the run (6.7); only the step is checked here
         check final["steps"][0]["state"].getStr == "FAILED"
         check final["steps"][0]["termination"].getStr == "timeout"
@@ -702,7 +702,7 @@ suite "walking skeleton end to end":
             end)
             return "code=" .. tostring(r.code)
           end})"""
-        let runId = postRun(apiPort, "p1", script)["id"].getStr
+        let runId = postRun(apiPort, "", script)["id"].getStr
         check waitTerminal(apiPort, runId, 120000)["state"].getStr == "SUCCEEDED"
         var lines: seq[string]
         for _ in 0 ..< 30:
@@ -721,7 +721,7 @@ suite "walking skeleton end to end":
               ci.job({image = "busybox:1.36"}, function(j) r = j:sh("seq 1 400000; echo after-the-flood") end)
               return "code=" .. tostring(r.code)
             end})"""
-          let runId = postRun(apiPort, "p1", script)["id"].getStr
+          let runId = postRun(apiPort, "", script)["id"].getStr
           let final = waitTerminal(apiPort, runId, 180000)
           check final["state"].getStr == "SUCCEEDED"
           var n = 0
@@ -766,7 +766,7 @@ suite "walking skeleton end to end":
             end)
             return "code=" .. tostring(r.code)
           end})"""
-        let runId = postRun(apiPort, "p1", script)["id"].getStr
+        let runId = postRun(apiPort, "", script)["id"].getStr
         check waitMetric("cinim_inflight_app_metric_sum{source=\"myapp\",metric=\"myapp_requests_total\"} 42.000", 90000)
         check "ignored_thing" notin coreMetrics()                               # `include` filtered it in the shim
         check "cinim_inflight_scrape_up{source=\"myapp\"} 1" in coreMetrics()
@@ -782,7 +782,7 @@ suite "walking skeleton end to end":
             end)
             return "code=" .. tostring(r.code)
           end})"""
-        let runId = postRun(apiPort, "p1", script)["id"].getStr
+        let runId = postRun(apiPort, "", script)["id"].getStr
         check waitMetric("cinim_inflight_app_metric_sum{source=\"jvm\",metric=\"jvm_threads_current\"}", 240000)
         check "cinim_inflight_app_metric_sum{source=\"jvm\",metric=\"jvm_heap_used_bytes\"}" in coreMetrics()
         discard waitTerminal(apiPort, runId, 120000)
@@ -794,7 +794,7 @@ suite "walking skeleton end to end":
             ci.job({image = "busybox:1.36"}, function(j) r = j:sh("x=$(head -c 400000000 /dev/zero | tr '\\0' a); echo survived") end)
             return "code=" .. tostring(r.code)
           end})"""
-        let runId = postRun(apiPort, "p1", script)["id"].getStr
+        let runId = postRun(apiPort, "", script)["id"].getStr
         let final = waitTerminal(apiPort, runId, 120000)
         check final["steps"][0]["state"].getStr == "FAILED"
         check final["steps"][0]["termination"].getStr == "oom_killed"
