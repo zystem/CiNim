@@ -41,7 +41,7 @@ If the start is visible in the log or another source and the status is unclear, 
 | An endless line without `\n` | many | ✅ split at 32 KiB, a bound on accumulation |
 | Secrets in logs | all | ✅ values are masked in the shim before the spool and the core, the build's output does not reach the Pod's log at all; base64 forms (all alignments), URL, JSON; `$CICD_MASK` for values found at run time (docs/secrets-masking.md). ❌ splits across lines and other encodings |
 | The spool disk is full or unavailable | observed in testing | ✅ the shim does not fail: blocks are dropped and counted (`dropped` in the state and in the Pod log), the step ends with its own result |
-| An undelivered block is lost together with the Pod | Jenkins, GitLab (attach) | ✅ the shim holds the Pod for the hold timeout while the core or the log store is away; before a running Pod is removed the controller pulls the spool out over exec in chunks with checksums and hands it to the core; and with run volumes the spool is on the volume, so that after the Pod has ended a drain Pod delivers it when the core orders (the same for artifacts); the client's exec is costly (~17 s per call) and loses frames on a fast stream, so the shim writes frames with a pause |
+| An undelivered block is lost together with the Pod | Jenkins, GitLab (attach) | ✅ the shim holds the Pod for the hold timeout while the core or the log store is away; a Pod that is removed while it runs gets a grace period, in which the shim stops the build, delivers the log and leaves; the spool is on the run's volume, so that what is left after the Pod has ended is delivered by a drain Pod when the core orders (the same for artifacts); nothing is pulled out of a Pod from outside (the controller's `exec` returned nothing in the TESTING cluster, and costs ~17 s a call where it works) |
 | The whole log is in the server's memory | Drone | ✅ the core is a proxy and stores nothing |
 | A step's log has no size limit | GitLab (`output_limit`) | ✅ `log_max_bytes` per step (1 GiB by default, configurable), one truncation marker (end to end) |
 | A log sidecar is killed too early | Prow | ✅ there is no sidecar: the shim is the parent of the command and holds the Pod until delivery |
@@ -58,6 +58,5 @@ If the start is visible in the log or another source and the status is unclear, 
 ## What remains
 
 - Secrets: a value split by a line break and other encodings (hex, gzip+base64) are not masked; a value that is neither among the step's secrets nor in `$CICD_MASK` cannot be masked.
-- Every exec call in the Kubernetes client costs about 17 s: pulling out a large spool takes minutes, so the controller is limited to a total of 120 s. An alternative (an own exec client or a separate adapter process) is needed only if the need is real.
 - Adoption of a "revived" step after `liveness_timeout` is not done: the core has already finished it and removed the Pod (by design).
 - UI: there are no warnings in the interface because there is no UI yet (stage M4); the profile settings are available through the API.

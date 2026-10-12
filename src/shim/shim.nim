@@ -6,12 +6,13 @@
 ##   - gives the command $CICD_ENV, $CICD_OUTPUT, $CICD_MASK and $CICD_WORKSPACE, validates the files after it (STO-003, SEC-011); with --workspace and
 ##     --state-dir (the run volume of STO-001) the workspace and the env file are the ones every step of the run shares, --run-dir is the step's own;
 ##   - starts the command in its own process group, below its own CPU priority, and enforces the step's timeout and SIGTERM;
-##   - turns the output into masked, numbered, compressed blocks in a spool on the Pod's ephemeral storage and delivers them to
+##   - turns the output into masked, numbered, compressed blocks in a spool on the run's volume (so that it outlives the Pod, D-53) and delivers them to
 ##     core (logclient.nim); the Pod's own log carries only the shim's events (shimlog.nim);
 ##   - samples the container's resources, reads a JVM's counters and scrapes the application's endpoints (metrics);
 ##   - reports its state to core with every heartbeat and its result in StepReport, then waits for core's permission to exit; the
 ##     termination message (at most 4 KiB) and the Pod status stay the fallback;
-##   - `--read-spool DIR` / `--ack-spool DIR` are the exec tools the job-controller uses to pull an undelivered spool out of a Pod.
+##   - `--drain ...` delivers what a step that has ended left on the volume (its log spool, the manifest of its artifacts), in a Pod the job-controller makes when core orders it;
+##   - on SIGTERM (a cancelled step, a Pod being removed) stops the build (SIGTERM to its process group, SIGKILL after 20 s), delivers the log and exits.
 ## Exit code: the command's, 124 for a timeout, 70 for env_rejected, 72 for logs_undelivered, 71 for an internal error.
 ## The default build has no ZeroMQ (it runs in any image); the production build is -d:shimLogging, linked statically
 ## (tools/shim/build_static.sh).
@@ -139,80 +140,6 @@ proc spawnBuild(cmd: seq[string]; env: StringTableRef; nice, oomAdj: int; cwd = 
     discard waitpid(pid, st, 0)
     raise newException(OSError, "cannot execute " & cmd[0] & ": " & $strerror(childErrno))
   Build(pid: int(pid), fd: fds[0])
-
-when defined(shimLogging):
-  import logspool, ../common/spoolwire
-
-  proc spoolTool(args: seq[string]): int =
-    ## `cicd-shim --read-spool DIR [--after-seq N] [--max-bytes M]` writes the queued, undelivered blocks to stdout as frames
-    ## (common/spoolwire.nim); `cicd-shim --ack-spool DIR --upto N` removes the blocks core now has. Both are run by the
-    ## job-controller through the Kubernetes exec API when this shim cannot reach core itself (D-29). Read-only apart
-    ## from the ack; they never touch the running shim's own bookkeeping, which is why the shim's sender may still be
-    ## sending the same blocks: core takes each sequence number once.
-    var dir = ""
-    var afterSeq = 0'u64
-    var maxBytes = 8 * 1024 * 1024
-    var upto = 0'u64
-    var paceMs = 2                               # pause between 4095-byte pieces (see below)
-    var lingerMs = 700                           # how long to stay alive after the last byte (see below)
-    var mode = ""
-    var i = 0
-    while i < args.len:
-      case args[i]
-      of "--read-spool", "--ack-spool":
-        mode = args[i]
-        inc i
-        dir = args[i]
-      of "--after-seq":
-        inc i
-        afterSeq = parseBiggestUInt(args[i])
-      of "--max-bytes":
-        inc i
-        maxBytes = parseInt(args[i])
-      of "--upto":
-        inc i
-        upto = parseBiggestUInt(args[i])
-      of "--pace-ms":
-        inc i
-        paceMs = parseInt(args[i])
-      of "--linger-ms":
-        inc i
-        lingerMs = parseInt(args[i])
-      else:
-        stderr.writeLine "cicd-shim: unknown argument " & args[i]
-        return 2
-      inc i
-    if not dirExists(dir):
-      stderr.writeLine "cicd-shim: no spool directory " & dir
-      return 3
-    if mode == "--read-spool":
-      var sent = 0
-      for q in peek(dir, maxBlocks = 1_000_000, maxBytes = maxBytes):
-        if q.blk.seq <= afterSeq: continue
-        let frame = encodeFrame(Frame(seq: q.blk.seq, firstLn: q.blk.firstLn, lines: q.blk.lines, encoding: q.blk.encoding,
-                                      data: q.blk.data))
-        if sent > 0 and sent + frame.len > maxBytes: break
-        # Written in pieces of one websocket frame (4095 bytes of payload) with a short pause: the C client's WebSocket exec
-        # loses frames when a producer streams at full speed (measured: half of 1 MB of zeros arrived), and is lossless when
-        # paced. The checksum on every block catches whatever still goes wrong, and the reader asks again.
-        var off = 0
-        while off < frame.len:
-          let n = min(4095, frame.len - off)
-          stdout.write frame[off ..< off + n]
-          stdout.flushFile()
-          off += n
-          if paceMs > 0: sleep paceMs
-        sent += frame.len
-      stdout.flushFile()
-      # The exec stream is closed as soon as this process exits, and frames still in flight at that moment are lost (measured:
-      # a short output was cut after ~3.6 KB). Staying alive a moment lets the client read everything first.
-      sleep lingerMs
-      return 0
-    for f in walkFiles(dir / "*.blk"):           # --ack-spool
-      let name = extractFilename(f)
-      let seqNo = try: parseBiggestUInt(name.split('-')[0]) except ValueError: 0'u64
-      if seqNo > 0 and seqNo <= upto: removeFile(f)
-    0
 
 proc prepareVolume(args: seq[string]): int =
   ## `cicd-shim --prepare-volume DIR SUB...` is the init container of a step Pod that mounts the run volume (STO-001, STO-002): it makes the subdirectories of the
@@ -357,9 +284,6 @@ proc main(): int =
     when defined(shimLogging):
       if argv.len > 0 and argv[0] == "--drain": return drainTool(argv)
     if argv.len > 0 and argv[0] == "--prepare-volume": return prepareVolume(argv)
-  when defined(shimLogging):
-    let argv = commandLineParams()
-    if argv.len > 0 and argv[0] in ["--read-spool", "--ack-spool"]: return spoolTool(argv)
   var runDir = ""
   var workspaceDir = ""                    # STO-002: the run's shared workspace (default: the parent of --run-dir, as before the run volume)
   var stateDir = ""                        # STO-002: the run's shared state (the env file of STO-003); default: --run-dir, file CICD_ENV

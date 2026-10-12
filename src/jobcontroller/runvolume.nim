@@ -11,19 +11,13 @@ const
 
 type
   VolumeSettings* = object
-    enabled*: bool                     ## CINIM_RUN_STORAGE=on: steps share a volume; off: every Pod has an emptyDir of its own as before
     size*, storageClass*: string       ## the claim's request and class ("" = the cluster's default class)
     readWriteMany*: bool               ## the class offers ReadWriteMany; otherwise ReadWriteOnce, and the Pods of a run are kept on one node (STO-001)
 
-func volumeSettings*(enabled, size, storageClass, access: string): VolumeSettings =
-  ## from the environment (CINIM_RUN_STORAGE, CINIM_RUN_STORAGE_SIZE, CINIM_RUN_STORAGE_CLASS, CINIM_RUN_STORAGE_ACCESS)
-  VolumeSettings(enabled: enabled == "on", size: (if size.len > 0: size else: defaultSize), storageClass: storageClass,
-                 readWriteMany: access == "ReadWriteMany")
-
-func withEnabled*(v: VolumeSettings; on: bool): VolumeSettings =
-  ## the namespace's settings, for one Pod: on when the controller makes run volumes and the request says the step uses it
-  result = v
-  result.enabled = v.enabled and on
+func volumeSettings*(size, storageClass, access: string): VolumeSettings =
+  ## from the environment (CINIM_RUN_STORAGE_SIZE, CINIM_RUN_STORAGE_CLASS, CINIM_RUN_STORAGE_ACCESS). The run volume is not optional (D-55): the steps of a run share it, and
+  ## the spool of the log and the manifest of the artifacts are on it.
+  VolumeSettings(size: (if size.len > 0: size else: defaultSize), storageClass: storageClass, readWriteMany: access == "ReadWriteMany")
 
 func claimName*(runId: string): string =
   ## the run id is shard-prefixed ("s1_<uuid>"): the underscore is not valid in a Kubernetes name
@@ -43,13 +37,9 @@ type PodVolume* = object
   runDir*: string                      ## where the shim keeps the step's own files (CICD_OUTPUT, CICD_MASK)
 
 func podVolume*(v: VolumeSettings; runId, image: string; shimMount, containerCtx, resources: JsonNode): PodVolume =
-  ## Without a run volume the step has an emptyDir at `/cicd/workspace`, as before. With it: the claim's `workspace/` at `/cicd/workspace`, its `state/` at
-  ## `/cicd/state`, and an emptyDir at `/cicd/run` for the step's own files. The two subdirectories are made by an init container, because the kubelet would make
+  ## The claim's `workspace/` at `/cicd/workspace`, its `state/` at `/cicd/state`, and an emptyDir at `/cicd/run` for the step's own files. The two subdirectories are made by an init container, because the kubelet would make
   ## a missing `subPath` as root and a step that is not root could not write there; the init container runs as the step does (the same security context)
   ## and opens the two for everyone of the run, since the steps of one run are not all the same user (a build Pod is root of its user namespace).
-  if not v.enabled:
-    return PodVolume(mounts: @[%*{"name": "run", "mountPath": "/cicd/workspace"}],
-                     volumes: @[%*{"name": "run", "emptyDir": {}}], runDir: "/cicd/workspace/.run")
   result.mounts = @[%*{"name": "run", "mountPath": "/cicd/run"},
                     %*{"name": "data", "mountPath": "/cicd/workspace", "subPath": workspaceDir},
                     %*{"name": "data", "mountPath": "/cicd/state", "subPath": stateDir}]

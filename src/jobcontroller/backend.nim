@@ -10,13 +10,12 @@ type
     ## What the platform wants a step Pod to be; the adapter turns it into a Pod spec (volumes, security context, ...).
     name*, image*, runId*: string
     cmd*: seq[string]            ## the container's command: the shim, its flags, `--` and the step's command
-    logging*: bool               ## the shim streams logs: it needs the spool volume and the CURVE keys
+    logging*: bool               ## the shim streams logs: it needs the CURVE keys (its spool is on the run's volume)
     spoolBytes*: int
     secrets*: seq[string]        ## the names of the step's secrets: the Pod's environment holds a placeholder for each, the shim fetches the values from core
     env*: seq[(string, string)]  ## plain environment of the step: the run's launch parameters (VAR-002); never a secret
     build*: bool                 ## a step of the build profile: the adapter makes a build Pod of it (podsec.nim, D-42)
     deploy*: bool                ## a step of the deploy profile: an ordinary Pod with the label that the network policies of a deployment select (D-48)
-    runVolume*: bool             ## the step shares the run's volume (STO-001, runvolume.nim); the shim is told where the workspace and the state are
 
   PodSummary* = object
     name*, phase*: string
@@ -48,9 +47,6 @@ type
       ## true = gone afterwards (deleted, or it was not there)
     createDrainPod*: proc (name, runId, image: string; cmd: seq[string]): CreateOutcome
       ## a Pod that mounts the run's volume and runs `cmd` (the shim's `--drain`, docs/artifacts.md), to deliver what a step that has ended left there; idempotent
-    execInPod*: proc (name, container, command: string): tuple[ok: bool, output: string]
-      ## run a command in a running Pod and return its stdout (the command is split on spaces, no quoting); ok = it ran.
-      ## The WebSocket exec of the C client is lossy for bulk data, so callers ask for small pieces and verify checksums.
     ensureRunVolume*: proc (runId: string): CreateOutcome
       ## the run's PersistentVolumeClaim exists afterwards (idempotent: it is made at the first step of the run); nil when the controller has no run volumes
     releaseRunVolume*: proc (runId: string): bool

@@ -1,6 +1,5 @@
 ## The job-controller's decisions against a fake cluster (D-29): no Kubernetes, no ZeroMQ.
 import std/[unittest, json, tables, options, strutils, os, sequtils]
-import common/spoolwire
 import common/shimstate
 import jobcontroller/[backend, ctrlstate, logic, podverdict]
 
@@ -9,14 +8,10 @@ type Fake = ref object
   created: Table[string, int64]
   logs: Table[string, string]
   deleted: seq[string]
-  spool: seq[Frame]                     ## what the fake Pod's spool holds
-  acked: uint64
-  damageFirstReads: int                 ## the first N reads come back damaged (the lossy exec)
   creates: seq[PodRequest]
   listOk: bool
   refuse: CreateOutcome                 ## when its kind is not ckOk, creating a Pod is refused like this
   events: Table[string, seq[JsonNode]]  ## name -> the Kubernetes events about the Pod
-  commands: seq[string]                 ## what was run in a Pod through exec
 
 proc newFake(): Fake = Fake(listOk: true)
 
@@ -36,27 +31,6 @@ proc backendOf(f: Fake): Backend =
       f.deleted.add name
       f.pods.del name
       true,
-    execInPod: proc (name, container, command: string): tuple[ok: bool, output: string] =
-      if name notin f.pods or f.pods[name]{"status", "phase"}.getStr != "Running": return
-      result.ok = true
-      f.commands.add command
-      let parts = command.split(' ')
-      if "--ack-spool" in parts:
-        f.acked = parseBiggestUInt(parts[parts.find("--upto") + 1])
-        f.spool = f.spool.filterIt(it.seq > f.acked)
-        return
-      let after = parseBiggestUInt(parts[parts.find("--after-seq") + 1])
-      let budget = parseInt(parts[parts.find("--max-bytes") + 1])
-      var sent = 0
-      for fr in f.spool:
-        if fr.seq <= after: continue
-        let enc = encodeFrame(fr)
-        if sent > 0 and sent + enc.len > budget: break
-        result.output.add enc
-        sent += enc.len
-      if f.damageFirstReads > 0 and result.output.len > 100:
-        dec f.damageFirstReads
-        result.output[result.output.len div 2] = char(ord(result.output[result.output.len div 2]) xor 1),
     listPods: proc (): tuple[ok: bool, pods: seq[PodSummary]] =
       result.ok = f.listOk
       for n, p in f.pods: result.pods.add PodSummary(name: n, phase: p{"status", "phase"}.getStr, createdAt: f.created.getOrDefault(n, 1000)))
@@ -117,13 +91,11 @@ suite "creating Pods":
 
 suite "the volume the steps of a run share (STO-001, STO-006)":
   var volCfg = cfg
-  volCfg.runVolumes = true
   test "STO-002 the shim is told where the step's own files, the workspace and the state are":
     let r = buildRequest(volCfg, req())
-    check r.runVolume
     check r.cmd[r.cmd.find("--run-dir") + 1] == "/cicd/run" and r.cmd[r.cmd.find("--workspace") + 1] == "/cicd/workspace"
     check r.cmd[r.cmd.find("--state-dir") + 1] == "/cicd/state"
-  test "DAT-003 with a run volume the manifest of the artifacts and the log spool are on it, where a reader Pod finds them after the Pod has ended":
+  test "DAT-003, D-55 the manifest of the artifacts and the log spool are on the run volume, where a drain Pod finds them after the Pod has ended":
     var c2 = volCfg
     c2.collectorAddr = "tcp://core:19743"
     c2.stepReportAddr = "tcp://core:19742"
@@ -131,12 +103,7 @@ suite "the volume the steps of a run share (STO-001, STO-006)":
     let r = buildRequest(c2, req())
     check r.cmd[r.cmd.find("--manifest-dir") + 1] == drainDir(req().seq, req().attempt)
     check r.cmd[r.cmd.find("--log-spool-dir") + 1] == drainDir(req().seq, req().attempt) & "/spool"
-    c2.runVolumes = false
-    let plain = buildRequest(c2, req())
-    check "--manifest-dir" notin plain.cmd and plain.cmd[plain.cmd.find("--log-spool-dir") + 1] == "/cicd/spool"
-  test "without run volumes the command is what it was: the shim's files in the workspace, no shared volume":
-    let r = buildRequest(cfg, req())
-    check not r.runVolume and r.cmd[r.cmd.find("--run-dir") + 1] == "/cicd/workspace/.run" and "--state-dir" notin r.cmd
+    check "/cicd/spool" notin r.cmd                      # there is no spool of the Pod's own any more
   test "the claim of the run is made before its first Pod, and before the row":
     let st = openState(":memory:")
     var order: seq[string]
@@ -157,14 +124,6 @@ suite "the volume the steps of a run share (STO-001, STO-006)":
       CreateOutcome(kind: ckQuota, reason: "Forbidden", message: "exceeded quota: persistentvolumeclaims")
     let o = startPod(be, st, volCfg, req(), 100)
     check o.kind == ckQuota and f.creates.len == 0 and not st.has("ci-s1-run-0-1")
-  test "a controller without run volumes never asks for a claim":
-    let st = openState(":memory:")
-    var asked = false
-    var be = backendOf(newFake())
-    be.ensureRunVolume = proc (runId: string): CreateOutcome =
-      asked = true
-      CreateOutcome(kind: ckOk)
-    check startPod(be, st, cfg, req(), 100).ok and not asked
   test "STO-006 the volumes core names are deleted, and the ones that are gone are reported back":
     var deleted: seq[string]
     var be = backendOf(newFake())
@@ -387,7 +346,7 @@ suite "cancel, retention, orphans":
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    discard cancelPod(be, st, "s1_run", 0, 1, 5)
+    cancelPod(be, st, "s1_run", 0, 1, 5)
     check f.deleted == @["ci-s1-run-0-1"] and not st.has("ci-s1-run-0-1")
   test "a Pod whose result core has and whose log was delivered is removed at once, a failed one too":
     let st = openState(":memory:")
@@ -462,82 +421,3 @@ suite "cancel, retention, orphans":
     discard startPod(be, st, cfg, req(), 100)
     check sweep(be, st, cfg, 99999).orphans.len == 0
 
-suite "pulling the spool out of a running Pod before it is removed (the exec fallback)":
-  proc frame(n: uint64): Frame = Frame(seq: n, firstLn: n * 10, lines: 10, encoding: "gzip", data: "block-" & $n & repeat("x", 3000))
-
-  test "drain returns the blocks in order, in several small exec calls":
-    let st = openState(":memory:")
-    let f = newFake()
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
-    for n in 1'u64 .. 30'u64: f.spool.add frame(n)
-    let got = drainSpool(be, "ci-s1-run-0-1")
-    check got.mapIt(it.seq) == (1'u64 .. 30'u64).toSeq
-  test "a spool that does not start at 1 (earlier blocks were delivered by the shim itself) is drained from where it starts":
-    let st = openState(":memory:")
-    let f = newFake()
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
-    for n in 6'u64 .. 25'u64: f.spool.add frame(n)
-    check drainSpool(be, "ci-s1-run-0-1").mapIt(it.seq) == (6'u64 .. 25'u64).toSeq
-  test "a gap inside the spool stops the drain at the gap":
-    let st = openState(":memory:")
-    let f = newFake()
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
-    for n in [3'u64, 4, 5, 9, 10]: f.spool.add frame(n)
-    check drainSpool(be, "ci-s1-run-0-1").mapIt(it.seq) == @[3'u64, 4, 5]
-  test "damaged reads are repeated with a smaller budget, nothing is skipped or doubled":
-    let st = openState(":memory:")
-    let f = newFake()
-    f.damageFirstReads = 2
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
-    for n in 1'u64 .. 10'u64: f.spool.add frame(n)
-    check drainSpool(be, "ci-s1-run-0-1").mapIt(it.seq) == (1'u64 .. 10'u64).toSeq
-  test "a Pod that is not running has nothing to pull":
-    let st = openState(":memory:")
-    let f = newFake()
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = succeeded()
-    for n in 1'u64 .. 3'u64: f.spool.add frame(n)
-    check drainSpool(be, "ci-s1-run-0-1").len == 0
-  test "cancel rescues first (core gets the blocks, the spool is acknowledged), then deletes the Pod":
-    let st = openState(":memory:")
-    let f = newFake()
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
-    for n in 1'u64 .. 5'u64: f.spool.add frame(n)
-    var delivered: seq[uint64]
-    let rescue: Deliver = proc (runId: string; seq, attempt: int; frames: seq[Frame]): uint64 =
-      for fr in frames: delivered.add fr.seq
-      frames[^1].seq
-    check cancelPod(be, st, "s1_run", 0, 1, 5, rescue) == 5
-    check delivered == @[1'u64, 2, 3, 4, 5] and f.acked == 5 and f.spool.len == 0
-    check f.deleted == @["ci-s1-run-0-1"]
-  test "D-27 with run volumes the cancel rescue reads the spool where the shim keeps it, on the volume":
-    let st = openState(":memory:")
-    let f = newFake()
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
-    f.spool.add frame(1)
-    let rescue: Deliver = proc (runId: string; seq, attempt: int; frames: seq[Frame]): uint64 = frames[^1].seq
-    check cancelPod(be, st, "s1_run", 0, 1, 5, rescue, volumes = true) == 1
-    check f.commands.len == 2 and (drainDir(0, 1) & "/spool") in f.commands[0] and (drainDir(0, 1) & "/spool") in f.commands[1]
-  test "when core does not take the blocks they are not acknowledged (they stay in the spool) and the Pod is still removed":
-    let st = openState(":memory:")
-    let f = newFake()
-    let be = backendOf(f)
-    discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
-    for n in 1'u64 .. 3'u64: f.spool.add frame(n)
-    let refuse: Deliver = proc (runId: string; seq, attempt: int; frames: seq[Frame]): uint64 = 0
-    check cancelPod(be, st, "s1_run", 0, 1, 5, refuse) == 0
-    check f.acked == 0 and f.spool.len == 3 and f.deleted.len == 1

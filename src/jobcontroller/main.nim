@@ -6,11 +6,10 @@
 ## deferred: the shim gets the shared CURVE "client" identity through a Secret. The shim binary reaches the Pod through a ConfigMap
 ## mount (A.6). The step namespace must be dedicated to this controller (docs/settings.md).
 import std/[os, json, strutils, times, sequtils, tables]
-import crunchy
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import std/options
-import common/[zmqcurve, spoolwire, stream, streamstate]
+import common/[zmqcurve, stream, streamstate]
 import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors, drain
 
 import_proto3 "../../build/nimproto/all.proto"
@@ -34,7 +33,6 @@ let
   streamAddr = getEnv("CINIM_CORE_STREAM_ADDR", "")
 const pollIntervalMs = 1000
 
-var logIngestAddr = ""      ## where *this* process reaches the core's LogIngest, to hand over the blocks it pulled out of a Pod's spool (the exec fallback, D-29); the core says in every answer to a poll (D-49)
 
 # ---- the push channel: a controller's end
 type
@@ -127,44 +125,6 @@ proc waitPushed(p: var Push; ms: int): bool =
         return true
       if p.wake: return true
 
-proc deliverToCore(runId: string; seq, attempt: int; frames: seq[Frame]): uint64 =
-  ## Blocks pulled out of a Pod's spool go to core's LogIngest exactly as the shim would have sent them (same sequence numbers:
-  ## core takes each one once, so a shim that is only half dead and sends them too does no harm). Returns the highest sequence
-  ## core acknowledged, 0 if none.
-  echo "jobcontroller: handing ", frames.len, " spooled block(s) of ", runId, "/", seq, " attempt ", attempt, " to core"
-  if logIngestAddr.len == 0:
-    stderr.writeLine "jobcontroller: the core gave no LogIngest address: the blocks are not delivered"
-    return 0
-  try:
-    let conn = connectReq(logIngestAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"),
-                          recvTimeoutMs = 30000, sendTimeoutMs = 10000)
-    defer: (try: conn.close() except CatchableError: discard)
-    var i = 0
-    while i < frames.len:
-      var batch = LogBatch(step: StepRef(run_id: runId, seq: uint32(seq), attempt: uint32(attempt)))
-      var bytes = 0
-      while i < frames.len and batch.chunks.len < 32 and (batch.chunks.len == 0 or bytes + frames[i].data.len <= 900_000):
-        let f = frames[i]
-        batch.chunks.add LogChunk(seq: f.seq, data: cast[seq[byte]](f.data), crc32c: crc32c(f.data), encoding: f.encoding,
-                                  first_ln: f.firstLn, lines: f.lines)
-        bytes += f.data.len
-        inc i
-      let enc = Protobuf.encode(batch)
-      var msg = newString(enc.len)
-      if enc.len > 0: copyMem(addr msg[0], unsafeAddr enc[0], enc.len)
-      conn.send(msg)
-      let (avail, _, body) = waitForReceive(conn.socket)
-      if not avail:
-        stderr.writeLine "jobcontroller: core did not answer the spooled blocks"
-        return
-      let ack = Protobuf.decode(cast[seq[byte]](body), LogAck)
-      result = max(result, ack.acked_seq)
-      if ack.failure.code != "" and ack.failure.code != "rejected":      # core could not take it: what was acked stays acked
-        stderr.writeLine "jobcontroller: core answered " & ack.failure.code & " to the spooled blocks (acked up to " & $ack.acked_seq & ")"
-        return
-  except CatchableError as e:
-    stderr.writeLine "jobcontroller: handing a Pod's spooled log to core failed: " & e.msg
-
 func toProto(t: Transition): PodTransition =
   PodTransition(step: StepRef(run_id: t.runId, seq: uint32(t.seq), attempt: uint32(t.attempt)), pod_name: t.podName,
     state: (case t.kind
@@ -234,7 +194,6 @@ proc main() =
   var released: seq[string]               # run volumes deleted since the last answered poll: core is told, and stops asking (STO-006)
   var drainWork: Table[string, DrainWork]    # DAT-003: the drains core ordered (by the reader Pod's name), until they are done, failed for good, or core forgets them
   var drained: seq[StepDrained]               # how they ended, for the next report
-  var seenPhase: Table[string, string]     # pod name -> phase as of the last round (only a Running Pod has a spool worth pulling)
   echo "jobcontroller: push channel to ", streamAddr, ", session=", sessionId
   while true:
     let now = epochTime()
@@ -242,7 +201,6 @@ proc main() =
       lastQuota = now
       quota = be.readStorageQuota()
     let round = pollRound(be, st, cfg, now)
-    for p in round.inventory: seenPhase[p.podName] = p.phase
     let req = PollRequest(header: Header(protocol: 1), session_id: sessionId, ack_command_seq: ackSeq, namespace: ns,
       credential: credential, bootstrap_token: (if credential.len == 0: readTrimmed(bootstrapFile) else: ""),
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
@@ -286,13 +244,11 @@ proc main() =
       # the settings of the shard, in every answer: what the next Pod and claim are made by (a step is never started before the first answer)
       let c = resp.config
       let s = shardSettings(c.build_enabled, c.build_seccomp, c.build_caps, c.build_memory_limit, c.build_ephemeral_limit,
-                            c.run_storage_enabled, c.run_storage_size, c.run_storage_class, c.run_storage_access)
+                            c.run_storage_size, c.run_storage_class, c.run_storage_access)
       applyShardSettings(s)
-      cfg.runVolumes = s.volume.enabled
       cfg.collectorAddr = c.collector_addr
       cfg.stepReportAddr = c.step_report_addr
       cfg.artifactAddr = c.artifact_addr
-      logIngestAddr = if c.log_ingest_addr.len > 0: c.log_ingest_addr else: c.collector_addr
       cfg.logSpoolBytes = int(c.log_spool_bytes)
       cfg.logHoldTimeout = int(c.log_hold_timeout_seconds)
       cfg.retentionRead = int(c.pod_retention_read_seconds)
@@ -391,10 +347,7 @@ proc main() =
           handBack.add PodTransition(step: c.step, state: STEP_STATE_LOST, exit_code: -1, termination_reason: "diag_only",
             pod_reason: (if w.reason.len > 0: w.reason else: ps.reason), pod_message: (if w.reason.len > 0: w.message else: ps.message),
             pod_diag: podDiag(seen, (if be.readEvents != nil: be.readEvents(pn) else: @[])))
-        let rescued = cancelPod(be, st, c.step.run_id, int(c.step.seq), int(c.step.attempt), int(c.grace_seconds),
-                                (if seenPhase.getOrDefault(pn) == "Running": Deliver(deliverToCore) else: nil), cfg.runVolumes)
-        seenPhase.del pn
-        if rescued > 0: echo "jobcontroller: pulled ", rescued, " undelivered log block(s) out of the Pod before removing it"
+        cancelPod(be, st, c.step.run_id, int(c.step.seq), int(c.step.attempt), int(c.grace_seconds))
       else: discard
       if cmd.seq > ackSeq: ackSeq = cmd.seq
     if epochTime() - lastSweep >= 10.0:

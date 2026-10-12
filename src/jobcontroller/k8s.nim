@@ -102,7 +102,7 @@ proc applyShardSettings*(s: ShardSettings) = shard = s
 proc podBody(r: PodRequest): JsonNode =
   let sec = podsec.podSecurity(shard.build, r.build, r.deploy)
   let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
-  let vol = runvolume.podVolume(shard.volume.withEnabled(r.runVolume), r.runId, r.image, shimMount, sec.containerCtx, sec.resources)
+  let vol = runvolume.podVolume(shard.volume, r.runId, r.image, shimMount, sec.containerCtx, sec.resources)
   result = %*{
     "apiVersion": "v1", "kind": "Pod",
     "metadata": {"name": r.name, "labels": {"cicd.io/run": r.runId}},
@@ -113,12 +113,10 @@ proc podBody(r: PodRequest): JsonNode =
       "securityContext": sec.podCtx,
       "containers": [{"name": "step", "image": r.image, "command": r.cmd,
         "volumeMounts": (@[shimMount] & vol.mounts &
-          (if r.logging: @[%*{"name": "certs", "mountPath": "/cicd/certs", "readOnly": true}] else: @[]) &
-          (if r.logging and not r.runVolume: @[%*{"name": "spool", "mountPath": "/cicd/spool"}] else: @[])),     # with a run volume the spool is on it: a reader Pod can fetch it (drainDir)
+          (if r.logging: @[%*{"name": "certs", "mountPath": "/cicd/certs", "readOnly": true}] else: @[])),
         "securityContext": sec.containerCtx,
         "resources": sec.resources}],
-      "volumes": (@[%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}}] & vol.volumes &   # the run's volume, or an emptyDir for the shim's --run-dir
-        (if r.logging and not r.runVolume: @[%*{"name": "spool", "emptyDir": {"sizeLimit": $(r.spoolBytes + 1024 * 1024)}}] else: @[]) &   # kubelet evicts above this; the shim stops itself at spoolBytes
+      "volumes": (@[%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}}] & vol.volumes &   # the run's volume (the spool of the log and the manifest of the artifacts are on it), and an emptyDir for the shim's own files
         (if r.logging: @[%*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
           {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
@@ -158,61 +156,6 @@ proc drainBody(name, runId, image: string; cmd: seq[string]): JsonNode =
         {"weight": 100, "podAffinityTerm": {"labelSelector": {"matchLabels": {runvolume.runLabel: runId}}, "topologyKey": "kubernetes.io/hostname"}}]}}}}
   for k, v in sec.labels: result["metadata"]["labels"][k] = v
   if not sec.hostUsers: result["spec"]["hostUsers"] = %false
-
-var execCaptured {.threadvar.}: string
-
-proc onExecData(data: ptr pointer; len: ptr clong) {.cdecl.} =
-  if data != nil and data[] != nil and len != nil and len[] > 0:
-    let n = int(len[])
-    let old = execCaptured.len
-    execCaptured.setLen(old + n)
-    copyMem(addr execCaptured[old], data[], n)
-
-type
-  ExecJob = ref object
-    api: ptr apiClient_t
-    ns, name, container, command: string
-    done: Atomic[bool]
-    ok: bool
-    output: string
-    rcExec, rcRun: int      ## what kube_exec and wsclient_run answered (for the log when a call returns nothing)
-
-proc execThread(job: ExecJob) {.thread.} =
-  ## the C client's WebSocket exec (kube_exec): one connection, blocks until the command's stream closes - and, if the API
-  ## refuses or the Pod is not up, may keep retrying for a long time. Hence a thread of its own, which the caller can give up on.
-  {.cast(gcsafe).}:
-    let wsc = wsclient_create(job.api.basePath, job.api.sslConfig, job.api.apiKeys_BearerToken, 0)
-    if wsc != nil:
-      setCallback(wsc, onExecData)
-      execCaptured = ""
-      job.rcExec = int(kube_exec(wsc, job.ns.cstring, job.name.cstring, job.container.cstring, 0, 1, 0, job.command.cstring))
-      if job.rcExec == 0:
-        job.rcRun = int(wsclient_run(wsc, 0))
-        job.ok = true
-        job.output = execCaptured
-      wsclient_free(wsc)
-    job.done.store(true)
-
-proc execInPod(k: K8s; name, container, command: string; timeoutSeconds = 25): tuple[ok: bool, output: string] =
-  ## Gives up after `timeoutSeconds`: the thread is left behind (it ends when the Pod is removed and its stream closes) and the
-  ## caller carries on - a stuck exec must never stop the controller from deleting a Pod.
-  let started = epochTime()
-  var job = ExecJob(api: k.api, ns: k.ns, name: name, container: container, command: command)
-  GC_ref(job)
-  var th: Thread[ExecJob]
-  createThread(th, execThread, job)
-  let until = epochTime() + timeoutSeconds.float
-  while not job.done.load and epochTime() < until: sleep 50
-  if job.done.load:
-    joinThread(th)
-    result = (job.ok, job.output)
-    GC_unref(job)
-    if epochTime() - started > 3.0:
-      stderr.writeLine "jobcontroller: exec in " & name & " took " & formatFloat(epochTime() - started, ffDecimal, 1) & " s (" &
-        $job.output.len & " bytes, kube_exec " & $job.rcExec & ", wsclient_run " & $job.rcRun & "): " & command[0 ..< min(command.len, 60)]
-  else:
-    stderr.writeLine "jobcontroller: exec in " & name & " did not finish within " & $timeoutSeconds & " s, giving up on it"
-    # the thread is detached on purpose (job stays referenced for as long as it runs)
 
 proc parseTime(s: string): int64 =
   try: parse(s, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc()).toTime.toUnix
@@ -279,8 +222,6 @@ proc backendOf*(k: K8s): Backend =
         return false
       echo "jobcontroller: deleted pod ", name
       true,
-    execInPod: proc (name, container, command: string): tuple[ok: bool, output: string] =
-      execInPod(kk, name, container, command),
     ensureRunVolume: proc (runId: string): CreateOutcome =
       let raw = Generic_createNamespacedResource(kk.claims, kk.ns.cstring, ($claimBody(shard.volume, runId)).cstring, nil)
       if raw == nil:

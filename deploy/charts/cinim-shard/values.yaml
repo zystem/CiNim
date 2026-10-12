@@ -161,8 +161,7 @@ steps:
 artifacts:
   retention: 2592000                  # 30 days
   abandonAfter: 86400                 # a day
-runStorage:
-  enabled: true
+runStorage:                           # the run volume is not optional (D-55): every run has one, and the spool of the log and the manifest of the artifacts are on it
   size: 5Gi
   storageClass: ""                    # empty is the cluster's default class
   accessMode: ReadWriteOnce

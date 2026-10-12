@@ -1,7 +1,6 @@
 ## Runner shim (RUN-010, STO-003, SEC-011): runs the step command, then validates CICD_ENV and CICD_OUTPUT with the dotenv parser.
-import std/[unittest, os, osproc, json, strutils, times, sequtils, streams]
+import std/[unittest, os, osproc, json, strutils, times, sequtils, streams, algorithm]
 import zippy
-import common/spoolwire
 
 let shimExe = getTempDir() / "cinim-shim-test"
 
@@ -263,45 +262,31 @@ suite "secret masking through the log pipeline (docs/secrets-masking.md)":
       let text = spooled(d, "echo \"mask file: [$CICD_MASK]\"", @["--opts-json", """{"mask":{"min_length":4,"runtime":false,"variants":false}}"""])
       check "mask file: []" in text
 
-suite "reading the spool through exec (the fallback for a shim that cannot reach core)":
+suite "the log spool of the shim (D-53: it is on the run's volume, so that it outlives the Pod)":
   let logExe = getTempDir() / "cinim-shim-log-test"
   let certs = getCurrentDir() / "tests" / "certs"
 
-  test "--read-spool gives whole checksummed blocks, --after-seq skips what core has, --ack-spool frees them":
+  test "a shim that cannot deliver leaves every block in its spool directory, whole and numbered, for the drain Pod to deliver":
     if not fileExists(logExe) or not dirExists(certs / "curve"): skip()
     else:
-      let d = getTempDir() / "shim-spool-tool"
+      let d = getTempDir() / "shim-spool-left"
       removeDir d
       createDir d
       let sp = d / "spool"
-      # a shim that cannot deliver (nobody listens): everything it read stays in the spool
       let p = startProcess(logExe, args = @["--run-dir", d, "--termination-log", d / "tl", "--collector-addr", "tcp://127.0.0.1:1",
         "--core-addr", "tcp://127.0.0.1:1", "--certs-dir", certs, "--run-id", "s1_m", "--step-seq", "0", "--step-attempt", "1",
         "--log-spool-dir", sp, "--log-hold-timeout", "2", "--", "sh", "-c", "seq 1 20000"], options = {poStdErrToStdout})
       discard p.waitForExit(60000)
       p.close()
-      # (execCmdEx reads lines and would rewrite a "\r\n" inside a binary block: go through a file)
-      proc readSpool(extra = ""): string =
-        let f = d / "read.out"
-        discard execCmd(logExe & " --read-spool " & sp & extra & " > " & f)
-        readFile(f)
-      let out1 = readSpool()
-      let all = parseFrames(out1)
-      check not all.damaged and all.frames.len >= 2
-      check all.frames[0].seq == 1 and all.frames[0].encoding == "gzip"
-      var total = 0'u32
-      for f in all.frames:
-        check uncompress(f.data).len > 0
-        total += f.lines
-      check total == 20000
-      let out2 = readSpool(" --after-seq " & $all.frames[0].seq)
-      check parseFrames(out2).frames.len == all.frames.len - 1
-      let out3 = readSpool(" --max-bytes 1")
-      check parseFrames(out3).frames.len == 1                   # at least one block, however small the budget
-      check execCmd(logExe & " --ack-spool " & sp & " --upto " & $all.frames[0].seq) == 0
-      check parseFrames(readSpool()).frames.len == all.frames.len - 1
-      check execCmd(logExe & " --ack-spool " & sp & " --upto 999999") == 0
-      check parseFrames(readSpool()).frames.len == 0
+      var names: seq[string]
+      for f in walkFiles(sp / "*.blk"): names.add extractFilename(f)
+      names.sort()
+      check names.len >= 2 and names[0].startsWith("000000000001-")
+      var lines = 0
+      for n in names:
+        lines += parseInt(n.split('-')[2])
+        check uncompress(readFile(sp / n)).len > 0
+      check lines == 20000
   test "a spool that cannot be written degrades the log, never the step":
     if not fileExists(logExe) or not dirExists(certs / "curve"): skip()
     else:
@@ -322,9 +307,6 @@ suite "reading the spool through exec (the fallback for a shim that cannot reach
       for l in output.splitLines:
         if l.startsWith("CICD-SHIM "): last = parseJson(l["CICD-SHIM ".len .. ^1])
       check last["ev"].getStr == "done" and last["dropped"].getInt >= 1     # the loss is counted where the verdict is
-  test "a missing spool directory is an error, not an empty answer":
-    if not fileExists(logExe): skip()
-    else: check execCmd(logExe & " --read-spool /nonexistent/spool 2>/dev/null") == 3 * 256 or execCmd(logExe & " --read-spool /nonexistent/spool 2>/dev/null") != 0
 
 suite "step options in the shim":
   test "the step timeout can come in the options object":

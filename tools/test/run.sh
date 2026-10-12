@@ -17,7 +17,7 @@ while [ $# -gt 0 ]; do
 done
 if [ ${#files[@]} -eq 0 ]; then
   [ $integ = 1 ] && for f in tests/integration/t*.nim; do
-    case $f in *texec*|*tdrain*|*tm1skeleton*) continue;; esac     # these need the Kubernetes C client (K8S_PREFIX) and a cluster: name them on the command line
+    case $f in *tm1skeleton*) continue;; esac     # needs the Kubernetes C client (K8S_PREFIX) and a cluster: name it on the command line
     files+=("$f")
   done
   [ $unit = 1 ] && for f in tests/unit/t*.nim; do

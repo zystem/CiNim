@@ -489,6 +489,8 @@ proc startEnv(c: var RqClient; runId: string; ordinal, attempt: int; claimedAt: 
   for (k, v) in result: names.add k
   result.add ("CICD_VARIABLES", names.join(","))
 
+const cancelGraceSeconds* = 50       ## a Pod that is removed while it runs: its shim stops the build (SIGTERM, then SIGKILL after 20 s), delivers the log (up to 15 s) and exits, so the Pod has this long (less than the 60 s of its spec)
+
 proc unwantedPods*(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
   ## Pods the controller has that no step wants any more: the step moved on to a later attempt, or finished (a short while
   ## ago - a Pod that is just exiting by itself is left alone), or core has no such step at all (an orphan).
@@ -529,9 +531,9 @@ proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
   ## the settings of the shard as the wire carries them to a controller
   ControllerConfig(present: true, build_enabled: s.buildEnabled, build_seccomp: s.buildSeccomp, build_caps: s.buildCaps,
                    build_memory_limit: s.buildMemoryLimit, build_ephemeral_limit: s.buildEphemeralLimit,
-                   run_storage_enabled: s.runStorageEnabled, run_storage_size: s.runStorageSize,
+                   run_storage_size: s.runStorageSize,
                    run_storage_class: s.runStorageClass, run_storage_access: s.runStorageAccess,
-                   collector_addr: s.collectorAddr, step_report_addr: s.stepReportAddr, artifact_addr: s.artifactAddr, log_ingest_addr: s.logIngestAddr,
+                   collector_addr: s.collectorAddr, step_report_addr: s.stepReportAddr, artifact_addr: s.artifactAddr,
                    log_spool_bytes: uint64(s.logSpoolBytes), log_hold_timeout_seconds: uint32(s.logHoldTimeout),
                    pod_retention_read_seconds: uint32(max(s.podRetentionRead, 0)), pod_retention_unread_seconds: uint32(max(s.podRetentionUnread, 0)))
 
@@ -623,7 +625,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   var seq = 1'u64
   # Pods nobody wants any more are removed (superseded attempts, finished steps, orphans of an earlier core or controller)
   for step in unwantedPods(c, req.inventory.toSeq):
-    commands.add Command(seq: seq, body: CommandBody(kind: CommandBodyKind.cancel, cancel: CancelStep(step: step, grace_seconds: 5)))
+    commands.add Command(seq: seq, body: CommandBody(kind: CommandBodyKind.cancel, cancel: CancelStep(step: step, grace_seconds: cancelGraceSeconds)))
     inc seq
   if gate.isOpen:
     if waitReasonSet.exchange(false):   # the gate (re)opened: queued steps no longer wait for the log circuit
@@ -683,7 +685,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     releaseAskedAt[profileId] = epochTime()
     release = releasableRuns(c, profileId, getTime().toUnix(), retentionFromEnv())
   var drainOrders: seq[DrainStep]
-  if not push and profileId.len > 0 and shardSettingsFromEnv().runStorageEnabled:      # the push channel answers for work, the poll names the drains
+  if not push and profileId.len > 0:      # the push channel answers for work, the poll names the drains
     for d in c.dueDrains(profileId, getTime().toUnix()):
       drainOrders.add DrainStep(step: StepRef(run_id: d.runId, seq: uint32(d.ordinal), attempt: uint32(d.attempt)), image: d.image,
                                 step_token: stepToken(master, d.runId, d.ordinal, d.attempt), artifacts: d.artifacts, logs: d.logs)

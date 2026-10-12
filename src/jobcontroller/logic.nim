@@ -4,7 +4,7 @@
 ## the shim's state from its log), cancelling Pods core no longer wants, keeping finished Pods for a while and then removing them,
 ## and sweeping orphans out of the (dedicated) step namespace.
 import std/[json, options, strutils, tables, times, sequtils]
-import ../common/[shimstate, spoolwire]
+import ../common/shimstate
 import backend, ctrlstate, podverdict
 
 type
@@ -42,7 +42,6 @@ type
     retentionUnread*: int                     ## seconds it is kept when they are not (log not delivered, end unknown): 14 days
     orphanGrace*: int                         ## a Pod not in our state is an orphan only after this many seconds
     logEvery*: int                            ## seconds between reads of a running Pod's log
-    runVolumes*: bool                         ## the steps of a run share one volume (STO-001): the Pods mount it and the shim is told where the workspace and the state are
 
 func defaultConfig*(): Config =
   Config(logSpoolBytes: 10 * 1024 * 1024, logHoldTimeout: 600, retentionUnread: 14 * 86400, orphanGrace: 120,
@@ -63,18 +62,15 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   let spool = if r.logSpoolBytes > 0: int(r.logSpoolBytes) else: cfg.logSpoolBytes
   let hold = if r.logHoldTimeout > 0: r.logHoldTimeout else: cfg.logHoldTimeout
   var cmd = @["/cicd/shim/cicd-shim"]
-  if cfg.runVolumes:
-    # STO-002: the step's own files (CICD_OUTPUT, CICD_MASK) are in /cicd/run, the run's workspace and the env file of STO-003 on the shared volume
-    cmd.add @["--run-dir", "/cicd/run", "--workspace", "/cicd/workspace", "--state-dir", "/cicd/state"]
-  else:
-    cmd.add @["--run-dir", "/cicd/workspace/.run"]
+  # STO-002: the step's own files (CICD_OUTPUT, CICD_MASK) are in /cicd/run, the run's workspace and the env file of STO-003 on the volume the steps of the run share
+  cmd.add @["--run-dir", "/cicd/run", "--workspace", "/cicd/workspace", "--state-dir", "/cicd/state"]
   if logging:
     cmd.add @["--collector-addr", cfg.collectorAddr, "--core-addr", cfg.stepReportAddr, "--certs-dir", "/cicd/certs",
               "--run-id", r.runId, "--step-seq", $r.seq, "--step-attempt", $r.attempt,
-              "--log-spool-dir", (if cfg.runVolumes: drainDir(r.seq, r.attempt) & "/spool" else: "/cicd/spool"), "--log-spool-bytes", $spool,
+              "--log-spool-dir", drainDir(r.seq, r.attempt) & "/spool", "--log-spool-bytes", $spool,
               "--log-hold-timeout", $hold]
   if cfg.artifactAddr.len > 0: cmd.add @["--artifact-addr", cfg.artifactAddr]
-  if cfg.runVolumes: cmd.add @["--manifest-dir", drainDir(r.seq, r.attempt)]       # on the volume: a reader Pod can fetch what the shim could not deliver
+  cmd.add @["--manifest-dir", drainDir(r.seq, r.attempt)]       # on the volume: a drain Pod can deliver what the shim could not (D-53)
   if r.logMaxBytes > 0: cmd.add @["--log-max-bytes", $r.logMaxBytes]
   if r.optsJson.len > 0: cmd.add @["--opts-json", r.optsJson]          # validated by the Lua sandbox, holds no secret values
   # the values are fetched by the shim from core with the step's own credential; the Pod's specification holds the names (as placeholders) and the credential
@@ -84,13 +80,13 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
-             spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", runVolume: cfg.runVolumes, env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
+             spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds
   ## out: 404 = never started), never a Pod without a row (that would be an orphan).
   let req = buildRequest(cfg, r)
-  if cfg.runVolumes and be.ensureRunVolume != nil:
+  if be.ensureRunVolume != nil:
     # the claim of the run is made before its first Pod (and found again by every later one); a refusal (the namespace's quota of claims or of storage is used
     # up, or a claim the class cannot give) is told the way a refused Pod is, and nothing is tracked for a Pod that will not exist
     let vol = be.ensureRunVolume(r.runId)
@@ -154,61 +150,11 @@ proc afterPoll*(st: CtrlState; transitions: seq[Transition]; now: int64) =
   ## core acknowledged these ends: from now on the Pods are only kept for a while, not watched
   for t in transitions: st.markReported(t.podName, t.kind == tkSucceeded, t.fullyRead, now, t.reason, t.podReason, t.podMessage)
 
-const
-  shimExe = "/cicd/shim/cicd-shim"
-  spoolDir = "/cicd/spool"
-
-proc drainSpool*(be: Backend; name: string; afterSeq: uint64 = 0; maxCalls = 60; deadlineSeconds = 120.0; dir = spoolDir; container = "step"): seq[Frame] =
-  ## Read the undelivered blocks out of a running Pod's spool through exec (the fallback for a shim that cannot reach core).
-  ## The C client's exec drops data when a producer streams fast, so the shim paces its output and this asks for small pieces:
-  ## each call yields whole, checksummed blocks; a damaged call is repeated with a smaller budget (never an error), and a block
-  ## out of order stops the run (the next attempt starts from the last good one). Returns the blocks in sequence order.
-  var last = afterSeq                           # the spool does not start at 1: blocks the shim already delivered are gone from it
-  var haveAny = false
-  var budget = 400_000
-  var failures = 0
-  let until = epochTime() + deadlineSeconds     # an exec call costs ~17 s of the C client's own overhead: do not stall the controller for ever
-  for _ in 0 ..< maxCalls:
-    if epochTime() > until: return
-    let r = be.execInPod(name, container, shimExe & " --read-spool " & dir & " --after-seq " & $last & " --max-bytes " & $budget)
-    if not r.ok: return
-    let p = parseFrames(r.output)
-    var took = 0
-    for f in p.frames:
-      if haveAny and f.seq != last + 1: return    # a gap or a repeat inside what we read: do not guess
-      if f.seq <= last: return                    # older than what we asked for: not ours to trust
-      result.add f
-      last = f.seq
-      haveAny = true
-      inc took
-    if took == 0:
-      if not p.damaged: return                    # empty and not damaged: nothing (more) in the spool
-      inc failures
-      if failures >= 4: return
-      budget = max(20_000, budget div 2)          # lost data in the stream: ask for less at a time
-    elif not p.damaged and p.consumed + 64 * 1024 < budget:
-      return          # the answer stopped well short of the budget: that was all of it (every exec costs ~17 s of the client's own overhead)
-
-proc ackSpool*(be: Backend; name: string; upto: uint64; dir = spoolDir; container = "step"): bool =
-  be.execInPod(name, container, shimExe & " --ack-spool " & dir & " --upto " & $upto).ok
-
-type Deliver* = proc (runId: string; seq, attempt: int; frames: seq[Frame]): uint64
-  ## hands blocks to core's LogIngest; returns the highest sequence core acknowledged (0 = none)
-
-proc cancelPod*(be: Backend; st: CtrlState; runId: string; seq, attempt, graceSeconds: int; rescue: Deliver = nil; volumes = false): int =
-  ## core does not want this Pod any more (a later attempt exists, the step is finished, or it is an orphan). Before a Pod that
-  ## is still running is removed, whatever its shim could not deliver is pulled out of its spool and given to core (log lines
-  ## are not lost with a dead shim). Returns how many blocks were rescued.
+proc cancelPod*(be: Backend; st: CtrlState; runId: string; seq, attempt, graceSeconds: int) =
+  ## core does not want this Pod any more (a cancelled step, a later attempt exists, the step is finished, or it is an orphan). The Pod is deleted with a grace period, and in
+  ## it the shim stops the build (SIGTERM to its process group, SIGKILL after 20 s), delivers the log and leaves; the spool of the log is on the run's volume, so what it could not
+  ## deliver is not lost with the Pod (D-53, D-55). Nothing is pulled out of the Pod from outside.
   let name = podName(runId, seq, attempt)
-  if rescue != nil:
-    # with run volumes the spool is on the volume (drainDir), else in the Pod's own /cicd/spool
-    let dir = if volumes: drainDir(seq, attempt) & "/spool" else: spoolDir
-    let frames = drainSpool(be, name, dir = dir)
-    if frames.len > 0:
-      let acked = rescue(runId, seq, attempt, frames)
-      if acked > 0:
-        result = frames.len
-        discard ackSpool(be, name, acked, dir)
   if be.deletePod(name, graceSeconds): st.forget(name)
 
 type SweepResult* = object

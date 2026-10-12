@@ -156,7 +156,7 @@ message ControllerConfig {
   string build_caps = 4;                 // the capabilities a build Pod keeps, comma separated
   string build_memory_limit = 5;
   string build_ephemeral_limit = 6;      // the ephemeral-storage limit of a build Pod
-  bool run_storage_enabled = 7;          // the steps of a run share a volume
+  bool run_storage_enabled = 7;          // no longer sent or read: the run volume is not optional (D-55); the number stays so that the wire form does not change
   string run_storage_size = 8;
   string run_storage_class = 9;          // "" = the cluster's default class
   string run_storage_access = 10;        // ReadWriteOnce or ReadWriteMany
@@ -164,7 +164,7 @@ message ControllerConfig {
   string collector_addr = 11;            // the core's LogIngest, as the shim in a step Pod reaches it ("" = no log streaming)
   string step_report_addr = 12;          // the core's StepReport, the same
   string artifact_addr = 13;             // the core's ArtifactIngest, the same ("" = a step with artifacts fails)
-  string log_ingest_addr = 14;           // where the controller itself hands the blocks it pulled out of a Pod's spool (empty: the collector's)
+  string log_ingest_addr = 14;           // no longer sent or read: the controller does not pull a spool out of a Pod any more (D-55); the number stays so that the wire form does not change
   uint64 log_spool_bytes = 15;           // the default size of a step's spool on the Pod (a profile's own setting wins, StartStep)
   uint32 log_hold_timeout_seconds = 16;  // the default wait for log delivery (a profile's own setting wins)
   uint32 pod_retention_read_seconds = 17;    // how long a finished Pod is kept when the core has its result and its log (0: removed at once)

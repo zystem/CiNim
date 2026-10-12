@@ -21,7 +21,6 @@ suite "DAT-003 the drain of a step's leavings":
     let ns = "cinim-001-d-" & sfx
     let prof = c.ensureOrganizationProfile(org, ns)
     let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns")
-    putEnv("CINIM_RUN_STORAGE", "on")
     putEnv("CINIM_STORAGE_RETENTION_SUCCEEDED", "0")
     runstorage.coreStartedAt = 0
     proc now(): int64 = getTime().toUnix()
@@ -125,9 +124,3 @@ suite "DAT-003 the drain of a step's leavings":
       let other = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-o-" & sfx, namespace: "cinim-001-nobody-" & sfx, free_pod_slots: 0))
       check other.orderOf(r).len == 0
       check poll(push = true).orderOf(r).len == 0
-    test "no orders when the shard has no run volumes: there is nothing on a volume to fetch":
-      clean()
-      putEnv("CINIM_RUN_STORAGE", "off")
-      let r = runWithStep(uploads)
-      check ends(r, "artifacts_undelivered").orderOf(r).len == 0
-      putEnv("CINIM_RUN_STORAGE", "on")

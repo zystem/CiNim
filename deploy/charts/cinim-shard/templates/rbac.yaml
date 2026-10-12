@@ -69,10 +69,6 @@ rules:
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]
-  # only to pull an undelivered spool out of a Pod (D-29); without it that fallback does not run
-  - apiGroups: [""]
-    resources: [pods/exec]
-    verbs: [create]
   - apiGroups: [""]
     resources: [configmaps, secrets]
     verbs: [create, get, delete]

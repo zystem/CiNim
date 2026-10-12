@@ -3,7 +3,6 @@
 ## a real process against a core nobody listens on (what is checked is what it does before and when the core does not answer; the bytes through a real core are checked live).
 import std/[unittest, os, osproc, json, strutils, tables, sequtils]
 import checksums/sha2
-import common/spoolwire
 import jobcontroller/[backend, drain, logic]
 
 func sha(data: string): string =

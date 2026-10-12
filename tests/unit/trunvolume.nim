@@ -5,7 +5,7 @@ import jobcontroller/runvolume
 let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
 let ctx = %*{"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}
 let res = %*{"requests": {"cpu": "10m"}}
-let rwo = volumeSettings("on", "", "", "")
+let rwo = volumeSettings("", "", "")
 
 suite "STO-001 the claim of a run":
   test "the name is a valid Kubernetes name made of the run id, the claim carries the run's label":
@@ -16,20 +16,12 @@ suite "STO-001 the claim of a run":
     check c["spec"]["resources"]["requests"]["storage"].getStr == "5Gi"
     check c["spec"]["accessModes"][0].getStr == "ReadWriteOnce" and not c["spec"].hasKey("storageClassName")
   test "what the operator set is used":
-    let c = claimBody(volumeSettings("on", "20Gi", "fast", "ReadWriteMany"), "s1_r")
+    let c = claimBody(volumeSettings("20Gi", "fast", "ReadWriteMany"), "s1_r")
     check c["spec"]["resources"]["requests"]["storage"].getStr == "20Gi" and c["spec"]["storageClassName"].getStr == "fast"
     check c["spec"]["accessModes"][0].getStr == "ReadWriteMany"
-  test "the volumes are off unless the controller is told to make them, and a request can switch them off for a Pod":
-    check not volumeSettings("off", "", "", "").enabled and not volumeSettings("", "", "", "").enabled
-    check not rwo.withEnabled(false).enabled and rwo.withEnabled(true).enabled
-    check not volumeSettings("off", "", "", "").withEnabled(true).enabled
 
 suite "STO-002 what a step Pod gets of it":
-  test "without a run volume the step has an emptyDir at the workspace and keeps its files in it, as before":
-    let v = podVolume(volumeSettings("off", "", "", ""), "s1_r", "img", shimMount, ctx, res)
-    check v.runDir == "/cicd/workspace/.run" and v.initContainers.len == 0 and v.affinity.isNil
-    check v.mounts[0]["mountPath"].getStr == "/cicd/workspace" and v.volumes[0].hasKey("emptyDir")
-  test "with it the claim's workspace/ and state/ are mounted, the step's own files are in an emptyDir at /cicd/run":
+  test "D-55 the claim's workspace/ and state/ are mounted, the step's own files are in an emptyDir at /cicd/run":
     let v = podVolume(rwo, "s1_r", "img", shimMount, ctx, res)
     check v.runDir == "/cicd/run"
     var paths: seq[string]
@@ -47,4 +39,4 @@ suite "STO-002 what a step Pod gets of it":
     let a = podVolume(rwo, "s1_r", "img", shimMount, ctx, res).affinity
     let term = a["podAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][0]
     check term["labelSelector"]["matchLabels"]["cicd.io/run"].getStr == "s1_r" and term["topologyKey"].getStr == "kubernetes.io/hostname"
-    check podVolume(volumeSettings("on", "", "", "ReadWriteMany"), "s1_r", "img", shimMount, ctx, res).affinity.isNil
+    check podVolume(volumeSettings("", "", "ReadWriteMany"), "s1_r", "img", shimMount, ctx, res).affinity.isNil

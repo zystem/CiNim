@@ -372,7 +372,6 @@ what the steps of one run hand to each other.
 
 ```yaml
 runStorage:
-  enabled: true                  # false: every step has an emptyDir of its own, as before
   size: 5Gi                      # the request of a run's claim
   storageClass: ""               # empty is the cluster's default class
   accessMode: ReadWriteOnce      # ReadWriteMany if the class has it
