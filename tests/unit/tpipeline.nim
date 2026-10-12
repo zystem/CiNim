@@ -332,3 +332,62 @@ suite "PIP-014 the lock of a job (ci.job{lock = ...})":
       let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = " & bad & "}, function(j) j:sh('x') end) end})", fakeHost, runId = "s1_abc")
       check r.code == "script_error" and "lock is a name" in r.message
       check j.entries.len == 0
+
+suite "PIP-015 running again only what failed (replay with a retry record)":
+  const twoJobs = "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('one') end) ci.job({image = 'a'}, function(j) j:sh('two') end) return 'done' end})"
+  proc hostFailing(seq: int; kind, payload: string): Option[string] =
+    if kind == "job_sh" and payload.endsWith("\ttwo"): some("1\n") else: some("0\nout")
+
+  test "a record that supersedes the failed step makes the replay ask the host for that step again, and for no other":
+    var j = Journal()
+    var sb = newSandbox()
+    check sb.execute(j, twoJobs, hostFailing, runId = "s1_abc").code == "script_error"
+    check j.entries.len == 2 and j.entries[1].key == "s1" and j.entries[1].result == "1\n"
+    discard j.append("retry#0", "retry", "[\"s1\"]", "")
+    var asked: seq[string]
+    let healed = proc (seq: int; kind, payload: string): Option[string] =
+      asked.add payload.split('\t')[^1]
+      some("0\nfixed")
+    var sb2 = newSandbox()
+    let r = sb2.execute(j, twoJobs, healed, runId = "s1_abc")
+    check r.code == "ok" and r.value == "done"
+    check asked == @["two"]                                  # the step that succeeded is answered by the journal
+    check j.entries[^1].key == "s1~1" and j.entries[^1].result == "0\nfixed"
+    check j.entries[1].result == "1\n"                       # the old record stays, chained, and is not the answer
+  test "a second retry supersedes the answer of the first: the step is found under s1~2":
+    var j = Journal()
+    var sb = newSandbox()
+    discard sb.execute(j, twoJobs, hostFailing, runId = "s1_abc")
+    discard j.append("retry#0", "retry", "[\"s1\"]", "")
+    var sb2 = newSandbox()
+    check sb2.execute(j, twoJobs, hostFailing, runId = "s1_abc").code == "script_error"       # failed again, now recorded as s1~1
+    check j.entries[^1].key == "s1~1"
+    discard j.append("retry#1", "retry", "[\"s1~1\"]", "")
+    var asked = 0
+    let healed = proc (seq: int; kind, payload: string): Option[string] =
+      inc asked
+      some("0\nok")
+    var sb3 = newSandbox()
+    check sb3.execute(j, twoJobs, healed, runId = "s1_abc").code == "ok"
+    check asked == 1 and j.entries[^1].key == "s1~2"
+  test "while the step is waiting to run again the replay suspends at it and asks nothing else":
+    var j = Journal()
+    var sb = newSandbox()
+    discard sb.execute(j, twoJobs, hostFailing, runId = "s1_abc")
+    discard j.append("retry#0", "retry", "[\"s1\"]", "")
+    var kinds: seq[string]
+    let waiting = proc (seq: int; kind, payload: string): Option[string] =
+      kinds.add kind
+      none(string)
+    var sb2 = newSandbox()
+    check sb2.execute(j, twoJobs, waiting, runId = "s1_abc").status == esSuspended
+    check kinds == @["job_sh"]
+  test "a retry record that names a key that is not there, or is not a list, changes nothing":
+    var j = Journal()
+    var sb = newSandbox()
+    check sb.execute(j, twoJobs, hostFailing, runId = "s1_abc").code == "script_error"
+    discard j.append("retry#0", "retry", "[\"s9\"]", "")
+    discard j.append("retry#1", "retry", "not json", "")
+    var sb2 = newSandbox()
+    let again = sb2.execute(j, twoJobs, hostFailing, runId = "s1_abc")
+    check again.code == "script_error"                       # the failed step still answers: s1 was not superseded

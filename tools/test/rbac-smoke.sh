@@ -70,6 +70,7 @@ check "a user that exists" 409 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"
 rows=(
   "GET /api/v1/users||200 403 403 403"
   "GET /api/v1/roles||200 403 403 403"
+  "GET /api/v1/audit||200 403 403 403"
   "GET /api/v1/tokens||200 403 403 403"
   "GET /api/v1/storage||200 403 403 403"
   "GET /api/v1/components||200 200 200 200"

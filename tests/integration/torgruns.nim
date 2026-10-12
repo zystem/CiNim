@@ -7,6 +7,7 @@ import common/ctrlauth
 import core/[schema, scheduler, loggate, logcircuit, runlease]
 
 let url = getEnv("CINIM_RQLITE_URL")
+unenrolledControllers = true       # the controllers of these tests have no identity (T-46: the core refuses such a controller unless it is told to serve it)
 
 proc addStep(c: var RqClient; runId, profileId: string) =
   ## what a host call of the executor leaves behind: a pending step in the profile of the run

@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
 import ../common/httpsrv
-import joblocks, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
+import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -182,10 +182,21 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         var lc = newRq(coreRef.rqliteUrl)
         let now = getTime().toUnix()
-        let li = lc.login(lj["user"].getStr, lj["password"].getStr, now)
+        let loginName = lj["user"].getStr
+        # too many wrong passwords for this name, or for all names together, and nobody is let in for a while (the audit is what is counted)
+        let wait = lc.loginRetryAfter(loginName, now)
+        if wait.blocked:
+          lc.record(now, "login", "login", loginName, "throttled", "retry after " & $wait.seconds & " s")
+          reply(Http429, $(%*{"type": "about:blank", "status": 429, "code": "too_many_attempts",
+                              "detail": "too many wrong passwords; try again in " & $wait.seconds & " seconds"}),
+                ["Content-Type: application/problem+json", "Retry-After: " & $wait.seconds])
+          return
+        let li = lc.login(loginName, lj["password"].getStr, now)
         if not li.ok:
+          lc.record(now, "login", "login", loginName, "failed")
           unauthorized("bad_credentials")
           return
+        lc.record(now, "user:" & loginName, "login", loginName, "ok")
         jsonOk(Http200, %*{"token": li.token, "user": lj["user"].getStr, "roles": li.roles, "expires_at": li.expiresAt,
                            "password_change_required": li.mustChange})
         return
@@ -214,12 +225,14 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not made.ok:
             problem(Http404, "not_found", "no such token")
             return
+          ac.record(getTime().toUnix(), actorOf(who), "token.rotate", who.id, "ok", "new " & made.id)
           jsonOk(Http200, %*{"id": made.id, "token": made.token, "replaced": who.id})
           return
         if not who.admin:
           if who.roles.len > 0:
             # IAM-001: the roles of the user (rw, dev, ro) are the shard's, and every organisation inherits them; what each may do is in rbac.nim
             if not rolesMay(who.roles, getMethod(), path) and not selfService(who.user, getMethod(), path):
+              ac.record(getTime().toUnix(), actorOf(who), "access", getMethod() & " " & path, "denied", "roles " & who.roles.join(","))
               problem(Http403, "forbidden", "the role of " & who.user & " (" & who.roles.join(", ") & ") does not allow " & getMethod() & " " & path)
               return
           elif not path.startsWith(base):
@@ -255,6 +268,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not uc.createUser(name, nj["role"].getStr, nj["password"].getStr, getTime().toUnix()):
             problem(Http409, "user_exists", "there is a user " & name & " already")
             return
+          uc.record(getTime().toUnix(), actorOf(who), "user.create", name, "ok", "role " & nj["role"].getStr)
           jsonOk(Http201, %*{"name": name, "role": nj["role"].getStr, "scope": shardScope, "breach_check": nv.breachCheck})
         elif umeth == "DELETE" and path.startsWith("/api/v1/users/") and path.count('/') == 4:
           let name = path["/api/v1/users/".len .. ^1]
@@ -264,6 +278,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not uc.deleteUser(name, getTime().toUnix()):
             problem(Http404, "not_found", "no such user")
             return
+          uc.record(getTime().toUnix(), actorOf(who), "user.delete", name, "ok")
           jsonOk(Http200, %*{"name": name, "deleted": true})
         elif umeth == "PUT" and userOfPasswordPath(path).len > 0:
           # a user changes their own password (the gate lets a user of any role in for exactly this), an administrator anyone's. A user changing their own
@@ -278,6 +293,7 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem(Http400, "invalid_password", bad)
             return
           if who.user == name and not uc.passwordIs(name, pj{"current_password"}.getStr("")):
+            uc.record(getTime().toUnix(), actorOf(who), "password.change", name, "failed", "the current password was wrong")
             problem(Http403, "wrong_password", "the current password is not right")
             return
           if who.user == name and pj["password"].getStr == pj{"current_password"}.getStr(""):
@@ -294,9 +310,28 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not done.ok:
             problem(Http404, "not_found", "no such user")
             return
+          uc.record(getTime().toUnix(), actorOf(who), "password.change", name, "ok", "sessions revoked " & $done.sessionsRevoked)
           jsonOk(Http200, %*{"user": name, "changed": true, "sessions_revoked": done.sessionsRevoked, "breach_check": verdict.breachCheck})
         else:
           problem(Http404, "not_found", "no such route")
+        return
+      if path == "/api/v1/audit":
+        # IAM-001, D-52: who did what to whom (administrator): ?limit=100 (at most 1000), ?actor=, ?action=, ?target=; the newest first
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        var limit, actor, action, target = ""
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            case k
+            of "limit": limit = v
+            of "actor": actor = v
+            of "action": action = v
+            of "target": target = v
+            else: discard
+        var ac2 = newRq(coreRef.rqliteUrl)
+        let lim = try: parseInt(if limit.len > 0: limit else: "100") except ValueError: 100
+        jsonOk(Http200, %*{"events": ac2.list(lim, actor, action, target)})
         return
       if path == "/api/v1/roles":
         # IAM-001: the roles of the shard, which every organisation inherits (administrator)
@@ -322,6 +357,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           let name = j{"name"}.getStr("")
           let made = c.createApiToken(name, j["scope"].getStr, (if ttl > 0: now + ttl else: 0), now)
           # the token is shown here and never again: only its hash is kept
+          c.record(now, actorOf(who), "token.create", made.id, "ok", "scope " & j["scope"].getStr)
           jsonOk(Http201, %*{"id": made.id, "token": made.token, "name": name, "scope": j["scope"].getStr, "expires_at": (if ttl > 0: now + ttl else: 0)})
         elif tmeth == "GET" and path == "/api/v1/tokens":
           jsonOk(Http200, %*{"tokens": c.listApiTokens()})
@@ -330,6 +366,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not c.revokeApiToken(id, getTime().toUnix()):
             problem(Http404, "not_found", "no such token, or it is revoked already")
             return
+          c.record(getTime().toUnix(), actorOf(who), "token.revoke", id, "ok")
           jsonOk(Http200, %*{"id": id, "revoked": true})
         else:
           problem(Http404, "not_found", "no such route")
@@ -590,6 +627,45 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"configured": true, "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "access_key_id": cfg.keyId, "checked": true})
         else:
           problem(Http405, "method_not_allowed", "GET, PUT, DELETE, or POST :check")
+        return
+      if path.startsWith("/api/v1/organizations/") and "/variables" in path:
+        # VAR-001: the plain variables of an organisation, for its steps' environment (core/orgvars.nim). GET lists (any role that reads), PUT and DELETE name one: /variables/{NAME}
+        let restV = path["/api/v1/organizations/".len .. ^1]
+        let partsV = restV.split("/variables")
+        let slugV = partsV[0]
+        let varName = if partsV.len > 1: partsV[1].strip(chars = {'/'}) else: ""
+        if partsV.len != 2 or (partsV[1].len > 0 and not partsV[1].startsWith("/")) or slugV.len == 0:
+          problem(Http404, "not_found", "no such route")
+          return
+        var vc = newRq(coreRef.rqliteUrl)
+        let orgV = vc.organizationRow(slugV)
+        if orgV.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugV)
+          return
+        let vmeth = getMethod()
+        if vmeth == "GET" and varName.len == 0:
+          var list = newJArray()
+          for (k, v) in vc.listVariables(orgV.id): list.add %*{"name": k, "value": v}
+          jsonOk(Http200, %*{"organization": slugV, "variables": list})
+        elif varName.len == 0:
+          problem(Http405, "method_not_allowed", "GET lists, PUT and DELETE name a variable: /variables/{NAME}")
+        elif vmeth == "PUT":
+          let vj = try: parseJson(getBody()) except JsonParsingError: nil
+          if not vj.isString("value"):
+            problem(Http400, "invalid_request", "{\"value\": \"...\"} is required")
+            return
+          let bad = vc.setVariable(orgV.id, varName, vj["value"].getStr, getTime().toUnix())
+          if bad.len > 0:
+            problem(Http400, "invalid_variable", bad)
+            return
+          jsonOk(Http200, %*{"organization": slugV, "name": varName, "value": vj["value"].getStr})
+        elif vmeth == "DELETE":
+          if not vc.deleteVariable(orgV.id, varName):
+            problem(Http404, "not_found", "no such variable")
+            return
+          jsonOk(Http200, %*{"organization": slugV, "name": varName, "deleted": true})
+        else:
+          problem(Http405, "method_not_allowed", "GET, PUT or DELETE")
         return
       if path.startsWith("/api/v1/organizations/") and (path.endsWith("/locks") or "/locks/" in path):
         # PIP-014: the jobs in which the locks of an organisation are present - who holds a lock and who waits for it, in the order they will get it
@@ -939,7 +1015,26 @@ proc onRequest() {.raises: [], gcsafe.} =
         case done.outcome
         of coNotFound: problem(Http404, "not_found", "no such run")
         of coAlreadyFinished: problem(Http409, "run_finished", "the run has ended already (" & done.state & ")")
-        of coCanceled: jsonOk(Http200, %*{"id": runId, "state": done.state})
+        of coCanceled:
+          cc.record(getTime().toUnix(), actorOf(who), "run.cancel", runId, "ok")
+          jsonOk(Http200, %*{"id": runId, "state": done.state})
+      elif meth == "POST" and rest.endsWith(":retry"):
+        # PIP-015 failed-only: run again only what failed, in the same run, if its volume is still there (docs/parallel.md section 11)
+        let runId = rest[0 ..< rest.len - ":retry".len]
+        let owner = coreRef.getRun(runId)
+        if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+          problem(Http404, "not_found", "no such run")
+          return
+        var rc = newRq(coreRef.rqliteUrl)
+        let done = rc.retryRun(runId, getTime().toUnix())
+        case done.outcome
+        of roNotFound: problem(Http404, "not_found", "no such run")
+        of roNotRetryable: problem(Http409, "run_not_retryable", "only a run that ended FAILED, INFRASTRUCTURE_ERROR or TIMED_OUT can be run again (this one is " & done.state & ")")
+        of roNothingToRetry: problem(Http409, "nothing_to_retry", "no step of this run failed: the script itself ended it, and running it again would end it the same way")
+        of roVolumeGone: problem(Http409, "volume_gone", "the volume of this run is gone: start a new run")
+        of roRetried:
+          rc.record(getTime().toUnix(), actorOf(who), "run.retry", runId, "ok", "steps " & $done.steps)
+          jsonOk(Http200, %*{"id": runId, "state": done.state, "retried_steps": done.steps})
       elif meth == "GET" and rest.len > 0:
         let run = coreRef.getRun(rest)
         if run != nil and not who.mayUseOrg(run{"organization"}.getStr):

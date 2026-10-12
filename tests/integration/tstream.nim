@@ -6,6 +6,7 @@ import core/[schema, scheduler, loggate, logcircuit, streamhub, workkick, retryp
 import std/strutils
 
 let url = getEnv("CINIM_RQLITE_URL")
+unenrolledControllers = true       # the controllers of these tests have no identity (T-46: the core refuses such a controller unless it is told to serve it)
 let certs = getCurrentDir() / "tests" / "certs"
 const port = 29846
 

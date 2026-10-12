@@ -5,7 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
-import apiauth, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
+import apiauth, artifactsweep, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -24,6 +24,9 @@ if paramCount() >= 3 and paramStr(1) == "conductor-credential":
   # hand it to the conductors it makes (docs/conductors.md phase 3); a conductor started by hand is given it this way.
   echo conductorCredential(coreSecretKey(getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")), paramStr(2), paramStr(3))
   quit 0
+
+if unenrolledControllers:
+  stderr.writeLine "core: CINIM_UNENROLLED_CONTROLLERS=on: a controller of a namespace with no identity is served (development only)"
 
 let
   rqliteUrl = getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001")
@@ -57,14 +60,25 @@ proc runStream(a: Args) {.thread.} = serveStream(a.co, a.port)
 proc runLogIngest(a: tuple[co: Collector, certs: string, port: int]) {.thread.} =
   serveLogIngest(a.co, a.certs, a.port)
 proc runStepReport(a: StepReportArgs) {.thread.} = serveStepReport(a.rqliteUrl, a.certs, a.port, a.profileId)
+const artifactSweepSeconds = 600.0       ## how often the artifacts are looked at (DAT-006)
+
 proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thread.} =
   ## every few seconds: steps whose Pod never came up or whose shim went quiet (liveness_timeout, D-29)
   {.cast(gcsafe).}:
     var c = newRq(a.rqliteUrl)
+    var lastSweep = 0.0
     while not stopServers.load:
       try:
         probeAndAge(c, a.startedAt)
         watchdogPass(c, a.profileId, a.startedAt)
+        if epochTime() - lastSweep >= artifactSweepSeconds:
+          # DAT-006: expired artifacts, abandoned uploads and orphans leave the store (core/artifactsweep.nim); only when a store is set up
+          lastSweep = epochTime()
+          let store = c.loadStore()
+          if store.ok:
+            let rep = c.sweepArtifacts(store.backend(), getTime().toUnix(), retentionFromEnv(), abandonAfterFromEnv())
+            if rep.expired + rep.abandoned + rep.orphans + rep.failed > 0:
+              echo "core: artifacts swept: ", rep.expired, " expired, ", rep.abandoned, " abandoned uploads, ", rep.orphans, " of runs that are gone, ", rep.failed, " left for the next pass"
       except CatchableError as e: stderr.writeLine "core: watchdog: " & e.msg
       for _ in 0 ..< 50:
         if stopServers.load: break

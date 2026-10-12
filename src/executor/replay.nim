@@ -4,7 +4,7 @@
 ## Calls with a journal record are answered from the journal (replay), the
 ## first call without one goes to the host and is appended.
 
-import std/[options, strutils, tables]
+import std/[options, strutils, tables, sets, json]
 import luac, sandbox, journal
 
 type
@@ -70,6 +70,20 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
   var kindCount = initTable[string, int]()
   var index = initTable[string, int]()           # key -> place in j.entries, so that a long journal is not searched at every call
   for i, e in j.entries: index[e.key] = i
+  # A run that was run again (docs/parallel.md section 11): the journal holds records of kind `retry`, each naming the keys it supersedes. The record of a step that failed stays in
+  # the journal (it is chained and is never taken out), but it is no longer the answer: the step is found under `<key>~1`, and after a second retry under `<key>~2`.
+  var superseded = initHashSet[string]()
+  for e in j.entries:
+    if e.kind == "retry":
+      try:
+        for k in parseJson(e.payload): superseded.incl k.getStr
+      except CatchableError: discard
+  proc effectiveKey(base: string): string =
+    result = base
+    var r = 0
+    while result in superseded:
+      inc r
+      result = base & "~" & $r
   while true:
     sb.resetBudget()
     var nres: cint
@@ -91,7 +105,7 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
       var res: string
       let n = kindCount.getOrDefault(kind, 0)
       kindCount[kind] = n + 1
-      let key = if kind == "job_sh": (if stepKey != nil: stepKey() else: "s" & $n) else: kind & "#" & $n
+      let key = effectiveKey(if kind == "job_sh": (if stepKey != nil: stepKey() else: "s" & $n) else: kind & "#" & $n)
       if onCall != nil: onCall(seq, kind, key)
       let at = index.getOrDefault(key, -1)
       if at >= 0:

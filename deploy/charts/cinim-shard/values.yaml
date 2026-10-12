@@ -156,6 +156,11 @@ steps:
 # (docs/parallel.md section 11); a negative value never. The core releases nothing of a failed run before it has itself been up that long. When less than 15 % of the
 # organisation's storage quota is free (until more than 20 % is) a failed run keeps its volume `pressure` seconds only.
 # Counts against the organisation's quota of claims and storage. `enabled: false` gives every step an emptyDir of its own (artifacts are then the way between steps).
+# How long the artifacts of finished runs live in the object store, and how long an upload that was started and never finished is kept (DAT-006, docs/artifacts.md):
+# the core deletes what is older, every ten minutes. Seconds; `retention: 0` keeps for ever.
+artifacts:
+  retention: 2592000                  # 30 days
+  abandonAfter: 86400                 # a day
 runStorage:
   enabled: true
   size: 5Gi

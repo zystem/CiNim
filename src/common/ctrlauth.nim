@@ -3,7 +3,8 @@
 ## secret key (the CURVE `core` key, which never leaves the core), so the core can make the token again when a provisioning is
 ## retried, and a rotation is a new generation. The bootstrap token (in a Secret of the namespace) is good until the controller has
 ## once polled with the credential that it gave in exchange, or until it expires; the credential is what every poll carries.
-## A namespace that has no row is a single-tenant setup, trusted as before.
+## A namespace that has no row is **not enrolled** and is refused: whoever holds the transport's `client` key could otherwise pose as the controller of a namespace the core has
+## never provisioned and be handed its steps (and, through them, the secrets they ask for). Development and tests that run a controller without an identity say so (`unenrolled`).
 import std/strutils
 import crunchy
 
@@ -15,7 +16,7 @@ type
     bootstrapExpiresAt*: int64
 
   Verdict* = enum
-    vLegacy                       ## no identity is kept for this namespace
+    vUnenrolled                   ## no identity is kept for this namespace, and the core was told to serve such controllers anyway (development)
     vOk                           ## the credential is right
     vIssue                        ## the bootstrap token is right: hand out the credential
     vRefused
@@ -59,8 +60,10 @@ func constantTimeEqual*(a, b: string): bool =
   for i in 0 ..< a.len: diff = diff or (ord(a[i]) xor ord(b[i]))
   diff == 0
 
-proc decide*(row: CredentialRow; master, namespace, credential, bootstrap: string; now: int64): Decision =
-  if namespace.len == 0 or not row.found: return Decision(verdict: vLegacy)
+proc decide*(row: CredentialRow; master, namespace, credential, bootstrap: string; now: int64; unenrolled = false): Decision =
+  ## `unenrolled`: a controller of a namespace with no identity (or none named) is served instead of refused; false in a cluster
+  if namespace.len == 0 or not row.found:
+    return Decision(verdict: (if unenrolled: vUnenrolled else: vRefused))
   if credential.len > 0:
     return
       if constantTimeEqual(credential, controllerCredential(master, namespace, row.generation)):

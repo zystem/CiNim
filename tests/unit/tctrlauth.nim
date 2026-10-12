@@ -9,9 +9,17 @@ proc row(gen = 1, confirmed = false, expires = t0 + 3600): CredentialRow =
   CredentialRow(found: true, generation: gen, confirmed: confirmed, bootstrapExpiresAt: expires)
 
 suite "IAM-003 controller identity":
-  test "a namespace without an identity is a single-tenant setup and is trusted":
-    check decide(CredentialRow(), master, "ns", "", "", t0).verdict == vLegacy
-    check decide(row(), master, "", "", "", t0).verdict == vLegacy          # a poll that names no namespace
+  test "T-46 a namespace without an identity is refused, and so is a poll that names no namespace; nothing is trusted by default":
+    check decide(CredentialRow(), master, "ns", "", "", t0).verdict == vRefused
+    check decide(CredentialRow(), master, "ns", controllerCredential(master, "ns", 1), "", t0).verdict == vRefused      # a credential made for a row that is not there
+    check decide(CredentialRow(), master, "ns", "", bootstrapToken(master, "ns", 1), t0).verdict == vRefused
+    check decide(row(), master, "", "", "", t0).verdict == vRefused
+    check decide(row(), master, "", controllerCredential(master, "", 1), "", t0).verdict == vRefused
+  test "development: with the switch on, a controller without an identity is served, and one that has an identity is still held to it":
+    check decide(CredentialRow(), master, "ns", "", "", t0, unenrolled = true).verdict == vUnenrolled
+    check decide(row(), master, "", "", "", t0, unenrolled = true).verdict == vUnenrolled
+    check decide(row(), master, "ns", "", "", t0, unenrolled = true).verdict == vRefused       # an enrolled namespace is never opened by the switch
+    check decide(row(), master, "ns", controllerCredential(master, "other", 1), "", t0, unenrolled = true).verdict == vRefused
   test "the token and the credential are made again from the same inputs, and differ by namespace, generation and purpose":
     check bootstrapToken(master, "a", 1) == bootstrapToken(master, "a", 1)
     check bootstrapToken(master, "a", 1) != bootstrapToken(master, "b", 1)

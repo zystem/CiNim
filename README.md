@@ -33,6 +33,7 @@ Transport between services: ZeroMQ with CURVE (D-24). HTTP layer: GuildenStern (
 - `docs/settings.md` — execution profile settings (retries, log limit, spool, timeouts) and cluster requirements;
 - `docs/metrics.md` — step metrics, `metrics = {...}` in Lua, `/metrics`;
 - `docs/secrets-masking.md` — secret masking, `$CICD_MASK`, step secrets;
+- `docs/variables.md` — the plain variables of an organisation, their precedence under the launch parameters;
 - `docs/hardware-key.md` — the master key of the step secrets in a hardware token (SmartCard-HSM), the key service and its emulator;
 - `docs/triggers.md` — launch parameters and triggers;
 - `docs/artifacts.md` — artifacts, the object store, the spool fallback, moving the storage module out of the core;

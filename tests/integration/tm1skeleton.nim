@@ -288,7 +288,7 @@ suite "walking skeleton end to end":
 
     test "setup: start core, job-controller and conductor":
       if not remoteCore:
-        var coreEnv = @[("CINIM_RQLITE_URL", rqliteUrl), ("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
+        var coreEnv = @[("CINIM_RQLITE_URL", rqliteUrl), ("CINIM_UNENROLLED_CONTROLLERS", "on"), ("CINIM_NAMESPACE", ns), ("CINIM_CERTS", certs),
           ("CINIM_STREAM_PORT", $streamPort),
           ("CINIM_STEPREPORT_PORT", $stepReportPort), ("CINIM_LOGINGEST_PORT", $logIngestPort),
           ("CINIM_API_PORT", $apiPort), ("CINIM_LOG_HOLD_TIMEOUT", "20")]

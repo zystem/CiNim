@@ -47,6 +47,16 @@ GET /api/v1/runs/{id}/artifacts/{path}   → the file (up to 64 MiB; the core re
 
 An organisation's token sees its own runs only.
 
+## How long they live (DAT-006)
+
+The store does not fill up by itself: the core looks at it every ten minutes (`core/artifactsweep.nim`) and deletes, from the store and from the database,
+
+* an artifact **older than the retention** (`artifacts.retention` of the chart, `CINIM_ARTIFACT_RETENTION`, 30 days; `0` keeps for ever) whose run has ended - an artifact of a run that is still under way is never taken, whatever its age;
+* an upload that was **started and never finished** for longer than `artifacts.abandonAfter` (`CINIM_UPLOAD_ABANDON_AFTER`, a day): the multipart upload is aborted, so that the store frees the parts;
+* the artifacts of a run that is **not in the database** any more (an organisation that was purged).
+
+An object the store says it does not have is as good as deleted; a store that does not answer leaves the rows for the next pass. Each pass looks at 200 rows of each kind. Not built: a retention per organisation, a quota of bytes per organisation, a legal hold on chosen runs (DAT-006).
+
 ## Network
 
 A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artifacts) and DNS, and nothing else: the object store is not reachable from a step Pod and needs no NetworkPolicy of its own. The store has to be reachable from the core, with a plain `http://` or an `https://` endpoint (the core talks to it with its own HTTP client).
@@ -63,4 +73,4 @@ A job of two steps: the first made `dist/app.txt` (6 bytes) and `dist/sub/big.bi
 
 ## Not built
 
-The storage module as a separate service (the seam is there, above), the controller's drain of a kept Pod, parallel uploads (the ingest is one thread: a big upload delays another step's request by a block), artifacts between runs and download by another run (`ci.run`, cache: DAT-004), retention and a sweeper of the objects (the rows of a deleted organisation go, its objects stay), a quota per organisation, expiry, ACL, provenance, the `JobArtifact.upload/download` calls of the API v1 signatures (the `artifacts` option stands in for them), downloading from the UI.
+The storage module as a separate service (the seam is there, above), the controller's drain of a kept Pod, parallel uploads (the ingest is one thread: a big upload delays another step's request by a block), artifacts between runs and download by another run (`ci.run`, cache: DAT-004), a retention per organisation (the retention is the shard's, above), a quota per organisation, ACL, provenance, the `JobArtifact.upload/download` calls of the API v1 signatures (the `artifacts` option stands in for them), downloading from the UI.

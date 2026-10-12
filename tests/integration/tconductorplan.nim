@@ -6,6 +6,7 @@ import core/[schema, scheduler, loggate, logcircuit, retrypolicy]
 import common/conductorplan
 
 let url = getEnv("CINIM_RQLITE_URL")
+unenrolledControllers = true       # the controllers of these tests have no identity (T-46: the core refuses such a controller unless it is told to serve it)
 
 suite "RUN-009 the plan of the conductors in the answer to a report":
   if url.len == 0:

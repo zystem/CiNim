@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import joblocks, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
+import audit, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -83,6 +83,10 @@ proc queueIsFull*(c: var RqClient; profileId: string): bool =
   let r = c.query(%*[["SELECT count(*) FROM runs WHERE profile_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED', 'SKIPPED', 'TIMED_OUT', 'INFRASTRUCTURE_ERROR')", profileId]])
   r["results"][0]{"values"}[0][0].getBiggestInt >= maxUnfinishedRuns
 
+func stepKeyOf*(ordinal, retries: int): string =
+  ## the key of a step's answer in the journal: `s<number>`, and `s<number>~<n>` after the step has been run again n times (docs/parallel.md section 11)
+  if retries > 0: "s" & $ordinal & "~" & $retries else: "s" & $ordinal
+
 type CancelOutcome* = enum
   coNotFound, coCanceled, coAlreadyFinished
 
@@ -110,6 +114,40 @@ proc cancelRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Canc
   kickProfile(profileOfRun(c, runId, ""))       # the controllers hear of it now, not at their next poll
   (coCanceled, protoName(rsCanceled))
 
+type RetryOutcome* = enum
+  roNotFound, roRetried, roNotRetryable, roNothingToRetry, roVolumeGone
+
+proc retryRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: RetryOutcome, state: string, steps: seq[int]] =
+  ## Run again only what failed (PIP-015 failed-only, docs/parallel.md section 11): the same run, if its volume is still there. A run that ended FAILED, INFRASTRUCTURE_ERROR
+  ## or TIMED_OUT is RUNNING again, its steps that failed (FAILED, LOST, TIMED_OUT) get a new attempt and wait to be handed out, and the steps that succeeded are not run again:
+  ## the script is replayed from the journal up to the failed step. The journal is chained and only grows, so the record of a failed step stays; a record of kind `retry`
+  ## names the keys it supersedes, and the new result of the step is written under `s<n>~<retries>` (executor/replay.nim finds it there). Everything is one transaction
+  ## with the record, so a retry that is asked twice at once is one retry.
+  let r = c.query(%*[["SELECT state, storage_released FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
+  if r == nil or r.len == 0: return (roNotFound, "", @[])
+  let was = r[0][0].getStr
+  if was notin [protoName(rsFailed), protoName(rsInfrastructureError), protoName(rsTimedOut)]: return (roNotRetryable, was, @[])
+  if r[0][1].getInt != 0: return (roVolumeGone, was, @[])
+  let failed = c.query(%*[["SELECT ordinal, retries FROM steps WHERE run_id = ? AND state IN (?, ?, ?) ORDER BY ordinal", runId,
+                           protoName(ssFailed), protoName(ssLost), protoName(ssTimedOut)]])["results"][0]{"values"}
+  if failed == nil or failed.len == 0: return (roNothingToRetry, was, @[])
+  var keys = newJArray()
+  var ordinals: seq[int]
+  for v in failed:
+    keys.add %stepKeyOf(v[0].getInt, v[1].getInt)
+    ordinals.add v[0].getInt
+  let markers = c.query(%*[["SELECT count(*) FROM run_journal WHERE run_id = ? AND kind = 'retry'", runId]])["results"][0]{"values"}[0][0].getInt
+  let again = c.appendRow(runId, "retry#" & $markers, "retry", $keys, "", alongside = %*[
+    ["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0, fail_code = '', fail_message = '' WHERE id = ? AND state = ?", protoName(rsRunning), $now, runId, was],
+    ["UPDATE log_streams SET state = 'abandoned', closed_at = ? WHERE state = 'open' AND step_id IN (SELECT id FROM steps WHERE run_id = ? AND state IN (?, ?, ?))",
+     $now, runId, protoName(ssFailed), protoName(ssLost), protoName(ssTimedOut)],
+    ["UPDATE steps SET state = ?, attempt = attempt + 1, retries = retries + 1, controller_id = NULL, wait_reason = NULL, exit_code = NULL, shim_n = 0, shim_phase = '', shim_json = '', " &
+     "shim_seen_at = 0, shim_source = '', termination = NULL, pod_reason = '', pod_message = '', pod_diag = '', not_before = 0, finished_at = NULL, version = version + 1 " &
+     "WHERE run_id = ? AND state IN (?, ?, ?)", protoName(ssPending), runId, protoName(ssFailed), protoName(ssLost), protoName(ssTimedOut)]])
+  if not again: return (roNotRetryable, was, @[])          # another retry of the same run won the race: this one did nothing
+  kickProfile(profileOfRun(c, runId, ""))
+  (roRetried, protoName(rsRunning), ordinals)
+
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
   let r = c.query(%*[["SELECT r.id, r.project_id, r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message " &
@@ -123,6 +161,12 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
   if row[6].getStr.len > 0:
     result["params"] = (try: parseJson(row[6].getStr) except JsonParsingError: newJObject())
+  let vars = c.effectiveVariables(runId)
+  if vars.len > 0:
+    # VAR-001: what the steps see, and where each value came from (an override at a lower level is shown, not hidden)
+    var vj = newJArray()
+    for e in vars: vj.add %*{"name": e.name, "value": e.value, "source": e.source}
+    result["variables"] = vj
   let lockWait = c.waitingFor(runId)
   if lockWait.waiting: result["waiting_for_lock"] = %*{"name": lockWait.name, "held_by": lockWait.heldBy}
   # RUN-015: a queued step that waits for the log circuit says so (API shows the reason)
@@ -238,6 +282,10 @@ const
   terminatedGrace = 30         ## seconds the end of a step whose shim was stopped from outside waits for the job controller's reading of the Pod
   quotaPause = 15          ## seconds a step that met a used-up quota waits before it is assigned again
 
+proc stepJournalKey(c: var RqClient; runId: string; ordinal: int): string =
+  let r = c.query(%*[["SELECT retries FROM steps WHERE run_id = ? AND ordinal = ?", runId, ordinal]])["results"][0]{"values"}
+  stepKeyOf(ordinal, if r != nil and r.len > 0: r[0][0].getInt else: 0)
+
 proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let attempt = int(t.step.attempt)
   let now = getTime().toUnix()
@@ -337,7 +385,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
       try:
         # the step is closed out and its result goes into the journal, chained, in one transaction; if the record is already there
         # (a retried poll) nothing is done again
-        discard c.appendRow(t.step.run_id, "s" & $t.step.seq, "job_sh", plv[0][0].getStr, res, alongside = %*[
+        discard c.appendRow(t.step.run_id, stepJournalKey(c, t.step.run_id, int(t.step.seq)), "job_sh", plv[0][0].getStr, res, alongside = %*[
           ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
            protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
            t.step.run_id, int(t.step.seq), attempt]])
@@ -383,6 +431,7 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
   ## unknown outcome and is not restarted); the Pod itself is removed by the CancelStep that the next controller poll
   ## brings back, because the step is no longer wanted.
   let now = getTime().toUnix()
+  if now mod 60 < 6: audit.prune(c, now)          # about once a minute: the audit keeps 90 days (core/audit.nim)
   c.settle(now)       # locks of jobs: what a run that has ended held is let go, and the lists are looked at (core/joblocks.nim)
   # the profile of a step is that of its run's organisation (SHD-007): its liveness_timeout and retry policy
   let r = c.query(%*[["SELECT s.run_id, s.ordinal, s.attempt, s.state, s.claimed_at, s.shim_n, s.shim_seen_at, COALESCE(r.profile_id, ''), s.shim_phase, s.shim_json " &
@@ -409,6 +458,18 @@ proc watchdogPass*(c: var RqClient; profileId: string; coreStartedAt: int64) =
          " (no sign of life for over ", settings.livenessTimeout, " s)"
     applyTransition(c, policy, PodTransition(step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[2].getInt)),
                                              state: STEP_STATE_LOST, exit_code: -1, termination_reason: reason))
+
+proc startEnv(c: var RqClient; runId: string; ordinal, attempt: int; claimedAt: int64): seq[(string, string)] =
+  ## The environment of a step: the plain variables of the run (core/orgvars.nim), and for the first step of the run only, in `CICD_VARIABLES`, their names, so that its shim
+  ## prints the header of VAR-005. The first step is the one with no step claimed before it (two claimed in the same second: the lower number); two steps claimed together may both
+  ## print it, which is harmless; a step that is run again does not.
+  result = c.stepEnv(runId)
+  if attempt != 1 or result.len == 0: return
+  let earlier = c.query(%*[["SELECT count(*) FROM steps WHERE run_id = ? AND claimed_at > 0 AND (claimed_at < ? OR (claimed_at = ? AND ordinal < ?))", runId, claimedAt, claimedAt, ordinal]])
+  if earlier["results"][0]{"values"}[0][0].getInt > 0: return
+  var names: seq[string]
+  for (k, v) in result: names.add k
+  result.add ("CICD_VARIABLES", names.join(","))
 
 proc unwantedPods*(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
   ## Pods the controller has that no step wants any more: the step moved on to a later attempt, or finished (a short while
@@ -439,6 +500,9 @@ proc unwantedPods*(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
         elif attempt == int(p.step.attempt) and state notin [protoName(ssStarting), protoName(ssRunning), protoName(ssPending)] and
              now - row[4].getBiggestInt > 30: wanted = false     # finished by itself: its shim is exiting, leave it a little time
     if not found or not wanted: result.add p.step
+
+var unenrolledControllers* = getEnv("CINIM_UNENROLLED_CONTROLLERS") == "on"
+  ## serve a controller whose namespace has no identity (or names none) instead of refusing it: for development and tests, never in a cluster (T-46); set at start
 
 var releaseAskedAt {.threadvar.}: Table[string, float]     ## when the runs whose volume may go were last looked for, per profile (STO-006)
 var refusedLoggedAt {.threadvar.}: Table[string, float]    ## a controller that keeps being refused is said once a minute, not every poll
@@ -490,14 +554,14 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   ## steps - on the push channel steps go out when there is work for the organisation (a kick) or a free place, not at every report.
   # Who is asking (IAM-003, T-46): a namespace that has a controller identity is served only against its credential, or against the
   # bootstrap token once, in which case the credential is handed out and nothing else happens in this poll. A namespace without
-  # an identity (a single-tenant setup) is trusted as before.
-  let decision = decide(c.credentialRow(req.namespace), master, req.namespace, req.credential, req.bootstrap_token, getTime().toUnix())
+  # an identity is refused, unless the core runs with CINIM_UNENROLLED_CONTROLLERS=on (development and tests).
+  let decision = decide(c.credentialRow(req.namespace), master, req.namespace, req.credential, req.bootstrap_token, getTime().toUnix(), unenrolledControllers)
   case decision.verdict
   of vRefused:
     let now = epochTime()
     if now - refusedLoggedAt.getOrDefault(req.namespace, 0.0) > 60:
       refusedLoggedAt[req.namespace] = now
-      stderr.writeLine "core: a controller for the namespace " & req.namespace & " (session " & req.session_id & ") did not prove its identity: refused"
+      stderr.writeLine "core: a controller for the namespace '" & req.namespace & "' (session " & req.session_id & ") did not prove its identity, or the namespace has none: refused"
     return PollResponse(header: Header(protocol: 1), unauthorized: true, poll_after_ms: 5000)
   of vIssue:
     let row = c.credentialRow(req.namespace)
@@ -505,7 +569,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     return PollResponse(header: Header(protocol: 1), issued_credential: controllerCredential(master, req.namespace, row.generation), poll_after_ms: 200)
   of vOk:
     if decision.confirm: c.confirmCredential(req.namespace)
-  of vLegacy: discard
+  of vUnenrolled: discard
   # every poll is the controller's heartbeat (D-29)
   if not push: discard registryTouch("controller", req.session_id, epochTime(), @[("pods", $req.inventory.len)])
   # the Pods this controller keeps because it could not read them (the result unknown, the log undelivered): an alert for each, until it removes them
@@ -574,12 +638,13 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
           total += row[1].getInt
       toClaim = admit(pending, inFlight, total, settings.podLimit, jobPodLimit(settings.podLimit, settings.jobPodLimitPercent), int(req.free_pod_slots))
   for stepId in toClaim:
+    let claimedNow = getTime().toUnix()
     let r = c.execute(%*[["UPDATE steps SET state = ?, controller_id = ?, claimed_at = ?, version = version + 1, " &
       "pod_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_reason END, " &
       "pod_message = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_message END, " &
       "wait_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN NULL ELSE wait_reason END " &
       "WHERE id = ? AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts, profile",
-      protoName(ssStarting), req.session_id, getTime().toUnix(), stepId, protoName(ssPending)]])
+      protoName(ssStarting), req.session_id, claimedNow, stepId, protoName(ssPending)]])
     let vals = r["results"][0]{"values"}
     if vals == nil or vals.len == 0: continue    # another poll took it first
     let row = vals[0]
@@ -587,7 +652,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
-      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: runParams(c, row[0].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
+      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow).mapIt(EnvEntry(key: it[0], value: it[1])),
       step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr): stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   # STO-006: the controller deleted these volumes; and the runs whose volume may go now (it is told again until it says it is done)

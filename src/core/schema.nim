@@ -32,6 +32,14 @@ const ddl = [
        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER NOT NULL DEFAULT 0,
        revoked_at INTEGER NOT NULL DEFAULT 0)""",
+  # VAR-001, core/orgvars.nim: the plain variables of an organisation, put into the environment of its steps
+  """CREATE TABLE IF NOT EXISTS org_variables (
+       tenant_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, name))""",
+  # IAM-001, core/audit.nim: who did what to whom; also what the throttle of the login counts
+  """CREATE TABLE IF NOT EXISTS audit_log (
+       id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '',
+       outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')""",
+  "CREATE INDEX IF NOT EXISTS audit_log_action ON audit_log (action, outcome, target, at)",
   # PIP-014, core/joblocks.nim: who holds the lock of a name in an organisation, and who waits for it, in the order of coming
   """CREATE TABLE IF NOT EXISTS run_locks (
        profile_id TEXT NOT NULL, name TEXT NOT NULL, run_id TEXT NOT NULL, depth INTEGER NOT NULL DEFAULT 1, acquired_at INTEGER NOT NULL,
@@ -130,6 +138,7 @@ proc migrate*(c: var RqClient) =
   discard c.execute(stmts, transaction = true)
   # columns added after a table already existed in a shard (CREATE TABLE IF NOT EXISTS leaves old tables alone)
   for (table, column, definition) in [
+      ("steps", "retries", "INTEGER NOT NULL DEFAULT 0"),      # how many times a person asked to run the step again (docs/parallel.md section 11): its journal key is s<n>~<retries>
       ("steps", "attempt", "INTEGER NOT NULL DEFAULT 1"), ("steps", "not_before", "INTEGER NOT NULL DEFAULT 0"),
       ("steps", "profile", "TEXT NOT NULL DEFAULT ''"),   # the job's profile name as the script gave it: "" or "build" (part of the journalled call)
       ("steps", "opts", "TEXT NOT NULL DEFAULT ''"),      # the Lua step options as one JSON object (mask, metrics, timeout)

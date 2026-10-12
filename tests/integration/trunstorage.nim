@@ -5,6 +5,7 @@ import common/rqlite
 import core/[schema, scheduler, loggate, logcircuit, runstorage]
 
 let url = getEnv("CINIM_RQLITE_URL")
+unenrolledControllers = true       # the controllers of these tests have no identity (T-46: the core refuses such a controller unless it is told to serve it)
 
 suite "STO-006 the volume of a finished run":
   if url.len == 0:

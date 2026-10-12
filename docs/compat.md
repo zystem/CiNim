@@ -6,14 +6,14 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 
 | What | Where | Why it exists | Delete when |
 |---|---|---|---|
-| Journal entries found by **place**, a row without `call_key` read as `key = place` | will be in `executor/replay.nim`, `core/journaldb.nim` once `call_key` is built (docs/parallel.md section 9a) | runs made before the keys | the runs made before the keys are over or purged; then the column is required |
-| A namespace with no controller identity is trusted (`vLegacy`) | `common/ctrlauth.nim`, `core/scheduler.nim` (`handlePoll`) | single-tenant set-ups and tests, where the controller has no bootstrap token | every controller of a shard is enrolled (organisations are, since the core provisions them); then an empty or unknown namespace is refused. **This one is about security**, do it before a first user |
 | The columns of the controller's state added by `ALTER TABLE` | `jobcontroller/ctrlstate.nim` (line "state files from before these columns") | controller state files from before | the state volumes of the controllers are made again, or a migration number replaces the ALTERs |
 | The `ALTER TABLE … ADD COLUMN` list of the core | `core/schema.nim` (`migrate`) | databases from before each column | when there is a first release: fold the columns into `CREATE TABLE` and number the migrations |
 | The host call `sh` and `ci.sh` (a fixture of the tests) | `executor/replay.nim` (`hostKinds`), `executor/bootstrap.lua`, `tests/unit/tluaapi.nim` (`fixtureOnly`) | the early tests of the sandbox | the tests use `Job:sh` |
 
 ## Deleted (2026-10-11)
 
+* A namespace with no controller identity trusted (`vLegacy`): `decide` refuses it now (T-46). Development and tests that run a controller without an identity say so, `CINIM_UNENROLLED_CONTROLLERS=on` (a switch for development, not a compatibility path: the core warns at start; an enrolled namespace is never opened by it).
+* The journal read by place, a row without `call_key` read as `key = place`: there is no such reading (the keys are built, docs/parallel.md section 4).
 * The shared executor service (`src/executorsvc`, `ExecutorChannel` on port 19741, the chart's executor Deployment, the lease request of the protocol, `handleLease`, `leaseCandidates`): the conductors lead every run; the chart has no `conductor.enabled` any more.
 * A host call with `numbered` false: the core refuses a `job_sh` without a number (`executor_too_old`); `steps.journal_seq` is gone.
 * A journal record without a key (the plan was to read it as `m#<seq + 1>`): there is no such reading; the keys came in the same rollout and the runs with journals from before were deleted from the live database. `run_journal.call_key` is `''` only in the tests that forge a record.

@@ -18,7 +18,7 @@
 
 import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options, base64]
 import checksums/sha2
-import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts
+import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts, varsheader
 when defined(shimLogging):
   import logclient   ## also brings in StepRef (import_proto3-generated) for the calls below
 else:
@@ -603,6 +603,7 @@ proc main(): int =
   for k, v in envPairs(): childEnv[k] = v
   for e in inherited: childEnv[e.name] = e.value
   for (n, v) in fetched: childEnv[n] = v          # after the inherited ones: a secret is not overridden by an earlier step's file
+  childEnv.del variablesEnv                      # the core's list of variable names is for the header, not for the command
   childEnv["CICD_ENV"] = envFile
   childEnv["CICD_OUTPUT"] = outFile
   childEnv["CICD_RUN_DIR"] = runDir
@@ -635,6 +636,13 @@ proc main(): int =
       lp = newLogPipeline(LogCfg(collectorAddr: collectorAddr, coreAddr: coreAddr, certs: certsDir, spoolDir: spoolDir,
                                  step: step, spoolCap: spoolBytes.int64, holdSeconds: holdSeconds, secrets: secrets,
                                  maskVariants: maskVariants, maskMinLen: maskMinLen, logMaxBytes: logMaxBytes))
+  # VAR-005: the first step of a run starts its log with the values it was given and their digest (the core names the variables in CICD_VARIABLES for that step only)
+  when defined(shimLogging):
+    if logging and existsEnv(variablesEnv):
+      var secretNames: seq[string]
+      for (n, v) in fetched: secretNames.add n
+      let header = buildHeader(getEnv(variablesEnv), proc (name: string): string = getEnv(name), secretNames)
+      if header.len > 0: lp.write(header)
   # Read the child's output (stdout and stderr merged, D-27) straight from the pipe: poll with a short timeout so a
   # quiet step still gets its lines flushed, and do not read at all while the log spool is full - the child then blocks
   # on its own pipe, which is the backpressure (nothing is dropped).

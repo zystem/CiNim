@@ -16,9 +16,14 @@ suite "IAM-001 what ro may do":
   test "read runs, steps, logs, artifacts, and the plain facts of the shard":
     for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/components", "/api/v1/launch-gate",
               "/api/v1/profile", "/api/v1/alerts", "/api/v1/router", "/api/v1/organizations", "/api/v1/organizations:check",
-              "/api/v1/organizations/acme/triggers", "/api/v1/organizations/acme/locks", "/api/v1/organizations/acme/locks/stand"]:
+              "/api/v1/organizations/acme/triggers", "/api/v1/organizations/acme/locks", "/api/v1/organizations/acme/locks/stand", "/api/v1/organizations/acme/variables"]:
       check roleMay("ro", "GET", p)
       check roleMay("ro", "HEAD", p)
+  test "variables of an organisation are plain, so every role that reads sees them, and only rw and admin change them":
+    check roleMay("ro", "GET", "/api/v1/organizations/acme/variables") and roleMay("dev", "GET", "/api/v1/organizations/acme/variables")
+    for role in ["ro", "dev"]:
+      check not roleMay(role, "PUT", "/api/v1/organizations/acme/variables/URL") and not roleMay(role, "DELETE", "/api/v1/organizations/acme/variables/URL")
+    check roleMay("rw", "PUT", "/api/v1/organizations/acme/variables/URL") and roleMay("rw", "DELETE", "/api/v1/organizations/acme/variables/URL")
   test "write nothing, anywhere":
     for m in ["POST", "PUT", "PATCH", "DELETE"]:
       for p in ["/api/v1/runs", "/api/v1/runs/s1_x", "/api/v1/profile", "/api/v1/organizations/acme/triggers"]:
@@ -44,7 +49,7 @@ suite "IAM-001 what dev may do":
                    ("DELETE", "/api/v1/organizations/acme/triggers/t1"), ("POST", "/api/v1/organizations"), ("POST", "/api/v1/users"),
                    ("DELETE", "/api/v1/users/ro"), ("POST", "/api/v1/tokens"), ("PUT", "/api/v1/storage"), ("PUT", "/api/v1/users/dev/password")]:
       check not roleMay("dev", m, p)
-    for p in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/storage", "/api/v1/organizations/acme/secrets"]:
+    for p in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/storage", "/api/v1/audit", "/api/v1/organizations/acme/secrets"]:
       check not roleMay("dev", "GET", p)
   test "a dev is not a rw: the same user with both roles may do what rw may":
     check not roleMay("dev", "DELETE", "/api/v1/runs/s1_x") and rolesMay(["dev", "rw"], "DELETE", "/api/v1/runs/s1_x")
@@ -62,7 +67,7 @@ suite "IAM-001 what rw may do":
       check roleMay("rw", m, p)
   test "but not what is the shard's own: who may do what (the users, the roles, the API tokens) and the object store":
     for (m, p) in [("GET", "/api/v1/storage"), ("PUT", "/api/v1/storage"), ("POST", "/api/v1/storage:check"), ("GET", "/api/v1/users"), ("POST", "/api/v1/users"), ("DELETE", "/api/v1/users/ann"), ("PUT", "/api/v1/users/ann/password"),
-                   ("GET", "/api/v1/roles"), ("GET", "/api/v1/tokens"), ("POST", "/api/v1/tokens"), ("DELETE", "/api/v1/tokens/abc")]:
+                   ("GET", "/api/v1/roles"), ("GET", "/api/v1/audit"), ("GET", "/api/v1/tokens"), ("POST", "/api/v1/tokens"), ("DELETE", "/api/v1/tokens/abc")]:
       check not roleMay("rw", m, p)
   test "the own password is every user's (the gate asks selfService), the own token is replaced before the gate":
     check selfService("rw", "PUT", "/api/v1/users/rw/password")
