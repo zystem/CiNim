@@ -85,6 +85,10 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
     of "put_object", "put_begin":
       if req.size > uint64(maxObjectBytes): return refuse("too_big", path & " is bigger than " & $maxObjectBytes & " bytes")
       if c.runBytes(runId, path) + int64(req.size) > maxRunBytes: return refuse("too_big", "the artifacts of this run would pass " & $maxRunBytes & " bytes")
+      # DAT-006: the quota of the organisation (a setting of its profile; 0 is no limit): what it holds already, without the file this one replaces
+      let quota = c.orgQuota(runId)
+      if quota > 0 and c.orgBytes(tenant, runId, path) + int64(req.size) > quota:
+        return refuse("quota_exceeded", "the artifacts of this organisation would pass its quota of " & $quota & " bytes")
       if req.sha256.len != 64 or req.sha256.anyIt(it notin HexDigits): return refuse("bad_request", "sha256 of " & path & " is not 64 hex digits")
       let sha = req.sha256.toLowerAscii
       if req.op == "put_object":

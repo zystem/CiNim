@@ -404,8 +404,9 @@ proc onRequest() {.raises: [], gcsafe.} =
                                   livenessTimeout: cur["liveness_timeout"].getInt, logSpoolBytes: cur["log_spool_bytes"].getBiggestInt,
                                   logHoldTimeout: cur["log_hold_timeout"].getInt, podLimit: cur["pod_limit"].getInt,
                                   jobPodLimitPercent: cur["job_pod_limit_percent"].getInt, runsPerConductor: cur["runs_per_conductor"].getInt,
-                                  conductorMin: cur["conductor_min"].getInt)
-          for k in ["infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent", "runs_per_conductor", "conductor_min"]:
+                                  conductorMin: cur["conductor_min"].getInt, artifactQuotaBytes: cur["artifact_quota_bytes"].getBiggestInt,
+                                  artifactRetentionDays: cur["artifact_retention_days"].getInt)
+          for k in ["artifact_quota_bytes", "artifact_retention_days", "infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent", "runs_per_conductor", "conductor_min"]:
             if j.hasKey(k) and j[k].kind != JInt:
               problem(Http400, "invalid_request", k & " must be an integer")
               return
@@ -418,6 +419,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           if j.hasKey("job_pod_limit_percent"): s.jobPodLimitPercent = j["job_pod_limit_percent"].getInt
           if j.hasKey("runs_per_conductor"): s.runsPerConductor = j["runs_per_conductor"].getInt
           if j.hasKey("conductor_min"): s.conductorMin = j["conductor_min"].getInt
+          if j.hasKey("artifact_quota_bytes"): s.artifactQuotaBytes = j["artifact_quota_bytes"].getBiggestInt
+          if j.hasKey("artifact_retention_days"): s.artifactRetentionDays = j["artifact_retention_days"].getInt
           let bad = validate(s)
           if bad.len > 0:
             problem(Http400, "invalid_request", bad)

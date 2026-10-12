@@ -1,7 +1,7 @@
 ## DAT-006: the sweep of the artifacts (core/artifactsweep.nim), against a real rqlite and a store in memory. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, tables, strutils, times]
 import common/rqlite
-import core/[schema, scheduler, storagebackend, artifactsweep]
+import core/[schema, scheduler, storagebackend, artifactsweep, objectstore, retrypolicy]
 
 type MemStore = ref object of ObjectBackend
   objects: Table[string, string]
@@ -104,3 +104,68 @@ suite "DAT-006 the sweep of the artifacts":
       check rep.orphans >= 2
       check not rowExists(a) and not rowExists(b)
       check be.objects.len == 0 and be.uploads.len == 0
+
+    test "an organisation's own retention (days in its profile) is its own: shorter than the shard's, it expires sooner; longer, it keeps; 0 is the shard's":
+      let be = newStore()
+      var s7 = defaultSettings()
+      s7.artifactRetentionDays = 7
+      var s90 = defaultSettings()
+      s90.artifactRetentionDays = 90
+      let org7 = c.addOrganization("rt7" & newId()[^6 .. ^1].toLowerAscii, "R7")
+      let org90 = c.addOrganization("rt90" & newId()[^6 .. ^1].toLowerAscii, "R90")
+      let p7 = c.ensureOrganizationProfile(org7, "cinim-001-rt7-" & newId()[^6 .. ^1].toLowerAscii)
+      let p90 = c.ensureOrganizationProfile(org90, "cinim-001-rt90-" & newId()[^6 .. ^1].toLowerAscii)
+      co.setProfileSettings(s7, p7)
+      co.setProfileSettings(s90, p90)
+      let r7 = co.createRun("p", "return 1", org7, p7)
+      let r90 = co.createRun("p", "return 1", org90, p90)
+      let rDefault = newRun()
+      for r in [r7, r90]: discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", r]])
+      let a7 = be.add(r7, "a.txt", "stored", 10 * day)             # 10 days old: past 7, within 90 and within the shard's 30
+      let a90 = be.add(r90, "a.txt", "stored", 40 * day)           # 40 days old: past the shard's 30, within 90
+      let aDef = be.add(rDefault, "a.txt", "stored", 40 * day)     # 40 days old, no setting: the shard's 30
+      discard c.sweepArtifacts(be, now, 30 * day)
+      check not rowExists(a7) and rowExists(a90) and not rowExists(aDef)
+    test "an organisation with a retention of its own keeps its artifacts even when the shard keeps nothing for ever... and the shard's 0 still means for ever for the rest":
+      let be = newStore()
+      let org = c.addOrganization("rtk" & newId()[^6 .. ^1].toLowerAscii, "RK")
+      let p = c.ensureOrganizationProfile(org, "cinim-001-rtk-" & newId()[^6 .. ^1].toLowerAscii)
+      var s = defaultSettings()
+      s.artifactRetentionDays = 5
+      co.setProfileSettings(s, p)
+      let mine = co.createRun("p", "return 1", org, p)
+      discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", mine]])
+      let other = newRun()
+      let a = be.add(mine, "a.txt", "stored", 6 * day)
+      let b = be.add(other, "a.txt", "stored", 4000 * day)
+      discard c.sweepArtifacts(be, now, 0)                         # the shard keeps for ever
+      check not rowExists(a) and rowExists(b)
+
+suite "DAT-006 the quota of an organisation":
+  if url.len > 0:
+    var c = newRq(url)
+    migrate(c)
+    let defaultProfile = c.seedDefaultProfile("cinim-default-ns")
+    let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns")
+    let now = getTime().toUnix()
+    let sfx = newId()[^6 .. ^1].toLowerAscii
+    proc add(org, run, path: string; size: int64; state = "stored") =
+      discard c.execute(%*[["INSERT INTO artifacts (id, tenant_id, run_id, step_ordinal, path, s3_key, size, sha256, state, created_at) VALUES (?, ?, ?, 0, ?, ?, ?, 'x', ?, ?)",
+        newId(), org, run, path, org & "/" & run & "/" & path, size, state, now]])
+    test "the quota is the profile's setting of the organisation the run belongs to, 0 when there is none; the bytes are the organisation's, stored and under way, without the file a new one replaces":
+      let org = c.addOrganization("qa" & sfx, "QA")
+      let other = c.addOrganization("qb" & sfx, "QB")
+      let p = c.ensureOrganizationProfile(org, "cinim-001-qa-" & sfx)
+      var s = defaultSettings()
+      s.artifactQuotaBytes = 5 * 1024 * 1024
+      co.setProfileSettings(s, p)
+      let r1 = co.createRun("p", "return 1", org, p)
+      let r2 = co.createRun("p", "return 1", org, p)
+      let rOther = co.createRun("p", "return 1", other, c.ensureOrganizationProfile(other, "cinim-001-qb-" & sfx))
+      check c.orgQuota(r1) == 5 * 1024 * 1024 and c.orgQuota(rOther) == 0
+      add(org, r1, "a.bin", 2 * 1024 * 1024)
+      add(org, r2, "b.bin", 1024 * 1024, "uploading")
+      add(other, rOther, "c.bin", 100 * 1024 * 1024)
+      check c.orgBytes(org, r1, "new.bin") == 3 * 1024 * 1024               # the other organisation's bytes are not counted
+      check c.orgBytes(org, r1, "a.bin") == 1024 * 1024                      # a file this one replaces is not counted
+      check c.orgBytes(org, r2, "new.bin") == 3 * 1024 * 1024

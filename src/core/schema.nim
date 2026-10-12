@@ -177,6 +177,8 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "pod_limit", "INTEGER NOT NULL DEFAULT 20"),              # RUN-004, core/admission.nim: step Pods in flight of the organisation
       ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20"),   # the share of it one run may hold
       ("execution_profiles", "runs_per_conductor", "INTEGER NOT NULL DEFAULT 10"),      # docs/conductors.md: runs one conductor Pod leads at once
+      ("execution_profiles", "artifact_quota_bytes", "INTEGER NOT NULL DEFAULT 0"),    # DAT-006, core/artifactingest.nim: the most bytes of artifacts the organisation may hold (0: no limit)
+      ("execution_profiles", "artifact_retention_days", "INTEGER NOT NULL DEFAULT 0"),  # DAT-006, core/artifactsweep.nim: how long its artifacts live (0: the shard's retention)
       ("execution_profiles", "conductor_min", "INTEGER NOT NULL DEFAULT 1")]:           # conductors kept warm
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])

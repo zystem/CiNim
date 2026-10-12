@@ -55,7 +55,7 @@ The store does not fill up by itself: the core looks at it every ten minutes (`c
 * an upload that was **started and never finished** for longer than `artifacts.abandonAfter` (`CINIM_UPLOAD_ABANDON_AFTER`, a day): the multipart upload is aborted, so that the store frees the parts;
 * the artifacts of a run that is **not in the database** any more (an organisation that was purged).
 
-An object the store says it does not have is as good as deleted; a store that does not answer leaves the rows for the next pass. Each pass looks at 200 rows of each kind. Not built: a retention per organisation, a quota of bytes per organisation, a legal hold on chosen runs (DAT-006).
+An object the store says it does not have is as good as deleted; a store that does not answer leaves the rows for the next pass. Each pass looks at 200 rows of each kind. **Per organisation (the settings of its profile, `PUT /api/v1/profile?organization=<slug>`, docs/settings.md):** `artifact_retention_days` is the organisation's own retention (0: the shard's, above), and `artifact_quota_bytes` is the most bytes of artifacts it holds - stored and under way, whatever the runs - checked when an upload begins: one that would pass it is refused with `quota_exceeded` and the step's log says why; the file that a new one replaces is not counted twice. Not built: a legal hold on chosen runs (DAT-006).
 
 ## Network
 

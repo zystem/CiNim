@@ -36,9 +36,13 @@ proc dropObject(be: ObjectBackend; key: string): bool =
 
 proc sweepArtifacts*(c: var RqClient; be: ObjectBackend; now: int64; retention = defaultRetention; abandonAfter = defaultAbandonAfter): SweepReport =
   ## one pass; the report says what was done
-  if retention > 0:
-    let r = c.query(%*[["SELECT a.id, a.s3_key FROM artifacts a LEFT JOIN runs r ON r.id = a.run_id WHERE a.state = 'stored' AND a.created_at < ? " &
-      "AND r.state IN (" & finalList() & ") ORDER BY a.created_at LIMIT ?", now - retention, batch]])["results"][0]{"values"}
+  # the retention of an organisation (days, in its profile) is its own; 0 there is the shard's `retention`, and no retention at all (0 or less) keeps for ever
+  block expire:
+    let r = c.query(%*[["SELECT a.id, a.s3_key FROM artifacts a LEFT JOIN runs r ON r.id = a.run_id LEFT JOIN execution_profiles p ON p.id = r.profile_id " &
+      "WHERE a.state = 'stored' AND r.state IN (" & finalList() & ") AND " &
+      "(CASE WHEN COALESCE(p.artifact_retention_days, 0) > 0 THEN p.artifact_retention_days * 86400 ELSE ? END) > 0 AND " &
+      "a.created_at < ? - (CASE WHEN COALESCE(p.artifact_retention_days, 0) > 0 THEN p.artifact_retention_days * 86400 ELSE ? END) " &
+      "ORDER BY a.created_at LIMIT ?", max(retention, 0), now, max(retention, 0), batch]])["results"][0]{"values"}
     if r != nil:
       for v in r:
         if dropObject(be, v[1].getStr):

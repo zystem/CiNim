@@ -132,6 +132,15 @@ proc markStored*(c: var RqClient; runId, path: string): bool =
 proc forgetArtifact*(c: var RqClient; runId, path: string) =
   discard c.execute(%*[["DELETE FROM artifacts WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])
 
+proc orgQuota*(c: var RqClient; runId: string): int64 =
+  ## the quota of artifact bytes of the organisation the run belongs to (its profile's setting; 0: no limit)
+  let v = c.query(%*[["SELECT COALESCE(p.artifact_quota_bytes, 0) FROM runs r LEFT JOIN execution_profiles p ON p.id = r.profile_id WHERE r.id = ?", runId]])["results"][0]{"values"}
+  if v != nil and v.len > 0: v[0][0].getBiggestInt else: 0'i64
+
+proc orgBytes*(c: var RqClient; tenant, runId, exceptPath: string): int64 =
+  ## what the organisation holds in artifacts (stored and under way), without the file at `exceptPath` of this run, which a new one replaces
+  c.query(%*[["SELECT COALESCE(SUM(size), 0) FROM artifacts WHERE tenant_id = ? AND NOT (run_id = ? AND path = ?)", tenant, runId, exceptPath]])["results"][0]{"values"}[0][0].getBiggestInt
+
 proc runBytes*(c: var RqClient; runId, exceptPath: string): int64 =
   ## what the run's other artifacts hold already
   c.query(%*[["SELECT COALESCE(SUM(size), 0) FROM artifacts WHERE run_id = ? AND path != ?", runId, exceptPath]])["results"][0]{"values"}[0][0].getBiggestInt

@@ -38,7 +38,7 @@ const
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
   ## the execution profile's settings (set through the API/UI, D-27, D-29); defaults when the row is missing
   result = defaultSettings()
-  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min " &
+  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min, artifact_quota_bytes, artifact_retention_days " &
     "FROM execution_profiles WHERE id = ?", profileId]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0:
@@ -51,6 +51,8 @@ proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
     result.jobPodLimitPercent = vals[0][6].getInt(admission.defaultJobPodLimitPercent)
     result.runsPerConductor = vals[0][7].getInt(defaultRunsPerConductor)
     result.conductorMin = vals[0][8].getInt(defaultConductorMin)
+    result.artifactQuotaBytes = vals[0][9].getBiggestInt(0)
+    result.artifactRetentionDays = vals[0][10].getInt(0)
 
 proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
   result = defaultPolicy()
@@ -195,13 +197,16 @@ proc getProfileSettings*(co: Core; profileId = ""): JsonNode =
   %*{"infra_retries": p.infraRetries, "log_max_bytes": p.logMaxBytes, "liveness_timeout": p.livenessTimeout,
      "log_spool_bytes": p.logSpoolBytes, "log_hold_timeout": p.logHoldTimeout,
      "pod_limit": p.podLimit, "job_pod_limit_percent": p.jobPodLimitPercent,
-     "runs_per_conductor": p.runsPerConductor, "conductor_min": p.conductorMin}
+     "runs_per_conductor": p.runsPerConductor, "conductor_min": p.conductorMin,
+     "artifact_quota_bytes": p.artifactQuotaBytes, "artifact_retention_days": p.artifactRetentionDays}
 
 proc setProfileSettings*(co: Core; s: ProfileSettings; profileId = "") =
   var c = newRq(co.rqliteUrl)
   discard c.execute(%*[["UPDATE execution_profiles SET infra_retries = ?, log_max_bytes = ?, liveness_timeout = ?, " &
-    "log_spool_bytes = ?, log_hold_timeout = ?, pod_limit = ?, job_pod_limit_percent = ?, runs_per_conductor = ?, conductor_min = ? WHERE id = ?",
+    "log_spool_bytes = ?, log_hold_timeout = ?, pod_limit = ?, job_pod_limit_percent = ?, runs_per_conductor = ?, conductor_min = ?, " &
+    "artifact_quota_bytes = ?, artifact_retention_days = ? WHERE id = ?",
     s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout, s.podLimit, s.jobPodLimitPercent, s.runsPerConductor, s.conductorMin,
+    s.artifactQuotaBytes, s.artifactRetentionDays,
     (if profileId.len > 0: profileId else: co.profileId)]])
   kickProfile(if profileId.len > 0: profileId else: co.profileId)    # a raised limit may let waiting steps go
 

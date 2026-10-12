@@ -57,3 +57,21 @@ suite "profile settings":
     let d = defaultSettings()
     check d.infraRetries == 3 and d.logMaxBytes == 1073741824 and d.livenessTimeout == 300
     check d.logSpoolBytes == 10 * 1024 * 1024 and d.logHoldTimeout == 600
+
+suite "DAT-006 the artifact settings of an organisation":
+  test "the quota is 0 (no limit) or 1 MiB..1 PiB, the retention 0 (the shard's) to 3650 days; the defaults are no quota and the shard's retention":
+    check defaultSettings().artifactQuotaBytes == 0 and defaultSettings().artifactRetentionDays == 0
+    var s = defaultSettings()
+    for ok in [0'i64, 1024 * 1024, 50'i64 shl 30, 1'i64 shl 50]:
+      s.artifactQuotaBytes = ok
+      check validate(s) == ""
+    for bad in [-1'i64, 1, 1024 * 1024 - 1, (1'i64 shl 50) + 1]:
+      s.artifactQuotaBytes = bad
+      check validate(s) != ""
+    s = defaultSettings()
+    for ok in [0, 1, 30, 3650]:
+      s.artifactRetentionDays = ok
+      check validate(s) == ""
+    for bad in [-1, 3651]:
+      s.artifactRetentionDays = bad
+      check validate(s) != ""
