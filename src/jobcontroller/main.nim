@@ -11,7 +11,7 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import std/options
 import common/[zmqcurve, spoolwire, stream, streamstate]
-import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors
+import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors, drain
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -95,6 +95,7 @@ proc exchange(p: var Push; sessionId: string; req: PollRequest): PollResponse =
       for b in p.backlog:
         r.commands = b.commands & r.commands
         r.release_storage = b.release_storage & r.release_storage
+        r.drain_steps = b.drain_steps & r.drain_steps
         if not r.config.present and b.config.present: r.config = b.config
       p.backlog.setLen 0
       return r
@@ -107,6 +108,7 @@ proc quiet(p: var Push): PollResponse =
   for b in p.backlog:
     result.commands = b.commands & result.commands
     result.release_storage = b.release_storage & result.release_storage
+    result.drain_steps = b.drain_steps & result.drain_steps
     if not result.config.present and b.config.present: result.config = b.config
   p.backlog.setLen 0
 
@@ -199,6 +201,11 @@ proc keptPods(st: CtrlState; cfg: Config; limit: int): seq[KeptPod] =
                        reason: (if p.endReason.len > 0: p.endReason else: "unknown"), reported_at: p.reportedAt,
                        keep_until: p.reportedAt + cfg.retentionUnread.int64, pod_reason: p.podReason, pod_message: p.podMessage)
 
+type DrainWork = object
+  order: DrainOrder
+  retryAt: float            ## not before this time (a slice that failed for a reason that may pass)
+  namedAt: float            ## the last time core named it: core stops when the drain is done or given up, and this one is forgotten after ten minutes of silence
+
 proc main() =
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   let k = connectK8s(ns, kubeconfig)
@@ -225,6 +232,8 @@ proc main() =
   var quota: tuple[used, hard: uint64]       # the storage quota of the namespace as last read (every 30 s): the core keeps the volumes of failed runs shorter when it is nearly full
   var conductorTried: Table[int, float]
   var released: seq[string]               # run volumes deleted since the last answered poll: core is told, and stops asking (STO-006)
+  var drainWork: Table[string, DrainWork]    # DAT-003: the drains core ordered (by the reader Pod's name), until they are done, failed for good, or core forgets them
+  var drained: seq[StepDrained]               # how they ended, for the next report
   var seenPhase: Table[string, string]     # pod name -> phase as of the last round (only a Running Pod has a spool worth pulling)
   echo "jobcontroller: push channel to ", streamAddr, ", session=", sessionId
   while true:
@@ -239,12 +248,12 @@ proc main() =
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
       inventory: round.inventory.map(toProto), inventory_complete: true,    # every Pod this controller tracks is listed
       kept: keptPods(st, cfg, 100), kept_total: uint32(st.unread().len), kept_complete: true,
-      storage_released: released, storage_used_bytes: quota.used, storage_hard_bytes: quota.hard)
+      storage_released: released, storage_used_bytes: quota.used, storage_hard_bytes: quota.hard, steps_drained: drained)
     # A report is a snapshot the core takes in with some database work, so it goes out when something changed, when the core asks, and as a
     # heartbeat; the work itself is pushed to us and needs no report to ask for it (reportcadence.nim)
     let sig = podSignature(round.inventory.mapIt((it.podName, it.phase, it.podReason)))
     let due = reportDue(cadence, now, Changes(transitions: round.transitions.len > 0, handedBack: handBack.len > 0,
-                                              released: released.len > 0, asked: push.wake), sig)
+                                              released: released.len > 0 or drained.len > 0, asked: push.wake), sig)
     var resp: PollResponse
     if due:
       try:
@@ -304,12 +313,43 @@ proc main() =
     if due:        # what the report carried has been taken in
       afterPoll(st, round.transitions, int64(now))
       released.setLen(0)
+      drained.setLen(0)
       handBack.setLen(0)
     if resp.commands.len > 0:
       stderr.writeLine "jobcontroller: poll got " & $resp.commands.len & " command(s): " & $resp.commands.mapIt($it.body.kind)
     if resp.release_storage.len > 0:
       released = releaseRunVolumes(be, resp.release_storage)       # idempotent: a run that never had a volume counts as released
       if released.len > 0: echo "jobcontroller: released the volume of ", released.len, " finished run(s)"
+    for d in resp.drain_steps:
+      let o = DrainOrder(runId: d.step.run_id, seq: int(d.step.seq), attempt: int(d.step.attempt), image: d.image, token: d.step_token, artifacts: d.artifacts, logs: d.logs)
+      let key = drainPodName(o.runId, o.seq, o.attempt)
+      drainWork[key] = DrainWork(order: o, retryAt: (if key in drainWork: drainWork[key].retryAt else: 0.0), namedAt: epochTime())
+    # one drain looked at per round: the Pod does the work, the controller only makes it and reads how it ended
+    block drainOne:
+      var gone: seq[string]
+      for key, w in drainWork:
+        if epochTime() - w.namedAt > 600: gone.add key
+      for key in gone: drainWork.del key
+      for key, w in drainWork.mpairs:
+        if epochTime() < w.retryAt: continue
+        let o = w.order
+        let out0 = drainStep(be, o, DrainAddrs(collectorAddr: cfg.collectorAddr, artifactAddr: cfg.artifactAddr))
+        let step = StepRef(run_id: o.runId, seq: uint32(o.seq), attempt: uint32(o.attempt))
+        case out0.state
+        of dsDone:
+          echo "jobcontroller: drained what step ", o.runId, "/", o.seq, " left on the volume"
+          drained.add StepDrained(step: step, ok: true)
+          drainWork.del key
+        of dsFailed:
+          stderr.writeLine "jobcontroller: the drain of " & o.runId & "/" & $o.seq & " cannot be done: " & out0.detail
+          drained.add StepDrained(step: step, final: true, detail: out0.detail)
+          drainWork.del key
+        of dsRetry:
+          stderr.writeLine "jobcontroller: the drain of " & o.runId & "/" & $o.seq & " goes on later: " & out0.detail
+          drained.add StepDrained(step: step, detail: out0.detail)
+          w.retryAt = epochTime() + 60
+        of dsMore: w.retryAt = epochTime() + 5          # the Pod is being made or is working: a look every few seconds is enough
+        break drainOne        # a table that changed under the loop is not iterated on
     for cmd in resp.commands:
       case cmd.body.kind
       of CommandBodyKind.start:
@@ -352,7 +392,7 @@ proc main() =
             pod_reason: (if w.reason.len > 0: w.reason else: ps.reason), pod_message: (if w.reason.len > 0: w.message else: ps.message),
             pod_diag: podDiag(seen, (if be.readEvents != nil: be.readEvents(pn) else: @[])))
         let rescued = cancelPod(be, st, c.step.run_id, int(c.step.seq), int(c.step.attempt), int(c.grace_seconds),
-                                (if seenPhase.getOrDefault(pn) == "Running": Deliver(deliverToCore) else: nil))
+                                (if seenPhase.getOrDefault(pn) == "Running": Deliver(deliverToCore) else: nil), cfg.runVolumes)
         seenPhase.del pn
         if rescued > 0: echo "jobcontroller: pulled ", rescued, " undelivered log block(s) out of the Pod before removing it"
       else: discard
@@ -360,6 +400,7 @@ proc main() =
     if epochTime() - lastSweep >= 10.0:
       lastSweep = epochTime()
       let sw = sweep(be, st, cfg, int64(epochTime()))
+      for name in sweepDrainPods(be, int64(epochTime())): echo "jobcontroller: removed drain Pod ", name, " (older than any drain)"
       if sw.expired.len > 0: echo "jobcontroller: removed finished Pod(s) after their retention: ", sw.expired.join(", ")
       if sw.orphans.len > 0: echo "jobcontroller: removed orphan Pod(s) (not in this controller's state): ", sw.orphans.join(", ")
     let pause = if resp.poll_after_ms > 0: int(resp.poll_after_ms) else: pollIntervalMs

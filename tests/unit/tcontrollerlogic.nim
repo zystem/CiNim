@@ -16,6 +16,7 @@ type Fake = ref object
   listOk: bool
   refuse: CreateOutcome                 ## when its kind is not ckOk, creating a Pod is refused like this
   events: Table[string, seq[JsonNode]]  ## name -> the Kubernetes events about the Pod
+  commands: seq[string]                 ## what was run in a Pod through exec
 
 proc newFake(): Fake = Fake(listOk: true)
 
@@ -38,6 +39,7 @@ proc backendOf(f: Fake): Backend =
     execInPod: proc (name, container, command: string): tuple[ok: bool, output: string] =
       if name notin f.pods or f.pods[name]{"status", "phase"}.getStr != "Running": return
       result.ok = true
+      f.commands.add command
       let parts = command.split(' ')
       if "--ack-spool" in parts:
         f.acked = parseBiggestUInt(parts[parts.find("--upto") + 1])
@@ -121,6 +123,17 @@ suite "the volume the steps of a run share (STO-001, STO-006)":
     check r.runVolume
     check r.cmd[r.cmd.find("--run-dir") + 1] == "/cicd/run" and r.cmd[r.cmd.find("--workspace") + 1] == "/cicd/workspace"
     check r.cmd[r.cmd.find("--state-dir") + 1] == "/cicd/state"
+  test "DAT-003 with a run volume the manifest of the artifacts and the log spool are on it, where a reader Pod finds them after the Pod has ended":
+    var c2 = volCfg
+    c2.collectorAddr = "tcp://core:19743"
+    c2.stepReportAddr = "tcp://core:19742"
+    c2.artifactAddr = "tcp://core:19744"
+    let r = buildRequest(c2, req())
+    check r.cmd[r.cmd.find("--manifest-dir") + 1] == drainDir(req().seq, req().attempt)
+    check r.cmd[r.cmd.find("--log-spool-dir") + 1] == drainDir(req().seq, req().attempt) & "/spool"
+    c2.runVolumes = false
+    let plain = buildRequest(c2, req())
+    check "--manifest-dir" notin plain.cmd and plain.cmd[plain.cmd.find("--log-spool-dir") + 1] == "/cicd/spool"
   test "without run volumes the command is what it was: the shim's files in the workspace, no shared volume":
     let r = buildRequest(cfg, req())
     check not r.runVolume and r.cmd[r.cmd.find("--run-dir") + 1] == "/cicd/workspace/.run" and "--state-dir" notin r.cmd
@@ -236,6 +249,15 @@ suite "the poll round":
     let r = pollRound(be, st, cfg, 101.0)
     check r.transitions[0].kind == tkFailed and r.transitions[0].reason == "oom_killed" and r.transitions[0].exitCode == 137
 
+  test "DAT-003 a Pod that ended with its artifacts undelivered is reported as that, not as an undelivered log: the drain core orders is another one":
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, cfg, req(), 100)
+    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Failed", "containerStatuses": [{"state": {"terminated":
+      {"exitCode": 76, "message": $(%*{"exit_code": 76, "reason": "artifacts_undelivered", "command_exit_code": 0}), "startedAt": "2026-10-02T10:00:00Z"}}}]}}
+    let r = pollRound(be, st, cfg, 101.0)
+    check r.transitions[0].kind == tkSucceeded and r.transitions[0].reason == "artifacts_undelivered" and not r.transitions[0].fullyRead
   test "a Pod evicted for its own storage limit is reported as ephemeral_storage_exceeded with what Kubernetes said":
     let st = openState(":memory:")
     let f = newFake()
@@ -499,6 +521,16 @@ suite "pulling the spool out of a running Pod before it is removed (the exec fal
     check cancelPod(be, st, "s1_run", 0, 1, 5, rescue) == 5
     check delivered == @[1'u64, 2, 3, 4, 5] and f.acked == 5 and f.spool.len == 0
     check f.deleted == @["ci-s1-run-0-1"]
+  test "D-27 with run volumes the cancel rescue reads the spool where the shim keeps it, on the volume":
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, cfg, req(), 100)
+    f.pods["ci-s1-run-0-1"] = running()
+    f.spool.add frame(1)
+    let rescue: Deliver = proc (runId: string; seq, attempt: int; frames: seq[Frame]): uint64 = frames[^1].seq
+    check cancelPod(be, st, "s1_run", 0, 1, 5, rescue, volumes = true) == 1
+    check f.commands.len == 2 and (drainDir(0, 1) & "/spool") in f.commands[0] and (drainDir(0, 1) & "/spool") in f.commands[1]
   test "when core does not take the blocks they are not acknowledged (they stay in the spool) and the Pod is still removed":
     let st = openState(":memory:")
     let f = newFake()

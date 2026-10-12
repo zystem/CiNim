@@ -6,6 +6,28 @@ proc st(n: int; ev: ShimEvent; cmdExit = none(int); reason = ""; exitCode = none
   ShimState(run: "s1_r", seq: 0, attempt: 1, n: n, event: ev, phase: phaseAfter[ev], cmdStarted: ev != seStarted,
             cmdExit: cmdExit, logs: (if logsAfter[ev].isSome: logsAfter[ev].get else: lsNone), reason: reason, exitCode: exitCode)
 
+suite "D-53 the result and what became of the artifacts and the log are in the state":
+  test "the artifact events come between the command's exit and the log's delivery, and lead to the log":
+    let path = [seStarted, seCommandStarted, seCommandExited, seArtifactsUndelivered, seLogsDelivering, seLogsUndelivered, seDone]
+    for i in 0 ..< path.high: check path[i + 1] in successors(path[i])
+    check reachable(seCommandExited, seLogsDelivered) and not reachable(seArtifactsDelivered, seCommandExited)
+    check artifactsAfter[seArtifactsDelivered] == some(asDelivered) and artifactsAfter[seArtifactsUndelivered] == some(asUndelivered)
+    check artifactsAfter[seArtifactsFailed] == some(asFailed) and artifactsAfter[seLogsUndelivered].isNone
+  test "a final state tells the result, the log and the artifacts, and survives the Pod-log line":
+    var s = st(9, seDone, cmdExit = some(0), reason = "logs_undelivered", exitCode = some(72))
+    s.logs = lsUndelivered
+    s.artifacts = asUndelivered
+    s.result = "success"
+    let back = parseLine(marker & $toJson(s, 1000)).get
+    check back.result == "success" and back.logs == lsUndelivered and back.artifacts == asUndelivered and back.reason == "logs_undelivered"
+    check toJson(s, 1000).hasKey("result") and toJson(s, 1000)["arts"].getStr == "undelivered"
+  test "a state from a shim that knew nothing of this (no result, no artifacts) is read as before":
+    let old = parseLine(marker & """{"v":1,"n":4,"t":1,"ev":"logs_undelivered","run":"s1_r","seq":0,"at":1,"ph":"draining","cmd":{"started":true,"exit":0},"logs":"undelivered","lines":3,"blocks":1,"dropped":0}""").get
+    check old.result == "" and old.artifacts == asNone and old.logs == lsUndelivered
+  test "a command that failed, and one that was cut off from outside, are not a success":
+    var s = st(5, seDone, cmdExit = some(3), reason = "failed", exitCode = some(3))
+    check outcomeOf(s) == oFailed
+
 suite "the event table":
   test "every event has a phase; the phases only move forward":
     var last = spStarting

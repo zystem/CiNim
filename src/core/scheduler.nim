@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import audit, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
+import audit, drains, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -394,6 +394,8 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
           ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
            protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
            t.step.run_id, int(t.step.seq), attempt]])
+        # the shim could not hand over its artifacts or its log: they are on the run's volume, to be fetched when the controller is told to (core/drains.nim)
+        c.noteUndelivered(t.step.run_id, int(t.step.seq), attempt, reason, int(t.exit_code), now)
       except RqError as e:
         stderr.writeLine "core: could not record the result of step " & t.step.run_id & "/" & $t.step.seq & ": " & e.msg
 
@@ -588,6 +590,8 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   # and of no other. A controller that names none (single-tenant setups) gets the shard's default profile. Until the controllers have
   # identities of their own (SEC-010) the namespace is taken on the controller's word.
   let profileId = if req.namespace.len == 0: defaultProfile else: profileOfNamespace(c, req.namespace)
+  # DAT-003: what the controller said of the drains it was ordered
+  for d in req.steps_drained: c.recordDrained(d.step.run_id, int(d.step.seq), int(d.step.attempt), d.ok, d.final, d.detail, getTime().toUnix())
   # 1. Apply reported Pod transitions (results, losses to retry, steps handed back because the gate closed).
   for t in req.transitions: applyTransition(c, loadPolicy(c, profileOfRun(c, t.step.run_id, defaultProfile)), t)
   if req.transitions.len > 0 and profileId.len > 0: kickProfile(profileId)      # steps ended: their runs may be ready for a conductor again
@@ -667,7 +671,12 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   if epochTime() - releaseAskedAt.getOrDefault(profileId, 0.0) >= 10.0 or req.storage_released.len > 0:   # a few seconds' delay in deleting a volume costs nothing
     releaseAskedAt[profileId] = epochTime()
     release = releasableRuns(c, profileId, getTime().toUnix(), retentionFromEnv())
-  PollResponse(header: Header(protocol: 1), commands: commands, release_storage: release, config: controllerConfigOf(shardSettingsFromEnv()),
+  var drainOrders: seq[DrainStep]
+  if not push and profileId.len > 0 and shardSettingsFromEnv().runStorageEnabled:      # the push channel answers for work, the poll names the drains
+    for d in c.dueDrains(profileId, getTime().toUnix()):
+      drainOrders.add DrainStep(step: StepRef(run_id: d.runId, seq: uint32(d.ordinal), attempt: uint32(d.attempt)), image: d.image,
+                                step_token: stepToken(master, d.runId, d.ordinal, d.attempt), artifacts: d.artifacts, logs: d.logs)
+  PollResponse(header: Header(protocol: 1), commands: commands, drain_steps: drainOrders, release_storage: release, config: controllerConfigOf(shardSettingsFromEnv()),
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000,
                conductors: (if push or profileId.len == 0: ConductorPlan() else: conductorPlanOf(c, profileId, master, req.namespace, settings)))
 

@@ -15,7 +15,7 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import crunchy
 import ../common/[zmqcurve, rqlite, states, ctrlauth]
-import schema, objectstore, scheduler
+import schema, objectstore, scheduler, drains
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -48,7 +48,8 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
   let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id FROM steps s JOIN runs ru ON ru.id = s.run_id " &
                       "WHERE s.run_id = ? AND s.ordinal = ? AND s.attempt = ?", req.step.run_id, int(req.step.seq), int(req.step.attempt)]])
   let v = r["results"][0]{"values"}
-  if v == nil or v.len == 0 or v[0][0].getStr notin [protoName(ssStarting), protoName(ssRunning)]:
+  # while the step runs; and after it, while its artifacts are being drained from the run's volume for it (core/drains.nim): the shim could not hand them over
+  if v == nil or v.len == 0 or (v[0][0].getStr notin [protoName(ssStarting), protoName(ssRunning)] and not c.isDraining(req.step.run_id, int(req.step.seq), int(req.step.attempt))):
     return refuse("not_current", "this attempt of the step is not running")
   let decl = artifactDecl(v[0][1].getStr)
   let tenant = v[0][2].getStr

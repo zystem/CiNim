@@ -46,6 +46,8 @@ type
       ## the last lines of the Pod's log; "" on any failure
     deletePod*: proc (name: string; graceSeconds: int): bool
       ## true = gone afterwards (deleted, or it was not there)
+    createDrainPod*: proc (name, runId, image: string; cmd: seq[string]): CreateOutcome
+      ## a Pod that mounts the run's volume and runs `cmd` (the shim's `--drain`, docs/artifacts.md), to deliver what a step that has ended left there; idempotent
     execInPod*: proc (name, container, command: string): tuple[ok: bool, output: string]
       ## run a command in a running Pod and return its stdout (the command is split on spaces, no quoting); ok = it ran.
       ## The WebSocket exec of the C client is lossy for bulk data, so callers ask for small pieces and verify checksums.

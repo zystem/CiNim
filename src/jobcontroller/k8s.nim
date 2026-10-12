@@ -113,13 +113,13 @@ proc podBody(r: PodRequest): JsonNode =
       "securityContext": sec.podCtx,
       "containers": [{"name": "step", "image": r.image, "command": r.cmd,
         "volumeMounts": (@[shimMount] & vol.mounts &
-          (if r.logging: @[%*{"name": "certs", "mountPath": "/cicd/certs", "readOnly": true},
-                           %*{"name": "spool", "mountPath": "/cicd/spool"}] else: @[])),
+          (if r.logging: @[%*{"name": "certs", "mountPath": "/cicd/certs", "readOnly": true}] else: @[]) &
+          (if r.logging and not r.runVolume: @[%*{"name": "spool", "mountPath": "/cicd/spool"}] else: @[])),     # with a run volume the spool is on it: a reader Pod can fetch it (drainDir)
         "securityContext": sec.containerCtx,
         "resources": sec.resources}],
       "volumes": (@[%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}}] & vol.volumes &   # the run's volume, or an emptyDir for the shim's --run-dir
-        (if r.logging: @[%*{"name": "spool", "emptyDir": {"sizeLimit": $(r.spoolBytes + 1024 * 1024)}},   # kubelet evicts above this; the shim stops itself at spoolBytes
-                         %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
+        (if r.logging and not r.runVolume: @[%*{"name": "spool", "emptyDir": {"sizeLimit": $(r.spoolBytes + 1024 * 1024)}}] else: @[]) &   # kubelet evicts above this; the shim stops itself at spoolBytes
+        (if r.logging: @[%*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
           {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
   if vol.initContainers.len > 0: result["spec"]["initContainers"] = %vol.initContainers
@@ -129,6 +129,33 @@ proc podBody(r: PodRequest): JsonNode =
     var env = newJArray()
     for (n, v) in podEnv: env.add %*{"name": n, "value": v}
     result["spec"]["containers"][0]["env"] = env
+  for k, v in sec.labels: result["metadata"]["labels"][k] = v
+  if not sec.hostUsers: result["spec"]["hostUsers"] = %false
+
+proc drainBody(name, runId, image: string; cmd: seq[string]): JsonNode =
+  ## The Pod of a drain (docs/artifacts.md): the run's volume as a step Pod sees it (`/cicd/workspace`, `/cicd/state`), the shim, and the keys of the shim to reach the core, running
+  ## `cicd-shim --drain`. Same security class as an ordinary step, so that it reads what a step of that user wrote. On the node of the run's other Pods when there are any (a
+  ## ReadWriteOnce volume is attached to one node), anywhere else when there are none. It is a Pod of the steps' policy: DNS and the core's ports, nothing else.
+  let sec = podsec.podSecurity(shard.build, false, false)
+  let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
+  result = %*{
+    "apiVersion": "v1", "kind": "Pod",
+    "metadata": {"name": name, "labels": {"cicd.io/run": runId, "cicd.io/drain": "true"}},
+    "spec": {
+      "restartPolicy": "Never", "automountServiceAccountToken": false, "terminationGracePeriodSeconds": 30,
+      "securityContext": sec.podCtx,
+      "containers": [{"name": "drain", "image": image, "command": cmd,
+        "volumeMounts": [shimMount,
+          {"name": "certs", "mountPath": "/cicd/certs", "readOnly": true},
+          {"name": "data", "mountPath": "/cicd/workspace", "subPath": runvolume.workspaceDir},
+          {"name": "data", "mountPath": "/cicd/state", "subPath": runvolume.stateDir}],
+        "securityContext": sec.containerCtx, "resources": sec.resources}],
+      "volumes": [%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}},
+                  %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [
+                    {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"}, {"key": "core.pub", "path": "curve/core.pub"}]}},
+                  %*{"name": "data", "persistentVolumeClaim": {"claimName": runvolume.claimName(runId)}}],
+      "affinity": {"podAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [
+        {"weight": 100, "podAffinityTerm": {"labelSelector": {"matchLabels": {runvolume.runLabel: runId}}, "topologyKey": "kubernetes.io/hostname"}}]}}}}
   for k, v in sec.labels: result["metadata"]["labels"][k] = v
   if not sec.hostUsers: result["spec"]["hostUsers"] = %false
 
@@ -148,6 +175,7 @@ type
     done: Atomic[bool]
     ok: bool
     output: string
+    rcExec, rcRun: int      ## what kube_exec and wsclient_run answered (for the log when a call returns nothing)
 
 proc execThread(job: ExecJob) {.thread.} =
   ## the C client's WebSocket exec (kube_exec): one connection, blocks until the command's stream closes - and, if the API
@@ -157,8 +185,9 @@ proc execThread(job: ExecJob) {.thread.} =
     if wsc != nil:
       setCallback(wsc, onExecData)
       execCaptured = ""
-      if kube_exec(wsc, job.ns.cstring, job.name.cstring, job.container.cstring, 0, 1, 0, job.command.cstring) == 0:
-        discard wsclient_run(wsc, 0)
+      job.rcExec = int(kube_exec(wsc, job.ns.cstring, job.name.cstring, job.container.cstring, 0, 1, 0, job.command.cstring))
+      if job.rcExec == 0:
+        job.rcRun = int(wsclient_run(wsc, 0))
         job.ok = true
         job.output = execCaptured
       wsclient_free(wsc)
@@ -180,7 +209,7 @@ proc execInPod(k: K8s; name, container, command: string; timeoutSeconds = 25): t
     GC_unref(job)
     if epochTime() - started > 3.0:
       stderr.writeLine "jobcontroller: exec in " & name & " took " & formatFloat(epochTime() - started, ffDecimal, 1) & " s (" &
-        $job.output.len & " bytes): " & command[0 ..< min(command.len, 60)]
+        $job.output.len & " bytes, kube_exec " & $job.rcExec & ", wsclient_run " & $job.rcRun & "): " & command[0 ..< min(command.len, 60)]
   else:
     stderr.writeLine "jobcontroller: exec in " & name & " did not finish within " & $timeoutSeconds & " s, giving up on it"
     # the thread is detached on purpose (job stays referenced for as long as it runs)
@@ -205,6 +234,16 @@ proc backendOf*(k: K8s): Backend =
         stderr.writeLine "jobcontroller: create pod " & r.name & " failed: " & $j
         return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
       echo "jobcontroller: created pod ", r.name
+      CreateOutcome(kind: ckOk),
+    createDrainPod: proc (name, runId, image: string; cmd: seq[string]): CreateOutcome =
+      let raw = Generic_createNamespacedResource(kk.pods, kk.ns.cstring, ($drainBody(name, runId, image, cmd)).cstring, nil)
+      if raw == nil:
+        return CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "no response from the Kubernetes API client")
+      let j = jstr(raw)
+      if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "AlreadyExists":
+        stderr.writeLine "jobcontroller: create drain pod " & name & " failed: " & $j
+        return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
+      echo "jobcontroller: created drain pod ", name
       CreateOutcome(kind: ckOk),
     readEvents: proc (name: string): seq[JsonNode] =
       ## the events whose subject is this Pod: the cluster forgets them after about an hour, so they are read when the Pod's story is over

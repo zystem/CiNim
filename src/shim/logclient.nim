@@ -10,7 +10,7 @@ import ../common/zmqcurve
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import crunchy
-import logspool, shimlog, secretmask
+import logspool, shimlog, secretmask, artifacts
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -266,6 +266,8 @@ proc fetchStepSecrets*(coreAddr, certs: string; step: StepRef; token: string): F
   except CatchableError as e:
     result = FetchedSecrets(retry: true, code: "no_answer", detail: e.msg)
 
+# ------------------------------------------------------------------ the artifacts (DAT-003): the client of the core's ArtifactIngest, for the shim's own upload and for its drain mode
+
 type
   ArtifactClient* = ref object
     target, certs: string
@@ -308,3 +310,82 @@ proc call*(c: ArtifactClient; req: ArtifactRequest; timeoutMs = 60000): Artifact
   except CatchableError as e:
     c.close()
     result = ArtifactReply(retry: true, code: "no_answer", detail: e.msg)
+
+proc ask*(c: ArtifactClient; step: StepRef; token: string; req: ArtifactRequest; patience: int): ArtifactReply =
+  ## the request, again while the core or the store does not answer, for up to `patience` seconds
+  var r = req
+  r.header = Header(protocol: 1)
+  r.step = step
+  r.job_token = token
+  let until = epochTime() + patience.float
+  while true:
+    result = c.call(r, timeoutMs = min(60000, max(1000, patience * 1000)))      # a short patience is not overshot by a long wait for one answer
+    if result.ok or not result.retry or epochTime() >= until: return
+    sleep 2000
+
+proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; size: int64; sha256: string; patience: int): ArtifactReply =
+  ## One file into the store: whole in one request when it is at most one part, otherwise as a multipart upload (begin, parts, end). A failed upload is aborted, so that
+  ## the store frees the parts. `path` is the file's name as the artifact (relative to the workspace), `absPath` where it is now.
+  if size <= partSize:
+    return ask(c, step, token, ArtifactRequest(op: "put_object", path: path, size: uint64(size), sha256: sha256,
+                                               data: cast[seq[byte]](readBlock(absPath, 0, size))), patience)
+  result = ask(c, step, token, ArtifactRequest(op: "put_begin", path: path, size: uint64(size), sha256: sha256), patience)
+  if not result.ok: return
+  let uploadId = result.ack.upload_id
+  var parts: seq[ArtifactPart]
+  var off = 0'i64
+  var n = 0'u32
+  while off < size and result.ok:
+    inc n
+    result = ask(c, step, token, ArtifactRequest(op: "put_part", path: path, upload_id: uploadId, part: n,
+                                                 data: cast[seq[byte]](readBlock(absPath, off, partSize))), patience)
+    if result.ok: parts.add ArtifactPart(part: n, etag: result.ack.etag)
+    off += partSize
+  if result.ok:
+    result = ask(c, step, token, ArtifactRequest(op: "put_end", path: path, upload_id: uploadId, parts: parts), patience)
+  if not result.ok:
+    discard c.call(ArtifactRequest(header: Header(protocol: 1), step: step, job_token: token, op: "put_abort", path: path, upload_id: uploadId), 15000)
+
+proc drainLogSpool*(collectorAddr, certs, spoolDir: string; step: StepRef; patience: int): tuple[ok: bool, detail: string] =
+  ## The drain (docs/artifacts.md): what the log spool still holds is sent to LogIngest, exactly as the sender thread of a step would have, and the blocks the core
+  ## acknowledges are removed. No heartbeat and no state of a shim: the step is over. `ok` false: the core did not take it all within `patience` seconds.
+  let until = epochTime() + patience.float
+  var conn: ZConnection
+  var connected = false
+  var backoff = 300
+  var lastFailure = "the core did not answer"
+  defer:
+    if connected:
+      try: conn.close() except CatchableError: discard
+  while true:
+    let queued = peek(spoolDir, maxBlocks = 32, maxBytes = 900_000)
+    if queued.len == 0: return (true, "")
+    if epochTime() >= until: return (false, lastFailure)
+    try:
+      if not connected:
+        conn = connectReq(collectorAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"), recvTimeoutMs = 6000, sendTimeoutMs = 5000)
+        connected = true
+      var batch = LogBatch(step: step)
+      for q in queued: batch.chunks.add chunkOf(q)
+      let bytes = Protobuf.encode(batch)
+      var msg = newString(bytes.len)
+      if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
+      conn.send(msg)
+      let (avail, _, body) = waitForReceive(conn.socket)
+      if not avail:
+        lastFailure = "no answer from the core within the timeout"
+      else:
+        let ack = Protobuf.decode(cast[seq[byte]](body), LogAck)
+        for q in queued:
+          if q.blk.seq <= ack.acked_seq: q.remove()
+        if ack.failure.code == "" or ack.failure.code == "rejected":      # rejected for good by the log store: dropping is the only way to move on
+          backoff = 300
+          continue
+        lastFailure = "the core says " & ack.failure.code
+    except CatchableError as e:
+      lastFailure = e.msg
+      if connected:
+        try: conn.close() except CatchableError: discard
+        connected = false
+    sleep backoff
+    backoff = min(backoff * 2, 5000)

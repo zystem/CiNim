@@ -118,6 +118,25 @@ proc readManifest*(path: string): seq[ManifestFile] =
       result.add ManifestFile(path: f{"path"}.getStr, size: f{"size"}.getBiggestInt, sha256: f{"sha256"}.getStr)
   except CatchableError: discard
 
+type Delivered* = object
+  ok*, retry*: bool           ## not ok and retry: the core or the store did not answer in time, the rest is to be tried again; not ok and not retry: refused for good
+  path*, detail*: string      ## the file it stopped at
+
+proc deliverFiles*(manifestPath: string; files: seq[ManifestFile];
+                   put: proc (f: ManifestFile): tuple[ok, retry: bool; detail: string] {.closure.};
+                   delivered: proc (f: ManifestFile) {.closure.} = nil): Delivered =
+  ## The files in turn, oldest first. The manifest holds what is still to be delivered, so it is written again without a file as soon as that file is delivered, and
+  ## removed when none is left: whatever happens next (a restart, a drain by another process, docs/artifacts.md), nothing is sent twice that need not be.
+  var rest = files
+  while rest.len > 0:
+    let f = rest[0]
+    let r = put(f)
+    if not r.ok: return Delivered(retry: r.retry, path: f.path, detail: r.detail)
+    if delivered != nil: delivered(f)
+    rest.delete(0)
+    if rest.len > 0: writeManifest(manifestPath, rest) else: removeFile(manifestPath)
+  Delivered(ok: true)
+
 proc declaredArtifacts*(opts: JsonNode): tuple[upload, download: seq[string]] =
   ## the `artifacts` of the step's options; a list that is not declared (nil) is none. (`for x in items(node)` over a nil node is a segmentation fault: the
   ## elements are taken from `.elems` only when the node is an array.)

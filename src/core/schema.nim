@@ -35,6 +35,14 @@ const ddl = [
   # VAR-001, core/orgvars.nim: the plain variables of an organisation, put into the environment of its steps
   """CREATE TABLE IF NOT EXISTS org_variables (
        tenant_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, name))""",
+  # DAT-003, D-27, core/drains.nim: a step whose artifacts or log the shim could not deliver (the core was not there): they are on the run's volume, and the controller of the
+  # organisation fetches them when told. `state` is pending | done | failed.
+  """CREATE TABLE IF NOT EXISTS step_drains (
+       run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, attempt INTEGER NOT NULL, profile_id TEXT NOT NULL, image TEXT NOT NULL DEFAULT '',
+       artifacts INTEGER NOT NULL DEFAULT 0, logs INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'pending', tries INTEGER NOT NULL DEFAULT 0,
+       next_at INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+       PRIMARY KEY (run_id, ordinal, attempt))""",
+  "CREATE INDEX IF NOT EXISTS step_drains_state ON step_drains (profile_id, state, next_at)",
   # IAM-001, core/audit.nim: who did what to whom; also what the throttle of the login counts
   """CREATE TABLE IF NOT EXISTS audit_log (
        id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '',

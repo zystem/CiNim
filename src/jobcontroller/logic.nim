@@ -53,6 +53,11 @@ func podName*(runId: string; seq, attempt: int): string =
   ## (run_id is otherwise lowercase hex/dashes, so this stays injective). Must equal the shim's and core's podName.
   "ci-" & runId.replace("_", "-") & "-" & $seq & "-" & $attempt
 
+func drainDir*(seq, attempt: int): string =
+  ## Where a step keeps what a reader Pod may have to fetch after the step's own Pod has ended (docs/artifacts.md): the manifest of its artifacts, and under `spool/` its log
+  ## spool. On the run's volume, so it outlives the Pod; the path is the same in the step's Pod and in the reader's.
+  "/cicd/state/drain/" & $seq & "-" & $attempt
+
 func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   let logging = cfg.collectorAddr.len > 0 and cfg.stepReportAddr.len > 0
   let spool = if r.logSpoolBytes > 0: int(r.logSpoolBytes) else: cfg.logSpoolBytes
@@ -66,9 +71,10 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   if logging:
     cmd.add @["--collector-addr", cfg.collectorAddr, "--core-addr", cfg.stepReportAddr, "--certs-dir", "/cicd/certs",
               "--run-id", r.runId, "--step-seq", $r.seq, "--step-attempt", $r.attempt,
-              "--log-spool-dir", "/cicd/spool", "--log-spool-bytes", $spool,
+              "--log-spool-dir", (if cfg.runVolumes: drainDir(r.seq, r.attempt) & "/spool" else: "/cicd/spool"), "--log-spool-bytes", $spool,
               "--log-hold-timeout", $hold]
   if cfg.artifactAddr.len > 0: cmd.add @["--artifact-addr", cfg.artifactAddr]
+  if cfg.runVolumes: cmd.add @["--manifest-dir", drainDir(r.seq, r.attempt)]       # on the volume: a reader Pod can fetch what the shim could not deliver
   if r.logMaxBytes > 0: cmd.add @["--log-max-bytes", $r.logMaxBytes]
   if r.optsJson.len > 0: cmd.add @["--opts-json", r.optsJson]          # validated by the Lua sandbox, holds no secret values
   # the values are fetched by the shim from core with the step's own credential; the Pod's specification holds the names (as placeholders) and the credential
@@ -140,6 +146,7 @@ proc pollRound*(be: Backend; st: CtrlState; cfg: Config; now: float): tuple[tran
         # everything the cluster says about the Pod while it still says it: the events are gone in about an hour
         podDiag: podDiag(pod, (if be.readEvents != nil: be.readEvents(p.name) else: @[])),
         reason: (if reading.verdict == vFailed and reading.detail == "OOMKilled": "oom_killed"
+                 elif reading.verdict == vLogsUndelivered and reading.detail == "artifacts_undelivered": "artifacts_undelivered"
                  elif reading.verdict == vFailed and reading.detail == "ephemeral_storage_exceeded": "ephemeral_storage_exceeded"
                  else: reasonOf(reading.verdict)))
 
@@ -151,7 +158,7 @@ const
   shimExe = "/cicd/shim/cicd-shim"
   spoolDir = "/cicd/spool"
 
-proc drainSpool*(be: Backend; name: string; afterSeq: uint64 = 0; maxCalls = 60; deadlineSeconds = 120.0): seq[Frame] =
+proc drainSpool*(be: Backend; name: string; afterSeq: uint64 = 0; maxCalls = 60; deadlineSeconds = 120.0; dir = spoolDir; container = "step"): seq[Frame] =
   ## Read the undelivered blocks out of a running Pod's spool through exec (the fallback for a shim that cannot reach core).
   ## The C client's exec drops data when a producer streams fast, so the shim paces its output and this asks for small pieces:
   ## each call yields whole, checksummed blocks; a damaged call is repeated with a smaller budget (never an error), and a block
@@ -163,7 +170,7 @@ proc drainSpool*(be: Backend; name: string; afterSeq: uint64 = 0; maxCalls = 60;
   let until = epochTime() + deadlineSeconds     # an exec call costs ~17 s of the C client's own overhead: do not stall the controller for ever
   for _ in 0 ..< maxCalls:
     if epochTime() > until: return
-    let r = be.execInPod(name, "step", shimExe & " --read-spool " & spoolDir & " --after-seq " & $last & " --max-bytes " & $budget)
+    let r = be.execInPod(name, container, shimExe & " --read-spool " & dir & " --after-seq " & $last & " --max-bytes " & $budget)
     if not r.ok: return
     let p = parseFrames(r.output)
     var took = 0
@@ -182,24 +189,26 @@ proc drainSpool*(be: Backend; name: string; afterSeq: uint64 = 0; maxCalls = 60;
     elif not p.damaged and p.consumed + 64 * 1024 < budget:
       return          # the answer stopped well short of the budget: that was all of it (every exec costs ~17 s of the client's own overhead)
 
-proc ackSpool*(be: Backend; name: string; upto: uint64): bool =
-  be.execInPod(name, "step", shimExe & " --ack-spool " & spoolDir & " --upto " & $upto).ok
+proc ackSpool*(be: Backend; name: string; upto: uint64; dir = spoolDir; container = "step"): bool =
+  be.execInPod(name, container, shimExe & " --ack-spool " & dir & " --upto " & $upto).ok
 
 type Deliver* = proc (runId: string; seq, attempt: int; frames: seq[Frame]): uint64
   ## hands blocks to core's LogIngest; returns the highest sequence core acknowledged (0 = none)
 
-proc cancelPod*(be: Backend; st: CtrlState; runId: string; seq, attempt, graceSeconds: int; rescue: Deliver = nil): int =
+proc cancelPod*(be: Backend; st: CtrlState; runId: string; seq, attempt, graceSeconds: int; rescue: Deliver = nil; volumes = false): int =
   ## core does not want this Pod any more (a later attempt exists, the step is finished, or it is an orphan). Before a Pod that
   ## is still running is removed, whatever its shim could not deliver is pulled out of its spool and given to core (log lines
   ## are not lost with a dead shim). Returns how many blocks were rescued.
   let name = podName(runId, seq, attempt)
   if rescue != nil:
-    let frames = drainSpool(be, name)
+    # with run volumes the spool is on the volume (drainDir), else in the Pod's own /cicd/spool
+    let dir = if volumes: drainDir(seq, attempt) & "/spool" else: spoolDir
+    let frames = drainSpool(be, name, dir = dir)
     if frames.len > 0:
       let acked = rescue(runId, seq, attempt, frames)
       if acked > 0:
         result = frames.len
-        discard ackSpool(be, name, acked)
+        discard ackSpool(be, name, acked, dir)
   if be.deletePod(name, graceSeconds): st.forget(name)
 
 type SweepResult* = object

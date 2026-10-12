@@ -16,7 +16,7 @@
 ## The default build has no ZeroMQ (it runs in any image); the production build is -d:shimLogging, linked statically
 ## (tools/shim/build_static.sh).
 
-import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options, base64]
+import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options, base64, sequtils]
 import checksums/sha2
 import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts, varsheader
 when defined(shimLogging):
@@ -236,60 +236,10 @@ proc prepareVolume(args: seq[string]): int =
       return 1
   0
 
-proc artifactTool(args: seq[string]): int =
-  ## Run by the job controller through exec when the shim could not hand the artifacts to the core itself (the spool fallback, D-33), and only when the core orders it:
-  ## `cicd-shim --read-artifact PATH --workspace DIR --offset N --length L` writes that block of the file as base64 to stdout (the exec channel carries text);
-  ## `cicd-shim --ack-artifacts SPOOLDIR` removes the manifest once the core has everything. The workspace and the manifest are the shim's own, nothing else is readable.
-  var mode, path, workspace, spool = ""
-  var offset, length = 0
-  var i = 0
-  while i < args.len:
-    case args[i]
-    of "--read-artifact", "--ack-artifacts":
-      mode = args[i]
-      inc i
-      (if mode == "--read-artifact": path = args[i] else: spool = args[i])
-    of "--workspace":
-      inc i
-      workspace = args[i]
-    of "--offset":
-      inc i
-      offset = parseInt(args[i])
-    of "--length":
-      inc i
-      length = parseInt(args[i])
-    else:
-      stderr.writeLine "cicd-shim: unknown argument " & args[i]
-      return 2
-    inc i
-  if mode == "--ack-artifacts":
-    removeFile(spool / "artifacts.manifest")
-    return 0
-  if path.len == 0 or path[0] == '/' or ".." in path.split('/') or workspace.len == 0 or length <= 0 or length > readSize:
-    stderr.writeLine "cicd-shim: a relative path inside the workspace, and a length of 1.." & $readSize
-    return 2
-  if not fileExists(workspace / path):
-    stderr.writeLine "cicd-shim: no such file"
-    return 3
-  stdout.write encode(readBlock(workspace / path, offset, length))
-  0
-
 when defined(shimLogging):
   proc safeRel(p: string): bool =
     ## a path core named: relative and inside the workspace, whatever core says
     p.len > 0 and p[0] != '/' and ".." notin p.split('/') and '\0' notin p
-
-  proc ask(c: ArtifactClient; step: StepRef; token: string; req: ArtifactRequest; patience: int): ArtifactReply =
-    ## the request, again while the core or the store does not answer, for up to `patience` seconds
-    var r = req
-    r.header = Header(protocol: 1)
-    r.step = step
-    r.job_token = token
-    let until = epochTime() + patience.float
-    while true:
-      result = c.call(r)
-      if result.ok or not result.retry or epochTime() >= until: return
-      sleep 2000
 
   proc downloadArtifacts(artifactAddr, certs: string; step: StepRef; token: string; names: seq[string]; workspace: string; patience: int): string =
     ## the artifacts the step asked for, from this run, into the workspace, block by block; "" or what went wrong
@@ -333,38 +283,78 @@ when defined(shimLogging):
     writeManifest(manifestPath, files)          # before the first block: whatever happens next, what the command left is on record
     let c = newArtifactClient(artifactAddr, certs)
     defer: c.close()
-    for f in files:
-      let abs = workspace / f.path
-      var r: ArtifactReply
-      if f.size <= partSize:
-        r = ask(c, step, token, ArtifactRequest(op: "put_object", path: f.path, size: uint64(f.size), sha256: f.sha256,
-                                               data: cast[seq[byte]](readBlock(abs, 0, f.size))), patience)
+    let d = deliverFiles(manifestPath, files,
+      proc (f: ManifestFile): tuple[ok, retry: bool; detail: string] =
+        let r = putFile(c, step, token, f.path, workspace / f.path, f.size, f.sha256, patience)
+        (r.ok, r.retry, r.code & ": " & r.detail),
+      proc (f: ManifestFile) = say "artifact " & f.path & " put (" & $f.size & " bytes)")
+    if d.ok: UploadResult() else: UploadResult(failure: d.path & ": " & d.detail, undelivered: d.retry)
+
+  proc drainTool(args: seq[string]): int =
+    ## `cicd-shim --drain ...`: the drain of a step that ended without having handed over its artifacts or its log (docs/artifacts.md). Run by a Pod the job controller makes
+    ## on the run's volume when the core orders it: it reads the manifest of the artifacts and the log spool that the step's shim left there, and sends them to the core as that
+    ## shim would have, with the step's credential, taking each file off the manifest and each block off the spool as the core has it. Exit 0: everything asked is delivered;
+    ## 77: the core or the store did not answer in time (to be tried again); 78: it cannot be done (the file is not the one the shim recorded, the core refuses for good).
+    var runId, workspace, manifestDir, spool, certs, collector, artifactAddr, token = ""
+    var termLog = "/dev/termination-log"
+    var stepSeq, stepAttempt = 0
+    var wait = 120
+    var doArtifacts, doLogs = false
+    var i = 1
+    while i < args.len:
+      case args[i]
+      of "--artifacts": doArtifacts = true
+      of "--logs": doLogs = true
+      of "--run-id": (inc i; runId = args[i])
+      of "--step-seq": (inc i; stepSeq = parseInt(args[i]))
+      of "--step-attempt": (inc i; stepAttempt = parseInt(args[i]))
+      of "--workspace": (inc i; workspace = args[i])
+      of "--manifest-dir": (inc i; manifestDir = args[i])
+      of "--log-spool-dir": (inc i; spool = args[i])
+      of "--certs-dir": (inc i; certs = args[i])
+      of "--collector-addr": (inc i; collector = args[i])
+      of "--artifact-addr": (inc i; artifactAddr = args[i])
+      of "--step-token": (inc i; token = args[i])
+      of "--termination-log": (inc i; termLog = args[i])
+      of "--wait": (inc i; wait = parseInt(args[i]))
       else:
-        r = ask(c, step, token, ArtifactRequest(op: "put_begin", path: f.path, size: uint64(f.size), sha256: f.sha256), patience)
-        if r.ok:
-          let uploadId = r.ack.upload_id
-          var parts: seq[ArtifactPart]
-          var off = 0'i64
-          var n = 0'u32
-          while off < f.size and r.ok:
-            inc n
-            r = ask(c, step, token, ArtifactRequest(op: "put_part", path: f.path, upload_id: uploadId, part: n,
-                                                   data: cast[seq[byte]](readBlock(abs, off, partSize))), patience)
-            if r.ok: parts.add ArtifactPart(part: n, etag: r.ack.etag)
-            off += partSize
-          if r.ok:
-            r = ask(c, step, token, ArtifactRequest(op: "put_end", path: f.path, upload_id: uploadId, parts: parts), patience)
-          if not r.ok: discard c.call(ArtifactRequest(header: Header(protocol: 1), step: step, job_token: token, op: "put_abort", path: f.path, upload_id: uploadId), 15000)
-      if not r.ok:
-        return UploadResult(failure: f.path & ": " & r.code & ": " & r.detail, undelivered: r.retry)
-      say "artifact " & f.path & " put (" & $f.size & " bytes)"
-    removeFile(manifestPath)
-    UploadResult()
+        stderr.writeLine "cicd-shim --drain: unknown argument " & args[i]
+        return 2
+      inc i
+    proc finish(code: int; reason, detail: string): int =
+      stderr.writeLine "cicd-shim --drain: " & reason & (if detail.len > 0: ": " & detail else: "")
+      writeTermination(termLog, %*{"exit_code": code, "reason": reason, "detail": detail})
+      code
+    if runId.len == 0 or certs.len == 0 or token.len == 0: return finish(78, "failed", "the run, the certificates and the step's credential are needed")
+    let step = StepRef(run_id: runId, seq: uint32(stepSeq), attempt: uint32(stepAttempt))
+    if doArtifacts:
+      let manifest = manifestDir / "artifacts.manifest"
+      var files = readManifest(manifest)
+      if files.len > 0:
+        if artifactAddr.len == 0: return finish(78, "failed", "no address of the core's artifact service")
+        let c = newArtifactClient(artifactAddr, certs)
+        defer: c.close()
+        let d = deliverFiles(manifest, files,
+          proc (f: ManifestFile): tuple[ok, retry: bool; detail: string] =
+            let abs = workspace / f.path
+            # the workspace is the run's: a later step may have written over the file. What the shim recorded is what was meant, and the SHA-256 is how it is known.
+            if not safeRel(f.path) or not fileExists(abs) or fileSha256(abs) != f.sha256:
+              return (false, false, "the file is not the one the shim recorded (SHA-256), a later step changed it")
+            let r = putFile(c, step, token, f.path, abs, f.size, f.sha256, wait)
+            (r.ok, r.retry, r.code & ": " & r.detail),
+          proc (f: ManifestFile) = echo "cicd-shim --drain: artifact ", f.path, " put (", f.size, " bytes)")
+        if not d.ok: return finish(if d.retry: 77 else: 78, if d.retry: "retry" else: "failed", d.path & ": " & d.detail)
+    if doLogs and spool.len > 0 and dirExists(spool):
+      if collector.len == 0: return finish(78, "failed", "no address of the core's log service")
+      let r = drainLogSpool(collector, certs, spool, step, wait)
+      if not r.ok: return finish(77, "retry", "the log: " & r.detail)
+    finish(0, "drained", "")
 
 proc main(): int =
   block tools:
     let argv = commandLineParams()
-    if argv.len > 0 and argv[0] in ["--read-artifact", "--ack-artifacts"]: return artifactTool(argv)
+    when defined(shimLogging):
+      if argv.len > 0 and argv[0] == "--drain": return drainTool(argv)
     if argv.len > 0 and argv[0] == "--prepare-volume": return prepareVolume(argv)
   when defined(shimLogging):
     let argv = commandLineParams()
@@ -378,6 +368,8 @@ proc main(): int =
   var coreAddr = ""
   var certsDir = ""
   var spoolDir = "/cicd/spool"
+  var manifestDir = ""                     # where the manifest of the artifacts to deliver is kept: on the run's volume when the Pod has one (a reader Pod can reach it after the
+                                           # Pod has ended, docs/artifacts.md), else the spool directory
   var spoolBytes = 10 * 1024 * 1024        # log_spool_bytes (D-27), default 10 MiB
   var holdSeconds = 600                    # log_hold_timeout, default 10 min
   var runId = ""
@@ -391,7 +383,8 @@ proc main(): int =
   var stepToken = ""                       # the step's own credential for that
   var optsJson = ""                        # the Lua step options: mask, metrics, timeout (docs/secrets-masking.md, metrics.md)
   var artifactAddr = ""                    # the core's ArtifactIngest (DAT-003)
-  var artifactWait = 60                    # seconds the shim keeps asking when the core or the store does not answer
+  var artifactWait = -1                    # seconds the shim keeps asking when the core or the store does not answer (-1: log_hold_timeout, as for the log: a store that is down for
+                                           # a while holds the step, it does not end it)
   var artUpload, artDownload: seq[string]  # the Lua `artifacts` option: what to put into the object store after the command, what to fetch before it
   var timeoutSeconds = 0                   # the step's timeout (Lua `timeout`, StartStep.timeout_seconds); 0 = none
   var termGrace = 20                       # after SIGTERM / timeout: seconds the build gets to stop before SIGKILL
@@ -427,6 +420,9 @@ proc main(): int =
     of "--log-spool-dir":
       inc i
       spoolDir = args[i]
+    of "--manifest-dir":
+      inc i
+      manifestDir = args[i]
     of "--log-spool-bytes":
       inc i
       spoolBytes = parseInt(args[i])
@@ -706,7 +702,7 @@ proc main(): int =
       if artifactAddr.len == 0:
         artifactFailure = "the Pod was given no address of the core's artifact service"
       else:
-        let up = uploadArtifacts(artifactAddr, certsDir, step, stepToken, artUpload, workspace, spoolDir / "artifacts.manifest", artifactWait, tell)
+        let up = uploadArtifacts(artifactAddr, certsDir, step, stepToken, artUpload, workspace, (if manifestDir.len > 0: manifestDir else: spoolDir) / "artifacts.manifest", (if artifactWait >= 0: artifactWait else: holdSeconds), tell)
         artifactFailure = up.failure
         artifactsUndelivered = up.undelivered
     else:
@@ -715,6 +711,8 @@ proc main(): int =
       stderr.writeLine "cicd-shim: artifacts: " & artifactFailure
       when defined(shimLogging):
         if logging: lp.write("cicd-shim: artifacts: " & artifactFailure & "\n")
+    # what became of them, in the Pod log, after the command's own result and before the log's: a core that was away reads the whole story from there (D-53)
+    event(if artifactFailure.len == 0: seArtifactsDelivered elif artifactsUndelivered: seArtifactsUndelivered else: seArtifactsFailed)
   # The step is not finished until its log is: wait (up to log_hold_timeout) for delivery. The Pod stays Running meanwhile.
   # A Pod being deleted has only its termination grace period left, so then the wait is short.
   event(seLogsDelivering)
@@ -751,8 +749,10 @@ proc main(): int =
   var canon = ""
   for o in outputs: canon.add o.name & "=" & o.value & "\n"
   if not logsDelivered:
-    writeTermination(termLog, %*{"exit_code": exitLogsUndelivered, "reason": "logs_undelivered",
-                                 "command_exit_code": code, "detail": "log not delivered within " & $holdSeconds & " s"})
+    # both are said: the log was not delivered, and what became of the artifacts (the reason is the log's, which comes first)
+    writeTermination(termLog, %*{"exit_code": exitLogsUndelivered, "reason": "logs_undelivered", "command_exit_code": code,
+                                 "result": currentState().result, "logs": "undelivered", "artifacts": $currentState().artifacts,
+                                 "detail": "log not delivered within " & $holdSeconds & " s"})
     result = done("logs_undelivered", exitLogsUndelivered)
     release(exitLogsUndelivered, "logs_undelivered")
     return
@@ -762,7 +762,7 @@ proc main(): int =
   let reason = if stopReason.len > 0: stopReason elif artifactsUndelivered: "artifacts_undelivered" elif artifactFailure.len > 0: "artifacts_failed" elif code == 0: "ok" elif code == 137 and usage.oomKills > 0: "oom_killed" else: "failed"
   let exitCode = if stopReason == "timeout": exitTimeout elif artifactsUndelivered: exitArtifactsUndelivered elif artifactFailure.len > 0: exitArtifactsFailed else: code
   writeTermination(termLog, %*{"exit_code": exitCode, "reason": reason, "command_exit_code": code,
-                               "outputs": outputs.len, "digest": sha256hex(canon), "detail": artifactFailure})
+                               "result": currentState().result, "logs": "delivered", "artifacts": $currentState().artifacts, "outputs": outputs.len, "digest": sha256hex(canon), "detail": artifactFailure})
   result = done(reason, exitCode)
   release(exitCode, reason)
 

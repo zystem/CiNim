@@ -41,8 +41,10 @@ proc event*(ev: ShimEvent; cmdExit = noValue; reason = ""; exitCode = noValue; l
       cur.event = ev
       cur.phase = phaseAfter[ev]
       if logsAfter[ev].isSome: cur.logs = logsAfter[ev].get
+      if artifactsAfter[ev].isSome: cur.artifacts = artifactsAfter[ev].get
       if ev == seCommandStarted: cur.cmdStarted = true
       if cmdExit != noValue: cur.cmdExit = some cmdExit
+      if ev == seCommandExited: cur.result = (if cur.reason == "terminated": "unknown" elif cur.cmdExit == some(0) and cur.reason.len == 0: "success" else: "failed")
       if reason.len > 0: cur.reason = reason
       if exitCode != noValue: cur.exitCode = some exitCode
       if lines != noValue: cur.lines = lines

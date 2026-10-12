@@ -85,6 +85,29 @@ message PollRequest {
   uint64 storage_hard_bytes = 16;    // STO-006: `requests.storage` of the namespace's ResourceQuota (0: none, or it could not be read) and how much of it is used, so that the core knows when
   uint64 storage_used_bytes = 17;    // the organisation's storage is short of space (less than 15 % free) and keeps the volumes of failed runs for a minute only
   repeated string storage_released = 15;  // STO-006: the runs whose volume this controller deleted after core asked (`PollResponse.release_storage`); a run that had none counts too
+  repeated StepDrained steps_drained = 18;  // DAT-003: how the drains that core ordered (`PollResponse.drain_steps`) went; only the ones that ended or failed, not the ones under way
+}
+
+// DAT-003, D-27: core orders the controller to take what a step left on the run's volume and hand it to core, because the shim could not (`artifacts_undelivered`, `logs_undelivered`
+// after a core that was not there, docs/artifacts.md). The Pod of the step has ended, so `exec` cannot reach it: the controller starts a reader Pod of its own on the run's volume
+// (`image`: the step's), reads the shim's manifest of artifacts and the blocks of its log spool through it, sends them as the shim would have (the artifacts with `step_token`), and
+// removes what core has taken. Core names the order in every answer until the controller says it is done, so a lost answer or a restarted controller costs nothing: the controller
+// goes on from the file it had.
+message DrainStep {
+  StepRef step = 1;
+  string image = 2;
+  string step_token = 3;
+  bool artifacts = 4;                // the manifest of the artifacts is to be drained
+  bool logs = 5;                     // the log spool is to be drained
+}
+
+// The end of an order: `ok` (everything asked is delivered, the reader Pod is gone), or `final` (it cannot be done: the volume is gone, the files do not match their SHA-256, the
+// store refuses for good; `detail` says which). Anything else is not reported: core orders again.
+message StepDrained {
+  StepRef step = 1;
+  bool ok = 2;
+  bool final = 3;
+  string detail = 4;
 }
 
 message StartStep {
@@ -174,5 +197,6 @@ message PollResponse {
   bool unauthorized = 7;             // the namespace has a controller identity and the poll did not prove it: nothing was done
   ControllerConfig config = 9;       // the settings of the shard, in every answer (see ControllerConfig)
   ConductorPlan conductors = 10;     // the conductors to keep (see ConductorPlan)
+  repeated DrainStep drain_steps = 11;  // DAT-003: steps whose artifacts or log the shim could not deliver (see DrainStep); a few at a time, in every answer until the controller says it is done
   repeated string release_storage = 8;  // STO-006: runs of this namespace that are over and whose retention has passed: the controller deletes the run volume of each and says so in `storage_released`
 }

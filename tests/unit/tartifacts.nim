@@ -1,5 +1,5 @@
 ## The shim's part of the artifacts (DAT-003): patterns, the files found, the hash, and the transfer against a small server of the test's own.
-import std/[unittest, os, strutils, tempfiles, json]
+import std/[sequtils, unittest, os, strutils, tempfiles, json]
 import shim/artifacts
 
 suite "DAT-003 artifact patterns":
@@ -72,6 +72,31 @@ suite "DAT-003 blocks and the manifest":
     check back.len == 2 and back[0].path == "dist/a" and back[0].size == 3 and back[1].sha256 == "cd"
     writeFile(m, "{broken")
     check readManifest(m).len == 0
+
+  test "DAT-003 files are delivered in turn, the manifest loses each one as soon as it is delivered and is removed after the last (no iteration over a list that changes)":
+    let root = createTempDir("art", "")
+    defer: removeDir(root)
+    let m = root / "artifacts.manifest"
+    let files = @[ManifestFile(path: "a", size: 1, sha256: "x"), ManifestFile(path: "b", size: 2, sha256: "y"), ManifestFile(path: "c", size: 3, sha256: "z")]
+    writeManifest(m, files)
+    var put, seen: seq[string]
+    let r = deliverFiles(m, files, proc (f: ManifestFile): tuple[ok, retry: bool; detail: string] =
+      put.add f.path
+      (true, false, ""), proc (f: ManifestFile) = seen.add f.path)
+    check r.ok and put == @["a", "b", "c"] and seen == put
+    check not fileExists(m)
+  test "DAT-003 a file that is not accepted stops the delivery there: the ones before it are off the manifest, it and the rest stay, and the answer says which":
+    let root = createTempDir("art", "")
+    defer: removeDir(root)
+    let m = root / "artifacts.manifest"
+    let files = @[ManifestFile(path: "a", size: 1, sha256: "x"), ManifestFile(path: "b", size: 2, sha256: "y"), ManifestFile(path: "c", size: 3, sha256: "z")]
+    writeManifest(m, files)
+    let r = deliverFiles(m, files, proc (f: ManifestFile): tuple[ok, retry: bool; detail: string] =
+      if f.path == "b": (false, true, "store_unavailable") else: (true, false, ""))
+    check not r.ok and r.retry and r.path == "b" and r.detail == "store_unavailable"
+    check readManifest(m).mapIt(it.path) == @["b", "c"]
+    let refused = deliverFiles(m, readManifest(m), proc (f: ManifestFile): tuple[ok, retry: bool; detail: string] = (false, false, "quota_exceeded"))
+    check not refused.ok and not refused.retry and refused.path == "b" and readManifest(m).len == 2
 
 suite "DAT-003 the declaration in the step's options":
   test "DAT-003 an option with only an upload list (no download list) is read without a crash":

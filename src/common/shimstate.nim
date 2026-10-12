@@ -18,6 +18,9 @@ type
     seStopping = "stopping"                 ## timeout or SIGTERM: the build was asked to stop
     seKilling = "killing"                   ## ... and did not, after the grace period: SIGKILL
     seCommandExited = "command_exited"
+    seArtifactsDelivered = "artifacts_delivered"       ## the step declared artifacts and the core has them (DAT-003)
+    seArtifactsUndelivered = "artifacts_undelivered"   ## ... and the core or the store did not take them in time: they are on the run's volume (D-53)
+    seArtifactsFailed = "artifacts_failed"             ## ... and they cannot be delivered at all (no file matched, refused for good)
     seLogsDelivering = "logs_delivering"    ## waiting (up to log_hold_timeout) for the log to reach vlagent
     seLogsDelivered = "logs_delivered"
     seLogsUndelivered = "logs_undelivered"
@@ -29,6 +32,9 @@ type
   LogsState* = enum
     lsNone = "none", lsDraining = "draining", lsDelivered = "delivered", lsUndelivered = "undelivered"
 
+  ArtifactsState* = enum
+    asNone = "none", asDelivered = "delivered", asUndelivered = "undelivered", asFailed = "failed"
+
   ShimState* = object
     run*: string
     seq*, attempt*: int
@@ -38,6 +44,9 @@ type
     cmdStarted*: bool
     cmdExit*: Option[int]        ## the command's exit code once it has exited
     logs*: LogsState
+    artifacts*: ArtifactsState   ## what became of the step's artifacts; `none` when it declared none or its command did not succeed
+    result*: string              ## the command's own result once it has exited: "success" (exit 0, not stopped from outside) or "failed". Written before the delivery
+                                 ## states, so that a core that was away reads from the Pod log how the step went and what of it was not delivered (D-53)
     lines*, blocks*, dropped*: int
     truncated*: bool             ## the step's log reached log_max_bytes and was cut (with a marker line)
     cpuSec*: float               ## CPU the step's container used so far (cgroup), seconds
@@ -59,13 +68,20 @@ const
   # What each event leaves the shim in. The writer (shimlog.event) and every reader use this one table.
   phaseAfter*: array[ShimEvent, ShimPhase] = [
     seStarted: spStarting, seCommandStarted: spRunning, seStopping: spStopping, seKilling: spStopping,
-    seCommandExited: spDraining, seLogsDelivering: spDraining, seLogsDelivered: spDraining,
-    seLogsUndelivered: spDraining, seDone: spDone]
+    seCommandExited: spDraining, seArtifactsDelivered: spDraining, seArtifactsUndelivered: spDraining, seArtifactsFailed: spDraining,
+    seLogsDelivering: spDraining, seLogsDelivered: spDraining, seLogsUndelivered: spDraining, seDone: spDone]
 
   logsAfter*: array[ShimEvent, Option[LogsState]] = [
     seStarted: none(LogsState), seCommandStarted: none(LogsState), seStopping: none(LogsState),
-    seKilling: none(LogsState), seCommandExited: none(LogsState), seLogsDelivering: some(lsDraining),
+    seKilling: none(LogsState), seCommandExited: none(LogsState), seArtifactsDelivered: none(LogsState), seArtifactsUndelivered: none(LogsState),
+    seArtifactsFailed: none(LogsState), seLogsDelivering: some(lsDraining),
     seLogsDelivered: some(lsDelivered), seLogsUndelivered: some(lsUndelivered), seDone: none(LogsState)]
+
+  artifactsAfter*: array[ShimEvent, Option[ArtifactsState]] = [
+    seStarted: none(ArtifactsState), seCommandStarted: none(ArtifactsState), seStopping: none(ArtifactsState), seKilling: none(ArtifactsState),
+    seCommandExited: none(ArtifactsState), seArtifactsDelivered: some(asDelivered), seArtifactsUndelivered: some(asUndelivered),
+    seArtifactsFailed: some(asFailed), seLogsDelivering: none(ArtifactsState), seLogsDelivered: none(ArtifactsState),
+    seLogsUndelivered: none(ArtifactsState), seDone: none(ArtifactsState)]
 
 func successors*(e: ShimEvent): set[ShimEvent] =
   ## The only orders in which the shim produces events. (Intermediate ones may be missing from what a reader sees - a Pod
@@ -75,7 +91,8 @@ func successors*(e: ShimEvent): set[ShimEvent] =
   of seCommandStarted: {seStopping, seCommandExited}
   of seStopping: {seKilling, seCommandExited}
   of seKilling: {seCommandExited}
-  of seCommandExited: {seLogsDelivering}
+  of seCommandExited: {seLogsDelivering, seArtifactsDelivered, seArtifactsUndelivered, seArtifactsFailed}     # the artifacts only when the step declared some and succeeded
+  of seArtifactsDelivered, seArtifactsUndelivered, seArtifactsFailed: {seLogsDelivering}
   of seLogsDelivering: {seLogsDelivered, seLogsUndelivered}
   of seLogsDelivered, seLogsUndelivered: {seDone}
   of seDone: {}
@@ -131,6 +148,8 @@ proc toJson*(s: ShimState; t: int64): JsonNode =
   result = %*{"v": 1, "n": s.n, "t": t, "ev": $s.event, "run": s.run, "seq": s.seq, "at": s.attempt, "ph": $s.phase,
               "cmd": {"started": s.cmdStarted}, "logs": $s.logs, "lines": s.lines, "blocks": s.blocks, "dropped": s.dropped}
   if s.truncated: result["trunc"] = %true
+  if s.artifacts != asNone: result["arts"] = %($s.artifacts)
+  if s.result.len > 0: result["result"] = %s.result
   if s.cpuSec > 0 or s.memPeak > 0 or s.oomKills > 0:
     result["res"] = %*{"cpu_s": s.cpuSec, "mem_peak": s.memPeak, "oom": s.oomKills}
   if s.cmdExit.isSome: result["cmd"]["exit"] = %s.cmdExit.get
@@ -144,7 +163,8 @@ proc fromJson*(j: JsonNode): Option[ShimState] =
     let ev = parseEnum[ShimEvent](j["ev"].getStr)
     var s = ShimState(run: j{"run"}.getStr, seq: j{"seq"}.getInt, attempt: j{"at"}.getInt, n: j["n"].getInt, event: ev,
                       phase: parseEnum[ShimPhase](j["ph"].getStr), cmdStarted: j{"cmd", "started"}.getBool,
-                      logs: parseEnum[LogsState](j{"logs"}.getStr("none")), lines: j{"lines"}.getInt,
+                      logs: parseEnum[LogsState](j{"logs"}.getStr("none")),
+                      artifacts: parseEnum[ArtifactsState](j{"arts"}.getStr("none")), result: j{"result"}.getStr, lines: j{"lines"}.getInt,
                       blocks: j{"blocks"}.getInt, dropped: j{"dropped"}.getInt, truncated: j{"trunc"}.getBool, reason: j{"reason"}.getStr,
                       cpuSec: j{"res", "cpu_s"}.getFloat, memPeak: j{"res", "mem_peak"}.getBiggestInt, oomKills: j{"res", "oom"}.getInt)
     if j{"cmd", "exit"} != nil: s.cmdExit = some j{"cmd", "exit"}.getInt

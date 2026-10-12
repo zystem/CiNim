@@ -63,7 +63,7 @@ func startCount(resp: PollResponse): int =
 
 proc worth(resp: PollResponse; p: Peer): bool =
   ## is there anything in the answer the controller does not have: commands, volumes to release, an identity matter, a changed setting or gate
-  resp.commands.len > 0 or resp.release_storage.len > 0 or resp.issued_credential.len > 0 or resp.unauthorized or
+  resp.commands.len > 0 or resp.release_storage.len > 0 or resp.drain_steps.len > 0 or resp.issued_credential.len > 0 or resp.unauthorized or
     encodeConfig(resp.config) != p.lastConfig or $resp.gate.open & resp.gate.reason != p.lastGate or
     (resp.conductors.present and encodePlan(resp.conductors) != p.lastPlan)
 
