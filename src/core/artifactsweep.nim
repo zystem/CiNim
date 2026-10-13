@@ -1,7 +1,7 @@
 ## The sweep of the artifacts (DAT-006): what nobody will read is deleted from the store, so that it does not fill up.
 ##
 ##   * a stored artifact older than the retention (`CINIM_ARTIFACT_RETENTION`, 30 days; 0 or less keeps for ever), of a run that has ended - an artifact of a run still
-##     under way is never taken, whatever its age;
+##     under way is never taken, whatever its age, nor is one of a run under a legal hold (core/holds.nim, DAT-006);
 ##   * an upload that was started and never finished (state `uploading`, the multipart upload of the store still open) for longer than `CINIM_UPLOAD_ABANDON_AFTER`
 ##     (a day): the upload is aborted, so that the store frees the parts, and the row goes;
 ##   * an artifact whose run is not in the database any more (a switched-off organisation that was purged): the object and the row go.
@@ -39,7 +39,7 @@ proc sweepArtifacts*(c: var RqClient; be: ObjectBackend; now: int64; retention =
   # the retention of an organisation (days, in its profile) is its own; 0 there is the shard's `retention`, and no retention at all (0 or less) keeps for ever
   block expire:
     let r = c.query(%*[["SELECT a.id, a.s3_key FROM artifacts a LEFT JOIN runs r ON r.id = a.run_id LEFT JOIN execution_profiles p ON p.id = r.profile_id " &
-      "WHERE a.state = 'stored' AND r.state IN (" & finalList() & ") AND " &
+      "WHERE a.state = 'stored' AND r.state IN (" & finalList() & ") AND NOT EXISTS (SELECT 1 FROM run_holds h WHERE h.run_id = a.run_id) AND " &
       "(CASE WHEN COALESCE(p.artifact_retention_days, 0) > 0 THEN p.artifact_retention_days * 86400 ELSE ? END) > 0 AND " &
       "a.created_at < ? - (CASE WHEN COALESCE(p.artifact_retention_days, 0) > 0 THEN p.artifact_retention_days * 86400 ELSE ? END) " &
       "ORDER BY a.created_at LIMIT ?", max(retention, 0), now, max(retention, 0), batch]])["results"][0]{"values"}

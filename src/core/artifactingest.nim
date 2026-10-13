@@ -15,7 +15,7 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import crunchy
 import ../common/[zmqcurve, rqlite, states, ctrlauth]
-import schema, objectstore, scheduler, drains
+import schema, objectstore, scheduler, drains, cachestore
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -42,10 +42,91 @@ proc refuse(code, detail: string): ArtifactAck =
 proc fromOutcome(o: Outcome): ArtifactAck =
   refuse(if o.retry: "store_unavailable" else: "store_error", o.error)
 
+proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; ds: seq[CacheDecl]; be: ObjectBackend; now: int64): ArtifactAck =
+  ## DAT-004: the step's cache, by the same channel and blocks as its artifacts. `path` is the cache key. A step may find or read only what it declared (its key, or what one of its
+  ## restore keys names) and save only the key it declared; a key that is stored is immutable (`cache_exists`: the saver gives way); room is made by dropping the entries that were
+  ## used least long ago (cachestore.makeRoom).
+  let key = req.path
+  case req.op
+  of "cache_find":
+    let d = ds.filterIt(it.key == key)
+    if d.len == 0: return refuse("not_declared", key & " is not a cache key this step declared")
+    let found = c.findEntry(tenant, scope, key, d[0].restoreKeys, now)
+    result = ack()
+    if found.found: result.files.add ArtifactFile(path: found.key, size: uint64(found.size), sha256: found.sha256)
+  of "get_block":
+    if not ds.mayFind(key): return refuse("not_declared", key & " is not a cache this step may read")
+    let e = c.storedEntry(tenant, scope, key)
+    if not e.found: return refuse("cache_missing", "no such cache entry")
+    if req.length == 0 or int(req.length) > readSize or int64(req.offset) >= e.size: return refuse("bad_request", "a block is 1.." & $readSize & " bytes inside the entry")
+    let got = be.readRange(e.s3Key, int64(req.offset), min(int64(req.length), e.size - int64(req.offset)))
+    if not got.res.ok: return fromOutcome(got.res)
+    result = ack()
+    result.data = cast[seq[byte]](got.data)
+  of "put_object", "put_begin", "put_part", "put_end", "put_abort":
+    if not ds.maySave(key): return refuse("not_declared", key & " is not a cache key this step declared")
+    case req.op
+    of "put_object", "put_begin":
+      if req.size > uint64(maxEntryBytes): return refuse("too_big", "a cache entry is at most " & $maxEntryBytes & " bytes")
+      if req.sha256.len != 64 or req.sha256.anyIt(it notin HexDigits): return refuse("bad_request", "sha256 is not 64 hex digits")
+      let sha = req.sha256.toLowerAscii
+      let s3 = objectKeyOf(tenant, scope, key)
+      if c.storedEntry(tenant, scope, key).found or c.uploadingEntry(tenant, scope, key).found: return refuse("cache_exists", "the cache key " & key & " is stored already; a key is immutable")
+      let room = c.makeRoom(be, tenant, scope, int64(req.size), cacheQuotaFromEnv())
+      if not room.ok: return refuse("quota_exceeded", room.why)
+      if not c.beginEntry(schema.newId(), tenant, scope, key, s3, int64(req.size), sha, "uploading", "", now): return refuse("cache_exists", "the cache key " & key & " is being saved by another step")
+      if req.op == "put_object":
+        let data = toStr(req.data)
+        if uint64(data.len) != req.size or data.len > partSize or hexOf(sha256(data)) != sha:
+          c.forgetEntry(tenant, scope, key)
+          return refuse("bad_request", "put_object holds the whole entry, at most " & $partSize & " bytes, and its SHA-256")
+        let put = be.putObject(s3, data)
+        if not put.ok:
+          c.forgetEntry(tenant, scope, key)
+          return fromOutcome(put)
+        discard c.markEntryStored(tenant, scope, key)
+        result = ack()
+      else:
+        let mp = be.createMultipart(s3)
+        if not mp.res.ok:
+          c.forgetEntry(tenant, scope, key)
+          return fromOutcome(mp.res)
+        c.setEntryUpload(tenant, scope, key, mp.uploadId)
+        result = ack()
+        result.upload_id = mp.uploadId
+    of "put_part":
+      let row = c.uploadingEntry(tenant, scope, key)
+      if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
+      if req.part == 0 or int(req.part) > maxParts or req.data.len == 0 or req.data.len > partSize: return refuse("bad_request", "a part is 1.." & $maxParts & ", 1.." & $partSize & " bytes")
+      let up = be.uploadPart(row.s3Key, row.uploadId, int(req.part), toStr(req.data))
+      if not up.res.ok: return fromOutcome(up.res)
+      result = ack()
+      result.etag = up.etag
+    of "put_end":
+      let row = c.uploadingEntry(tenant, scope, key)
+      if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
+      let fin = be.completeMultipart(row.s3Key, row.uploadId, req.parts.mapIt((int(it.part), it.etag)))
+      if not fin.ok: return fromOutcome(fin)
+      let sz = be.objectSize(row.s3Key)
+      if not sz.res.ok or sz.size != row.size:
+        discard be.deleteObject(row.s3Key)
+        c.forgetEntry(tenant, scope, key)
+        return refuse("size_mismatch", key & ": the store holds " & $sz.size & " bytes, " & $row.size & " were announced")
+      discard c.markEntryStored(tenant, scope, key)
+      result = ack()
+    else:       # put_abort
+      let row = c.uploadingEntry(tenant, scope, key)
+      if row.found:
+        discard be.abortMultipart(row.s3Key, row.uploadId)
+        c.forgetEntry(tenant, scope, key)
+      result = ack()
+  else:
+    return refuse("bad_request", "the op of a cache request is cache_find, get_block, put_object, put_begin, put_part, put_end or put_abort")
+
 proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): ArtifactAck =
   if req.job_token.len == 0 or not constantTimeEqual(req.job_token, stepToken(master, req.step.run_id, int(req.step.seq), int(req.step.attempt))):
     return refuse("bad_token", "the step's credential is not right")
-  let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id FROM steps s JOIN runs ru ON ru.id = s.run_id " &
+  let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id, ru.group_id FROM steps s JOIN runs ru ON ru.id = s.run_id " &
                       "WHERE s.run_id = ? AND s.ordinal = ? AND s.attempt = ?", req.step.run_id, int(req.step.seq), int(req.step.attempt)]])
   let v = r["results"][0]{"values"}
   # while the step runs; and after it, while its artifacts are being drained from the run's volume for it (core/drains.nim): the shim could not hand them over
@@ -53,12 +134,14 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
     return refuse("not_current", "this attempt of the step is not running")
   let decl = artifactDecl(v[0][1].getStr)
   let tenant = v[0][2].getStr
+  let scope = v[0][3].getStr
   let store = c.loadStore()
   if not store.ok:
     return refuse(if store.error == "not_configured": "store_not_configured" else: "store_unavailable",
                   if store.error == "not_configured": "the shard has no object store (PUT /api/v1/storage)" else: "the object store's key cannot be read now: " & store.error)
   let be = store.backend()
   let now = getTime().toUnix()
+  if req.cache: return handleCache(c, req, tenant, scope, cacheDecls(v[0][1].getStr), be, now)
   let runId = req.step.run_id
   case req.op
   of "get_list":

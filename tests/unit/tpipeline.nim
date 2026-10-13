@@ -131,6 +131,21 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     let many = sb.execute(j, "local t = {} for i = 1, 101 do t['V' .. i] = 'x' end return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:env(t) end) end})", fakeHost, runId = "s1_abc")
     check many.code == "script_error" and "at most 100" in many.message
 
+  test "DAT-004 the cache of a step is in the journalled options: a table or a list, a job's and a step's together, the same key is the step's":
+    var sb = newSandbox()
+    var j = Journal()
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', cache = {key = 'deps-1', paths = {'node_modules'}, restore_keys = {'deps-'}}}, function(j) j:sh('x'); j:sh('y', {cache = {{key = 'deps-1', paths = {'other'}}, {key = 'pip', paths = {'.pip', 'wheels/a'}}}}) end) end})", fakeHost, runId = "s1_abc")
+    check r.code == "ok"
+    check j.entries[0].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-1\",\"paths\":[\"node_modules\"],\"restore_keys\":[\"deps-\"]}]}\tx"
+    check j.entries[1].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-1\",\"paths\":[\"other\"],\"restore_keys\":[]},{\"key\":\"pip\",\"paths\":[\".pip\",\"wheels/a\"],\"restore_keys\":[]}]}\ty"
+  test "DAT-004 a key with a slash, no paths, a path outside the workspace, an unknown field and too many caches are refused before the run goes on":
+    for bad in ["{key = 'a/b', paths = {'x'}}", "{key = 'a', paths = {}}", "{key = 'a'}", "{key = 'a', paths = {'/etc'}}", "{key = 'a', paths = {'../x'}}", "{key = 'a', paths = {'x'}, mode = 1}",
+                "{key = 'a', paths = {'x'}, restore_keys = {'a/'}}", "{key = '', paths = {'x'}}", "'text'",
+                "{{key='1',paths={'x'}},{key='2',paths={'x'}},{key='3',paths={'x'}},{key='4',paths={'x'}},{key='5',paths={'x'}}}"]:
+      var sb = newSandbox()
+      var j = Journal()
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {cache = " & bad & "}) end) end})", fakeHost, runId = "s1_abc")
+      check r.code == "script_error" and "cache" in r.message
   test "a call that the core refuses for good fails the run with the core's words; it is not suspended":
     var sb = newSandbox()
     var j = Journal()

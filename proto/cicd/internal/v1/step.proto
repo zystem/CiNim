@@ -66,7 +66,9 @@ message ArtifactRequest {
   uint64 offset = 11;                // get_block
   uint32 length = 12;                // get_block
   bytes data = 13;                   // put_object, put_part
-  repeated string names = 14;        // get_list
+  repeated string names = 14;        // get_list; cache_find: the restore keys (prefixes), in order
+  bool cache = 15;                   // DAT-004: the request is about the step's cache, not its artifacts: `path` is the cache key, `op` is cache_find (answers with `files`: the entry found, if any),
+                                     // get_block, put_object, put_begin, put_part, put_end or put_abort. A key that is stored already is `cache_exists`: a key is immutable
 }
 
 message ArtifactAck {

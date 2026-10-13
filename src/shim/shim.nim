@@ -19,8 +19,8 @@
 
 import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options, base64, sequtils]
 import checksums/sha2
-import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts, varsheader
-import ../common/stepenv
+import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts, varsheader, cachepack
+import ../common/[stepenv, cachedecl]
 when defined(shimLogging):
   import logclient   ## also brings in StepRef (import_proto3-generated) for the calls below
 else:
@@ -218,6 +218,70 @@ when defined(shimLogging):
       proc (f: ManifestFile) = say "artifact " & f.path & " put (" & $f.size & " bytes)")
     if d.ok: UploadResult() else: UploadResult(failure: d.path & ": " & d.detail, undelivered: d.retry)
 
+  const cachePatience = 30          ## seconds: a cache is a convenience, a core that does not answer is not waited for long
+
+  proc restoreCaches(artifactAddr, certs: string; step: StepRef; token: string; specs: seq[CacheDecl]; workspace, tmpDir: string): tuple[notes: seq[string], hit: seq[string]] =
+    ## DAT-004: before the command, for each cache the step declared: the entry of its key, or of the latest key a restore key names, is fetched and unpacked into the workspace.
+    ## Nothing here fails the step: a miss, an archive that is damaged or a core that does not answer is a line in the step's log.
+    if artifactAddr.len == 0 or token.len == 0:
+      result.notes.add "cache: not restored (the Pod was given no address of the core's artifact service, or no credential)"
+      return
+    let c = newArtifactClient(artifactAddr, certs)
+    defer: c.close()
+    for i, d in specs:
+      let f = cacheFind(c, step, token, d.key, cachePatience)
+      if not f.ok:
+        result.notes.add "cache " & d.key & ": not restored (" & f.detail & ")"
+        continue
+      if not f.found:
+        result.notes.add "cache " & d.key & ": miss"
+        continue
+      let tmp = tmpDir / ("cache-" & $step.seq & "-" & $step.attempt & "-" & $i & ".bin")
+      let err = cacheFetch(c, step, token, f.key, f.size, tmp, cachePatience)
+      if err.len > 0:
+        result.notes.add "cache " & d.key & ": not restored (" & err & ")"
+        removeFile(tmp)
+        continue
+      if fileSha256(tmp) != f.sha256:
+        result.notes.add "cache " & d.key & ": not restored (the SHA-256 is not the one recorded when it was saved)"
+        removeFile(tmp)
+        continue
+      createDir(workspace)
+      let u = unpackCache(tmp, workspace)
+      removeFile(tmp)
+      if u.error.len > 0:
+        result.notes.add "cache " & d.key & ": restored only in part (" & u.error & ")"
+      else:
+        result.notes.add "cache " & d.key & ": restored from " & f.key & " (" & $u.files & " files, " & $f.size & " bytes" & (if u.skipped > 0: ", " & $u.skipped & " entries left out" else: "") & ")"
+      if f.key == d.key and u.error.len == 0: result.hit.add d.key
+
+  proc saveCaches(artifactAddr, certs: string; step: StepRef; token: string; specs: seq[CacheDecl]; hit: seq[string]; workspace, tmpDir: string): seq[string] =
+    ## DAT-004: after a command that succeeded, each cache whose exact key was not restored is packed from the workspace and saved under its key. A key is immutable: one
+    ## that is stored already (another run saved it meanwhile) is not an error.
+    if artifactAddr.len == 0 or token.len == 0: return @["cache: not saved (the Pod was given no address of the core's artifact service, or no credential)"]
+    let c = newArtifactClient(artifactAddr, certs)
+    defer: c.close()
+    for i, d in specs:
+      if d.key in hit:
+        result.add "cache " & d.key & ": not saved (the key was restored, and a key is immutable)"
+        continue
+      let tmp = tmpDir / ("cache-save-" & $step.seq & "-" & $step.attempt & "-" & $i & ".bin")
+      let st = packCache(workspace, d.paths, tmp)
+      if st.error.len > 0:
+        result.add "cache " & d.key & ": not saved (" & st.error & ")"
+        removeFile(tmp)
+        continue
+      if st.files + st.dirs + st.links == 0:
+        result.add "cache " & d.key & ": not saved (none of " & d.paths.join(", ") & " is in the workspace)"
+        removeFile(tmp)
+        continue
+      let size = getFileSize(tmp)
+      let r = putFile(c, step, token, d.key, tmp, size, fileSha256(tmp), cachePatience, cache = true)
+      removeFile(tmp)
+      if r.ok: result.add "cache " & d.key & ": saved (" & $st.files & " files, " & $size & " bytes)"
+      elif r.code == "cache_exists": result.add "cache " & d.key & ": not saved (the key is stored already)"
+      else: result.add "cache " & d.key & ": not saved (" & r.code & ": " & r.detail & ")"
+
   proc drainTool(args: seq[string]): int =
     ## `cicd-shim --drain ...`: the drain of a step that ended without having handed over its artifacts or its log (docs/artifacts.md). Run by a Pod the job controller makes
     ## on the run's volume when the core orders it: it reads the manifest of the artifacts and the log spool that the step's shim left there, and sends them to the core as that
@@ -310,6 +374,7 @@ proc main(): int =
   var artifactAddr = ""                    # the core's ArtifactIngest (DAT-003)
   var artifactWait = -1                    # seconds the shim keeps asking when the core or the store does not answer (-1: log_hold_timeout, as for the log: a store that is down for
                                            # a while holds the step, it does not end it)
+  var cacheSpecs: seq[CacheDecl]            # the Lua `cache` option (DAT-004)
   var artUpload, artDownload: seq[string]  # the Lua `artifacts` option: what to put into the object store after the command, what to fetch before it
   var timeoutSeconds = 0                   # the step's timeout (Lua `timeout`, StartStep.timeout_seconds); 0 = none
   var termGrace = 20                       # after SIGTERM / timeout: seconds the build gets to stop before SIGKILL
@@ -417,6 +482,7 @@ proc main(): int =
       let o = parseJson(optsJson)
       if o{"timeout"} != nil and timeoutSeconds == 0: timeoutSeconds = o["timeout"].getInt
       if o{"metrics"} != nil: appDecl = parseDeclaration($o["metrics"])
+      cacheSpecs = cacheDecls(optsJson)
       if o{"artifacts"} != nil:
         let decl = declaredArtifacts(o)
         artUpload = decl.upload
@@ -478,6 +544,20 @@ proc main(): int =
       stderr.writeLine "cicd-shim: the step's artifacts could not be fetched: " & why
       writeTermination(termLog, %*{"exit_code": exitArtifactsUnavailable, "reason": "artifacts_unavailable", "detail": why})
       return exitArtifactsUnavailable
+
+  # The caches the step declared (DAT-004): restored into the workspace before the command; what is said about them goes to the step's log once it exists
+  var cacheNotes: seq[string]
+  var cacheHit: seq[string]
+  # the archive is a file for a while: on the run's volume, which has the room, and not in the Pod's ephemeral storage, which is limited
+  let cacheTmp = if stateDir.len > 0: stateDir / "tmp" else: runDir
+  if cacheSpecs.len > 0: (try: createDir(cacheTmp) except CatchableError: discard)
+  if cacheSpecs.len > 0:
+    when defined(shimLogging):
+      let restored = restoreCaches(artifactAddr, certsDir, step, stepToken, cacheSpecs, workspace, cacheTmp)
+      cacheNotes = restored.notes
+      cacheHit = restored.hit
+    else:
+      cacheNotes.add "cache: not restored (this shim was built without the connection to core that caches need)"
 
   let maskFile = runDir / "CICD_MASK"
   var maskOffset = 0
@@ -565,6 +645,8 @@ proc main(): int =
       for (n, v) in fetched: secretNames.add n
       let header = buildHeader(getEnv(variablesEnv), proc (name: string): string = getEnv(name), secretNames)
       if header.len > 0: lp.write(header)
+    if logging:
+      for n in cacheNotes: lp.write("cicd-shim: " & n & "\n")
   # Read the child's output (stdout and stderr merged, D-27) straight from the pipe: poll with a short timeout so a
   # quiet step still gets its lines flushed, and do not read at all while the log spool is full - the child then blocks
   # on its own pipe, which is the backpressure (nothing is dropped).
@@ -639,6 +721,12 @@ proc main(): int =
         if logging: lp.write("cicd-shim: artifacts: " & artifactFailure & "\n")
     # what became of them, in the Pod log, after the command's own result and before the log's: a core that was away reads the whole story from there (D-53)
     event(if artifactFailure.len == 0: seArtifactsDelivered elif artifactsUndelivered: seArtifactsUndelivered else: seArtifactsFailed)
+  # The caches (DAT-004), after a command that succeeded; a failure here is a line in the log, never the step's
+  if cacheSpecs.len > 0 and code == 0 and stopReason.len == 0:
+    when defined(shimLogging):
+      for n in saveCaches(artifactAddr, certsDir, step, stepToken, cacheSpecs, cacheHit, workspace, cacheTmp):
+        stderr.writeLine "cicd-shim: " & n
+        if logging: lp.write("cicd-shim: " & n & "\n")
   # The step is not finished until its log is: wait (up to log_hold_timeout) for delivery. The Pod stays Running meanwhile.
   # A Pod being deleted has only its termination grace period left, so then the wait is short.
   event(seLogsDelivering)

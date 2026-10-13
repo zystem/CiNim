@@ -5,7 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
-import apiauth, artifactsweep, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
+import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -79,6 +79,9 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
             let rep = c.sweepArtifacts(store.backend(), getTime().toUnix(), retentionFromEnv(), abandonAfterFromEnv())
             if rep.expired + rep.abandoned + rep.orphans + rep.failed > 0:
               echo "core: artifacts swept: ", rep.expired, " expired, ", rep.abandoned, " abandoned uploads, ", rep.orphans, " of runs that are gone, ", rep.failed, " left for the next pass"
+            let cr = c.sweepCaches(store.backend(), getTime().toUnix(), cacheRetentionFromEnv())      # DAT-004: caches not used for the retention, and abandoned uploads
+            if cr.expired + cr.abandoned + cr.failed > 0:
+              echo "core: caches swept: ", cr.expired, " not used for long, ", cr.abandoned, " abandoned uploads, ", cr.failed, " left for the next pass"
       except CatchableError as e: stderr.writeLine "core: watchdog: " & e.msg
       for _ in 0 ..< 50:
         if stopServers.load: break

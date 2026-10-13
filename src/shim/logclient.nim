@@ -323,13 +323,13 @@ proc ask*(c: ArtifactClient; step: StepRef; token: string; req: ArtifactRequest;
     if result.ok or not result.retry or epochTime() >= until: return
     sleep 2000
 
-proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; size: int64; sha256: string; patience: int): ArtifactReply =
+proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; size: int64; sha256: string; patience: int; cache = false): ArtifactReply =
   ## One file into the store: whole in one request when it is at most one part, otherwise as a multipart upload (begin, parts, end). A failed upload is aborted, so that
   ## the store frees the parts. `path` is the file's name as the artifact (relative to the workspace), `absPath` where it is now.
   if size <= partSize:
-    return ask(c, step, token, ArtifactRequest(op: "put_object", path: path, size: uint64(size), sha256: sha256,
+    return ask(c, step, token, ArtifactRequest(op: "put_object", cache: cache, path: path, size: uint64(size), sha256: sha256,
                                                data: cast[seq[byte]](readBlock(absPath, 0, size))), patience)
-  result = ask(c, step, token, ArtifactRequest(op: "put_begin", path: path, size: uint64(size), sha256: sha256), patience)
+  result = ask(c, step, token, ArtifactRequest(op: "put_begin", cache: cache, path: path, size: uint64(size), sha256: sha256), patience)
   if not result.ok: return
   let uploadId = result.ack.upload_id
   var parts: seq[ArtifactPart]
@@ -337,14 +337,33 @@ proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; si
   var n = 0'u32
   while off < size and result.ok:
     inc n
-    result = ask(c, step, token, ArtifactRequest(op: "put_part", path: path, upload_id: uploadId, part: n,
+    result = ask(c, step, token, ArtifactRequest(op: "put_part", cache: cache, path: path, upload_id: uploadId, part: n,
                                                  data: cast[seq[byte]](readBlock(absPath, off, partSize))), patience)
     if result.ok: parts.add ArtifactPart(part: n, etag: result.ack.etag)
     off += partSize
   if result.ok:
-    result = ask(c, step, token, ArtifactRequest(op: "put_end", path: path, upload_id: uploadId, parts: parts), patience)
+    result = ask(c, step, token, ArtifactRequest(op: "put_end", cache: cache, path: path, upload_id: uploadId, parts: parts), patience)
   if not result.ok:
-    discard c.call(ArtifactRequest(header: Header(protocol: 1), step: step, job_token: token, op: "put_abort", path: path, upload_id: uploadId), 15000)
+    discard c.call(ArtifactRequest(header: Header(protocol: 1), step: step, job_token: token, op: "put_abort", cache: cache, path: path, upload_id: uploadId), 15000)
+
+proc cacheFind*(c: ArtifactClient; step: StepRef; token, key: string; patience: int): tuple[ok, found: bool; key: string; size: uint64; sha256, detail: string] =
+  ## DAT-004: the entry for `key` - the key itself or, failing that, what one of the step's restore keys names (the core chooses; it knows the step's declaration)
+  let r = ask(c, step, token, ArtifactRequest(op: "cache_find", cache: true, path: key), patience)
+  if not r.ok: return (false, false, "", 0'u64, "", r.code & ": " & r.detail)
+  if r.ack.files.len == 0: return (true, false, "", 0'u64, "", "")
+  (true, true, r.ack.files[0].path, r.ack.files[0].size, r.ack.files[0].sha256, "")
+
+proc cacheFetch*(c: ArtifactClient; step: StepRef; token, key: string; size: uint64; dest: string; patience: int): string =
+  ## the entry's bytes into the file `dest`, block by block; "" or what went wrong
+  var part = open(dest, fmWrite)
+  defer: part.close()
+  var off = 0'u64
+  while off < size:
+    let r = ask(c, step, token, ArtifactRequest(op: "get_block", cache: true, path: key, offset: off, length: uint32(min(uint64(readSize), size - off))), patience)
+    if not r.ok or r.ack.data.len == 0: return key & ": " & (if r.ok: "an empty block" else: r.code & ": " & r.detail)
+    discard part.writeBuffer(unsafeAddr r.ack.data[0], r.ack.data.len)
+    off += uint64(r.ack.data.len)
+  ""
 
 proc drainLogSpool*(collectorAddr, certs, spoolDir: string; step: StepRef; patience: int): tuple[ok: bool, detail: string] =
   ## The drain (docs/artifacts.md): what the log spool still holds is sent to LogIngest, exactly as the sender thread of a step would have, and the blocks the core

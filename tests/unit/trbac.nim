@@ -34,6 +34,12 @@ suite "IAM-001 what ro may do":
     for m in ["PUT", "DELETE"]:
       check roleMay("admin", m, "/api/v1/variables/URL") and not roleMay("rw", m, "/api/v1/variables/URL")
       check not roleMay("ro", m, "/api/v1/variables/URL") and not roleMay("dev", m, "/api/v1/variables/URL")
+  test "DAT-006 a legal hold is placed and released by rw and admin, and listed for every role that reads":
+    for role in ["rw", "admin"]:
+      check roleMay(role, "POST", "/api/v1/runs/s1_x:hold") and roleMay(role, "POST", "/api/v1/runs/s1_x:release")
+    for role in ["ro", "dev"]:
+      check not roleMay(role, "POST", "/api/v1/runs/s1_x:hold") and not roleMay(role, "POST", "/api/v1/runs/s1_x:release")
+    for role in ["ro", "dev", "rw", "admin"]: check roleMay(role, "GET", "/api/v1/organizations/acme/holds")
   test "write nothing, anywhere":
     for m in ["POST", "PUT", "PATCH", "DELETE"]:
       for p in ["/api/v1/runs", "/api/v1/runs/s1_x", "/api/v1/profile", "/api/v1/organizations/acme/triggers"]:

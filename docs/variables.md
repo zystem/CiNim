@@ -28,12 +28,13 @@ GET    /api/v1/organizations/{slug}/groups                                  the 
 PUT    /api/v1/organizations/{slug}/groups/{path}                           make the group (201; 200 if it is there); the parent has to exist     (rw, admin)
 GET    /api/v1/organizations/{slug}/groups/{path}
 DELETE /api/v1/organizations/{slug}/groups/{path}                           only an empty group: no group below, no run, no trigger (409 group_not_empty); its variables go with it
+GET|PUT /api/v1/organizations/{slug}/groups/{path}/settings                  the cache limits of a group: cache_quota_bytes, cache_retention_days (docs/cache.md)   (PUT: rw, admin)
 GET    /api/v1/organizations/{slug}/groups/{path}/variables                 a group's  → {"organization", "group", "variables": [...]}
 PUT    /api/v1/organizations/{slug}/groups/{path}/variables/{NAME}   {"value": "..."}      (rw, admin)
 DELETE /api/v1/organizations/{slug}/groups/{path}/variables/{NAME}          (rw, admin)
 ```
 
-* A group is named by its **path**, the names from the top joined by `/`, for example `team/backend`. A name is lowercase letters, digits and `-`, starting with a letter, at most 40 characters, and not `variables`; a group is at most 8 levels down; an organisation has at most 1000 groups. A refusal is `400 invalid_group`.
+* A group is named by its **path**, the names from the top joined by `/`, for example `team/backend`. A name is lowercase letters, digits and `-`, starting with a letter, at most 40 characters, and not `variables` or `settings`; a group is at most 8 levels down; an organisation has at most 1000 groups. A refusal is `400 invalid_group`.
 * A run is started in a group by `"group": "team/backend"` in `POST /api/v1/runs` (with `organization`); an unknown group is `404 group_not_found`. A trigger names its group the same way. `GET /api/v1/runs/{id}` shows the run's `group`.
 * A variable's name is capital letters, digits and `_`, not starting with a digit, at most 64 characters, and not one of the names a step's environment may not set (`PATH`, `LD_*`, `CICD_*`, ... STO-004). A value is at most 8 KiB, and has no control character but a newline and a tab. One place (the shard, an organisation, a group) has at most 100 variables and 64 KiB of values in all. A refusal is `400 invalid_variable` with the reason.
 * A step gets the **current** values at the moment its Pod is made (VAR-002): a variable changed while a run is under way is seen by the steps that start after the change.

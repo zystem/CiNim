@@ -43,6 +43,8 @@ type
     runsPerConductor*: int    ## 1..100, default 10: the runs one conductor Pod leads at once (docs/conductors.md)
     conductorMin*: int        ## 0..ceil(podLimit / runsPerConductor), default 1: the conductors kept warm; 0 lets the organisation scale to zero
     artifactQuotaBytes*: int64   ## 0 or 1 MiB..1 PiB, default 0 (no limit): the most bytes of artifacts the organisation holds (DAT-006); an upload that would pass it is refused
+    cacheQuotaBytes*: int64      ## -1, 0 or 1 MiB..1 PiB, default 0 (the shard's, CINIM_CACHE_QUOTA; -1 is no limit): the most bytes of caches the organisation holds (DAT-004); groups can have less
+    cacheRetentionDays*: int     ## -1, 0..3650, default 0 (the shard's, CINIM_CACHE_RETENTION; -1 keeps for ever): how long a cache entry may stay unused (DAT-004); groups can have their own
     artifactRetentionDays*: int  ## 0..3650, default 0 (the shard's retention, CINIM_ARTIFACT_RETENTION): how long the artifacts of its finished runs live (DAT-006)
 
 const
@@ -66,6 +68,9 @@ func validate*(s: ProfileSettings): string =
   elif s.livenessTimeout notin 30 .. 3600: "liveness_timeout must be 30..3600 seconds"
   elif s.artifactQuotaBytes < 0 or (s.artifactQuotaBytes > 0 and s.artifactQuotaBytes < 1024 * 1024) or s.artifactQuotaBytes > 1'i64 shl 50:
     "artifact_quota_bytes must be 0 (no limit) or 1 MiB..1 PiB"
+  elif s.cacheQuotaBytes < -1 or (s.cacheQuotaBytes > 0 and s.cacheQuotaBytes < 1024 * 1024) or s.cacheQuotaBytes > 1'i64 shl 50:
+    "cache_quota_bytes must be 0 (the shard's), -1 (no limit) or 1 MiB..1 PiB"
+  elif s.cacheRetentionDays notin -1 .. 3650: "cache_retention_days must be 0 (the shard's), -1 (for ever) or 1..3650"
   elif s.artifactRetentionDays notin 0 .. 3650: "artifact_retention_days must be 0 (the shard's retention) .. 3650"
   elif s.runsPerConductor notin 1 .. maxRunsPerConductor: "runs_per_conductor must be 1.." & $maxRunsPerConductor
   elif s.conductorMin notin 0 .. maxConductors(s.podLimit, s.runsPerConductor):

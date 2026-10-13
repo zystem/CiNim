@@ -288,6 +288,20 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     check r.orgs.len == 1 and r.orgs[0].slug == "kept"
     check toSeq(f.objects.keys).filterIt(namespaceOf(it) == "cinim-001-gone").len == 0
 
+  test "DAT-006 an organisation with a run under a legal hold is not deleted for good at the end of its retention, and says why; one without is":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "held", active = false)
+    f.made(mk, "free", active = false)
+    let rec = Rec()
+    var heldOrg = org("held", "disabled", 100)
+    heldOrg.held = 2
+    let r = reconcilePass(api(f), mk, curve, @[heldOrg, org("free", "disabled", 100)], hooksFor(rec), 1000, 500)
+    check r.purged == @["free"] and ns("held") in f.objects and ns("free") notin f.objects
+    check r.orgs.anyIt(it.slug == "held" and "legal hold" in it.error and "2 run" in it.error)
+    heldOrg.held = 0
+    check reconcilePass(api(f), mk, curve, @[heldOrg], hooksFor(rec), 1000, 500).purged == @["held"]       # released: the next pass deletes it
+
   test "retention 0 deletes a switched-off organisation at once, a negative one never does":
     let f = Cluster()
     let mk = maker()

@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv]
 import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import audit, drains, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
+import audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -38,7 +38,7 @@ const
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
   ## the execution profile's settings (set through the API/UI, D-27, D-29); defaults when the row is missing
   result = defaultSettings()
-  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min, artifact_quota_bytes, artifact_retention_days " &
+  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min, artifact_quota_bytes, artifact_retention_days, cache_quota_bytes, cache_retention_days " &
     "FROM execution_profiles WHERE id = ?", profileId]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0:
@@ -53,6 +53,8 @@ proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
     result.conductorMin = vals[0][8].getInt(defaultConductorMin)
     result.artifactQuotaBytes = vals[0][9].getBiggestInt(0)
     result.artifactRetentionDays = vals[0][10].getInt(0)
+    result.cacheQuotaBytes = vals[0][11].getBiggestInt(0)
+    result.cacheRetentionDays = vals[0][12].getInt(0)
 
 proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
   result = defaultPolicy()
@@ -172,6 +174,8 @@ proc getRun*(co: Core; runId: string): JsonNode =
       if e.group.len > 0: item["group"] = %e.group
       vj.add item
     result["variables"] = vj
+  let held = c.holdOf(runId)
+  if held.held: result["hold"] = held.hold.view      # DAT-006: a legal hold
   let lockWait = c.waitingFor(runId)
   if lockWait.waiting: result["waiting_for_lock"] = %*{"name": lockWait.name, "held_by": lockWait.heldBy}
   # RUN-015: a queued step that waits for the log circuit says so (API shows the reason)
@@ -201,15 +205,16 @@ proc getProfileSettings*(co: Core; profileId = ""): JsonNode =
      "log_spool_bytes": p.logSpoolBytes, "log_hold_timeout": p.logHoldTimeout,
      "pod_limit": p.podLimit, "job_pod_limit_percent": p.jobPodLimitPercent,
      "runs_per_conductor": p.runsPerConductor, "conductor_min": p.conductorMin,
-     "artifact_quota_bytes": p.artifactQuotaBytes, "artifact_retention_days": p.artifactRetentionDays}
+     "artifact_quota_bytes": p.artifactQuotaBytes, "artifact_retention_days": p.artifactRetentionDays,
+     "cache_quota_bytes": p.cacheQuotaBytes, "cache_retention_days": p.cacheRetentionDays}
 
 proc setProfileSettings*(co: Core; s: ProfileSettings; profileId = "") =
   var c = newRq(co.rqliteUrl)
   discard c.execute(%*[["UPDATE execution_profiles SET infra_retries = ?, log_max_bytes = ?, liveness_timeout = ?, " &
     "log_spool_bytes = ?, log_hold_timeout = ?, pod_limit = ?, job_pod_limit_percent = ?, runs_per_conductor = ?, conductor_min = ?, " &
-    "artifact_quota_bytes = ?, artifact_retention_days = ? WHERE id = ?",
+    "artifact_quota_bytes = ?, artifact_retention_days = ?, cache_quota_bytes = ?, cache_retention_days = ? WHERE id = ?",
     s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout, s.podLimit, s.jobPodLimitPercent, s.runsPerConductor, s.conductorMin,
-    s.artifactQuotaBytes, s.artifactRetentionDays,
+    s.artifactQuotaBytes, s.artifactRetentionDays, s.cacheQuotaBytes, s.cacheRetentionDays,
     (if profileId.len > 0: profileId else: co.profileId)]])
   kickProfile(if profileId.len > 0: profileId else: co.profileId)    # a raised limit may let waiting steps go
 
@@ -675,7 +680,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
       profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow, row[5].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
-      step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr): stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
+      step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr) or cacheDecls(row[5].getStr).len > 0: stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   # STO-006: the controller deleted these volumes; and the runs whose volume may go now (it is told again until it says it is done)
   markReleased(c, req.storage_released)
@@ -896,10 +901,14 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("profile \"" & profile & "\" needs a run that belongs to an organisation")
-  if hasArtifacts(opts) and not c.loadConfig().found:
+  if (hasArtifacts(opts) or cacheDecls(opts).len > 0) and not c.loadConfig().found:
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",
-        detail: "the step declares artifacts, and this shard has no object store (PUT /api/v1/storage)")))
+        detail: "the step declares artifacts or a cache, and this shard has no object store (PUT /api/v1/storage)")))
+  let badCache = checkCacheDecl(opts)
+  if badCache.len > 0:
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: badCache)))
   let badEnv = checkEnv(opts)
   if badEnv.len > 0:
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(

@@ -93,6 +93,20 @@ const ddl = [
   "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
   """CREATE TABLE IF NOT EXISTS group_variables (
        group_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (group_id, name))""",
+  # DAT-004, core/cachestore.nim: the caches of an organisation, between runs. One entry is one object of the store, named by (organisation, scope, key); the scope is the group
+  # (D-54) the run is in. A key is immutable: it is stored once.
+  """CREATE TABLE IF NOT EXISTS caches (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '', key TEXT NOT NULL, s3_key TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+       sha256 TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, upload_id TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS caches_scope_key ON caches (tenant_id, scope, key)",
+  "CREATE INDEX IF NOT EXISTS caches_used ON caches (tenant_id, last_used_at)",
+  # DAT-004, core/cachestore.nim: the cache limits of a group (0 is nothing of its own: the group above decides, then the organisation, then the shard)
+  """CREATE TABLE IF NOT EXISTS group_settings (
+       group_id TEXT PRIMARY KEY, cache_quota_bytes INTEGER NOT NULL DEFAULT 0, cache_retention_days INTEGER NOT NULL DEFAULT 0)""",
+  # DAT-006, core/holds.nim: a legal hold on a run forbids the garbage collection of what it left (its artifacts, its volume) and the deletion of its organisation
+  """CREATE TABLE IF NOT EXISTS run_holds (
+       run_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, reason TEXT NOT NULL, placed_by TEXT NOT NULL, placed_at INTEGER NOT NULL)""",
+  "CREATE INDEX IF NOT EXISTS run_holds_tenant ON run_holds (tenant_id)",
   # the variables of the shard itself, the lowest level (VAR-001, D-54): every step of every organisation of the shard gets them
   """CREATE TABLE IF NOT EXISTS shard_variables (
        name TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)""",
@@ -204,6 +218,8 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20"),   # the share of it one run may hold
       ("execution_profiles", "runs_per_conductor", "INTEGER NOT NULL DEFAULT 10"),      # docs/conductors.md: runs one conductor Pod leads at once
       ("execution_profiles", "artifact_quota_bytes", "INTEGER NOT NULL DEFAULT 0"),    # DAT-006, core/artifactingest.nim: the most bytes of artifacts the organisation may hold (0: no limit)
+      ("execution_profiles", "cache_quota_bytes", "INTEGER NOT NULL DEFAULT 0"),      # DAT-004, core/cachestore.nim: the most bytes of caches the organisation holds (0: the shard's, -1: no limit)
+      ("execution_profiles", "cache_retention_days", "INTEGER NOT NULL DEFAULT 0"),    # ... and how long an entry may stay unused (0: the shard's, -1: for ever)
       ("execution_profiles", "artifact_retention_days", "INTEGER NOT NULL DEFAULT 0"),  # DAT-006, core/artifactsweep.nim: how long its artifacts live (0: the shard's retention)
       ("execution_profiles", "conductor_min", "INTEGER NOT NULL DEFAULT 1")]:           # conductors kept warm
     if not c.hasColumn(table, column):
@@ -285,21 +301,24 @@ proc startRetention*(c: var RqClient; slug: string; at: int64) =
   discard c.execute(%*[["UPDATE organizations SET disabled_at = ? WHERE slug = ? AND state = 'disabled' AND disabled_at = 0", at, slug]])
 
 type OrganizationFull* = object
+  ## `held`: how many of its runs are under a legal hold (DAT-006); an organisation with any is not deleted for good
   slug*, name*, state*, egress*, ingress*: string   ## egress and ingress: the network mode asked for at creation, "" = the shard's default
   disabledAt*: int64
   controllerSpec*: string      ## the fingerprint of the controller's Deployment as the core last made it; "" = not recorded yet
+  held*: int
 
 proc setControllerSpec*(c: var RqClient; slug, spec: string) =
   discard c.execute(%*[["UPDATE organizations SET controller_spec = ? WHERE slug = ?", spec, slug]])
 
 proc listOrganizationsFull*(c: var RqClient): seq[OrganizationFull] =
   ## everything the reconciliation (SHD-008) needs to make an organisation's objects again
-  let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at, controller_spec FROM organizations ORDER BY slug"]])
+  let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at, controller_spec, " &
+    "(SELECT count(*) FROM run_holds h WHERE h.tenant_id = organizations.id) FROM organizations ORDER BY slug"]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for v in vals:
       result.add OrganizationFull(slug: v[0].getStr, name: v[1].getStr, state: v[2].getStr, egress: v[3].getStr, ingress: v[4].getStr,
-                                  disabledAt: v[5].getBiggestInt, controllerSpec: v[6].getStr)
+                                  disabledAt: v[5].getBiggestInt, controllerSpec: v[6].getStr, held: v[7].getInt)
 
 proc organizationRow*(c: var RqClient; slug: string): tuple[id, state: string] =
   ## ("", "") if the shard has no such organisation

@@ -2,7 +2,7 @@
 ## volume may be deleted. Nothing is remembered between polls except one column, `runs.storage_released`: the core names the runs that are over and
 ## whose retention (`CINIM_STORAGE_RETENTION_SUCCEEDED`, 0 by default, `CINIM_STORAGE_RETENTION_FAILED`, 10 minutes, in seconds) has passed, in every poll until
 ## the controller says it deleted the volume (it counts a run that never had one as released), so a lost answer or a restarted controller costs nothing.
-## A run with a drain under way (core/drains.nim: the shim could not hand its artifacts or its log over, and they are on the volume) keeps its volume until the drain is done or given up.
+## A run with a drain under way (core/drains.nim: the shim could not hand its artifacts or its log over, and they are on the volume) keeps its volume until the drain is done or given up; so does a run under a legal hold (core/holds.nim, DAT-006) until the hold is released.
 ## Two rules protect the failed run that its author may still want to continue with only the failed steps (docs/parallel.md section 11): the core releases nothing of a
 ## failed run until it has itself been up for the retention (a core that comes back after a stop would otherwise delete at once what could not be offered for a retry), and
 ## an organisation whose storage is short of space (the controller reports its ResourceQuota) keeps such a volume for a minute only, oldest first.
@@ -95,7 +95,7 @@ proc releasableRuns*(c: var RqClient; profileId: string; now: int64; keep: Reten
   for s in [rsSucceeded, rsFailed, rsCanceled, rsSkipped, rsTimedOut, rsInfrastructureError]: ends.add protoName(s)
   let marks = ends.mapIt("?").join(",")
   var args = %*["SELECT id, state, CAST(updated_at AS INTEGER) FROM runs WHERE profile_id = ? AND storage_released = 0 AND " &
-    "NOT EXISTS (SELECT 1 FROM step_drains d WHERE d.run_id = runs.id AND d.state = 'pending') AND state IN (" & marks & ") ORDER BY updated_at LIMIT ?", profileId]
+    "NOT EXISTS (SELECT 1 FROM step_drains d WHERE d.run_id = runs.id AND d.state = 'pending') AND NOT EXISTS (SELECT 1 FROM run_holds h WHERE h.run_id = runs.id) AND state IN (" & marks & ") ORDER BY updated_at LIMIT ?", profileId]
   for e in ends: args.add %e
   args.add %(maxPerPoll * 4)       # more than enough: the retention filters some out below
   let r = c.query(%*[args])

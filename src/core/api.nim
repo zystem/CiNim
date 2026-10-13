@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
 import ../common/httpsrv
-import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups
+import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore
 import ../common/[ctrlauth, envname]
 import ../common/rqlite
 
@@ -438,8 +438,9 @@ proc onRequest() {.raises: [], gcsafe.} =
                                   logHoldTimeout: cur["log_hold_timeout"].getInt, podLimit: cur["pod_limit"].getInt,
                                   jobPodLimitPercent: cur["job_pod_limit_percent"].getInt, runsPerConductor: cur["runs_per_conductor"].getInt,
                                   conductorMin: cur["conductor_min"].getInt, artifactQuotaBytes: cur["artifact_quota_bytes"].getBiggestInt,
-                                  artifactRetentionDays: cur["artifact_retention_days"].getInt)
-          for k in ["artifact_quota_bytes", "artifact_retention_days", "infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent", "runs_per_conductor", "conductor_min"]:
+                                  artifactRetentionDays: cur["artifact_retention_days"].getInt, cacheQuotaBytes: cur["cache_quota_bytes"].getBiggestInt,
+                                  cacheRetentionDays: cur["cache_retention_days"].getInt)
+          for k in ["artifact_quota_bytes", "artifact_retention_days", "cache_quota_bytes", "cache_retention_days", "infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent", "runs_per_conductor", "conductor_min"]:
             if j.hasKey(k) and j[k].kind != JInt:
               problem(Http400, "invalid_request", k & " must be an integer")
               return
@@ -454,6 +455,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           if j.hasKey("conductor_min"): s.conductorMin = j["conductor_min"].getInt
           if j.hasKey("artifact_quota_bytes"): s.artifactQuotaBytes = j["artifact_quota_bytes"].getBiggestInt
           if j.hasKey("artifact_retention_days"): s.artifactRetentionDays = j["artifact_retention_days"].getInt
+          if j.hasKey("cache_quota_bytes"): s.cacheQuotaBytes = j["cache_quota_bytes"].getBiggestInt
+          if j.hasKey("cache_retention_days"): s.cacheRetentionDays = j["cache_retention_days"].getInt
           let bad = validate(s)
           if bad.len > 0:
             problem(Http400, "invalid_request", bad)
@@ -669,6 +672,21 @@ proc onRequest() {.raises: [], gcsafe.} =
         var sc = newRq(coreRef.rqliteUrl)
         sc.serveVariables(vsShard, "", path["/api/v1/variables".len .. ^1].strip(chars = {'/'}), %*{"level": "shard"})
         return
+      if path.startsWith("/api/v1/organizations/") and path.endsWith("/holds"):
+        # DAT-006: the runs of an organisation under a legal hold
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        let slugH = path["/api/v1/organizations/".len ..< path.len - "/holds".len]
+        var hq = newRq(coreRef.rqliteUrl)
+        let orgHq = hq.organizationRow(slugH)
+        if orgHq.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugH)
+          return
+        var items = newJArray()
+        for h in hq.listHolds(orgHq.id): items.add h.view
+        jsonOk(Http200, %*{"organization": slugH, "holds": items})
+        return
       if path.startsWith("/api/v1/organizations/") and "/groups" in path:
         # PRJ-001, D-54: the groups of an organisation, nested up to 8 levels, and their variables (inherited by the groups below and by the runs in them).
         #   GET /groups                      the groups, by path
@@ -695,8 +713,41 @@ proc onRequest() {.raises: [], gcsafe.} =
           for g in gc.listGroups(orgG.id): items.add %*{"path": g.path, "depth": g.depth}
           jsonOk(Http200, %*{"organization": slugG, "groups": items})
           return
-        # a path, and perhaps /variables and a name after it ('variables' cannot be the name of a group)
+        # a path, and perhaps /variables and a name after it, or /settings ('variables' and 'settings' cannot be the name of a group)
         let segs = gpath.split('/')
+        if segs.len >= 2 and segs[^1] == "settings":
+          # DAT-004: the cache limits of a group: cache_quota_bytes (its own pool: the entries of the group and the groups below it) and cache_retention_days (0: the level above decides)
+          let sp = segs[0 ..< segs.high].join("/")
+          let sg = gc.groupIdOf(orgG.id, sp)
+          if not sg.found or sg.id.len == 0:
+            problem(Http404, "group_not_found", "the organisation " & slugG & " has no group " & sp)
+            return
+          if gmeth == "PUT":
+            let sj = try: parseJson(getBody()) except JsonParsingError: nil
+            if sj == nil or sj.kind != JObject:
+              problem(Http400, "invalid_request", "a JSON object with cache_quota_bytes and/or cache_retention_days is required")
+              return
+            let cur = gc.groupLimit(sg.id)
+            var q = cur.quota
+            var d = cur.retentionDays
+            for k in ["cache_quota_bytes", "cache_retention_days"]:
+              if sj.hasKey(k) and sj[k].kind != JInt:
+                problem(Http400, "invalid_request", k & " must be an integer")
+                return
+            if sj.hasKey("cache_quota_bytes"): q = sj["cache_quota_bytes"].getBiggestInt
+            if sj.hasKey("cache_retention_days"): d = sj["cache_retention_days"].getBiggestInt
+            let bad = validGroupLimit(q, d)
+            if bad.len > 0:
+              problem(Http400, "invalid_request", bad)
+              return
+            gc.setGroupLimit(sg.id, q, d)
+          elif gmeth != "GET":
+            problem(Http405, "method_not_allowed", "GET or PUT")
+            return
+          let lim = gc.groupLimit(sg.id)
+          jsonOk(Http200, %*{"organization": slugG, "group": normalPath(sp), "cache_quota_bytes": lim.quota, "cache_retention_days": lim.retentionDays,
+                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv())})
+          return
         let vpos = segs.find("variables")
         let groupPath = if vpos >= 0: segs[0 ..< vpos].join("/") else: gpath
         let varName = if vpos >= 0 and vpos + 1 < segs.len: segs[vpos + 1 .. ^1].join("/") else: ""
@@ -945,6 +996,9 @@ proc onRequest() {.raises: [], gcsafe.} =
         if state.len == 0:
           problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
           return
+        if doPurge and c.heldCount(c.organizationRow(slug).id) > 0:
+          problem(Http409, "legal_hold", "runs of this organisation are under a legal hold (GET /api/v1/organizations/" & slug & "/holds); release them first")
+          return
         if doPurge and state != "disabled" and not doForce:
           problem(Http409, "not_disabled", "switch the organisation off first (DELETE without purge), or confirm with force=true")
           return
@@ -1120,6 +1174,35 @@ proc onRequest() {.raises: [], gcsafe.} =
         of coCanceled:
           cc.record(getTime().toUnix(), actorOf(who), "run.cancel", runId, "ok")
           jsonOk(Http200, %*{"id": runId, "state": done.state})
+      elif meth == "POST" and (rest.endsWith(":hold") or rest.endsWith(":release")):
+        # DAT-006: a legal hold on a run - its artifacts and volume are not garbage-collected and its organisation is not deleted for good (core/holds.nim)
+        let placing = rest.endsWith(":hold")
+        let runId = rest[0 ..< rest.len - (if placing: ":hold".len else: ":release".len)]
+        let owner = coreRef.getRun(runId)
+        if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+          problem(Http404, "not_found", "no such run")
+          return
+        var hc = newRq(coreRef.rqliteUrl)
+        let orgH = hc.organizationRow(owner{"organization"}.getStr)
+        if orgH.id.len == 0:
+          problem(Http409, "no_organization", "a hold belongs to an organisation's run; this run belongs to none")
+          return
+        if placing:
+          let hj = try: parseJson(getBody()) except JsonParsingError: nil
+          if not hj.isString("reason"):
+            problem(Http400, "invalid_request", "{\"reason\": \"...\"} is required: a legal hold has a reason")
+            return
+          let placed = hc.placeHold(runId, orgH.id, hj["reason"].getStr, actorOf(who), getTime().toUnix())
+          if placed.error.len > 0:
+            problem(Http400, "invalid_hold", placed.error)
+            return
+          if placed.placed: hc.record(getTime().toUnix(), actorOf(who), "run.hold", runId, "ok", hj["reason"].getStr[0 ..< min(200, hj["reason"].getStr.len)])
+          let h = hc.holdOf(runId)
+          jsonOk(if placed.placed: Http201 else: Http200, %*{"id": runId, "held": true, "hold": h.hold.view, "placed": placed.placed})
+        else:
+          let gone = hc.releaseHold(runId)
+          if gone: hc.record(getTime().toUnix(), actorOf(who), "run.release", runId, "ok")
+          jsonOk(Http200, %*{"id": runId, "held": false, "released": gone})
       elif meth == "POST" and rest.endsWith(":retry"):
         # PIP-015 failed-only: run again only what failed, in the same run, if its volume is still there (docs/parallel.md section 11)
         let runId = rest[0 ..< rest.len - ":retry".len]

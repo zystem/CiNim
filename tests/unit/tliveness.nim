@@ -75,3 +75,21 @@ suite "DAT-006 the artifact settings of an organisation":
     for bad in [-1, 3651]:
       s.artifactRetentionDays = bad
       check validate(s) != ""
+
+suite "DAT-004 the cache settings of an organisation":
+  test "the quota is 0 (the shard's), -1 (no limit) or 1 MiB..1 PiB, the retention 0 (the shard's), -1 (for ever) or 1..3650 days; the defaults are the shard's":
+    check defaultSettings().cacheQuotaBytes == 0 and defaultSettings().cacheRetentionDays == 0
+    var s = defaultSettings()
+    for ok in [0'i64, -1, 1024 * 1024, 50'i64 shl 30, 1'i64 shl 50]:
+      s.cacheQuotaBytes = ok
+      check validate(s) == ""
+    for bad in [-2'i64, 1, 1024 * 1024 - 1, (1'i64 shl 50) + 1]:
+      s.cacheQuotaBytes = bad
+      check validate(s) != ""
+    s = defaultSettings()
+    for ok in [0, -1, 1, 7, 3650]:
+      s.cacheRetentionDays = ok
+      check validate(s) == ""
+    for bad in [-2, 3651]:
+      s.cacheRetentionDays = bad
+      check validate(s) != ""

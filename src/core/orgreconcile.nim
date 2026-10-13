@@ -135,7 +135,10 @@ proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[Org
       if o.disabledAt == 0:
         hooks.startRetention(o.slug, now)       # switched off before the time was recorded: the retention runs from now
         o.disabledAt = now
-      if retention >= 0 and now - o.disabledAt >= retention and now - coreStarted >= purgeGrace:
+      if o.held > 0 and retention >= 0 and now - o.disabledAt >= retention:
+        # DAT-006: a legal hold forbids the deletion of what a run left; the organisation stays, switched off, until the holds are released
+        result.orgs.add OrgReport(slug: o.slug, state: o.state, error: "not deleted at the end of the retention: " & $o.held & " run(s) under a legal hold (POST /api/v1/runs/{id}:release)")
+      elif retention >= 0 and now - o.disabledAt >= retention and now - coreStarted >= purgeGrace:
         let cfg = mk(o.egress, o.ingress)
         let p = purge(k, cfg, o.slug)
         if p.ok:

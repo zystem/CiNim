@@ -8,7 +8,7 @@ import schema
 const
   maxGroupDepth* = 8
   maxGroupsPerOrganization* = 1000
-  reservedSlugs = ["variables"]           ## a segment of the URL that names something under a group
+  reservedSlugs = ["variables", "settings"]           ## a segment of the URL that names something under a group
 
 func validGroupSlug*(s: string): bool =
   ## lowercase letters, digits and '-', starting with a letter, at most 40; not a word the URLs use
@@ -69,7 +69,7 @@ proc deleteGroup*(c: var RqClient; tenantId, path: string): tuple[error: string;
   if n[0].getInt > 0: return ("the group has groups below it", false)
   if n[1].getInt > 0: return ("the group has runs", false)
   if n[2].getInt > 0: return ("the group has triggers", false)
-  discard c.execute(%*[["DELETE FROM group_variables WHERE group_id = ?", g.id], ["DELETE FROM groups WHERE id = ?", g.id]], transaction = true)
+  discard c.execute(%*[["DELETE FROM group_variables WHERE group_id = ?", g.id], ["DELETE FROM group_settings WHERE group_id = ?", g.id], ["DELETE FROM groups WHERE id = ?", g.id]], transaction = true)
   ("", true)
 
 proc groupChain*(c: var RqClient; tenantId, groupId: string): seq[tuple[id, path: string]] =

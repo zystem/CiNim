@@ -385,6 +385,83 @@ local function norm_profile(v)
   return v
 end
 
+-- The cache of a step (DAT-004, docs/cache.md): `cache = { key = "deps-v1", paths = { "node_modules" }, restore_keys = { "deps-" } }`, or a list of such tables. Before the
+-- command the shim restores the entry with the key, or else the latest whose key starts with a restore key; after a command that succeeded it saves the paths under the key,
+-- unless the key was found (a key is immutable). A job's declaration and a step's are added together (the same key is the step's). Returns a list, or nil.
+local CACHE_KEY_PAT = "^[%a%d%._:%+=@%%%-]+$"
+local function cache_path_ok(p)
+  if type(p) ~= "string" or #p < 1 or #p > 512 or p:sub(1, 1) == "/" or p:sub(-1) == "/" or p:find("[%c\\]") then return false end
+  for part in (p .. "/"):gmatch("([^/]*)/") do
+    if part == "" or part == "." or part == ".." then return false end
+  end
+  return true
+end
+local function norm_cache(v, depth)
+  if v == nil then return nil end
+  if type(v) ~= "table" then error("cache: a table { key = ..., paths = {...} }, or a list of them", depth) end
+  local list = v
+  if rawget(v, "key") ~= nil or rawget(v, "paths") ~= nil then list = { v } end
+  local out = {}
+  for i = 1, rawlen(list) do
+    local e = list[i]
+    if type(e) ~= "table" then error("cache: an entry is a table { key = ..., paths = {...} }", depth) end
+    for k in rawnext, e do
+      if k ~= "key" and k ~= "paths" and k ~= "restore_keys" then error("cache: unknown field '" .. tostring_(k) .. "' (key, paths, restore_keys)", depth) end
+    end
+    local key = e.key
+    if type(key) ~= "string" or #key < 1 or #key > 200 or not key:match(CACHE_KEY_PAT) then
+      error("cache: key is 1..200 characters: letters, digits and . _ : + = @ % - (no '/')", depth)
+    end
+    local paths = {}
+    if type(e.paths) ~= "table" or rawlen(e.paths) < 1 or rawlen(e.paths) > 20 then error("cache: paths is a list of 1..20 files or directories of the workspace", depth) end
+    for j = 1, rawlen(e.paths) do
+      if not cache_path_ok(e.paths[j]) then error("cache: '" .. tostring_(e.paths[j]) .. "' is not a path inside the workspace (relative, no '..')", depth) end
+      paths[j] = e.paths[j]
+    end
+    local rks = {}
+    if e.restore_keys ~= nil then
+      if type(e.restore_keys) ~= "table" or rawlen(e.restore_keys) > 5 then error("cache: restore_keys is a list of at most 5 key prefixes", depth) end
+      for j = 1, rawlen(e.restore_keys) do
+        local r = e.restore_keys[j]
+        if type(r) ~= "string" or #r < 1 or #r > 200 or not r:match(CACHE_KEY_PAT) then error("cache: a restore key is a key prefix like a key", depth) end
+        rks[j] = r
+      end
+    end
+    out[#out + 1] = { key = key, paths = paths, restore_keys = rks }
+  end
+  if #out > 4 then error("cache: at most 4 caches per step", depth) end
+  if #out == 0 then return nil end
+  return out
+end
+
+local function merge_cache(a, b)
+  if a == nil then return b end
+  if b == nil then return a end
+  local out = {}
+  local byKey = {}
+  for k = 1, 2 do
+    local l = (k == 1) and a or b
+    for i = 1, #l do
+      local at = byKey[l[i].key]
+      if at then out[at] = l[i] else out[#out + 1] = l[i]; byKey[l[i].key] = #out end
+    end
+  end
+  if #out > 4 then error("cache: at most 4 caches per step", 4) end
+  return out
+end
+
+local function cache_json(list)
+  local parts = {}
+  for i = 1, #list do
+    local e = list[i]
+    local ps, rs = {}, {}
+    for j = 1, #e.paths do ps[j] = jstr(e.paths[j]) end
+    for j = 1, #e.restore_keys do rs[j] = jstr(e.restore_keys[j]) end
+    parts[i] = '{"key":' .. jstr(e.key) .. ',"paths":[' .. table.concat(ps, ",") .. '],"restore_keys":[' .. table.concat(rs, ",") .. "]}"
+  end
+  return "[" .. table.concat(parts, ",") .. "]"
+end
+
 -- The environment a script gives to steps (VAR-004). Three places, from the lower to the higher: `ci.pipeline{ env = {...} }` and `ci.job{ env = {...} }` / `j:env{...}`
 -- (together the "env of the job": the steps of the job get them as ordinary variables, above the launch parameters and below what a step writes to $CICD_ENV), and the
 -- `env` option of one `Job:sh` (above $CICD_ENV: the step's own word). Values are text, numbers or booleans, shown as text; the core refuses a name that a step may not
@@ -443,8 +520,10 @@ local function step_opts(job, opts)
   local secrets = job.__secrets
   local artifacts = job.__artifacts
   local env, step_env = job.__env, nil
+  local cache = job.__cache
   if opts then
     if opts.env ~= nil then step_env = norm_env(opts.env, "Job:sh env", 4) end
+    if opts.cache ~= nil then cache = merge_cache(cache, norm_cache(opts.cache, 4)) end
     if opts.artifacts ~= nil then artifacts = merge_artifacts(artifacts, norm_artifacts(opts.artifacts, 4)) end
     if opts.secrets ~= nil then secrets = merge_secrets(secrets, norm_secrets(opts.secrets, 4)) end
     if opts.metrics ~= nil then metrics = norm_metrics(opts.metrics) end
@@ -454,6 +533,7 @@ local function step_opts(job, opts)
   local parts = {}
   local art = artifacts and artifacts_json(artifacts)
   if art then parts[#parts + 1] = '"artifacts":' .. art end
+  if cache then parts[#parts + 1] = '"cache":' .. cache_json(cache) end
   if env then parts[#parts + 1] = '"env":' .. env_json(env) end
   if mask ~= "" then parts[#parts + 1] = '"mask":' .. mask end
   if metrics ~= "" then parts[#parts + 1] = '"metrics":' .. metrics end
@@ -702,7 +782,7 @@ G.ci = {
     job_seq = job_seq + 1
     local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
       __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
-      __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env") }, Job_mt)
+      __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env"), __cache = norm_cache(opts.cache, 3) }, Job_mt)
     local lock = norm_lock(opts.lock)
     if lock then call("lock", lock .. "\t" .. j.__key) end   -- the run waits here, suspended, until the lock is its turn; the job is named so that the lock can show who holds it
     local ok, err = pcall(fn, j)

@@ -1,7 +1,7 @@
 ## VAR-005: the core names the variables for the first step of a run only (CICD_VARIABLES), so that its shim prints the header (shim/varsheader.nim). Against a real rqlite.
 ## Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, strutils, sequtils, times]
-import common/rqlite
+import common/[rqlite, ctrlauth]
 import core/[schema, scheduler, loggate, logcircuit, orgvars]
 
 let url = getEnv("CINIM_RQLITE_URL")
@@ -80,3 +80,19 @@ suite "VAR-005 which step names the variables":
       check "MODE=job" in got[0].env and "MODE=launch" notin got[0].env and "NEW=n" in got[0].env       # the env of the job is above the launch parameter
       check "ONLY=shim" notin got[0].env                                          # the step's own env is the shim's to apply, after $CICD_ENV
       check "CICD_VARIABLES=MODE,NEW,REGION,TARGET" in got[0].env.mapIt(it) or got[0].env.anyIt(it.startsWith("CICD_VARIABLES=") and "NEW" in it and "MODE" in it)
+    test "DAT-004 a step that declares only a cache is given the credential of the channel (it has no other reason to get one); a step with nothing declared is not":
+      let o = newOrg()
+      let r = co.createRun("return 1", o.id, o.profile)
+      let jobId = newId()
+      discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j1', 'RUNNING', ?)", jobId, r, o.profile]])
+      for (ordinal, opts) in [(0, """{"cache":[{"key":"k","paths":["x"],"restore_keys":[]}]}"""), (1, "")]:
+        discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) VALUES (?, ?, ?, ?, 'sh', 'PENDING', ?, 'alpine', 'true', ?, '1')",
+          newId(), r, jobId, ordinal, o.profile, opts]])
+      inc n
+      let resp = handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-" & $n & "-" & sfx, namespace: o.ns, free_pod_slots: 2))
+      var tokens: seq[(int, string)]
+      for cmd in resp.commands:
+        if cmd.body.kind == CommandBodyKind.start: tokens.add (int(cmd.body.start.step.seq), cmd.body.start.step_token)
+      check tokens.len == 2
+      for (ordinal, token) in tokens:
+        check token == (if ordinal == 0: stepToken("master", r, 0, 1) else: "")
