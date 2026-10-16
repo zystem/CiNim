@@ -17,7 +17,7 @@
 import std/[tables, options, times, os, atomics, sequtils, json, hashes]
 import std/strutils
 import common/[stream, streamstate, rqlite, zmqcurve, states, shmq, podcpu, ctrlauth, conductorplan]
-import scheduler, schema, workkick, hubmetrics, components, retrypolicy
+import scheduler, schema, workkick, hubmetrics, components, retrypolicy, checkmail
 
 const
   resendAfterSeconds = 5.0
@@ -51,6 +51,7 @@ type
     co: Core
     lastDrainPass: float
     conds: Table[string, Cond]
+    checks: Table[string, tuple[session: string, at: float]]     ## the checks of scripts sent to a conductor and not answered yet (PIP-016), by the check's id
     outq: ptr ShmQueue                ## what the worker wants sent: the I/O thread owns the socket
     idx: int
     peers: Table[string, Peer]
@@ -75,6 +76,8 @@ func metricKind(kind: string): string =
   of "conductor.call": "call"
   of "conductor.lease": "lease"
   of "conductor.reply": "reply"
+  of "conductor.check": "check"
+  of "conductor.checked": "checked"
   of "ping", "resync": kind
   else: "other"
 
@@ -333,6 +336,37 @@ proc onCall(h: var Hub; routingId: string; f: StreamFrame) =
   h.conds[f.session] = c
   observe(hReport, epochTime() - t0)
 
+const checkWaitSeconds = 25.0       ## a conductor that has not answered a check by then is given up (the API has stopped waiting long before)
+
+proc answerCheck(id: string; code, message: string) =
+  checkmail.put(id, encodeCheckResult(CheckResult(check_id: id, code: code, message: message)))
+
+proc onCheck(h: var Hub; ns, payload: string) =
+  ## the API asks for a script to be checked (PIP-016): the request goes to a conductor of the organisation that is not draining; with none, the API is told at once
+  let req = try: decodeCheckScript(payload) except CatchableError: return
+  if req.check_id.len == 0: return
+  var target = ""
+  for session, c in h.conds:
+    if c.namespace == ns and not c.draining and (target.len == 0 or c.lastSeen > h.conds[target].lastSeen): target = session
+  if target.len == 0:
+    answerCheck(req.check_id, "no_conductor", "the organisation has no conductor connected to this core")
+    return
+  h.checks[req.check_id] = (target, epochTime())
+  h.condEmit(h.conds[target], "conductor.check", payload)
+
+proc onChecked(h: var Hub; routingId: string; f: StreamFrame) =
+  if f.session notin h.conds:
+    h.emit(routingId, frame("core", "resync"))
+    return
+  h.conds[f.session].routingId = routingId
+  h.conds[f.session].lastSeen = epochTime()
+  h.conds[f.session].outbox.ack(f.ack)
+  let res = try: decodeCheckResult(f.payload) except CatchableError: return
+  # only the conductor the check was sent to may answer it
+  if res.check_id in h.checks and h.checks[res.check_id].session == f.session:
+    h.checks.del res.check_id
+    checkmail.put(res.check_id, f.payload)
+
 proc handleFrame(h: var Hub; routingId: string; f: StreamFrame) =
   count(mFramesIn, metricKind(f.kind))
   case f.kind
@@ -342,6 +376,7 @@ proc handleFrame(h: var Hub; routingId: string; f: StreamFrame) =
     observe(hReport, epochTime() - t0)
   of "conductor.hello": h.onHello(routingId, f)
   of "conductor.call": h.onCall(routingId, f)
+  of "conductor.checked": h.onChecked(routingId, f)
   of "ping":
     if f.session in h.peers:
       h.peers[f.session].routingId = routingId
@@ -401,6 +436,14 @@ proc housekeeping(h: var Hub) =
     if c.profileId in ready and now - c.lastPush >= safetyPassSeconds:
       h.pushLeases(c)
   for session in goneConds: h.dropCond(session, "silent")
+  # checks whose conductor is gone, or that it never answered
+  var ended: seq[tuple[id, code, message: string]]
+  for id, chk in h.checks:
+    if chk.session notin h.conds: ended.add (id, "no_conductor", "the conductor went away")
+    elif now - chk.at > checkWaitSeconds: ended.add (id, "timeout", "the conductor did not answer")
+  for e in ended:
+    h.checks.del e.id
+    answerCheck(e.id, e.code, e.message)
   # the conductors above the number wanted that have been idle long enough are told to drain; the controller deletes the Pod after it has exited
   var wanted: Table[string, int]
   var states: seq[CondState]
@@ -449,6 +492,19 @@ const
   msgFrame = 1     # to a worker: a = routing id, b = the time the frame was read (8 bytes) and the encoded frame
   msgKick = 2      # to a worker: a = profile id, b = the time of the kick (8 bytes)
   msgKickAll = 3   # to a worker: every controller is looked at
+  msgCheck = 4     # to a worker: a = the namespace, b = the CheckScript to hand to a conductor of it (PIP-016)
+
+var
+  hubIn: ptr UncheckedArray[ShmQueue]       ## the queues of the workers, for what the API hands to the hub (set by serveStream)
+  hubWorkers: int
+
+proc requestCheck*(ns, payload: string): bool =
+  ## safe from any thread: hands a CheckScript to the worker that holds the conductors of the namespace (their frames carry the key `<namespace>#conductors`). False if the hub is not up.
+  if hubWorkers == 0 or hubIn == nil: return false
+  {.cast(gcsafe).}:
+    let target = int(uint(hash(ns & "#conductors")) mod uint(hubWorkers))
+    hubIn[target].push(msgCheck, ns, payload)
+  true
 
 type
   Pool = object
@@ -467,7 +523,7 @@ func unpackTime(s: string): float =
 proc runWorker(a: WorkerArgs) {.thread.} =
   {.cast(gcsafe).}:
     var h = Hub(co: a.co, c: newRq(a.co.rqliteUrl), defaultProfile: a.co.profileId, peers: initTable[string, Peer](), conds: initTable[string, Cond](),
-                outq: a.outq, idx: a.idx)
+                checks: initTable[string, tuple[session: string, at: float]](), outq: a.outq, idx: a.idx)
     let (_, secretKey) = loadKeypair(a.co.certs, "core")
     h.master = secretKey
     var lastTick = epochTime()
@@ -484,6 +540,7 @@ proc runWorker(a: WorkerArgs) {.thread.} =
             if f.isSome: h.handleFrame(x, f.get)
           of msgKick: h.onKick(x, unpackTime(y), false)
           of msgKickAll: h.onKick("", 0.0, true)
+          of msgCheck: h.onCheck(x, y)
           else: discard
         except CatchableError as e: stderr.writeLine "core: stream: " & e.msg
         count(mBusyMicros, n = int((epochTime() - t0) * 1e6))
@@ -511,6 +568,8 @@ proc serveStream*(co: Core; port: int; workers = 0) {.thread.} =
     let outq = cast[ptr ShmQueue](allocShared0(sizeof(ShmQueue)))
     for i in 0 ..< n: initShmQueue(inq[i])
     initShmQueue(outq[])
+    hubIn = inq
+    hubWorkers = n
     setGauge(gWorkers, n.float)
     var threads = newSeq[Thread[WorkerArgs]](n)
     for i in 0 ..< n: createThread(threads[i], runWorker, (co, i, addr inq[i], outq))
@@ -537,6 +596,7 @@ proc serveStream*(co: Core; port: int; workers = 0) {.thread.} =
         inc taken
         if taken >= 64: break
         got = conn.receiveRaw(0)
+    hubWorkers = 0
     for i in 0 ..< n: joinThread(threads[i])
     conn.close()
     for i in 0 ..< n: destroy(inq[i])

@@ -40,6 +40,16 @@ suite "IAM-001 what ro may do":
     for role in ["ro", "dev"]:
       check not roleMay(role, "POST", "/api/v1/runs/s1_x:hold") and not roleMay(role, "POST", "/api/v1/runs/s1_x:release")
     for role in ["ro", "dev", "rw", "admin"]: check roleMay(role, "GET", "/api/v1/organizations/acme/holds")
+  test "DAT-006 a hold on a group or on the organisation is placed and released by rw and admin, and read by every role that reads":
+    for path in ["/api/v1/organizations/acme/hold", "/api/v1/organizations/acme/groups/team/backend/hold"]:
+      for role in ["rw", "admin"]: check roleMay(role, "PUT", path) and roleMay(role, "DELETE", path)
+      for role in ["ro", "dev"]: check not roleMay(role, "PUT", path) and not roleMay(role, "DELETE", path)
+      for role in ["ro", "dev", "rw", "admin"]: check roleMay(role, "GET", path)
+  test "DAT-004 the caches of an organisation are read by every role that reads, and deleted by rw and admin":
+    let path = "/api/v1/organizations/acme/caches"
+    for role in ["ro", "dev", "rw", "admin"]: check roleMay(role, "GET", path)
+    for role in ["rw", "admin"]: check roleMay(role, "DELETE", path)
+    for role in ["ro", "dev"]: check not roleMay(role, "DELETE", path)
   test "write nothing, anywhere":
     for m in ["POST", "PUT", "PATCH", "DELETE"]:
       for p in ["/api/v1/runs", "/api/v1/runs/s1_x", "/api/v1/profile", "/api/v1/organizations/acme/triggers"]:

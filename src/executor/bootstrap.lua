@@ -457,7 +457,7 @@ local function cache_json(list)
     local ps, rs = {}, {}
     for j = 1, #e.paths do ps[j] = jstr(e.paths[j]) end
     for j = 1, #e.restore_keys do rs[j] = jstr(e.restore_keys[j]) end
-    parts[i] = '{"key":' .. jstr(e.key) .. ',"paths":[' .. table.concat(ps, ",") .. '],"restore_keys":[' .. table.concat(rs, ",") .. "]}"
+    parts[i] = '{"key":' .. jstr(e.key) .. (e.mode and (',"mode":' .. jstr(e.mode)) or "") .. ',"paths":[' .. table.concat(ps, ",") .. '],"restore_keys":[' .. table.concat(rs, ",") .. "]}"
   end
   return "[" .. table.concat(parts, ",") .. "]"
 end
@@ -567,6 +567,44 @@ local Job_mt = { __index = {
     return { code = code, outputs = {}, stdout = (opts and opts.capture) and out or nil }
   end,
 } }
+
+-- `j.cache.restore(keys)` and `j.cache.save(key, paths)` of the API v1 signatures (lua/stdlib/cicd.d.lua): each is a step of its own in the job's Pod, on the run's workspace, so a
+-- script can restore a cache in the middle of a job, or save one when it chooses. `keys` is the key and then the key prefixes to fall back on, as `restore_keys` of the `cache` option;
+-- the answer is `{ hit = true, key = <the key restored> }` or `{ hit = false }`: the shim says which key it restored, the core puts that in the step's result (the journal), so a replay
+-- sees the same. A restore that finds nothing is not an error; a save of a key that is stored already is not one either (a key is immutable). The job's image needs a shell (`true`).
+local function cache_step(job, decl, line)
+  step_count = step_count + 1
+  if step_count > MAX_STEPS then error("step_limit: a run has at most " .. MAX_STEPS .. " steps; the step at line " .. line .. " is the " .. step_count .. "th", 0) end
+  local only = { __key = job.__key, __image = job.__image, __profile = job.__profile, __metrics = "", __mask = job.__mask, __timeout = job.__timeout, __env = job.__env, __cache = { decl } }
+  local code, out = call("job_sh", job.__key .. "\t" .. job.__image .. "\t" .. job.__profile .. "\t" .. step_opts(only, nil) .. "\t" .. "true", line):match("^(%-?%d+)\n(.*)$")
+  code = tonumber(code)
+  if code ~= 0 then error("step failed with code " .. tostring(code), 3) end
+  return out
+end
+local function job_cache_api(job)
+  return {
+    restore = function(keys)
+      local line = getline()
+      if type(keys) ~= "table" or rawlen(keys) < 1 or rawlen(keys) > 6 then error("Job.cache.restore: a list of 1 to 6 keys: the first is the key, the others are key prefixes", 2) end
+      local rest = {}
+      for i = 1, rawlen(keys) do
+        local k = keys[i]
+        if type(k) ~= "string" or #k < 1 or #k > 200 or not k:match(CACHE_KEY_PAT) then error("Job.cache.restore: a key is 1..200 characters: letters, digits and . _ : + = @ % - (no '/')", 2) end
+        if i > 1 then rest[i - 1] = k end
+      end
+      local out = cache_step(job, { key = keys[1], mode = "restore", paths = {}, restore_keys = rest }, line)
+      if out == "" then return { hit = false } end
+      return { hit = true, key = out }
+    end,
+    save = function(key, paths)
+      local line = getline()
+      local list = norm_cache({ key = key, paths = paths }, 3)
+      local decl = list[1]
+      decl.mode = "save"
+      cache_step(job, decl, line)
+    end,
+  }
+end
 
 -- Launch parameters (PIP-012, VAR-002). The script declares them in `ci.pipeline{ params = { NAME = ci.string{...}, ... } }`; the names are the names of
 -- environment variables (VAR-003). The values given when the run was started arrive as text (`given`); they are checked against the declarations and
@@ -783,6 +821,7 @@ G.ci = {
     local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
       __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
       __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env"), __cache = norm_cache(opts.cache, 3) }, Job_mt)
+    j.cache = job_cache_api(j)
     local lock = norm_lock(opts.lock)
     if lock then call("lock", lock .. "\t" .. j.__key) end   -- the run waits here, suspended, until the lock is its turn; the job is named so that the lock can show who holds it
     local ok, err = pcall(fn, j)

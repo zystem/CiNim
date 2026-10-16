@@ -45,6 +45,7 @@ type
     artifactQuotaBytes*: int64   ## 0 or 1 MiB..1 PiB, default 0 (no limit): the most bytes of artifacts the organisation holds (DAT-006); an upload that would pass it is refused
     cacheQuotaBytes*: int64      ## -1, 0 or 1 MiB..1 PiB, default 0 (the shard's, CINIM_CACHE_QUOTA; -1 is no limit): the most bytes of caches the organisation holds (DAT-004); groups can have less
     cacheRetentionDays*: int     ## -1, 0..3650, default 0 (the shard's, CINIM_CACHE_RETENTION; -1 keeps for ever): how long a cache entry may stay unused (DAT-004); groups can have their own
+    auditVariables*: string      ## "off" (default), "digest" or "full": whether the changes of the variables and secrets of the organisation are in the audit, and how (VAR-006, core/varaudit.nim)
     artifactRetentionDays*: int  ## 0..3650, default 0 (the shard's retention, CINIM_ARTIFACT_RETENTION): how long the artifacts of its finished runs live (DAT-006)
 
 const
@@ -57,7 +58,7 @@ func defaultSettings*(): ProfileSettings =
   ProfileSettings(infraRetries: 3, logMaxBytes: defaultLogMaxBytes, livenessTimeout: defaultLivenessTimeout,
                   logSpoolBytes: defaultLogSpoolBytes, logHoldTimeout: defaultLogHoldTimeout,
                   podLimit: admission.defaultPodLimit, jobPodLimitPercent: admission.defaultJobPodLimitPercent,
-                  runsPerConductor: defaultRunsPerConductor, conductorMin: defaultConductorMin)
+                  runsPerConductor: defaultRunsPerConductor, conductorMin: defaultConductorMin, auditVariables: "off")
 
 func validate*(s: ProfileSettings): string =
   ## "" if valid, else what is wrong (the API answers 400 with it)
@@ -72,6 +73,7 @@ func validate*(s: ProfileSettings): string =
     "cache_quota_bytes must be 0 (the shard's), -1 (no limit) or 1 MiB..1 PiB"
   elif s.cacheRetentionDays notin -1 .. 3650: "cache_retention_days must be 0 (the shard's), -1 (for ever) or 1..3650"
   elif s.artifactRetentionDays notin 0 .. 3650: "artifact_retention_days must be 0 (the shard's retention) .. 3650"
+  elif s.auditVariables notin ["off", "digest", "full"]: "audit_variables must be off, digest or full"
   elif s.runsPerConductor notin 1 .. maxRunsPerConductor: "runs_per_conductor must be 1.." & $maxRunsPerConductor
   elif s.conductorMin notin 0 .. maxConductors(s.podLimit, s.runsPerConductor):
     "conductor_min must be 0.." & $maxConductors(s.podLimit, s.runsPerConductor) & " (pod_limit / runs_per_conductor, rounded up)"

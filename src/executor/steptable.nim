@@ -144,3 +144,35 @@ proc prepare*(script: string; params: seq[(string, string)]; apiVersion: int; st
   if not r.ok:
     return Prepared(refused: true, code: r.code, message: r.message)
   Prepared(numbering: newNumbering(r.table), toSend: encodeTable(r.table))
+
+# ------------------------------------------------------------------ the check before a run exists (PIP-016)
+
+type Preflight* = object
+  ## what a pass of the script against the stub host found. `code` "" is nothing found. `certain`: the finding is the script's and the parameters' alone - it came before the first
+  ## step, so no answer of a step can be the cause - or it is a limit the pass proves (`step_limit`, `duplicate_id`); an uncertain one (the script broke after a stub answer) is only a hint
+  code*, message*, paramsJson*: string
+  certain*: bool
+  steps*: int
+
+proc preflight*(script: string; params: seq[(string, string)] = @[]; apiVersion = currentApiVersion): Preflight =
+  ## Run `script` once against the stub host with the launch parameters `params`: the metadata phase (the declarations of the parameters and their checking, the options of the pipeline)
+  ## and `main` as far as the stub takes it. Nothing is made anywhere. The same pass the table of step numbers is made by, so what it proves about steps is what the table refuses.
+  var sb = newSandbox(apiVersion = apiVersion)
+  var j: Journal
+  var calls = 0                                 # host calls other than the one that reports the parameters: while there are none, the script has not yet been told anything by a step
+  var paramsJson = ""
+  var lines: seq[int]
+  proc host(seq: int; kind, payload: string): Option[string] =
+    if kind == "params":
+      paramsJson = payload
+      return some("")
+    inc calls
+    stubHost(seq, kind, payload)
+  let r = replay.execute(sb, j, script, host, runId = "check", params = params,
+                         onSite = proc (seq: int; kind: string; line: int) = (if kind == "job_sh": lines.add line))
+  result.steps = lines.len
+  result.paramsJson = paramsJson
+  if r.status == esFailed:
+    result.code = r.code
+    result.message = r.message
+    result.certain = calls == 0 or r.code in ["step_limit", "duplicate_id"]

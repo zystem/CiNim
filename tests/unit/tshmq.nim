@@ -68,3 +68,26 @@ suite "RUN-016 queues between threads":
     check got[0] + got[1] + got[2] + got[3] == 4 * perSender
     check sums[0] + sums[1] + sums[2] + sums[3] == 4 * (perSender * (perSender - 1) div 2)
     q.destroy()
+
+  test "a block that goes in whole comes out whole without a copy, and the header of it can sit before the bytes":
+    var q = newShmQueue()
+    let base = shmAlloc(16)
+    let bytes = cast[ptr UncheckedArray[char]](cast[uint](base) + 4'u)
+    copyMem(bytes, "hello world!".cstring, 12)
+    q.pushOwned(7, "route", base, bytes, 12)
+    var kind, n: int
+    var a: string
+    var b: ptr UncheckedArray[char]
+    var blk: pointer
+    check q.popOwned(0, kind, a, b, n, blk)
+    check kind == 7 and a == "route" and n == 12 and blk == base and cast[uint](b) == cast[uint](base) + 4'u
+    check equalMem(b, "hello world!".cstring, 12)
+    shmFree(blk)
+    check not q.popOwned(0, kind, a, b, n, blk)
+    # the plain pop of such a message copies the bytes and frees the block
+    let base2 = shmAlloc(8)
+    copyMem(base2, "abcdefgh".cstring, 8)
+    q.pushOwned(1, "", base2, cast[ptr UncheckedArray[char]](base2), 8)
+    var s1, s2: string
+    check q.pop(0, kind, s1, s2) and s2 == "abcdefgh"
+    q.destroy()

@@ -5,7 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
-import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
+import apiauth, artifactsweep, storerepair, zstore, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -60,17 +60,36 @@ proc runStream(a: Args) {.thread.} = serveStream(a.co, a.port)
 proc runLogIngest(a: tuple[co: Collector, certs: string, port: int]) {.thread.} =
   serveLogIngest(a.co, a.certs, a.port)
 proc runStepReport(a: StepReportArgs) {.thread.} = serveStepReport(a.rqliteUrl, a.certs, a.port, a.profileId)
-const artifactSweepSeconds = 600.0       ## how often the artifacts are looked at (DAT-006)
+const
+  artifactSweepSeconds = 600.0       ## how often the artifacts are looked at (DAT-006)
+  repairSeconds = 60.0               ## how often the repair queue of the store nodes is worked (D-57, core/storerepair.nim)
+  checkSeconds = 600.0               ## how often a slice of the rows is checked against the nodes
 
 proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thread.} =
   ## every few seconds: steps whose Pod never came up or whose shim went quiet (liveness_timeout, D-29)
   {.cast(gcsafe).}:
     var c = newRq(a.rqliteUrl)
     var lastSweep = 0.0
+    var lastRepair = 0.0
+    var lastCheck = 0.0
+    var checkCursor = ""
     while not stopServers.load:
       try:
         probeAndAge(c, a.startedAt)
         watchdogPass(c, a.profileId, a.startedAt)
+        if epochTime() - lastRepair >= repairSeconds:
+          # D-57: the store nodes of our own are kept alike: the queue of what a node missed, and a slice of the rows against the nodes
+          lastRepair = epochTime()
+          let st = c.loadStore()
+          if st.ok and st.cfg.kind == "nodes":
+            let mir = MirrorBackend(st.backend())
+            let rep = c.repairPass(mir, getTime().toUnix())
+            if rep.copied + rep.deleted + rep.dropped + rep.failed > 0:
+              echo "core: store repair: ", rep.copied, " copied, ", rep.deleted, " deleted, ", rep.dropped, " dropped, ", rep.failed, " left for later"
+            if epochTime() - lastCheck >= checkSeconds:
+              lastCheck = epochTime()
+              let made = c.checkNodes(mir, checkCursor, getTime().toUnix())
+              if made > 0: echo "core: store check: ", made, " objects are missing from a node or differ; queued for repair"
         if epochTime() - lastSweep >= artifactSweepSeconds:
           # DAT-006: expired artifacts, abandoned uploads and orphans leave the store (core/artifactsweep.nim); only when a store is set up
           lastSweep = epochTime()
@@ -100,6 +119,11 @@ proc runRouterClient(a: tuple[rqliteUrl: string]) {.thread.} =
     serveRouterClient(readOrgs, addr stopServers)
 
 proc main() =
+  objectstore.missedHook = proc (key, node, what: string) {.gcsafe.} =
+    ## what a store node missed goes into the repair queue (D-57)
+    {.cast(gcsafe).}:
+      var hc = newRq(rqliteUrl)
+      hc.noteMissed(key, node, what, getTime().toUnix())
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   var c = newRq(rqliteUrl)
   var profileId: string

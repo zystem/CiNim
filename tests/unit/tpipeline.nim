@@ -146,6 +146,36 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
       var j = Journal()
       let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {cache = " & bad & "}) end) end})", fakeHost, runId = "s1_abc")
       check r.code == "script_error" and "cache" in r.message
+  test "DAT-004 j.cache.restore and j.cache.save are steps of their own with the mode in the cache options; the answer of a restore is the key the host gave":
+    var sb = newSandbox()
+    var j = Journal()
+    let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some("0\ndeps-1")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', cache = {key = 'base', paths = {'b'}}}, function(j) local got = j.cache.restore({'deps-2', 'deps-'}); j.cache.save('deps-2', {'node_modules', 'x/y'}); j:sh('after ' .. tostring(got.hit) .. ' ' .. tostring(got.key)) end) end})", host, runId = "s1_abc")
+    check r.code == "ok"
+    check j.entries[0].kind == "job_sh" and j.entries[0].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-2\",\"mode\":\"restore\",\"paths\":[],\"restore_keys\":[\"deps-\"]}]}\ttrue"
+    check j.entries[1].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-2\",\"mode\":\"save\",\"paths\":[\"node_modules\",\"x/y\"],\"restore_keys\":[]}]}\ttrue"
+    check "\"key\":\"base\"" in j.entries[2].payload and "mode" notin j.entries[2].payload and j.entries[2].payload.endsWith("\tafter true deps-1")   # the job's own cache option belongs to the steps of j:sh only
+  test "DAT-004 j.cache.restore tells a hit from a miss, and a failing step fails the job":
+    for (answer, hit, key) in [("0\ndeps-1", true, "deps-1"), ("0\n", false, "nil")]:
+      var sb = newSandbox()
+      var j = Journal()
+      let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some(answer)
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) local got = j.cache.restore({'deps-1'}); j:sh('hit=' .. tostring(got.hit) .. ' key=' .. tostring(got.key)) end) end})", host, runId = "s1_abc")
+      check r.code == "ok"
+      check j.entries[1].payload.endsWith("\thit=" & $hit & " key=" & key)
+    var sb = newSandbox()
+    var j = Journal()
+    let failing: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some("3\n")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j.cache.save('k', {'x'}) end) end})", failing, runId = "s1_abc")
+    check r.code == "script_error" and "step failed with code 3" in r.message
+  test "DAT-004 j.cache.restore and j.cache.save refuse what the option refuses before a step is made":
+    for bad in ["j.cache.restore({})", "j.cache.restore('deps')", "j.cache.restore({'a/b'})", "j.cache.restore({'a','b','c','d','e','f','g'})", "j.cache.save('a/b', {'x'})",
+                "j.cache.save('a', {})", "j.cache.save('a')", "j.cache.save('a', {'../x'})", "j.cache.save('a', {'/etc'})"]:
+      var sb = newSandbox()
+      var j = Journal()
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) " & bad & " end) end})", fakeHost, runId = "s1_abc")
+      check r.code == "script_error" and ("ache" in r.message)
+      check j.entries.len == 0
   test "a call that the core refuses for good fails the run with the core's words; it is not suspended":
     var sb = newSandbox()
     var j = Journal()

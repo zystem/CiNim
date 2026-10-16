@@ -65,13 +65,15 @@ The store does not fill up by itself: the core looks at it every ten minutes (`c
 * an upload that was **started and never finished** for longer than `artifacts.abandonAfter` (`CINIM_UPLOAD_ABANDON_AFTER`, a day): the multipart upload is aborted, so that the store frees the parts;
 * the artifacts of a run that is **not in the database** any more (an organisation that was purged).
 
-An object the store says it does not have is as good as deleted; a store that does not answer leaves the rows for the next pass. Each pass looks at 200 rows of each kind. **Per organisation (the settings of its profile, `PUT /api/v1/profile?organization=<slug>`, docs/settings.md):** `artifact_retention_days` is the organisation's own retention (0: the shard's, above), and `artifact_quota_bytes` is the most bytes of artifacts it holds - stored and under way, whatever the runs - checked when an upload begins: one that would pass it is refused with `quota_exceeded` and the step's log says why; the file that a new one replaces is not counted twice. Not built: a legal hold on chosen runs (DAT-006).
+An object the store says it does not have is as good as deleted; a store that does not answer leaves the rows for the next pass. Each pass looks at 200 rows of each kind. **Per organisation (the settings of its profile, `PUT /api/v1/profile?organization=<slug>`, docs/settings.md):** `artifact_retention_days` is the organisation's own retention (0: the shard's, above), and `artifact_quota_bytes` is the most bytes of artifacts it holds - stored and under way, whatever the runs - checked when an upload begins: one that would pass it is refused with `quota_exceeded` and the step's log says why; the file that a new one replaces is not counted twice. A legal hold on runs, groups and the organisation is below.
 
 ## Network
 
 A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artifacts) and DNS, and nothing else: the object store is not reachable from a step Pod and needs no NetworkPolicy of its own. The store has to be reachable from the core, with a plain `http://` or an `https://` endpoint (the core talks to it with its own HTTP client).
 
 ## Moving the storage module out of the core
+
+*Built as a store of our own (2026-10-16): docs/store.md, D-57. The `RemoteBackend` below is `MirrorBackend` over `cinim-store` nodes, spoken to over ZeroMQ with CURVE; the S3 backend stays as the other choice (`PUT /api/v1/storage`). What follows is the original statement of the seam.*
 
 This is the rule of D-49 applied to the store: the core is the source of the settings of every permanent module, so the storage service is started with only the core's address and its transport keys; the store's endpoint, bucket and key are the core's (sealed in its database) and go to the service with the request or when it connects, never into the service's environment.
 
@@ -93,10 +95,20 @@ GET  /api/v1/organizations/{slug}/holds                 the runs under a hold, w
 
 * A hold needs a reason (at most 1000 characters). `GET /api/v1/runs/{id}` shows `hold: {reason, placed_by, placed_at}`. Placing and releasing are in the audit (`run.hold`, `run.release`). A run that is still going may be held; the hold takes effect when it ends.
 * While it stands: the sweep of the artifacts does not take the run's artifacts, whatever their age; the core does not tell the controller to delete the run's volume (STO-006); and the organisation is **not deleted for good** (`DELETE /api/v1/organizations/{slug}?purge=true` answers `409 legal_hold`, and the reconciliation does not purge a switched-off organisation at the end of its retention; it says so in its report) until every hold is released.
-* **Not covered:** the log (its retention is the log store's own, and nothing deletes one run's log), the journal (nothing deletes it), and the caches (they are not a run's). A hold on a group or an organisation (many runs at once) is not built.
+* **Not covered:** the journal (nothing deletes it), and the caches (they are not a run's; a cache is a convenience that can be made again).
+* **The log is not covered yet.** The log store drops whole days by its own period, so a hold does not keep the log of a held run. A copy of the log of held runs into the object store is written and tested (`core/heldlogs.nim`) but not switched on, and not offered by the API: the owner put it off until after the UI. Known gaps to close first: a pass copies too few steps for a big organisation, a log store that does not answer yields an empty copy marked incomplete, and only the newest attempt of a step is copied.
+
+### A hold on a group or on the organisation
+
+```
+GET|PUT|DELETE /api/v1/organizations/{slug}/hold                         the organisation        (rw, admin to change; every role that reads)
+GET|PUT|DELETE /api/v1/organizations/{slug}/groups/{path}/hold           a group and the groups below it
+```
+
+`PUT` takes `{"reason": "..."}` (201; 200 if held already, the first reason stands), `DELETE` releases. It covers **every run in the group and in the groups below it** (or every run of the organisation), **those that exist and those made while it stands**: it is a standing condition the sweeps look at, not a mark on each run. A run's view shows `hold` for its own and `held_by` (`level`, `group`, `reason`, `placed_by`) for the one that covers it. `GET /api/v1/organizations/{slug}/holds` lists the runs held and `scopes`, the holds of groups and of the organisation. A held group cannot be deleted; an organisation with any hold (of a run, a group or itself) is not deleted for good. In the audit: `group.hold`, `group.release`, `organization.hold`, `organization.release`. The word `hold` cannot be the name of a group.
 * Checked live on the TESTING cluster (2026-10-13): no reason is `400`; a hold is `201`, a second one `200` and the first reason stands; the run's view and `GET /api/v1/organizations/acme/holds` show it, the audit has `run.hold`; release is `200` (`released: true`, then `false`); an unknown run is `404`. Not checked live: the sweep and the purge against a held run (tests only), the roles on a running core.
-* Checked: `tests/integration/tholds.nim` (placed once, the first reason stands, released, listed; the sweep and the volume release skip a held run and take it once released; the view), `torgreconcile` (a held organisation is not purged and says why), `trbac` (who may).
+* Checked: `tests/integration/tholds.nim` (placed once, the first reason stands, released, listed; the sweep and the volume release skip a held run and take it once released; the view; a hold on a group covers the group and below it and not its neighbours or the groups above; a hold on the organisation covers all, runs made later too; the purge count; a held group is not deleted), `theldlogs` (the copy of the log, not switched on: once and in order, 12 MB through a multipart upload, lines that are missing, a group's hold, removal on release), `torgreconcile` (a held organisation is not purged and says why), `trbac` (who may).
 
 ## Not built
 
-The storage module as a separate service (the seam is there, above), parallel uploads (the ingest is one thread: a big upload delays another step's request by a block), download of an artifact by another run (`ci.run`; the files that outlive a run for the next run are the cache, docs/cache.md), a legal hold on a group, ACL, provenance, the `JobArtifact.upload/download` calls of the API v1 signatures (the `artifacts` option stands in for them), downloading from the UI.
+The storage module as a separate service (the seam is there, above), parallel uploads (the ingest is one thread: a big upload delays another step's request by a block), download of an artifact by another run (`ci.run`; the files that outlive a run for the next run are the cache, docs/cache.md), ACL, provenance, the `JobArtifact.upload/download` calls of the API v1 signatures (the `artifacts` option stands in for them), downloading from the UI.

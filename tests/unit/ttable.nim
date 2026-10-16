@@ -199,3 +199,33 @@ suite "PIP-018 the example of ids built in a loop":
   test "deploy/examples/ids/ids.lua is a valid script: ten steps, none of the ids repeated":
     let r = buildTable(readFile("deploy/examples/ids/ids.lua"))
     check r.ok and not r.partial and r.steps == 10
+
+suite "PIP-016 the check of a script before a run exists (preflight)":
+  const withParams = """
+return ci.pipeline({
+  params = { JOBS = ci.number{ default = 4, min = 1, max = 64, integer = true }, TARGET = ci.choice({ "staging", "production" }, { default = "staging" }), TICKET = ci.string{ required = true } },
+  main = function(run) ci.job({image = "a"}, function(j) j:sh("one"); j:sh("two") end) end })
+"""
+  test "a good script and good parameters: nothing found, the steps seen, the parameters a run would have (defaults completed)":
+    let r = preflight(withParams, @[("TICKET", "CI-7")])
+    check r.code == "" and not r.certain and r.steps == 2
+    check "\"JOBS\"" in r.paramsJson and "\"TARGET\":\"staging\"" in r.paramsJson and "CI-7" in r.paramsJson
+  test "a parameter the declarations refuse is a certain finding with the parameter's name and the rule, and no step was seen":
+    for (given, word) in [(@[("TICKET", "x"), ("JOBS", "0")], "JOBS"), (@[("TICKET", "x"), ("TARGET", "moon")], "TARGET"), (@[("JOBS", "3")], "TICKET"), (@[("TICKET", "x"), ("NOPE", "1")], "NOPE")]:
+      let r = preflight(withParams, given)
+      check r.code == "script_error" and r.certain and word in r.message and r.steps == 0
+  test "a syntax error, a forbidden global and an error before the first step are certain":
+    for script in ["return (", "os.execute('x')", "error('boom')", "return ci.pipeline({ main = function(run) local x = nil; x() end })"]:
+      let r = preflight(script)
+      check r.code == "script_error" and r.certain
+  test "a script that breaks after a step has answered is a finding that is not certain: the stub's answer may be the cause":
+    let r = preflight("return ci.pipeline({ main = function(run) local r = ci.job({image='a'}, function(j) return j:sh('x') end); error('after ' .. tostring(r)) end })")
+    check r.code == "script_error" and not r.certain and r.steps == 1
+  test "more than 200 steps and an id used twice are certain, whatever the steps answered":
+    let many = preflight("return ci.pipeline({ main = function(run) ci.job({image='a'}, function(j) for i = 1, 201 do j:sh('x') end end) end })")
+    check many.code == "step_limit" and many.certain
+    let dup = preflight("return ci.pipeline({ main = function(run) ci.job({image='a'}, function(j)\n j:sh('x', {id='same'})\n j:sh('y', {id='same'})\nend) end })")
+    check dup.code == "duplicate_id" and dup.certain
+  test "a loop that never ends is stopped by the instruction budget, and is certain":
+    let r = preflight("while true do end")
+    check r.code == "instruction_limit" and r.certain

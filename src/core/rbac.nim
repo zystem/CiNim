@@ -62,7 +62,7 @@ func readablePath(path: string): bool =
               "/api/v1/organizations:check"]: return true
   if path == "/api/v1/variables": return true
   path.startsWith("/api/v1/organizations/") and (path.endsWith("/triggers") or path.endsWith("/locks") or "/locks/" in path or path.endsWith("/variables") or
-                                                 path.endsWith("/groups") or "/groups/" in path or path.endsWith("/holds"))
+                                                 path.endsWith("/groups") or "/groups/" in path or path.endsWith("/holds") or path.endsWith("/hold") or path.endsWith("/caches"))
 
 func adminOnlyPath(path: string): bool =
   ## what is the shard's own and only an administrator's: the management of who may do what (the users, the roles, the API tokens) and the object store of the shard
@@ -76,7 +76,7 @@ func shardVariableWrite(meth, path: string): bool =
 func developerMay(meth, path: string): bool =
   ## what a developer may do besides reading: start a run, directly or by firing a manual trigger of an organisation, stop a run, start a failed one again
   if meth != "POST": return false
-  if path == runsBase: return true
+  if path == runsBase or path == "/api/v1/pipelines:check": return true
   if path.startsWith(runsBase & "/") and (path.endsWith(":cancel") or path.endsWith(":retry")): return true
   path.startsWith("/api/v1/organizations/") and "/triggers/" in path and path.endsWith(":fire")
 

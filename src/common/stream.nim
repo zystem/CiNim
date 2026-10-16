@@ -37,65 +37,96 @@ proc putU64(s: var string; v: uint64) =
 proc getU64(s: string; at: int): uint64 =
   for i in 0 ..< 8: result = (result shl 8) or uint64(ord(s[at + i]))
 
-proc encodeFrame*(f: StreamFrame): string =
+proc frameHeader*(f: StreamFrame; payloadLen: int): string =
+  ## everything of a frame up to its payload (the length of the payload included); a caller that has the payload in a buffer of its own writes this before it
   doAssert f.session.len <= 0xffff and f.kind.len <= 0xffff
-  result = newStringOfCap(34 + f.session.len + f.kind.len + f.payload.len)
+  result = newStringOfCap(34 + f.session.len + f.kind.len)
   result.add char(frameVersion)
   result.putU64 f.id
   result.putU64 f.ack
   result.putU64 f.re
   result.add char(f.session.len shr 8); result.add char(f.session.len and 0xff); result.add f.session
   result.add char(f.kind.len shr 8); result.add char(f.kind.len and 0xff); result.add f.kind
-  for i in countdown(3, 0): result.add char((f.payload.len shr (i * 8)) and 0xff)
+  for i in countdown(3, 0): result.add char((payloadLen shr (i * 8)) and 0xff)
+
+proc encodeFrame*(f: StreamFrame): string =
+  result = frameHeader(f, f.payload.len)
   result.add f.payload
   if f.key.len > 0:
     doAssert f.key.len <= 0xffff
     result.add char(f.key.len shr 8); result.add char(f.key.len and 0xff); result.add f.key
 
-proc decodeFrame*(s: string): Option[StreamFrame] =
+type FrameHead* = object
+  ## a frame read in place: the payload is `payloadLen` bytes at `payloadAt` of the buffer, not copied
+  id*, ack*, re*: uint64
+  session*, kind*, key*: string
+  payloadAt*, payloadLen*: int
+
+proc decodeHead*(p: ptr UncheckedArray[char]; len: int): Option[FrameHead] =
   ## none for anything that is not a frame of this version (a stray or damaged message is dropped, never trusted)
-  if s.len < 1 + 8 + 8 + 8 + 2 + 2 + 4 or ord(s[0]) != int(frameVersion): return none(StreamFrame)
-  var f: StreamFrame
+  if len < 1 + 8 + 8 + 8 + 2 + 2 + 4 or ord(p[0]) != int(frameVersion): return none(FrameHead)
+  var f: FrameHead
+  var s = newString(len.min(25))
+  copyMem(addr s[0], p, s.len)
   f.id = getU64(s, 1)
   f.ack = getU64(s, 9)
   f.re = getU64(s, 17)
   var at = 25
   template take(n: int): string =
-    if n < 0 or at + n > s.len: return none(StreamFrame)
-    let part = s[at ..< at + n]
+    if n < 0 or at + n > len: return none(FrameHead)
+    var part = newString(n)
+    if n > 0: copyMem(addr part[0], addr p[at], n)
     at += n
     part
-  var n = (ord(s[at]) shl 8) or ord(s[at + 1]); at += 2
+  var n = (ord(p[at]) shl 8) or ord(p[at + 1]); at += 2
   f.session = take(n)
-  if at + 2 > s.len: return none(StreamFrame)
-  n = (ord(s[at]) shl 8) or ord(s[at + 1]); at += 2
+  if at + 2 > len: return none(FrameHead)
+  n = (ord(p[at]) shl 8) or ord(p[at + 1]); at += 2
   f.kind = take(n)
-  if at + 4 > s.len: return none(StreamFrame)
+  if at + 4 > len: return none(FrameHead)
   var pl = 0
-  for i in 0 ..< 4: pl = (pl shl 8) or ord(s[at + i])
+  for i in 0 ..< 4: pl = (pl shl 8) or ord(p[at + i])
   at += 4
-  if pl > maxPayload: return none(StreamFrame)
-  f.payload = take(pl)
-  if at != s.len:
-    if at + 2 > s.len: return none(StreamFrame)
-    let kl = (ord(s[at]) shl 8) or ord(s[at + 1]); at += 2
+  if pl > maxPayload or at + pl > len: return none(FrameHead)
+  f.payloadAt = at
+  f.payloadLen = pl
+  at += pl
+  if at != len:
+    if at + 2 > len: return none(FrameHead)
+    let kl = (ord(p[at]) shl 8) or ord(p[at + 1]); at += 2
     f.key = take(kl)
-    if at != s.len: return none(StreamFrame)
+    if at != len: return none(FrameHead)
   some(f)
+
+proc decodeFrame*(s: string): Option[StreamFrame] =
+  ## none for anything that is not a frame of this version (a stray or damaged message is dropped, never trusted)
+  let h = decodeHead(cast[ptr UncheckedArray[char]](if s.len > 0: unsafeAddr s[0] else: nil), s.len)
+  if h.isNone: return none(StreamFrame)
+  let x = h.get
+  some(StreamFrame(id: x.id, ack: x.ack, re: x.re, session: x.session, kind: x.kind, key: x.key, payload: s[x.payloadAt ..< x.payloadAt + x.payloadLen]))
 
 proc frame*(session, kind: string; payload = ""; id = 0'u64; ack = 0'u64; re = 0'u64; key = ""): StreamFrame =
   StreamFrame(session: session, kind: kind, id: id, ack: ack, re: re, payload: payload, key: key)
 
-proc listenStream*(port: int; secretKey: string; sendTimeoutMs = 200): ZConnection =
+proc newContext*(ioThreads: int): ZContext =
+  ## A ZeroMQ context with that many I/O threads. CURVE is encrypted in the I/O thread of the connection, about 55 MB/s a thread (measured: docs/store.md), so a peer that moves
+  ## big blocks over several connections wants several: the connections are spread over the threads.
+  result = ctx_new()
+  if result == nil: raise newException(OSError, "could not make a ZeroMQ context")
+  discard ctx_set(result, ZMQ_IO_THREADS, cint(max(1, ioThreads)))
+
+proc listenStream*(port: int; secretKey: string; sendTimeoutMs = 200; ioThreads = 1; curve = true): ZConnection =
   ## the core's side: a ROUTER that anyone with the shared client key can connect to
-  doAssert hasCurve(), "libzmq was not built with CURVE (libsodium) support"
-  result = listen("tcp://0.0.0.0:" & $port, ROUTER) do (s: ZSocket) -> void:
-    s.setCurveServer(secretKey)
+  if curve: doAssert hasCurve(), "libzmq was not built with CURVE (libsodium) support"
+  proc configure(s: ZSocket) =
+    if curve: s.setCurveServer(secretKey)           # `curve` false is for a link inside a network that is encrypted anyway (docs/store.md); the peer is then told apart by a token in the request
     s.setsockopt(ROUTER_MANDATORY, 1)
     s.setsockopt(HEARTBEAT_IVL, heartbeatIntervalMs.cint)
     s.setsockopt(HEARTBEAT_TIMEOUT, heartbeatTimeoutMs.cint)
     s.setsockopt(HEARTBEAT_TTL, heartbeatTimeoutMs.cint)
     s.setsockopt(SNDTIMEO, sendTimeoutMs.cint)
+  if ioThreads > 1: return listen("tcp://0.0.0.0:" & $port, ROUTER, newContext(ioThreads), configure)
+  result = listen("tcp://0.0.0.0:" & $port, ROUTER, configure)
 
 proc connectStream*(address, serverPublicKey: string; client: CurveKeypair; sendTimeoutMs = 2000): ZConnection =
   ## a client's side: a DEALER that connects (and reconnects) by itself

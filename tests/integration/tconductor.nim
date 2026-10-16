@@ -3,7 +3,7 @@
 ## credential, and a drain that leaves nothing behind. Needs CINIM_RQLITE_URL (a scratch rqlite); builds `build/conductor` if it is not there.
 import std/[unittest, json, os, osproc, atomics, strutils, times, strtabs]
 import common/[rqlite, ctrlauth]
-import core/[schema, scheduler, loggate, logcircuit, streamhub, retrypolicy]
+import core/[schema, scheduler, loggate, logcircuit, streamhub, retrypolicy, preflight]
 
 let url = getEnv("CINIM_RQLITE_URL")
 let certs = getCurrentDir() / "tests" / "certs"
@@ -155,6 +155,40 @@ suite "RUN-009 the conductor":
       check waitState(r, "FAILED")
       check c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "duplicate_id"
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
+      stop p
+    proc checked(ns, script: string; given: seq[(string, string)] = @[]): Answer =
+      ## the conductor needs a moment to connect and say hello; until then the organisation has none
+      let deadline = epochTime() + 15
+      result = checkScript(ns, script, given, 1)
+      while not result.ran and result.skipped == "no_conductor" and epochTime() < deadline:
+        sleep 200
+        result = checkScript(ns, script, given, 1)
+
+    test "PIP-016 a conductor checks a script in a process of its own: what it found, the steps it saw, the parameters a run would have":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t9")
+      const script = "return ci.pipeline({ params = { JOBS = ci.number{ default = 4, min = 1, max = 64, integer = true } }, main = function(run) ci.job({image='a'}, function(j) j:sh('x'); j:sh('y') end) end })"
+      let good = checked(o.ns, script)
+      check good.ran and good.code == "" and good.steps == 2 and "\"JOBS\"" in good.paramsJson and good.problemOf == ""
+      let bad = checkScript(o.ns, script, @[("JOBS", "0")], 1)
+      check bad.ran and bad.code == "script_error" and bad.certain and "JOBS" in bad.message and bad.problemOf == bad.message
+      let loop = checkScript(o.ns, "while true do end", @[], 1)
+      check loop.ran and loop.code == "instruction_limit"
+      check c.query(%*[["SELECT COUNT(*) FROM runs WHERE profile_id = ?", o.profile]])["results"][0]["values"][0][0].getInt == 0     # nothing was made
+      stop p
+    test "PIP-016 an organisation without a conductor is told so at once, and is not made to wait; so is one whose conductor is gone":
+      let o = newOrg()
+      let t0 = epochTime()
+      let a = checkScript(o.ns, "return 1", @[], 1)
+      check not a.ran and a.skipped == "no_conductor" and epochTime() - t0 < 3
+      check a.problemOf == "" and not a.view["checked"].getBool and a.view["skipped"].getStr == "no_conductor"
+    test "PIP-016 a check does not take a place of the conductor, and the runs it leads go on":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t10", places = 1)
+      discard checked(o.ns, "return 1")
+      let r = co.createRun("return 1", "t1", o.profile)
+      for _ in 0 ..< 3: discard checkScript(o.ns, "return 1", @[], 1)
+      check waitState(r, "SUCCEEDED")
       stop p
     stopServers.store(true)
     joinThread(th)

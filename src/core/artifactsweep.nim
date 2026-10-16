@@ -10,7 +10,7 @@
 ## is tested against a store in memory.
 import std/[json, strutils, times, os]
 import ../common/[rqlite, states]
-import storagebackend
+import storagebackend, holds
 
 const
   defaultRetention* = 30 * 86400'i64
@@ -39,7 +39,7 @@ proc sweepArtifacts*(c: var RqClient; be: ObjectBackend; now: int64; retention =
   # the retention of an organisation (days, in its profile) is its own; 0 there is the shard's `retention`, and no retention at all (0 or less) keeps for ever
   block expire:
     let r = c.query(%*[["SELECT a.id, a.s3_key FROM artifacts a LEFT JOIN runs r ON r.id = a.run_id LEFT JOIN execution_profiles p ON p.id = r.profile_id " &
-      "WHERE a.state = 'stored' AND r.state IN (" & finalList() & ") AND NOT EXISTS (SELECT 1 FROM run_holds h WHERE h.run_id = a.run_id) AND " &
+      "WHERE a.state = 'stored' AND r.state IN (" & finalList() & ") AND NOT " & heldRunSql("a.run_id", "r.tenant_id", "r.group_id") & " AND " &
       "(CASE WHEN COALESCE(p.artifact_retention_days, 0) > 0 THEN p.artifact_retention_days * 86400 ELSE ? END) > 0 AND " &
       "a.created_at < ? - (CASE WHEN COALESCE(p.artifact_retention_days, 0) > 0 THEN p.artifact_retention_days * 86400 ELSE ? END) " &
       "ORDER BY a.created_at LIMIT ?", max(retention, 0), now, max(retention, 0), batch]])["results"][0]{"values"}

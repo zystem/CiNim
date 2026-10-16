@@ -14,6 +14,7 @@ const
   loginGlobalMax* = 100                  ## wrong passwords for all names within a minute: somebody is trying many names, nobody may log in until it calms down
   loginGlobalWindow* = 60'i64
   maxDetail = 300
+  maxChange = 16384                      ## the old or the new value of a variable (VAR-006): a value is at most 8 KiB
 
 func actorOf*(p: Principal): string =
   ## who is acting: a user by name, the operator's token, another token by its id
@@ -24,11 +25,11 @@ func actorOf*(p: Principal): string =
 
 func clip(s: string; n: int): string = (if s.len > n: s[0 ..< n] else: s)
 
-proc record*(c: var RqClient; now: int64; actor, action, target, outcome: string; detail = "") =
-  ## `outcome` is `ok`, `failed`, `denied` or `throttled`
+proc record*(c: var RqClient; now: int64; actor, action, target, outcome: string; detail = ""; before = ""; after = "") =
+  ## `outcome` is `ok`, `failed`, `denied` or `throttled`. `before` and `after` are the old and the new value of a variable, or their digests (VAR-006, core/varaudit.nim)
   try:
-    discard c.execute(%*[["INSERT INTO audit_log (at, actor, action, target, outcome, detail) VALUES (?, ?, ?, ?, ?, ?)",
-                          now, clip(actor, 100), clip(action, 60), clip(target, 200), outcome, clip(detail, maxDetail)]])
+    discard c.execute(%*[["INSERT INTO audit_log (at, actor, action, target, outcome, detail, before, after) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                          now, clip(actor, 100), clip(action, 60), clip(target, 200), outcome, clip(detail, maxDetail), clip(before, maxChange), clip(after, maxChange)]])
   except CatchableError as e:
     stderr.writeLine "core: the audit could not be written: " & e.msg
 
@@ -40,15 +41,18 @@ proc list*(c: var RqClient; limit: int; actor = ""; action = ""; target = ""): J
     if v.len > 0:
       where.add (if where.len == 0: " WHERE " else: " AND ") & col & " = ?"
       args.add %v
-  var stmt = %*["SELECT id, at, actor, action, target, outcome, detail FROM audit_log" & where & " ORDER BY id DESC LIMIT ?"]
+  var stmt = %*["SELECT id, at, actor, action, target, outcome, detail, before, after FROM audit_log" & where & " ORDER BY id DESC LIMIT ?"]
   for a in args: stmt.add a
   stmt.add %max(1, min(limit, 1000))
   result = newJArray()
   let vals = c.query(%*[stmt])["results"][0]{"values"}
   if vals != nil:
     for v in vals:
-      result.add %*{"id": v[0].getBiggestInt, "at": v[1].getBiggestInt, "actor": v[2].getStr, "action": v[3].getStr, "target": v[4].getStr, "outcome": v[5].getStr,
-                    "detail": v[6].getStr}
+      var e = %*{"id": v[0].getBiggestInt, "at": v[1].getBiggestInt, "actor": v[2].getStr, "action": v[3].getStr, "target": v[4].getStr, "outcome": v[5].getStr,
+                 "detail": v[6].getStr}
+      if v[7].getStr.len > 0: e["before"] = v[7]
+      if v[8].getStr.len > 0: e["after"] = v[8]
+      result.add e
 
 proc prune*(c: var RqClient; now: int64) =
   discard c.execute(%*[["DELETE FROM audit_log WHERE at < ?", now - auditRetention]])

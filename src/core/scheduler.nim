@@ -38,7 +38,7 @@ const
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
   ## the execution profile's settings (set through the API/UI, D-27, D-29); defaults when the row is missing
   result = defaultSettings()
-  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min, artifact_quota_bytes, artifact_retention_days, cache_quota_bytes, cache_retention_days " &
+  let r = c.query(%*[["SELECT infra_retries, log_max_bytes, liveness_timeout, log_spool_bytes, log_hold_timeout, pod_limit, job_pod_limit_percent, runs_per_conductor, conductor_min, artifact_quota_bytes, artifact_retention_days, cache_quota_bytes, cache_retention_days, audit_variables " &
     "FROM execution_profiles WHERE id = ?", profileId]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0:
@@ -55,6 +55,7 @@ proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
     result.artifactRetentionDays = vals[0][10].getInt(0)
     result.cacheQuotaBytes = vals[0][11].getBiggestInt(0)
     result.cacheRetentionDays = vals[0][12].getInt(0)
+    result.auditVariables = vals[0][13].getStr("off")
 
 proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
   result = defaultPolicy()
@@ -176,6 +177,8 @@ proc getRun*(co: Core; runId: string): JsonNode =
     result["variables"] = vj
   let held = c.holdOf(runId)
   if held.held: result["hold"] = held.hold.view      # DAT-006: a legal hold
+  let covering = c.coveringHold(runId)               # ... and the one of its group or of its organisation that covers it
+  if covering.held: result["held_by"] = covering.hold.view
   let lockWait = c.waitingFor(runId)
   if lockWait.waiting: result["waiting_for_lock"] = %*{"name": lockWait.name, "held_by": lockWait.heldBy}
   # RUN-015: a queued step that waits for the log circuit says so (API shows the reason)
@@ -206,15 +209,15 @@ proc getProfileSettings*(co: Core; profileId = ""): JsonNode =
      "pod_limit": p.podLimit, "job_pod_limit_percent": p.jobPodLimitPercent,
      "runs_per_conductor": p.runsPerConductor, "conductor_min": p.conductorMin,
      "artifact_quota_bytes": p.artifactQuotaBytes, "artifact_retention_days": p.artifactRetentionDays,
-     "cache_quota_bytes": p.cacheQuotaBytes, "cache_retention_days": p.cacheRetentionDays}
+     "cache_quota_bytes": p.cacheQuotaBytes, "cache_retention_days": p.cacheRetentionDays, "audit_variables": p.auditVariables}
 
 proc setProfileSettings*(co: Core; s: ProfileSettings; profileId = "") =
   var c = newRq(co.rqliteUrl)
   discard c.execute(%*[["UPDATE execution_profiles SET infra_retries = ?, log_max_bytes = ?, liveness_timeout = ?, " &
     "log_spool_bytes = ?, log_hold_timeout = ?, pod_limit = ?, job_pod_limit_percent = ?, runs_per_conductor = ?, conductor_min = ?, " &
-    "artifact_quota_bytes = ?, artifact_retention_days = ?, cache_quota_bytes = ?, cache_retention_days = ? WHERE id = ?",
+    "artifact_quota_bytes = ?, artifact_retention_days = ?, cache_quota_bytes = ?, cache_retention_days = ?, audit_variables = ? WHERE id = ?",
     s.infraRetries, s.logMaxBytes, s.livenessTimeout, s.logSpoolBytes, s.logHoldTimeout, s.podLimit, s.jobPodLimitPercent, s.runsPerConductor, s.conductorMin,
-    s.artifactQuotaBytes, s.artifactRetentionDays, s.cacheQuotaBytes, s.cacheRetentionDays,
+    s.artifactQuotaBytes, s.artifactRetentionDays, s.cacheQuotaBytes, s.cacheRetentionDays, s.auditVariables,
     (if profileId.len > 0: profileId else: co.profileId)]])
   kickProfile(if profileId.len > 0: profileId else: co.profileId)    # a raised limit may let waiting steps go
 
@@ -298,6 +301,20 @@ const
 proc stepJournalKey(c: var RqClient; runId: string; ordinal: int): string =
   let r = c.query(%*[["SELECT retries FROM steps WHERE run_id = ? AND ordinal = ?", runId, ordinal]])["results"][0]{"values"}
   stepKeyOf(ordinal, if r != nil and r.len > 0: r[0][0].getInt else: 0)
+
+proc restoredCacheKey(c: var RqClient; t: PodTransition; attempt: int): string =
+  ## The answer of a `j.cache.restore` step (DAT-004): the key the shim restored, from its newest state (the one the controller read from the Pod's log, or the one stored); "" for a miss
+  ## and for every other step.
+  let r = c.query(%*[["SELECT opts, shim_json FROM steps WHERE run_id = ? AND ordinal = ? AND attempt = ?", t.step.run_id, int(t.step.seq), attempt]])["results"][0]{"values"}
+  if r == nil or r.len == 0: return
+  let ds = cacheDecls(r[0][0].getStr)
+  if ds.len == 0 or ds[0].mode != "restore": return
+  var best = none(ShimState)
+  for text in [t.shim_state_json, r[0][1].getStr]:
+    if text.len == 0: continue
+    let st = try: fromJson(parseJson(text)) except CatchableError: none(ShimState)
+    if st.isSome and st.get.cache.len > 0 and (best.isNone or st.get.n > best.get.n): best = st
+  if best.isSome: best.get.cache[0] else: ""
 
 proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let attempt = int(t.step.attempt)
@@ -386,7 +403,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
           stderr.writeLine "core: step " & t.step.run_id & "/" & $t.step.seq & " attempt " & $attempt & ": the Pod says " &
             protoName(podSays) & ", the shim's last state says " & protoName(shimSays) & " (" & shim.get.reason & ")"
     # the step's own result: write it into run_journal, close out the step
-    let res = $t.exit_code & "\n"
+    let res = $t.exit_code & "\n" & (if t.exit_code == 0: c.restoredCacheKey(t, attempt) else: "")
     # payload must equal exactly what the executor's host call sent (bootstrap.lua Job:sh:
     # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
     # as a different call than the one in the journal and fails script_nondeterminism - steps.command
@@ -718,6 +735,11 @@ proc encodeExecRequest*(r: ExecutorRequest): string = wireString(Protobuf.encode
 proc decodeExecRequest*(payload: string): ExecutorRequest = Protobuf.decode(cast[seq[byte]](payload), ExecutorRequest)
 proc encodeExecResponse*(r: ExecutorResponse): string = wireString(Protobuf.encode(r))
 proc decodeExecResponse*(payload: string): ExecutorResponse = Protobuf.decode(cast[seq[byte]](payload), ExecutorResponse)
+# a check of a script before a run exists (PIP-016, core/preflight.nim)
+proc encodeCheckScript*(r: CheckScript): string = wireString(Protobuf.encode(r))
+proc decodeCheckScript*(payload: string): CheckScript = Protobuf.decode(cast[seq[byte]](payload), CheckScript)
+proc encodeCheckResult*(r: CheckResult): string = wireString(Protobuf.encode(r))
+proc decodeCheckResult*(payload: string): CheckResult = Protobuf.decode(cast[seq[byte]](payload), CheckResult)
 
 # ------------------------------------------------------------------ ExecutorChannel (executor <-> core)
 

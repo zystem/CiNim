@@ -179,6 +179,51 @@ suite "DAT-004 the limits: the shard's, the organisation's, the groups'":
       setOrg(org, 600, 0)
       check c.makeRoom(be, org, other, 200, 0).ok                  # the organisation's 600: 40 + 500 + 200 > 600 -> the least recently used of the whole organisation goes: o (900 s ago), and then it fits
       check not has(org, other, "o") and has(org, back, "b")
+    test "the view: the entries of an organisation, or of a group and the groups below it, the most recently used first, with what each limit holds":
+      let org = newOrg()
+      let other = newOrg()
+      let be = store()
+      let team = group(org, "team")
+      let back = group(org, "team/backend")
+      let side = group(org, "side")
+      be.put(org, "", "root-key", 10, 100)
+      be.put(org, team, "team-key", 20, 50)
+      be.put(org, back, "back-key", 30, 10)
+      be.put(org, side, "side-key", 40, 70)
+      be.put(other, "", "not-mine", 99)
+      check c.listCaches(org, "").mapIt(it.key) == @["back-key", "team-key", "side-key", "root-key"]
+      let t = c.listCaches(org, "team")
+      check t.mapIt(it.key) == @["back-key", "team-key"] and t[0].groupPath == "team/backend" and t[0].size == 30 and t[0].state == "stored"
+      check c.listCaches(org, "side").len == 1 and c.listCaches(org, "").len == 4 and c.listCaches(org, "", limit = 2).len == 2
+      check c.listCaches(org, "").filterIt(it.groupPath == "").mapIt(it.key) == @["root-key"]
+      setGroupLimit(c, team, 100, 0)
+      setOrg(org, 1000, 0)
+      let pools = c.poolUsage(org, 5000)
+      check pools[0].name == "organization" and pools[0].quota == 1000 and pools[0].bytes == 100
+      check pools.len == 2 and pools[1].groupPath == "team" and pools[1].quota == 100 and pools[1].bytes == 50          # team's own and backend's
+      setOrg(org, 0, 0)
+      check c.poolUsage(org, 5000)[0].quota == 5000
+      setOrg(org, -1, 0)
+      check c.poolUsage(org, 5000)[0].quota == 0
+    test "the deletion by hand: one entry, or all of exactly one scope; the object goes too; what is being uploaded stays; another scope and another organisation are not touched":
+      let org = newOrg()
+      let other = newOrg()
+      let be = store()
+      let team = group(org, "team")
+      let back = group(org, "team/backend")
+      be.put(org, team, "a", 5)
+      be.put(org, team, "b", 5)
+      be.put(org, back, "c", 5)
+      be.put(org, "", "d", 5)
+      be.put(other, team, "a", 5)
+      check c.beginEntry(newId(), org, team, "half", objectKeyOf(org, team, "half"), 5, "s", "uploading", "up1", now)
+      check c.deleteEntries(be, org, team, "a") == (1, 0)
+      check not has(org, team, "a") and objectKeyOf(org, team, "a") notin be.objects and has(org, team, "b")
+      check c.deleteEntries(be, org, team, "nope") == (0, 0)
+      check c.deleteEntries(be, org, team, "") == (1, 0)                 # all of team: b; the group below, the root and "half" stay
+      check has(org, back, "c") and has(org, "", "d") and c.uploadingEntry(org, team, "half").found
+      check c.deleteEntries(be, org, "", "") == (1, 0) and not has(org, "", "d")
+      check has(other, team, "a")
     test "the retention: the nearest group that says something, then the organisation, then the shard; -1 keeps for ever":
       let org = newOrg()
       let team = group(org, "team")
@@ -303,3 +348,9 @@ suite "DAT-004 the requests of the cache on the channel":
       check checkCacheDecl("""{"cache":[{"key":"a","paths":["../x"],"restore_keys":[]}]}""").len > 0
       check checkCacheDecl("""{"cache":[{"key":"a","paths":[],"restore_keys":[]}]}""").len > 0
       check checkCacheDecl("""{"cache":[{"key":"a","paths":["x"],"restore_keys":["a b"]}]}""").len > 0
+      # the steps of j.cache.restore and j.cache.save: a restore needs no path, a save does, and there are two modes only
+      check checkCacheDecl("""{"cache":[{"key":"a","mode":"restore","paths":[],"restore_keys":["a"]}]}""") == ""
+      check checkCacheDecl("""{"cache":[{"key":"a","mode":"save","paths":["x"],"restore_keys":[]}]}""") == ""
+      check checkCacheDecl("""{"cache":[{"key":"a","mode":"save","paths":[],"restore_keys":[]}]}""").len > 0
+      check checkCacheDecl("""{"cache":[{"key":"a","mode":"both","paths":["x"],"restore_keys":[]}]}""").len > 0
+      check cacheDecls("""{"cache":[{"key":"a","mode":"restore","paths":[],"restore_keys":[]}]}""")[0].mode == "restore"

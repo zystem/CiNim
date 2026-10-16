@@ -28,6 +28,24 @@ message ConductorHello {
   string image = 7;                   // the image it runs from (CINIM_CONDUCTOR_IMAGE of its Pod); the core drains a conductor whose image is not the one it hands out
 }
 
+// A check of a script before a run exists (PIP-016, docs/conductors.md): the core asks a conductor of the organisation to run the script once against a stub host, in a process
+// of its own like a run's, and to say what it found. The conductor answers with a CheckResult; nothing is kept.
+message CheckScript {
+  string check_id = 1;
+  string script = 2;
+  map<string, string> given = 3;      // the launch parameters as given (PIP-012); not named `params` because the generated type of a map is named by its field
+  uint32 api_version = 4;             // the version of the Lua host API a run made now would have
+}
+
+message CheckResult {
+  string check_id = 1;
+  string code = 2;                    // "" when the pass found nothing; else script_error, step_limit, duplicate_id, memory_limit, instruction_limit, busy, timeout
+  string message = 3;                 // what the pass found, in the script's own words (the parameter that was refused, the line that failed)
+  bool certain = 4;                   // the finding does not depend on what the steps will answer: it came before the first step, or it is a limit the pass proves
+  uint32 steps = 5;                   // how many steps the pass saw
+  string params = 6;                  // the parameters a run would have (a JSON object of text), defaults completed, when the pass got that far
+}
+
 message HostCall {
   string run_id = 1;
   string lease_token = 2;

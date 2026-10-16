@@ -38,6 +38,24 @@ proc limit(resource: cint; value: int) =
   var r = RLimit(rlim_cur: value, rlim_max: value)
   discard setrlimit(resource, r)
 
+proc checkMode(payload: string; toSup: cint) =
+  ## PIP-016: not a run, a check of a script: one pass against the stub host, the findings back, and the process is over
+  let req = Protobuf.decode(cast[seq[byte]](payload), CheckScript)
+  var res = CheckResult(check_id: req.check_id)
+  try:
+    let p = preflight(req.script, req.given.mapIt((it.key, it.value)), int(req.api_version))
+    res.code = p.code
+    res.message = p.message
+    res.certain = p.certain
+    res.steps = uint32(p.steps)
+    res.params = p.paramsJson
+  except CatchableError as e:
+    res.code = "script_error"
+    res.message = e.msg
+    res.certain = false
+  if not writePipeFd(toSup, pkChecked, wireString(Protobuf.encode(res))): quit(2)
+  quit(0)
+
 proc runMode() =
   ## fd 0: from the supervisor; fd 1 is the way to it (stdout is moved to stderr so that nothing a script prints can look like a frame)
   let toSup = dup(1)
@@ -52,6 +70,7 @@ proc runMode() =
   proc send(kind: PipeKind; payload: string) =
     if not writePipeFd(toSup, kind, payload): quit(2)
   let first = readPipeFd(0)
+  if first.isSome and first.get.kind == pkCheck: checkMode(first.get.payload, toSup)
   if first.isNone or first.get.kind != pkLease: quit(2)
   let g = Protobuf.decode(cast[seq[byte]](first.get.payload), LeaseGranted)
   let runId = g.run_id
@@ -111,6 +130,8 @@ type
     reader: PipeReader
     ended: bool               ## it said what became of the run (finished, suspended, lost)
     eof: bool
+    isCheck: bool             ## a check of a script (PIP-016), not a run: it holds no place and is not among the runs the conductor reports
+    startedAt: float
 
   Flight = object             ## a frame sent to the core and not answered yet
     runId: string
@@ -124,7 +145,8 @@ var
 
 proc onTerm(sig: cint) {.noconv.} = stopping = true
 
-proc startRun(g: LeaseGranted): bool =
+proc startProc(id: string; first: PipeKind; payload: string; isCheck = false): bool =
+  ## a process of this program in `--run` mode, with the pipes to it and its limits; a run's (the lease) or a check's (the script). A check gets less: it is a pass and nothing more.
   var inP, outP: array[2, cint]      # inP: supervisor writes [1], run reads [0]; outP: run writes [1], supervisor reads [0]
   if not openPipe(inP) or not openPipe(outP): return false
   for fd in [inP[1], outP[0]]: discard fcntl(fd, F_SETFD, FD_CLOEXEC)       # the other runs must not inherit this run's ends
@@ -137,8 +159,8 @@ proc startRun(g: LeaseGranted): bool =
   discard posix_spawn_file_actions_adddup2(actions, outP[1], 1)
   let argv = allocCStringArray([getAppFilename(), "--run"])
   # the run process gets no environment of the Pod: no credentials, no addresses; only its limits
-  let envp = allocCStringArray(["CINIM_RUN_MEMORY_MB=" & getEnv("CINIM_RUN_MEMORY_MB", "1024"),
-                                "CINIM_RUN_CPU_SECONDS=" & getEnv("CINIM_RUN_CPU_SECONDS", "3600")])
+  let envp = allocCStringArray(["CINIM_RUN_MEMORY_MB=" & (if isCheck: "256" else: getEnv("CINIM_RUN_MEMORY_MB", "1024")),
+                                "CINIM_RUN_CPU_SECONDS=" & (if isCheck: "15" else: getEnv("CINIM_RUN_CPU_SECONDS", "3600"))])
   var pid: Pid
   let rc = posix_spawn(pid, getAppFilename().cstring, actions, attr, argv, envp)
   discard posix_spawn_file_actions_destroy(actions)
@@ -151,8 +173,17 @@ proc startRun(g: LeaseGranted): bool =
     closeFd inP[1]
     closeFd outP[0]
     return false
-  runs[g.run_id] = RunProc(runId: g.run_id, pid: pid, toRun: inP[1], fromRun: outP[0])
-  writePipeFd(inP[1], pkLease, wireString(Protobuf.encode(g)))
+  runs[id] = RunProc(runId: id, pid: pid, toRun: inP[1], fromRun: outP[0], isCheck: isCheck, startedAt: epochTime())
+  writePipeFd(inP[1], first, payload)
+
+proc startRun(g: LeaseGranted): bool = startProc(g.run_id, pkLease, wireString(Protobuf.encode(g)))
+
+const maxChecks = 2             ## checks of scripts under way at once; more are answered "busy" (the core then lets the run be made and checked when it runs)
+
+proc realRuns(): seq[string] =
+  ## the runs the conductor leads (not the checks under way)
+  for id, r in runs:
+    if not r.isCheck: result.add id
 
 proc closeRun(r: RunProc) =
   closeFd r.toRun
@@ -185,9 +216,9 @@ proc main() =
 
   proc sendHello() =
     inc frameNo
-    let free = if stopping: 0 else: max(0, perConductor - runs.len)
+    let free = if stopping: 0 else: max(0, perConductor - realRuns().len)
     let hello = ConductorHello(conductor_id: conductorId, namespace: ns, credential: credential, image: getEnv("CINIM_CONDUCTOR_IMAGE"),
-                               api_versions: executorApiVersions().mapIt(uint32(it)), free_places: uint32(free), held_runs: toSeq(runs.keys))
+                               api_versions: executorApiVersions().mapIt(uint32(it)), free_places: uint32(free), held_runs: realRuns())
     discard conn.sendFrame(frame(session, "conductor.hello", wireString(Protobuf.encode(hello)), id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
     helloDirty = false
     lastHello = epochTime()
@@ -210,6 +241,17 @@ proc main() =
         helloDirty = true
       of acDuplicate: discard conn.sendFrame(frame(session, "ping", ack = inbox.ackValue, key = ns & "#conductors"))
       of acGap: discard
+    of "conductor.check":
+      let req = try: Protobuf.decode(cast[seq[byte]](f.payload), CheckScript) except CatchableError: CheckScript()
+      var busy = 0
+      for _, r in runs:
+        if r.isCheck: inc busy
+      let id = "check-" & req.check_id
+      if req.check_id.len == 0 or stopping or busy >= maxChecks or id in runs or not startProc(id, pkCheck, f.payload, isCheck = true):
+        if req.check_id.len > 0:
+          let res = CheckResult(check_id: req.check_id, code: "busy", message: "the conductor is busy")
+          inc frameNo
+          discard conn.sendFrame(frame(session, "conductor.checked", wireString(Protobuf.encode(res)), id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
     of "conductor.reply":
       if f.re in flights:
         let fl = flights[f.re]
@@ -266,20 +308,35 @@ proc main() =
         of pkLost:
           r.ended = true
           echo "conductor: run ", id, ": the lease is lost (", fr.get.payload, "); left to its new holder"
+        of pkChecked:
+          r.ended = true
+          inc frameNo
+          discard conn.sendFrame(frame(session, "conductor.checked", fr.get.payload, id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
         else: discard
       if r.reader.broken:
         stderr.writeLine "conductor: the pipe of run " & id & " is broken"
         r.eof = true
+      if r.isCheck and not r.ended and epochTime() - r.startedAt > 20.0:
+        # a pass that does not end (the limits of the process cut it at 15 s of CPU; this is the wall clock): the core is told, the process is killed
+        discard kill(r.pid, SIGKILL)
+        r.ended = true
+        inc frameNo
+        discard conn.sendFrame(frame(session, "conductor.checked", wireString(Protobuf.encode(CheckResult(check_id: id["check-".len .. ^1], code: "timeout", message: "the check took too long"))),
+                                     id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
       var status: cint
       if waitpid(r.pid, status, WNOHANG) == r.pid:
-        if not r.ended:
+        if not r.ended and r.isCheck:
+          inc frameNo
+          discard conn.sendFrame(frame(session, "conductor.checked", wireString(Protobuf.encode(CheckResult(check_id: id["check-".len .. ^1], code: "script_error", message: "the check ended without a word"))),
+                                       id = frameNo, ack = inbox.ackValue, key = ns & "#conductors"))
+        elif not r.ended:
           # it died by itself (a limit, a crash): its lease runs out and the core gives the run to a conductor again
           stderr.writeLine "conductor: the process of run " & id & " ended without a word (status " & $status & ")"
         done.add id
     for id in done:
       closeRun runs[id]
+      if not runs[id].isCheck: helloDirty = true
       runs.del id
-      helloDirty = true
 
   var drainStarted = 0.0
   while true:

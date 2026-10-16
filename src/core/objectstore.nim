@@ -5,9 +5,9 @@
 ## no access to the store: its shim moves the bytes to and from the core (core/artifactingest.nim), and the core talks to the store through `ObjectBackend`
 ## (core/storagebackend.nim), which is the seam where the storage module can leave the core. The objects of a run are `<tenant>/<run>/<path>`; a step may only
 ## put and get what its own options declared (`artifacts = {upload = {...}, download = {...}}`), in its own run.
-import std/[json, strutils, sequtils]
-import ../common/[rqlite, sigv4]
-import secretvault, storagebackend, s3backend
+import std/[json, strutils, sequtils, os]
+import ../common/[rqlite, sigv4, zmqcurve]
+import secretvault, storagebackend, s3backend, zstore
 export storagebackend
 
 const
@@ -23,6 +23,10 @@ type
   StoreConfig* = object
     found*: bool
     endpoint*, region*, bucket*, keyId*: string
+    kind*: string                ## "" or "s3": a bucket; "nodes": store nodes of our own (docs/store.md), `nodes` are their addresses, the secret is their token
+    nodes*: seq[string]
+    minAcks*: int
+    transport*: string           ## "" or "curve": CURVE on the link to the nodes; "plain": none, for a network that is encrypted anyway (docs/store.md)
 
   Store* = object
     ok*: bool
@@ -33,6 +37,14 @@ type
 
 func checkConfig*(cfg: StoreConfig; secret: string): string =
   ## "" if these may be the settings of the store, else what is wrong
+  if cfg.kind == "nodes":
+    if cfg.nodes.len < 1 or cfg.nodes.len > 4: return "nodes is 1..4 addresses of store nodes"
+    for a in cfg.nodes:
+      if not a.startsWith("tcp://") or a.len > 200 or a.anyIt(it < '!' or it > '~'): return "a node is tcp://host:port"
+    if cfg.minAcks < 0 or cfg.minAcks > cfg.nodes.len: return "min_acks is 0 (every node, the default) or 1.." & $cfg.nodes.len
+    if cfg.transport notin ["", "curve", "plain"]: return "transport is curve (the default) or plain"
+    if secret.len < 8 or secret.len > 256 or secret.anyIt(it < '!' or it > '~'): return "token is 8..256 printable characters"
+    return ""
   if not splitEndpoint(cfg.endpoint).ok: return "endpoint is scheme://host[:port], http or https, with no path"
   if cfg.region.len == 0 or cfg.region.len > 64 or cfg.region.anyIt(it notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}): return "region is letters, digits, - and _"
   if cfg.bucket.len < 3 or cfg.bucket.len > 63 or cfg.bucket.anyIt(it notin {'a' .. 'z', '0' .. '9', '-', '.'}): return "bucket is 3..63 lowercase letters, digits, - and ."
@@ -72,7 +84,7 @@ func objectKey*(tenant, runId, path: string): string = tenant & "/" & runId & "/
 proc saveStore*(c: var RqClient; kek: KekProvider; cfg: StoreConfig; secret: string; now: int64): tuple[ok, retry: bool, error: string] =
   let put = c.putSecret(kek, platformTenant, secretName, secret, now)
   if not put.ok: return (false, put.retry, put.error)
-  let meta = $(%*{"endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "key_id": cfg.keyId, "updated_at": now})
+  let meta = $(%*{"endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "key_id": cfg.keyId, "updated_at": now, "kind": cfg.kind, "nodes": cfg.nodes, "min_acks": cfg.minAcks, "transport": cfg.transport})
   discard c.execute(%*[["INSERT INTO vault_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", metaKey, meta]])
   (true, false, "")
 
@@ -82,8 +94,11 @@ proc loadConfig*(c: var RqClient): StoreConfig =
   if v == nil or v.len == 0: return
   try:
     let j = parseJson(v[0][0].getStr)
-    StoreConfig(found: true, endpoint: j["endpoint"].getStr, region: j["region"].getStr, bucket: j["bucket"].getStr, keyId: j["key_id"].getStr)
-  except CatchableError: StoreConfig()
+    result = StoreConfig(found: true, endpoint: j["endpoint"].getStr, region: j["region"].getStr, bucket: j["bucket"].getStr, keyId: j["key_id"].getStr,
+                         kind: j{"kind"}.getStr, minAcks: j{"min_acks"}.getInt(1), transport: j{"transport"}.getStr)
+    if j{"nodes"} != nil and j["nodes"].kind == JArray:
+      for a in j["nodes"].elems: result.nodes.add a.getStr
+  except CatchableError: result = StoreConfig()
 
 proc forgetStore*(c: var RqClient): bool =
   discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ? AND name = ?", platformTenant, secretName]])
@@ -108,8 +123,19 @@ proc loadStore*(c: var RqClient): Store =
   result.secret = got.values[0][1]
   result.ok = true
 
+var missedHook*: MissedProc          ## set by the core at start: what a store node missed goes into the repair queue (core/storerepair.nim)
+
 proc backend*(s: Store): ObjectBackend =
   ## the store as the core talks to it; the one place that says which backend it is
+  if s.cfg.kind == "nodes":
+    let certs = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
+    var nodes: seq[ZNode]
+    let plain = s.cfg.transport == "plain"
+    for a in s.cfg.nodes:
+      var n = if plain: newNode(a, "", s.secret, (publicKey: "", secretKey: "")) else: newNode(a, loadPublicKey(certs, "store"), s.secret, loadKeypair(certs, "client"))
+      n.plain = plain
+      nodes.add n
+    return newMirror(nodes, s.cfg.minAcks, missedHook)
   S3Backend(endpoint: s.cfg.endpoint, region: s.cfg.region, bucket: s.cfg.bucket, keyId: s.cfg.keyId, secret: s.secret)
 
 # ------------------------------------------------------------------ the rows

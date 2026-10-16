@@ -1,0 +1,124 @@
+# The store service (`cinim-store`)
+
+The object store of the shard (artifacts, caches, the mirrors of the git cache) was an S3 bucket (docs/artifacts.md). This is the other implementation of the same seam, `ObjectBackend` (`src/core/storagebackend.nim`): a service of our own, in Nim, that keeps the files as **plain files on a disk under readable paths**, spoken to over ZeroMQ with CURVE, run as **two independent nodes that mirror each other**. Requirements: DAT-003, DAT-004, DAT-006, STO-006. Decision: D-57.
+
+## Why
+
+* The owner does not want an S3 product for its own sake, and the ready ones were tried (two nodes each, on one host): Garage refuses keys over about 479 bytes and is slow on small objects, SeaweedFS needs a client that cuts big files, a repair by hand and allocates its volumes whole, and the simple WebDAV servers (Dufs, Caddy) leave a half-written file under the final name when killed in the middle of a `PUT` and have no replication.
+* **The metadata is already in rqlite.** Every artifact and cache entry has its key, size, SHA-256 and state in the database (`artifacts`, `caches`). So a node needs to keep **contents only**: no versions, no tombstones, no conflict rules. What exists on a node is decided by the core, and a repair is a comparison of the database with the nodes.
+* People must be able to **see the files** and must **never see another organisation's files**: the files lie under readable paths and the web interface is the core's (its RBAC decides who sees what), not a browser on the nodes.
+
+## What it holds
+
+| What | Object | Size | Form |
+|---|---|---|---|
+| **Artifacts** of a step (DAT-003) | one object per file, `<tenant>/<run>/<path>` | up to 2 GiB, up to 1000 files a step, 10 GiB a run | **the file as it is**, not an archive: a user and an operator see the files and take one of them, the API serves one file by its path, the quota and the retention are counted per file, and a file is read by `Range` without unpacking anything. A retry puts the same path again and replaces it whole |
+| **Caches** and **the git mirrors** (DAT-004) | one object per entry, `<tenant>/cache/<scope>/<hash of the key>` | up to 2 GiB | already a tar cut into 4 MiB chunks, each gzipped on its own (docs/cache.md): the form is the shim's, the store only keeps the bytes. Never replaced (a key is immutable) |
+| **The logs of held runs** (DAT-006) | one object per step and attempt, `heldlogs/<tenant>/<run>/<step>-<attempt>.log.gz` | text, up to the step's `log_max_bytes`, 5-10 times smaller when gzipped | **gzip, in members of 4 MiB of text** (members can be joined into one valid file, and an index of their offsets beside it lets a reader start in the middle). Written when the hold is placed and the step has ended; not built yet (docs/artifacts.md) |
+| **Backups** (BKP-003, BKP-005) | `backup/state/<time>`, `backup/logs/<node>/<time>` | the state of rqlite, snapshots of the log partitions | uploaded by a companion container with `cinim-storectl`, a command-line client of the same protocol (rqlite's own uploader speaks S3 and GCS only, rclone speaks WebDAV; neither speaks this). Not built yet |
+| **The audit export** (AUD-001, SEC-005) | `audit/<month>` | text | write once: a node refuses to replace or delete an object under `audit/` and `heldlogs/` unless the core says so with the hold released (not built yet) |
+| **Later** | pipeline bundles, plugin packages, test reports, SBOM and provenance | small to medium | one object each, as an artifact is |
+
+**Artifacts are not archived into one `tgz`.** An archive of a step's files would be one object and one atomic write, and would compress what compresses, but a single file could be got out of it only by reading the archive from its start (a `tar.gz` has no index), and nobody could see the files, which the owner wants (docs/artifacts.md "Moving the storage module"). What an archive is good for is already done where the shape fits: the cache is chunked and gzipped, a log is gzipped in members. If an artifact is worth compressing, the step can put a `.tar.gz` of its own.
+
+## The node
+
+One process, `cinim-store`, with one CURVE ROUTER socket (the port `19750`, `CINIM_STORE_IO_THREADS` I/O threads, 4 by default) for the core. `CINIM_STORE_SYNC` is `full` (the default: the file and then its directory are flushed to the disk before the answer, so an answered write survives a power cut), `file` (the file only) or `none` (the page cache decides: a killed process loses nothing, a machine that loses power may lose the last seconds). It has no web interface of its own: **what people see of the files they see through the core** (its API now, its UI later, with its RBAC), because a user must never see another organisation's files and the core is where that is known.
+
+**On disk** (`CINIM_STORE_ROOT`):
+
+```
+data/<escaped key as a path>      the objects
+tmp/<id>                          a file being written; nothing here is an object
+tmp/up-<upload id>/<part>         the parts of a multipart upload
+```
+
+The key `acme/s1_01a1/dist/app.txt` is the file `data/acme/s1_01a1/dist/app.txt`. Each segment of the key is **escaped** so that a name is always a safe, single file name: letters, digits and `- _ . + = @ , ( )` and a space inside the name stay as they are; every other byte becomes `%XX`; a leading or trailing `.` or space is escaped too (so nothing is hidden or special, and no object can be called `.` or `..`); `~` is escaped (it is the mark of the long form below). A segment whose escaped form is longer than 200 bytes becomes the first 120 bytes of it, `~` and 24 hex digits of the SHA-256 of the whole segment: it is still readable, it cannot clash with another, and the full name is in the database. A key is at most 1024 bytes, has no empty segment, no `.` or `..` segment, no control character, and does not start or end with `/`; anything else is refused with `bad_key`, never rewritten. (Caddy turned `a/../x` into `x` silently; this node refuses.)
+
+**Writes are atomic.** An object is written to `tmp/`, its SHA-256 is checked against the one the client announced (a mismatch is refused: `bad_hash`), the file is flushed (`fsync`), renamed into place, and the directory is flushed. A crash leaves a file in `tmp/`, never a half object under its name (a `kill -9` in the middle of a `PUT` leaves a partial file under the final name on Dufs and on Caddy). `tmp/` entries older than a day are removed by the node itself, hourly. A replaced object is replaced whole, by a rename.
+
+**The operations** (the eight of `ObjectBackend`, and four more):
+
+| op | what |
+|---|---|
+| `put` | a whole object up to 8 MiB: `key`, `data`, optional `sha256` |
+| `mp_create` | `key` → `upload_id` |
+| `mp_part` | `upload_id`, `part` (from 1), `data` → `etag` (the SHA-256 of the part) |
+| `mp_complete` | `upload_id`, the list of `(part, etag)`, optional `sha256` of the whole → the object appears |
+| `mp_abort` | `upload_id` |
+| `read` | `key`, `offset`, `length` (at most 4 MiB) → `data`, and the size |
+| `size` | `key` → size, or `not_found` |
+| `delete` | `key` (a missing key is not an error) |
+| `hash` | `key` → the SHA-256 of the file, read from the disk (the scrub) |
+| `list` | `prefix`, `after`, `limit` → entries `(key, size, exact)` in order; `exact` false for a long-form name |
+| `stats` | bytes total and free on the disk, number of objects |
+| `ping` | the node is up |
+
+Every request carries the **token** (`CINIM_STORE_TOKEN`, a secret shared by the core and the nodes, compared in constant time); a request without it is answered `unauthorized` and nothing else. CURVE keeps the line private (the shared `store` keypair, as the other services use `core` and `client`); the token is what says who is asking.
+
+**Seeing the files.** An operator who wants to look at a node reads its disk (the paths are readable, see above) or asks the core, which lists a tenant's objects from the database and, for a check, `list`s a node. There is no HTTP port on the node, so nothing on it can be reached without the token.
+
+## The mirror (in the core)
+
+`MirrorBackend` is an `ObjectBackend` over the list of nodes (two in a shard; one is allowed and then there is no mirror).
+
+* **A write goes to every node in parallel**, the requests sent to all before any answer is waited for, and it is **confirmed by the last one**: it succeeds when every node has it (`min_acks`, by default the number of nodes). A put, every step of a multipart upload (create, each part, complete, abort) and a delete all work in this one mode; a delete that one node did not take fails and is tried again, so a row is not forgotten while an object is still on a node. With a node away a write therefore fails (the error says it is worth trying again), as it would on any store that keeps two copies before it answers.
+* **A smaller `min_acks`** (1 of 2) is a degraded mode, chosen on purpose for a shard that must go on writing with one node away: the write succeeds with that many nodes, and each node that did not take it is written into the **repair queue** (`store_repair` in rqlite: key, node, `copy` or `delete`; the last operation on a key and a node wins). Without it the queue is only fed by the check against the database below.
+* **A read** goes to the nodes in turn, the node that answered last first; a node that does not have the object (`not_found`) or does not answer is passed over.
+* **The repair pass** (the core's watchdog, every minute; a task is attempted with growing pauses): a `copy` task reads the object from a node that has it, writes it to the one that has not (checking the SHA-256 against the database's), and drops the task; a `delete` task deletes. An object that is gone from the database meanwhile is not copied. The pass looks at a bounded number of tasks each time.
+* **The check against the database** (the same pass, slower, a slice of the rows each time): for rows `stored` in `artifacts` and `caches`, every node is asked the `size`; a missing or different one becomes a `copy` task. This is the whole of the "resync" after a node lost its disk or was away longer than the queue remembers, and it needs nothing from the nodes but their `size` and `hash`.
+* **Objects the database does not know** (a crash between the `put` and the row) are found by `list` of a node against the rows, one tenant's prefix at a time, and deleted after a day.
+
+## Settings
+
+`PUT /api/v1/storage` takes either the S3 settings (as before) or `{"kind": "nodes", "nodes": ["tcp://cinim-store-0.cinim-store:19750", "tcp://cinim-store-1.cinim-store:19750"], "token": "...", "min_acks": 0, "transport": "curve"}` (`min_acks` 0 or left out: every node confirms, see "The mirror"; `transport` `plain` for a link without CURVE inside a network that is encrypted anyway, the nodes then run with `CINIM_STORE_TRANSPORT=plain`; see "Speed"). The token is sealed like the S3 secret (docs/artifacts.md). The core's CURVE keys come from the certs directory (`store.pub`); the nodes hold `store.key`.
+
+## Speed and what bounds it
+
+Measured on one laptop (NVMe, loopback, one run each, the same Python client for every candidate, 2026-10-16; the rows of `cinim-store` were measured again after the copies in the node were cut, the others are the first run, the HTTPS and darkhttpd rows were added later with the same harness, a dash means the operation does not exist). The others are one node without replication; `cinim-store` is shown with one node and with two that must both confirm. `k4` is a client that sends the 8 MiB parts of one object over 4 connections at once; `plain` is the link without CURVE. CPU is the server's, in seconds, for the whole 1 GiB phase (two objects written and read back, 4 GiB moved); memory is the peak resident memory in that phase (for the containers the anonymous memory of their cgroup, the page cache not counted; for the node the resident size of the process).
+
+| | 64 KiB PUT / GET, 8 threads (obj/s) | 64 KiB PUT, 1 thread (obj/s) | 8 MiB PUT / GET, 4 threads (MB/s) | 1 GiB PUT / GET, one stream (MB/s) | CPU for the 1 GiB phase (s) | peak memory (MiB) | after `kill -9` in the middle of a write |
+|---|---|---|---|---|---|---|---|
+| Dufs | 1627 / 2256 | 505 | 802 / 637 | 151 / 368 | 17.0 | 2 | partial file under the final name |
+| Caddy + webdav | 904 / 3057 | 736 | 1472 / 658 | 1114 / 768 | 4.4 | 20 | the same |
+| File Browser (archived 2026-09-01, no security fixes) | 2810 / 2750 | 438 | 1179 / 658 | 964 / 808 | 3.1 | 22 | the same |
+| SFTPGo (WebDAV) | 1537 / 2653 | 474 | 1541 / 687 | 1304 / 864 | 2.5 | 44 | the same |
+| darkhttpd 1.16 (HTTP, GET only) | — / 2631 | — | — / 639 | — / 540 | 2.2 (reads only) | <1 | no writes |
+| darkhttpd, TLS terminated by Caddy in front | — / 2379 | — | — / 481 | — / 534 | 2.5 (reads only, both containers) | 19 | no writes |
+| Dufs, HTTPS | 1594 / 2477 | 428 | 391 / 473 | 126 / 391 | 23.3 | 2 | the same |
+| Caddy + webdav, HTTPS | 893 / 2385 | 929 | 1292 / 498 | 795 / 557 | 4.2 | 17 | the same |
+| File Browser, HTTPS | 2543 / 2400 | 419 | 1105 / 530 | 812 / 594 | 4.0 | 20 | the same |
+| SFTPGo (WebDAV), HTTPS | 1614 / 2504 | 641 | 1213 / 504 | 830 / 513 | 4.4 | 45 | the same |
+| SeaweedFS without the filer, 4 MB pieces, no replication | 570 / 2796 | 795 | 809 / 830 | 287 / 529 | 7.9 | 156 | not tried |
+| SeaweedFS, 4 MB pieces, two copies | 379 / 2224 | 320 | 394 / 841 | 131 / 539 | 18.7 | 308 | not tried |
+| **`cinim-store`, one node** | 954 / 3799 | 190 | 246 / 387 | 52 / 98 | 18.7 | 65 | nothing under the key, the parts in `tmp/` |
+| `cinim-store`, one node, `CINIM_STORE_SYNC=none` | 2938 / 4432 | 256 | 254 / 391 | 56 / 98 | 18.5 | 65 | the same |
+| `cinim-store`, one node, `plain` | 1204 / 7541 | 202 | 470 / 1346 | 98 / 451 | 15.5 | 65 | the same |
+| `cinim-store`, one node, `k4` | 956 / 3896 | 180 | 246 / 386 | 121 / 98 | 19.4 | 89 | the same |
+| `cinim-store`, one node, `plain` and `k4` | 933 / 8419 | 273 | 497 / 984 | 162 / 479 | 15.9 | 89 | the same |
+| **`cinim-store`, two nodes, both confirm** | 834 / 4111 | 140 | 125 / 382 | 48 / 92 | 36.5 | 113 | the same |
+| `cinim-store`, two nodes, `plain` | 682 / 6943 | 188 | 389 / 1165 | 91 / 435 | 30.8 | 113 | the same |
+| `cinim-store`, two nodes, `plain` and `k4` | 956 / 6706 | 177 | 358 / 996 | 132 / 428 | 33.3 | 161 | the same |
+
+What it says.
+
+1. **CURVE bounds `cinim-store` for big objects.** It is encrypted in the I/O thread of the connection, about 55 MB/s a thread (a ZeroMQ socket on plain TCP moved 1 GB/s on the same machine). One stream of a big file takes about 20 s a gibibyte; four streams together about 250 MB/s with 4 I/O threads, which the node and the core now run (`CINIM_STORE_IO_THREADS`, `stream.newContext`).
+2. **Option: parts of one object over several connections** (`k4`): a 1 GiB write rose from 52 to 121 MB/s (2.3 times). Reads were not parallelised in this test and did not change. The core cannot use it yet: its callers send the parts one after the other (the artifact ingest is one thread); it would need a window of parts in flight.
+3. **Option: a link without CURVE** (`CINIM_STORE_TRANSPORT=plain` on the node, `"transport": "plain"` in the settings): reads of 8 MiB rose from 387 to 1346 MB/s (3.5 times), of 1 GiB from 98 to 451, small reads from 3799 to 7541 objects a second; writes rose less (1 GiB from 52 to 98 MB/s). **The link is then not encrypted and the token crosses it in the clear**: it is for a network that is encrypted anyway (a CNI with WireGuard, say), and the node says so at start. Both options together give 162 MB/s of writes. The writes are then bound by the node itself (see 5).
+4. **A small write is bound by the flush.** With `CINIM_STORE_SYNC=none` small writes ran at 2938 objects a second against 954 with the flush of the file and its directory (the default), and one thread at 256 against 190. The default keeps a write that was answered through a power cut; `none` keeps it through a killed process only. Choosing is the owner's. (An earlier version of this section said the flush did not matter: that measurement ran the same node twice, because the first was not stopped.)
+5. **The node was expensive in CPU and memory, and is less so.** The first build spent 25-31 s of CPU for the 1 GiB phase and held 190-490 MiB at its peak (two nodes 54 s and 428 MiB), against 2.5-4.4 s and 2-44 MiB for Caddy, File Browser and SFTPGo (SeaweedFS 156-308 MiB with its master), because an 8 MiB request was copied about ten times (out of ZeroMQ into a string, the frame, the payload, the queue between threads in and out, the fields, the argument of the write), and four workers held such requests at once. Now the frame is copied once, from ZeroMQ into a block of memory that travels to its worker by pointer; the request is read in place (`wire.View`, `stream.decodeHead`), the data of a put is written to the file from that block, and a read goes from the file straight into the reply frame, with its header written just before the bytes, which ZeroMQ sends and frees without a copy. The same phase now takes 15.5-19.4 s and 65-89 MiB (two nodes 31-36 s and 113-161 MiB), and 8 MiB writes with 4 threads went from 146 to 246 MB/s (CURVE) and from 235 to 470 (`plain`). What is left is more than the others spend; it is not profiled (`perf` and `gdb` are not allowed to attach on this machine), and the usual suspects are the SHA-256 of every object written, the encryption, and the work of the kernel for the files and the flushes. Idle, the node holds 6-13 MiB.
+6. **Small reads and a listing are as good as any candidate** (a listing of 10 000 objects in pages of 1000 takes 0.2 s). Every other candidate leaves a half-written file under the final name after `kill -9`; this node does not.
+7. **HTTPS for the HTTP candidates** (a self-signed certificate that the client does not verify, persistent connections, so the handshake is not in the measure; the same Python client encrypts on its side on the same machine, so the HTTPS figures are a lower bound of the server, and small reads are bound by the client for all of them: 2400-2500 objects a second). Encryption costs little: a big file over HTTPS moves at 126-830 MB/s a stream against 151-1304 over HTTP (Caddy 1114 / 768 → 795 / 557, File Browser 964 / 808 → 812 / 594, SFTPGo 1304 / 864 → 830 / 513, Dufs 151 / 368 → 126 / 391), and the CPU for the phase rose for Dufs from 17.0 to 23.3 s, for SFTPGo from 2.5 to 4.4, for File Browser from 3.1 to 4.0, and did not change for Caddy (4.4 → 4.2). Probably these servers encrypt with AES-GCM on hardware instructions (the cause was not checked), while CURVE of ZeroMQ is XSalsa20-Poly1305 without hardware help; at any rate the node moves 55 MB/s a stream against hundreds for HTTPS. So it is CURVE that is slow, not encryption as such: the `plain` link inside a network that is encrypted anyway (item 3) stays a working option, and the fair comparison of the node with the HTTP candidates, where encryption is concerned, is with their HTTPS rows.
+8. **darkhttpd** (1.16, an Alpine package, one thread, no writes: it has no PUT and no TLS) was measured for reads only, the objects being put into its directory by the harness itself (the write columns are empty). It reads 64 KiB in 8 threads at 2631 objects a second, 8 MiB at 639 MB/s, 1 GiB at 540 MB/s, on 2.2 s of CPU and under a megabyte of memory. It cannot be the store (no writes, no roles, one shared `--auth` and nothing about atomic writes); it would do as the plainest reader of a directory behind a TLS front (the row with Caddy: 481-534 MB/s, 2.5 s of CPU, 19 MiB).
+
+Not measured here: a real network, the node's CPU under many clients, a day of work.
+
+## Checked
+
+Unit tests of the layout, the disk, the wire form and the node's handler (`tstorelayout`, `tstoredisk`, `tstorewire`, `tstorenode`); integration tests with real node processes (`tstorenet`: every operation, a wrong token, a multipart upload of 25 MB, a node stopped and started again, the mirror with a node away, a node stuck with `SIGSTOP`, the repair by parts checked by hash, four threads, `cinim-storectl`) and with a real rqlite (`tstorerepair`: the queue, the pause after a failure, the check of the rows).
+
+**On the TESTING cluster (2026-10-16, images h78, two nodes of 4 GiB on `directpv`, `PUT /api/v1/storage` with `kind: nodes`):** the check of the settings (put, read, delete and a multipart upload on both nodes) passed; a run with a step that uploaded `dist/**` (a 20 MB random file and a small one) and a step that downloaded it printed the same SHA-256, and `cinim-storectl hash` gave the same SHA-256 on both nodes. With one node scaled away, a step's upload waited (the write is refused while a node is away, the shim keeps trying), and 17 seconds after the node came back the run finished `SUCCEEDED` with both artifacts. `j.cache.restore` and `j.cache.save` (docs/cache.md) missed, then hit by the prefix of an earlier key (`deps-1`), then hit by the exact key; the view of the caches and the deletion of one entry removed it from both nodes; the check of a run before it exists answered `400` for a parameter below its minimum. Not checked: the degraded mode (`min_acks` 1) on the cluster, the repair pass on the cluster, a node that lost its disk, a day of work.
+
+## Not built (first version)
+
+Three or more nodes with a quorum; re-balancing; erasure coding; a limit of bytes per tenant on the node (the quotas are the core's); the view of the files in the core's UI (there is no UI yet).

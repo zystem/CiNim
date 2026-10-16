@@ -107,6 +107,18 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS run_holds (
        run_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, reason TEXT NOT NULL, placed_by TEXT NOT NULL, placed_at INTEGER NOT NULL)""",
   "CREATE INDEX IF NOT EXISTS run_holds_tenant ON run_holds (tenant_id)",
+  # DAT-006: a legal hold on a group (and the groups below it) or, with group_id '', on the whole organisation: it covers the runs that are there and those made while it stands
+  """CREATE TABLE IF NOT EXISTS scope_holds (
+       tenant_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL, placed_by TEXT NOT NULL, placed_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, group_id))""",
+  # DAT-006, core/heldlogs.nim: the copy of the log of a step of a held run, kept in the object store while the hold stands
+  """CREATE TABLE IF NOT EXISTS held_logs (
+       run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, attempt INTEGER NOT NULL, tenant_id TEXT NOT NULL, s3_key TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+       line_count INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, PRIMARY KEY (run_id, ordinal, attempt))""",
+  # D-57, core/storerepair.nim: what a store node has to be given or to lose so that the nodes agree again; the last operation on a key and a node wins
+  """CREATE TABLE IF NOT EXISTS store_repair (
+       key TEXT NOT NULL, node TEXT NOT NULL, op TEXT NOT NULL, since INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
+       last_error TEXT NOT NULL DEFAULT '', PRIMARY KEY (key, node))""",
+  "CREATE INDEX IF NOT EXISTS store_repair_due ON store_repair (next_at)",
   # the variables of the shard itself, the lowest level (VAR-001, D-54): every step of every organisation of the shard gets them
   """CREATE TABLE IF NOT EXISTS shard_variables (
        name TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)""",
@@ -221,7 +233,9 @@ proc migrate*(c: var RqClient) =
       ("execution_profiles", "cache_quota_bytes", "INTEGER NOT NULL DEFAULT 0"),      # DAT-004, core/cachestore.nim: the most bytes of caches the organisation holds (0: the shard's, -1: no limit)
       ("execution_profiles", "cache_retention_days", "INTEGER NOT NULL DEFAULT 0"),    # ... and how long an entry may stay unused (0: the shard's, -1: for ever)
       ("execution_profiles", "artifact_retention_days", "INTEGER NOT NULL DEFAULT 0"),  # DAT-006, core/artifactsweep.nim: how long its artifacts live (0: the shard's retention)
-      ("execution_profiles", "conductor_min", "INTEGER NOT NULL DEFAULT 1")]:           # conductors kept warm
+      ("execution_profiles", "conductor_min", "INTEGER NOT NULL DEFAULT 1"),            # conductors kept warm
+      ("execution_profiles", "audit_variables", "TEXT NOT NULL DEFAULT 'off'"),         # VAR-006: 'off', 'digest' or 'full' (core/varaudit.nim)
+      ("audit_log", "before", "TEXT NOT NULL DEFAULT ''"), ("audit_log", "after", "TEXT NOT NULL DEFAULT ''")]:     # VAR-006: the old and the new value (or a digest) of a variable
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
   discard c.execute(%*[["CREATE UNIQUE INDEX IF NOT EXISTS run_journal_key ON run_journal (run_id, call_key) WHERE call_key != ''"]])      # a call has one record
@@ -313,7 +327,7 @@ proc setControllerSpec*(c: var RqClient; slug, spec: string) =
 proc listOrganizationsFull*(c: var RqClient): seq[OrganizationFull] =
   ## everything the reconciliation (SHD-008) needs to make an organisation's objects again
   let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at, controller_spec, " &
-    "(SELECT count(*) FROM run_holds h WHERE h.tenant_id = organizations.id) FROM organizations ORDER BY slug"]])
+    "(SELECT count(*) FROM run_holds h WHERE h.tenant_id = organizations.id) + (SELECT count(*) FROM scope_holds s WHERE s.tenant_id = organizations.id) FROM organizations ORDER BY slug"]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for v in vals:

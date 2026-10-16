@@ -12,6 +12,7 @@ const
 
 type CacheDecl* = object
   key*: string
+  mode*: string                  ## "" restore before the command and save after it; "restore" or "save" only (the steps of `j.cache.restore` and `j.cache.save`)
   paths*, restoreKeys*: seq[string]
 
 func validCacheKey*(k: string): bool =
@@ -38,7 +39,7 @@ proc cacheDecls*(optsJson: string): seq[CacheDecl] =
     if a == nil or a.kind != JArray: return
     for e in a.elems:
       if e.kind != JObject: continue
-      var d = CacheDecl(key: e{"key"}.getStr)
+      var d = CacheDecl(key: e{"key"}.getStr, mode: e{"mode"}.getStr)
       if e{"paths"} != nil and e["paths"].kind == JArray:
         for p in e["paths"].elems: (if p.kind == JString: d.paths.add p.getStr)
       if e{"restore_keys"} != nil and e["restore_keys"].kind == JArray:
@@ -52,7 +53,9 @@ proc checkCacheDecl*(optsJson: string): string =
   if ds.len > maxCaches: return "a step has at most " & $maxCaches & " caches"
   for d in ds:
     if not validCacheKey(d.key): return "a cache key is 1.." & $maxKeyLen & " characters: letters, digits and . _ : + = @ % - (" & d.key & ")"
-    if d.paths.len == 0 or d.paths.len > maxPaths: return "the cache " & d.key & " needs 1.." & $maxPaths & " paths"
+    if d.mode notin ["", "restore", "save"]: return "the cache " & d.key & ": the mode is restore or save"
+    if d.mode == "restore" and d.paths.len > maxPaths: return "the cache " & d.key & " has at most " & $maxPaths & " paths"
+    elif d.mode != "restore" and (d.paths.len == 0 or d.paths.len > maxPaths): return "the cache " & d.key & " needs 1.." & $maxPaths & " paths"
     for p in d.paths:
       if not validCachePath(p): return "the cache " & d.key & ": " & p & " is not a path inside the workspace"
     if d.restoreKeys.len > maxRestoreKeys: return "the cache " & d.key & " has at most " & $maxRestoreKeys & " restore keys"

@@ -8,6 +8,7 @@
 ## an organisation whose storage is short of space (the controller reports its ResourceQuota) keeps such a volume for a minute only, oldest first.
 import std/[json, os, strutils, sequtils, locks, times]
 import common/[rqlite, states]
+import holds
 
 const
   defaultKeepSucceeded* = 0
@@ -95,7 +96,7 @@ proc releasableRuns*(c: var RqClient; profileId: string; now: int64; keep: Reten
   for s in [rsSucceeded, rsFailed, rsCanceled, rsSkipped, rsTimedOut, rsInfrastructureError]: ends.add protoName(s)
   let marks = ends.mapIt("?").join(",")
   var args = %*["SELECT id, state, CAST(updated_at AS INTEGER) FROM runs WHERE profile_id = ? AND storage_released = 0 AND " &
-    "NOT EXISTS (SELECT 1 FROM step_drains d WHERE d.run_id = runs.id AND d.state = 'pending') AND NOT EXISTS (SELECT 1 FROM run_holds h WHERE h.run_id = runs.id) AND state IN (" & marks & ") ORDER BY updated_at LIMIT ?", profileId]
+    "NOT EXISTS (SELECT 1 FROM step_drains d WHERE d.run_id = runs.id AND d.state = 'pending') AND NOT " & heldRunSql("runs.id", "runs.tenant_id", "runs.group_id") & " AND state IN (" & marks & ") ORDER BY updated_at LIMIT ?", profileId]
   for e in ends: args.add %e
   args.add %(maxPerPoll * 4)       # more than enough: the retention filters some out below
   let r = c.query(%*[args])

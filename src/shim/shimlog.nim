@@ -75,6 +75,12 @@ proc setResources*(cpuSec: float; memPeak: int64; oomKills: int; metrics: seq[(s
       cur.oomKills = oomKills
       latestMetrics = metrics
 
+proc setCache*(restored: seq[string]) =
+  ## the key restored for each cache the step declared (DAT-004), "" for a miss; it rides along with the next line, and the verdict has it
+  {.cast(gcsafe).}:
+    withLock lock:
+      cur.cache = restored
+
 proc currentMetrics*(): seq[(string, float)] =
   {.cast(gcsafe).}:
     withLock lock:

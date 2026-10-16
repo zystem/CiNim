@@ -6,10 +6,10 @@
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
-import std/[json, os, strutils, uri, times, atomics, tables, httpclient]
+import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
-import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore
-import ../common/[ctrlauth, envname]
+import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight, storerepair
+import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 
 const base = "/api/v1/runs"
@@ -27,8 +27,14 @@ proc withLabel(label: JsonNode; extra: JsonNode): JsonNode =
   for k, v in label.pairs: result[k] = v
   for k, v in extra.pairs: result[k] = v
 
-proc serveVariables(vc: var RqClient; scope: VarScope; key, varName: string; label: JsonNode) =
+type VarAudit = object
+  ## what a change of a variable needs to be in the audit (VAR-006): the organisation (empty for the shard), how the level is named in the record, the key of the digests, who acts
+  tenantId, level, master: string
+  who: Principal
+
+proc serveVariables(vc: var RqClient; scope: VarScope; key, varName: string; label: JsonNode; au: VarAudit) =
   ## The variables of one level (VAR-001, core/orgvars.nim): GET lists them, PUT and DELETE name one (`/variables/{NAME}`). `label` says whose they are in the answers.
+  ## A change is in the audit when the organisation asks for it (VAR-006, core/varaudit.nim).
   let vmeth = getMethod()
   if vmeth == "GET" and varName.len == 0:
     var list = newJArray()
@@ -41,19 +47,55 @@ proc serveVariables(vc: var RqClient; scope: VarScope; key, varName: string; lab
     if not vj.isString("value"):
       problem(Http400, "invalid_request", "{\"value\": \"...\"} is required")
       return
+    let was = vc.scopeVariable(scope, key, varName)
     let bad = vc.setScopeVariable(scope, key, varName, vj["value"].getStr, getTime().toUnix())
     if bad.len > 0:
       problem(Http400, "invalid_variable", bad)
       return
+    vc.recordVariable(vc.variableAuditMode(au.tenantId), au.master, au.tenantId, getTime().toUnix(), au.who, au.level, varName, was, some(vj["value"].getStr))
     jsonOk(Http200, withLabel(label, %*{"name": varName, "value": vj["value"].getStr}))
   elif vmeth == "DELETE":
+    let was = vc.scopeVariable(scope, key, varName)
     if not vc.deleteScopeVariable(scope, key, varName):
       problem(Http404, "not_found", "no such variable")
       return
+    vc.recordVariable(vc.variableAuditMode(au.tenantId), au.master, au.tenantId, getTime().toUnix(), au.who, au.level, varName, was, none(string))
     jsonOk(Http200, withLabel(label, %*{"name": varName, "deleted": true}))
   else:
     problem(Http405, "method_not_allowed", "GET, PUT or DELETE")
 
+
+proc serveScopeHold(hc: var RqClient; orgId, slug, groupId, groupPath: string; who: Principal) =
+  ## A legal hold on the organisation (`groupId` '') or on a group (DAT-006, core/holds.nim): GET shows it, PUT places it with a reason (`rw`, `admin`), DELETE releases it.
+  ## It covers every run of the organisation, or of the group and the groups below it, those that exist and those made while it stands.
+  let label = if groupPath.len == 0: %*{"organization": slug} else: %*{"organization": slug, "group": groupPath}
+  let target = if groupPath.len == 0: slug else: slug & "/" & groupPath
+  let kind = if groupPath.len == 0: "organization" else: "group"
+  let meth = getMethod()
+  if meth == "GET":
+    var h = hc.scopeHoldOf(orgId, groupId)
+    h.hold.groupPath = groupPath
+    jsonOk(Http200, withLabel(label, %*{"held": h.held, "hold": (if h.held: h.hold.view else: newJNull())}))
+  elif meth == "PUT":
+    let hj = try: parseJson(getBody()) except JsonParsingError: nil
+    if not hj.isString("reason"):
+      problem(Http400, "invalid_request", "{\"reason\": \"...\"} is required: a legal hold has a reason")
+      return
+    let reason = hj["reason"].getStr
+    let placed = hc.placeScopeHold(orgId, groupId, reason, actorOf(who), getTime().toUnix())
+    if placed.error.len > 0:
+      problem(Http400, "invalid_hold", placed.error)
+      return
+    if placed.placed: hc.record(getTime().toUnix(), actorOf(who), kind & ".hold", target, "ok", reason[0 ..< min(200, reason.len)])
+    var h = hc.scopeHoldOf(orgId, groupId)
+    h.hold.groupPath = groupPath
+    jsonOk(if placed.placed: Http201 else: Http200, withLabel(label, %*{"held": true, "hold": h.hold.view, "placed": placed.placed}))
+  elif meth == "DELETE":
+    let gone = hc.releaseScopeHold(orgId, groupId)
+    if gone: hc.record(getTime().toUnix(), actorOf(who), kind & ".release", target, "ok")
+    jsonOk(Http200, withLabel(label, %*{"held": false, "released": gone}))
+  else:
+    problem(Http405, "method_not_allowed", "GET, PUT or DELETE")
 
 let
   orgShard = getEnv("CINIM_SHARD", "001")                  ## the name of this shard: digits only (SHD-001)
@@ -439,7 +481,7 @@ proc onRequest() {.raises: [], gcsafe.} =
                                   jobPodLimitPercent: cur["job_pod_limit_percent"].getInt, runsPerConductor: cur["runs_per_conductor"].getInt,
                                   conductorMin: cur["conductor_min"].getInt, artifactQuotaBytes: cur["artifact_quota_bytes"].getBiggestInt,
                                   artifactRetentionDays: cur["artifact_retention_days"].getInt, cacheQuotaBytes: cur["cache_quota_bytes"].getBiggestInt,
-                                  cacheRetentionDays: cur["cache_retention_days"].getInt)
+                                  cacheRetentionDays: cur["cache_retention_days"].getInt, auditVariables: cur["audit_variables"].getStr)
           for k in ["artifact_quota_bytes", "artifact_retention_days", "cache_quota_bytes", "cache_retention_days", "infra_retries", "log_max_bytes", "liveness_timeout", "log_spool_bytes", "log_hold_timeout", "pod_limit", "job_pod_limit_percent", "runs_per_conductor", "conductor_min"]:
             if j.hasKey(k) and j[k].kind != JInt:
               problem(Http400, "invalid_request", k & " must be an integer")
@@ -457,6 +499,11 @@ proc onRequest() {.raises: [], gcsafe.} =
           if j.hasKey("artifact_retention_days"): s.artifactRetentionDays = j["artifact_retention_days"].getInt
           if j.hasKey("cache_quota_bytes"): s.cacheQuotaBytes = j["cache_quota_bytes"].getBiggestInt
           if j.hasKey("cache_retention_days"): s.cacheRetentionDays = j["cache_retention_days"].getInt
+          if j.hasKey("audit_variables"):
+            if j["audit_variables"].kind != JString:
+              problem(Http400, "invalid_request", "audit_variables must be off, digest or full")
+              return
+            s.auditVariables = j["audit_variables"].getStr
           let bad = validate(s)
           if bad.len > 0:
             problem(Http400, "invalid_request", bad)
@@ -632,10 +679,13 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           let bad = st.backend().roundTrip()
           if bad.len > 0: problem(Http502, "storage_unreachable", bad)
-          else: jsonOk(Http200, %*{"ok": true, "endpoint": st.cfg.endpoint, "bucket": st.cfg.bucket})
+          else: jsonOk(Http200, %*{"ok": true, "kind": (if st.cfg.kind == "nodes": "nodes" else: "s3"), "endpoint": st.cfg.endpoint, "bucket": st.cfg.bucket, "nodes": st.cfg.nodes})
         elif smeth == "GET":
           let cfg = c.loadConfig()
-          jsonOk(Http200, %*{"configured": cfg.found, "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "access_key_id": cfg.keyId})
+          jsonOk(Http200, %*{"configured": cfg.found, "kind": (if cfg.kind == "nodes": "nodes" else: "s3"), "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket,
+                             "access_key_id": cfg.keyId, "nodes": cfg.nodes, "min_acks": (if cfg.kind == "nodes" and cfg.minAcks <= 0: cfg.nodes.len else: cfg.minAcks),
+                             "transport": (if cfg.kind == "nodes": (if cfg.transport == "plain": "plain" else: "curve") else: ""),
+                             "repair_pending": (if cfg.kind == "nodes": c.pendingRepairs() else: 0)})
         elif smeth == "DELETE":
           jsonOk(Http200, %*{"deleted": c.forgetStore()})
         elif smeth == "PUT":
@@ -643,8 +693,14 @@ proc onRequest() {.raises: [], gcsafe.} =
           if j == nil or j.kind != JObject:
             problem(Http400, "invalid_request", "the body is {endpoint, region, bucket, access_key_id, secret_access_key}")
             return
-          let cfg = StoreConfig(found: true, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr)
-          let secret = j{"secret_access_key"}.getStr
+          var cfg = StoreConfig(found: true, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr)
+          var secret = j{"secret_access_key"}.getStr
+          if j{"kind"}.getStr == "nodes":
+            # docs/store.md: store nodes of our own; the token is what the S3 secret is for the other kind
+            cfg = StoreConfig(found: true, kind: "nodes", minAcks: j{"min_acks"}.getInt(0), transport: j{"transport"}.getStr)
+            if j{"nodes"} != nil and j["nodes"].kind == JArray:
+              for a in j["nodes"].elems: cfg.nodes.add a.getStr
+            secret = j{"token"}.getStr
           let why = checkConfig(cfg, secret)
           if why.len > 0:
             problem(Http400, "invalid_request", why)
@@ -663,14 +719,77 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not saved.ok:
             problem(if saved.retry: Http503 else: Http500, "secrets_error", saved.error)
             return
-          jsonOk(Http200, %*{"configured": true, "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "access_key_id": cfg.keyId, "checked": true})
+          jsonOk(Http200, %*{"configured": true, "kind": (if cfg.kind == "nodes": "nodes" else: "s3"), "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket,
+                             "access_key_id": cfg.keyId, "nodes": cfg.nodes, "checked": true})
         else:
           problem(Http405, "method_not_allowed", "GET, PUT, DELETE, or POST :check")
         return
       if path == "/api/v1/variables" or path.startsWith("/api/v1/variables/"):
         # VAR-001, D-54: the variables of the shard, the lowest level: every step of every organisation gets them. An administrator writes them (rbac.nim)
         var sc = newRq(coreRef.rqliteUrl)
-        sc.serveVariables(vsShard, "", path["/api/v1/variables".len .. ^1].strip(chars = {'/'}), %*{"level": "shard"})
+        sc.serveVariables(vsShard, "", path["/api/v1/variables".len .. ^1].strip(chars = {'/'}), %*{"level": "shard"},
+                          VarAudit(level: "shard", master: coreSecret(coreRef.certs), who: who))
+        return
+      if path.startsWith("/api/v1/organizations/") and path.endsWith("/hold") and not ("/groups" in path):
+        # DAT-006: a legal hold on the whole organisation
+        let slugO = path["/api/v1/organizations/".len ..< path.len - "/hold".len]
+        var oq = newRq(coreRef.rqliteUrl)
+        let orgO = oq.organizationRow(slugO)
+        if slugO.len == 0 or "/" in slugO or orgO.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugO)
+          return
+        oq.serveScopeHold(orgO.id, slugO, "", "", who)
+        return
+      if path.startsWith("/api/v1/organizations/") and path.endsWith("/caches"):
+        # DAT-004: the caches of an organisation (docs/cache.md): GET lists them with what each limit holds, ?group=<path> narrows to a group and the groups below it;
+        # DELETE takes entries of exactly one scope out: ?group=<path> (none: the organisation's own) with ?key=<key> for one, or ?all=true for all of them
+        let slugC = path["/api/v1/organizations/".len ..< path.len - "/caches".len]
+        var cc = newRq(coreRef.rqliteUrl)
+        let orgC = cc.organizationRow(slugC)
+        if slugC.len == 0 or "/" in slugC or orgC.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugC)
+          return
+        var groupQ, keyQ = ""
+        var allQ = false
+        var limitQ = 500
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            case k
+            of "group": groupQ = normalPath(v)
+            of "key": keyQ = v
+            of "all": allQ = v == "true"
+            of "limit": limitQ = (try: parseInt(v) except ValueError: 500)
+            else: discard
+        var groupId = ""
+        if groupQ.len > 0:
+          let g = cc.groupIdOf(orgC.id, groupQ)
+          if not g.found:
+            problem(Http404, "group_not_found", "the organisation " & slugC & " has no group " & groupQ)
+            return
+          groupId = g.id
+        if getMethod() == "GET":
+          var items = newJArray()
+          for r in cc.listCaches(orgC.id, groupQ, limitQ):
+            items.add %*{"group": r.groupPath, "key": r.key, "state": r.state, "size": r.size, "sha256": r.sha256, "created_at": r.createdAt, "last_used_at": r.lastUsedAt}
+          var pools = newJArray()
+          for p in cc.poolUsage(orgC.id, cacheQuotaFromEnv()):
+            var pj = %*{"level": p.name, "quota": p.quota, "bytes": p.bytes}
+            if p.groupPath.len > 0: pj["group"] = %p.groupPath
+            pools.add pj
+          jsonOk(Http200, %*{"organization": slugC, "pools": pools, "caches": items})
+        elif getMethod() == "DELETE":
+          if keyQ.len == 0 and not allQ:
+            problem(Http400, "invalid_request", "name the entry with ?key=<key>, or every entry of the scope with ?all=true (and ?group=<path> for a group's; none is the organisation's own)")
+            return
+          let st = cc.loadStore()
+          if not st.ok:
+            problem(Http503, "store_" & st.error, "the object store is not ready: " & st.error)
+            return
+          let gone = cc.deleteEntries(st.backend(), orgC.id, groupId, keyQ)
+          if gone.deleted > 0: cc.record(getTime().toUnix(), actorOf(who), "cache.delete", slugC & (if groupQ.len > 0: "/" & groupQ else: ""), "ok", (if keyQ.len > 0: keyQ else: "all") & ": " & $gone.deleted)
+          jsonOk(Http200, %*{"organization": slugC, "group": groupQ, "deleted": gone.deleted, "failed": gone.failed})
+        else:
+          problem(Http405, "method_not_allowed", "GET or DELETE")
         return
       if path.startsWith("/api/v1/organizations/") and path.endsWith("/holds"):
         # DAT-006: the runs of an organisation under a legal hold
@@ -685,7 +804,9 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         var items = newJArray()
         for h in hq.listHolds(orgHq.id): items.add h.view
-        jsonOk(Http200, %*{"organization": slugH, "holds": items})
+        var scopes = newJArray()
+        for h in hq.listScopeHolds(orgHq.id): scopes.add h.view
+        jsonOk(Http200, %*{"organization": slugH, "holds": items, "scopes": scopes})
         return
       if path.startsWith("/api/v1/organizations/") and "/groups" in path:
         # PRJ-001, D-54: the groups of an organisation, nested up to 8 levels, and their variables (inherited by the groups below and by the runs in them).
@@ -715,6 +836,15 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # a path, and perhaps /variables and a name after it, or /settings ('variables' and 'settings' cannot be the name of a group)
         let segs = gpath.split('/')
+        if segs.len >= 2 and segs[^1] == "hold":
+          # DAT-006: a legal hold on a group and the groups below it
+          let hp = segs[0 ..< segs.high].join("/")
+          let hg = gc.groupIdOf(orgG.id, hp)
+          if not hg.found or hg.id.len == 0:
+            problem(Http404, "group_not_found", "the organisation " & slugG & " has no group " & hp)
+            return
+          gc.serveScopeHold(orgG.id, slugG, hg.id, normalPath(hp), who)
+          return
         if segs.len >= 2 and segs[^1] == "settings":
           # DAT-004: the cache limits of a group: cache_quota_bytes (its own pool: the entries of the group and the groups below it) and cache_retention_days (0: the level above decides)
           let sp = segs[0 ..< segs.high].join("/")
@@ -759,7 +889,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not g.found or g.id.len == 0:
             problem(Http404, "group_not_found", "the organisation " & slugG & " has no group " & groupPath)
             return
-          gc.serveVariables(vsGroup, g.id, varName, %*{"organization": slugG, "group": normalPath(groupPath)})
+          gc.serveVariables(vsGroup, g.id, varName, %*{"organization": slugG, "group": normalPath(groupPath)},
+                          VarAudit(tenantId: orgG.id, level: "group " & slugG & "/" & normalPath(groupPath), master: coreSecret(coreRef.certs), who: who))
           return
         if gmeth == "PUT":
           let made = gc.createGroup(orgG.id, groupPath, getTime().toUnix())
@@ -799,7 +930,8 @@ proc onRequest() {.raises: [], gcsafe.} =
         if orgV.id.len == 0:
           problem(Http404, "organization_not_found", "this shard has no organisation " & slugV)
           return
-        vc.serveVariables(vsOrganization, orgV.id, varName, %*{"organization": slugV})
+        vc.serveVariables(vsOrganization, orgV.id, varName, %*{"organization": slugV},
+                          VarAudit(tenantId: orgV.id, level: "organization " & slugV, master: coreSecret(coreRef.certs), who: who))
         return
       if path.startsWith("/api/v1/organizations/") and (path.endsWith("/locks") or "/locks/" in path):
         # PIP-014: the jobs in which the locks of an organisation are present - who holds a lock and who waits for it, in the order they will get it
@@ -971,11 +1103,13 @@ proc onRequest() {.raises: [], gcsafe.} =
             else:
               problem(Http500, "secrets_error", put.error)
             return
+          c.recordSecret(c.variableAuditMode(org.id), coreSecret(coreRef.certs), org.id, getTime().toUnix(), who, slug, secName, put.version, some(value))
           jsonOk(Http200, %*{"organization": slug, "name": secName, "version": put.version})
         elif smeth == "DELETE":
           if not c.forgetStepSecret(org.id, secName):
             problem(Http404, "not_found", "no such secret")
             return
+          c.recordSecret(c.variableAuditMode(org.id), coreSecret(coreRef.certs), org.id, getTime().toUnix(), who, slug, secName, 0, none(string))
           jsonOk(Http200, %*{"organization": slug, "name": secName, "deleted": true})
         else:
           problem(Http405, "method_not_allowed", "PUT or DELETE")
@@ -1039,6 +1173,31 @@ proc onRequest() {.raises: [], gcsafe.} =
                                       "error": view.lastError},
                            "organizations": items, "alerts": al})
         return
+      if path == "/api/v1/pipelines:check":
+        # PIP-016: the script and the launch parameters are tried by a conductor of the organisation (core/preflight.nim) before a run exists:
+        # {"organization": "acme", "script": "...", "params": {...}} -> {"checked": true, "ok": ..., "steps": n, "params": {the parameters a run would have}, "failure": {...}}
+        if getMethod() != "POST":
+          problem(Http405, "method_not_allowed", "POST")
+          return
+        let pj = try: parseJson(getBody()) except JsonParsingError: nil
+        if pj == nil or pj.kind != JObject or not pj.isString("script") or not pj.isString("organization"):
+          problem(Http400, "invalid_request", "{\"organization\": \"...\", \"script\": \"...\", \"params\": {...}} is required")
+          return
+        let slugP = pj["organization"].getStr
+        if not who.mayUseOrg(slugP):
+          problem(Http403, "forbidden", "this token may not use the organisation " & slugP)
+          return
+        var pc = newRq(coreRef.rqliteUrl)
+        let orgP = pc.organizationRow(slugP)
+        if orgP.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugP)
+          return
+        let givenP = checkParams(pj{"params"})
+        if givenP.error.len > 0:
+          problem(Http400, "invalid_params", givenP.error)
+          return
+        jsonOk(Http200, checkScript(namespaceName(orgPrefix, orgShard, slugP), pj["script"].getStr, givenP.pairs, currentApiVersion).view)
+        return
       if not path.startsWith(base):
         problem(Http404, "not_found", "no such route")
         return
@@ -1095,8 +1254,16 @@ proc onRequest() {.raises: [], gcsafe.} =
         if qc.queueIsFull(if profile.len > 0: profile else: coreRef.profileId):
           problem(Http429, "queue_full", "this organisation has " & $maxUnfinishedRuns & " runs that have not ended; try again when some have")
           return
+        # PIP-016: a conductor of the organisation tries the script and the parameters first, if there is one to ask; a certain finding is the author's to fix, anything else the run decides
+        var checked = false
+        if orgSlug.len > 0:
+          let chk = checkScript(namespaceName(orgPrefix, orgShard, orgSlug), j["script"].getStr, given.pairs, currentApiVersion)
+          checked = chk.ran
+          if chk.problemOf.len > 0:
+            problem(Http400, chk.code, chk.message)
+            return
         let id = coreRef.createRun(j["script"].getStr, tenant, profile, given.pairs, groupId = groupId)
-        jsonOk(Http201, %*{"id": id, "organization": orgSlug, "state": "RUNNING"})
+        jsonOk(Http201, %*{"id": id, "organization": orgSlug, "state": "RUNNING", "checked": checked})
       elif meth == "GET" and "/steps/" in rest and rest.endsWith("/log"):
         let parts = rest.split("/steps/", maxsplit = 1)
         let seq = try: parseInt(parts[1][0 ..< parts[1].len - "/log".len]) except ValueError: -1

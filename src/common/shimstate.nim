@@ -52,6 +52,7 @@ type
     cpuSec*: float               ## CPU the step's container used so far (cgroup), seconds
     memPeak*: int64              ## its peak memory, bytes
     oomKills*: int               ## OOM kills in its cgroup
+    cache*: seq[string]          ## the caches the step declared, in order: the key that was restored for each, "" for a miss (DAT-004); the result of a `j.cache.restore` step
     reason*: string              ## once stopping/done: ok | failed | timeout | terminated | logs_undelivered | env_rejected | ...
     exitCode*: Option[int]       ## the shim's own exit code once done
 
@@ -150,6 +151,7 @@ proc toJson*(s: ShimState; t: int64): JsonNode =
   if s.truncated: result["trunc"] = %true
   if s.artifacts != asNone: result["arts"] = %($s.artifacts)
   if s.result.len > 0: result["result"] = %s.result
+  if s.cache.len > 0: result["cache"] = %s.cache
   if s.cpuSec > 0 or s.memPeak > 0 or s.oomKills > 0:
     result["res"] = %*{"cpu_s": s.cpuSec, "mem_peak": s.memPeak, "oom": s.oomKills}
   if s.cmdExit.isSome: result["cmd"]["exit"] = %s.cmdExit.get
@@ -167,6 +169,8 @@ proc fromJson*(j: JsonNode): Option[ShimState] =
                       artifacts: parseEnum[ArtifactsState](j{"arts"}.getStr("none")), result: j{"result"}.getStr, lines: j{"lines"}.getInt,
                       blocks: j{"blocks"}.getInt, dropped: j{"dropped"}.getInt, truncated: j{"trunc"}.getBool, reason: j{"reason"}.getStr,
                       cpuSec: j{"res", "cpu_s"}.getFloat, memPeak: j{"res", "mem_peak"}.getBiggestInt, oomKills: j{"res", "oom"}.getInt)
+    if j{"cache"} != nil and j["cache"].kind == JArray:
+      for k in j["cache"].elems: s.cache.add k.getStr
     if j{"cmd", "exit"} != nil: s.cmdExit = some j{"cmd", "exit"}.getInt
     if j{"exit"} != nil: s.exitCode = some j{"exit"}.getInt
     if s.n < 1: return

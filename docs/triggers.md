@@ -34,11 +34,24 @@ POST /api/v1/runs
 What happens:
 
 * The API checks only what it can without the script: a name is an environment variable name (`[A-Z_][A-Z0-9_]*`, not `PATH`, `LD_*`, `CICD_*` and the like), a value is a string, number or boolean of at most 1 KiB, 64 parameters and 4 KiB in all. Anything else is `400 invalid_params`.
-* The executor then checks the values against the script's declarations, **before `main` runs**: a missing required parameter, a number out of range, a value that is not one of the choices, or a parameter the script does not declare ends the run as failed, with the parameter's name and the rule in the message (`GET /api/v1/runs/{id}` shows the state `FAILED`, no steps, and `failure: {code, message}`, here `script_error` and `parameter JOBS must be at least 1`). (Checking at the API, before the run exists, needs the metadata phase and preflight, PIP-016; not built yet.)
+* The executor then checks the values against the script's declarations, **before `main` runs**: a missing required parameter, a number out of range, a value that is not one of the choices, or a parameter the script does not declare ends the run as failed, with the parameter's name and the rule in the message (`GET /api/v1/runs/{id}` shows the state `FAILED`, no steps, and `failure: {code, message}`, here `script_error` and `parameter JOBS must be at least 1`). (Checking at the API, before the run exists, is the next section.)
 * The complete set, defaults included, is journaled once and kept with the run (`GET /api/v1/runs/{id}` shows it as `params`). A replay after an executor restart gets the same values from the journal.
 * Every step of the run gets them as plain environment variables of the container. They are in the Pod's specification, so **a parameter is not a place for a secret**: a step asks for those by name (`secrets = {"NAME"}`, `docs/secrets-masking.md`). A secret of the same name wins.
 
 Not built: `ci.list`, `ci.map`, `ci.secret` parameters, the log header with the effective values (VAR-005).
+
+## Checking before the run exists (PIP-016)
+
+`POST /api/v1/runs` (and `POST /api/v1/pipelines:check`, which only checks) hands the script and the parameters to a conductor of the organisation, which runs the script once against a stub host and tells what it found (docs/conductors.md, "The check of a script"). What is **certain** is refused with `400` and the code and words of the failure, as a run would end - `script_error` `parameter JOBS must be at least 1`, a syntax error, a forbidden global, `step_limit`, `duplicate_id` - and no run is made.
+
+```
+POST /api/v1/pipelines:check   {"organization": "acme", "script": "...", "params": {"JOBS": 0}}
+-> 200 {"checked": true, "ok": false, "steps": 0, "failure": {"code": "script_error", "message": "parameter JOBS must be at least 1", "certain": true}}
+-> 200 {"checked": true, "ok": true, "steps": 12, "params": {"JOBS": "8", "TARGET": "staging"}}      (the parameters a run would have, defaults completed)
+-> 200 {"checked": false, "skipped": "no_conductor"}     (or busy, timeout, unavailable)
+```
+
+`dev`, `rw` and `admin` may check. A finding after a step has run on the stub (a script that branches on a step's result) is shown by `pipelines:check` as `certain: false` and does not stop a run. The check is skipped when the organisation has no conductor connected; the run then fails at its start as before. A **trigger** (schedule, webhook, manual) does not check when it fires: it makes the run directly.
 
 ## Triggers
 

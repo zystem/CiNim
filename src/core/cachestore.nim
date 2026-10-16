@@ -174,3 +174,50 @@ proc sweepCaches*(c: var RqClient; be: ObjectBackend; now: int64; shardRetention
           discard c.execute(%*[["DELETE FROM caches WHERE id = ?", row[0].getStr]])
           inc result.abandoned
         else: inc result.failed
+
+# ------------------------------------------------------------------ the view of the caches (the API) and the deletion of entries by hand
+
+type
+  CacheRow* = object
+    groupPath*, key*, state*, sha256*: string      ## groupPath "" is the organisation's own
+    size*, createdAt*, lastUsedAt*: int64
+  PoolUse* = object
+    name*, groupPath*: string
+    quota*, bytes*: int64                           ## quota 0: no limit
+
+proc listCaches*(c: var RqClient; tenant, groupPath: string; limit = 500): seq[CacheRow] =
+  ## The entries of an organisation, the most recently used first; with a group's path, those of the group and of the groups below it.
+  let gp = groupPath.strip(chars = {'/'})
+  let v = c.query(%*[["SELECT COALESCE(g.path, ''), c.key, c.state, c.size, c.created_at, c.last_used_at, c.sha256 FROM caches c LEFT JOIN groups g ON g.id = c.scope " &
+    "WHERE c.tenant_id = ?" & inPool & " ORDER BY c.last_used_at DESC, c.key LIMIT ?", tenant, gp, gp, gp, gp, max(1, min(limit, 1000))]])["results"][0]{"values"}
+  if v != nil:
+    for row in v:
+      result.add CacheRow(groupPath: row[0].getStr, key: row[1].getStr, state: row[2].getStr, size: row[3].getBiggestInt, createdAt: row[4].getBiggestInt,
+                          lastUsedAt: row[5].getBiggestInt, sha256: row[6].getStr)
+
+proc poolUsage*(c: var RqClient; tenant: string; shardQuota: int64): seq[PoolUse] =
+  ## What each limit that binds holds now: the organisation's (its own quota, else the shard's; -1 is none) and those of the groups that have one of their own
+  let o = c.orgLimit(tenant)
+  let oq = if o.quota == 0: shardQuota elif o.quota < 0: 0'i64 else: o.quota
+  result.add PoolUse(name: "organization", quota: oq, bytes: c.bytesHeld(tenant))
+  let v = c.query(%*[["SELECT g.path, s.cache_quota_bytes FROM group_settings s JOIN groups g ON g.id = s.group_id WHERE g.tenant_id = ? AND s.cache_quota_bytes > 0 ORDER BY g.path", tenant]])["results"][0]{"values"}
+  if v != nil:
+    for row in v:
+      let p = Pool(quota: row[1].getBiggestInt, groupPath: row[0].getStr)
+      result.add PoolUse(name: "group", groupPath: p.groupPath, quota: p.quota, bytes: c.poolBytes(tenant, p))
+
+proc deleteEntries*(c: var RqClient; be: ObjectBackend; tenant, scope, key: string): tuple[deleted, failed: int] =
+  ## The stored entries of exactly this scope ('' the organisation's own): the one named by `key`, or every one when `key` is empty. Entries being uploaded stay; the next run that
+  ## looks for one finds a miss.
+  var sql = "SELECT id, s3_key FROM caches WHERE tenant_id = ? AND scope = ? AND state = 'stored'"
+  var args = %*[sql, tenant, scope]
+  if key.len > 0:
+    sql.add " AND key = ?"
+    args = %*[sql, tenant, scope, key]
+  let v = c.query(%*[args])["results"][0]{"values"}
+  if v != nil:
+    for row in v:
+      if dropObject(be, row[1].getStr):
+        discard c.execute(%*[["DELETE FROM caches WHERE id = ?", row[0].getStr]])
+        inc result.deleted
+      else: inc result.failed

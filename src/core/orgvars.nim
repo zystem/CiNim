@@ -2,7 +2,7 @@
 ## every run of the organisation as an ordinary variable (`$URL`). The lowest level of the precedence (VAR-004): a launch parameter of the same name overrides it, and the run's
 ## view shows which value came from where. They are not secrets - the value is shown to whoever reads them; a secret is asked for by name (`secrets = {...}`, 6.7). Groups
 ## and projects, which VAR-001 puts between the organisation and the run, do not exist yet, so this is the one level above the launch parameters.
-import std/[json, strutils, times]
+import std/[json, strutils, times, options]
 import ../common/[rqlite, envname]
 import runparams, groups
 
@@ -57,6 +57,11 @@ proc listScopeVariables*(c: var RqClient; scope: VarScope; key: string): seq[(st
   let vals = c.query1("SELECT name, value FROM " & scopeTable(scope) & " WHERE " & scopeWhere(scope) & " ORDER BY name", keyArgs(scope, key))["results"][0]{"values"}
   if vals != nil:
     for v in vals: result.add (v[0].getStr, v[1].getStr)
+
+proc scopeVariable*(c: var RqClient; scope: VarScope; key, name: string): Option[string] =
+  ## the value of one variable of a level, or none
+  let vals = c.query1("SELECT value FROM " & scopeTable(scope) & " WHERE " & scopeWhere(scope) & " AND name = ?", keyArgs(scope, key) & @[name])["results"][0]{"values"}
+  if vals != nil and vals.len > 0: some(vals[0][0].getStr) else: none(string)
 
 proc setScopeVariable*(c: var RqClient; scope: VarScope; key, name, value: string; now: int64): string =
   ## "" if it is set, else why not: the checks above, at most 100 variables, at most 64 KiB of values in all (in one place: one organisation, one group, the shard)

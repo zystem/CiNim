@@ -14,6 +14,8 @@ type
     pkFinish = 'F'      ## run to supervisor: a FinishRun; the run process then exits
     pkSuspended = 'S'   ## run to supervisor: the run waits (for a step); the run process then exits
     pkLost = 'X'        ## run to supervisor: the core said the lease is lost; the run process then exits and nothing is written about the run
+    pkCheck = 'K'       ## supervisor to a check process: the CheckScript (PIP-016); it answers with pkChecked and exits
+    pkChecked = 'Y'     ## check process to supervisor: the CheckResult
   PipeFrame* = tuple[kind: PipeKind, payload: string]
   PipeReader* = object
     buf: string
@@ -29,7 +31,7 @@ func encodePipe*(kind: PipeKind; payload: string): string =
   result.add char(n and 255)
   result.add payload
 
-func isKind(c: char): bool = c in {'L', 'C', 'R', 'F', 'S', 'X'}
+func isKind(c: char): bool = c in {'L', 'C', 'R', 'F', 'S', 'X', 'K', 'Y'}
 
 proc feed*(r: var PipeReader; data: string) = r.buf.add data
 

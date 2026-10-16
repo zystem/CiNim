@@ -85,6 +85,18 @@ The digest is the first 12 hex digits of the SHA-256 over the sorted `NAME=value
 
 The shard that was there before the groups (its `runs` and `triggers` had `project_id`) migrated at the start of the new core and went on serving. Groups `team` and `team/backend` were made (a second `PUT` answered 200, a missing parent and a bad name were refused with `invalid_group`); the same name `LVL` was set at the shard, the organisation, `team` and `team/backend`, and a pipeline with `ci.job{env = {JOBENV = "j"}}` printed it from a run in `team/backend` (`LVL=backend`, with `TEAMONLY` inherited from `team` and `SHARDONLY` from the shard), in `team` (`LVL=team`) and in the organisation (`LVL=org`, no `TEAMONLY`); `GET /api/v1/runs/{id}` named the source and the group of each. An unknown group in `POST /api/v1/runs` was `group_not_found`, a group with a group below was `group_not_empty`. The levels of `env` (pipeline, job, `j:env`, step, `$CICD_ENV`) were checked in one run: a pipeline `env` above a launch parameter, a job `env` above the organisation's variable and the pipeline's, `j:env` for the steps after it, `$CICD_ENV` seen by the next step, the step's own `env` above `$CICD_ENV`; a script naming `PATH` was refused with `script_error`. Not checked: the roles of rw/dev/ro against these routes on the running core (only the rules, `trbac`), a group of 8 levels through the API (through the module, yes).
 
+## The audit of changes (VAR-006)
+
+Off by default. The setting `audit_variables` of the organisation's profile (`PUT /api/v1/profile?organization=<slug>`, docs/settings.md) turns it on in one of two modes, and then every change is a row of the audit (`GET /api/v1/audit`, the administrator's):
+
+* **`full`**: a plain variable's change (`variable.set`, `variable.delete`) has the old value in `before` and the new one in `after`, in full.
+* **`digest`**: the same, but a value of 256 characters or more is written as its digest (`hmac:` and 12 hex digits); the value itself is in the log header of a step that used it (VAR-005).
+* A **secret** (`secret.set`, `secret.delete` for `PUT`/`DELETE .../secrets/{NAME}`) is never written, in either mode: the row has who, when, the new version (`version 3`) and a digest of the value in `after`. The digest is an HMAC-SHA256 under a key made of the core's secret key and the tenant, not a plain hash, so that a short or guessable secret cannot be found by trying values against the audit; the name is part of what is signed.
+* The `target` of a row names the level and the variable: `organization acme/REGION`, `group acme/team/backend/REGION`, `shard/REGION`. The variables of the **shard** belong to no organisation: their changes are always written, in full (the operator makes them, and they are plain).
+* Launch parameters are not changed by anybody afterwards, so they have no rows; a run's view shows what it was given.
+
+Checked: `tvaraudit` (off writes nothing, full and digest, the secret never in a row, the digest keyed by tenant, name and key, the setting validated and saved). Not checked on a cluster.
+
 ## Not built
 
-The audit of changes of variables (VAR-006, off by default), a UI.
+A UI.

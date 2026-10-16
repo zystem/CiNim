@@ -1,0 +1,88 @@
+# Two store nodes of the shard (docs/store.md, D-57): `cinim-store`, a StatefulSet of two Pods, each with a volume of its own. They know nothing of each other: the core writes to both
+# and repairs from its database. Nothing here is published outside the cluster; only the core's Pods may reach the port.
+#
+#   kubectl -n <namespace> create secret generic cinim-store --from-literal=token="$(openssl rand -hex 24)" \
+#       --from-file=store.key=<certs>/curve/store.key --from-file=store.pub=<certs>/curve/store.pub
+#   kubectl -n <namespace> apply -f store.yaml
+#   curl -X PUT .../api/v1/storage -d '{"kind":"nodes","nodes":["tcp://cinim-store-0.cinim-store:19750","tcp://cinim-store-1.cinim-store:19750"],"token":"<the same token>"}'
+#
+# The core mounts the same `store.pub` (and `client.key`/`client.pub`) in its certs directory. The image is built with tools/image/kaniko-build.sh (target `store`).
+apiVersion: v1
+kind: Service
+metadata:
+  name: cinim-store
+  labels: {app.kubernetes.io/name: cinim-store, app.kubernetes.io/part-of: cinim}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {app.kubernetes.io/name: cinim-store}
+  ports:
+    - {name: store, port: 19750, targetPort: store}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cinim-store
+  labels: {app.kubernetes.io/name: cinim-store, app.kubernetes.io/part-of: cinim}
+spec:
+  serviceName: cinim-store
+  replicas: 2
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: {app.kubernetes.io/name: cinim-store}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: cinim-store, app.kubernetes.io/part-of: cinim}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      # one node per machine: the two copies are not on one disk
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector: {matchLabels: {app.kubernetes.io/name: cinim-store}}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: store
+          image: REGISTRY/cinim-store:TAG
+          ports:
+            - {name: store, containerPort: 19750}
+          env:
+            - {name: CINIM_STORE_ROOT, value: /data}
+            - {name: CINIM_CERTS, value: /etc/cinim}
+            - {name: CINIM_STORE_PORT, value: "19750"}
+            - {name: CINIM_STORE_TOKEN_FILE, value: /etc/cinim/token}
+            - {name: CINIM_STORE_WORKERS, value: "4"}
+          readinessProbe: {tcpSocket: {port: store}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: store}, initialDelaySeconds: 10, periodSeconds: 10, failureThreshold: 6}
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {memory: 512Mi}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: keys, mountPath: /etc/cinim/curve/store.key, subPath: store.key, readOnly: true}
+            - {name: keys, mountPath: /etc/cinim/curve/store.pub, subPath: store.pub, readOnly: true}
+            - {name: keys, mountPath: /etc/cinim/token, subPath: token, readOnly: true}
+      volumes:
+        - name: keys
+          secret: {secretName: cinim-store, defaultMode: 0440}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 200Gi}}
+---
+# only the core reaches a node
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cinim-store
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: cinim-store}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: cinim-core}}
+      ports:
+        - {port: 19750, protocol: TCP}

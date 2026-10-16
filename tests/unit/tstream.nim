@@ -79,3 +79,17 @@ suite "RUN-016 push channel: the frame envelope":
     var big = good
     big[big.len - 4 - 3 .. big.len - 4] = "\xff\xff\xff\xff"   # a payload length beyond the limit
     check decodeFrame(big).isNone
+
+  test "a frame is read in place: the payload stays where it is, and the head agrees with decodeFrame":
+    let f = frame("session-1", "store.req", "payload \x00 bytes", id = 7, ack = 3, re = 5, key = "ns")
+    var s = encodeFrame(f)
+    let h = decodeHead(cast[ptr UncheckedArray[char]](addr s[0]), s.len)
+    check h.isSome
+    check h.get.id == 7 and h.get.ack == 3 and h.get.re == 5 and h.get.session == "session-1" and h.get.kind == "store.req" and h.get.key == "ns"
+    check s[h.get.payloadAt ..< h.get.payloadAt + h.get.payloadLen] == f.payload
+    check decodeFrame(s).get == f
+    # the header and the payload written one after the other are the frame
+    let plain = frame("s", "k", "abc", id = 1, re = 2)
+    check frameHeader(plain, 3) & "abc" == encodeFrame(plain)
+    var cut = s[0 ..< s.len - 1]
+    check decodeHead(cast[ptr UncheckedArray[char]](addr cut[0]), cut.len).isNone

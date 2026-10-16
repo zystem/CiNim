@@ -220,7 +220,7 @@ when defined(shimLogging):
 
   const cachePatience = 30          ## seconds: a cache is a convenience, a core that does not answer is not waited for long
 
-  proc restoreCaches(artifactAddr, certs: string; step: StepRef; token: string; specs: seq[CacheDecl]; workspace, tmpDir: string): tuple[notes: seq[string], hit: seq[string]] =
+  proc restoreCaches(artifactAddr, certs: string; step: StepRef; token: string; specs: seq[CacheDecl]; workspace, tmpDir: string): tuple[notes: seq[string], hit: seq[string], restored: seq[string]] =
     ## DAT-004: before the command, for each cache the step declared: the entry of its key, or of the latest key a restore key names, is fetched and unpacked into the workspace.
     ## Nothing here fails the step: a miss, an archive that is damaged or a core that does not answer is a line in the step's log.
     if artifactAddr.len == 0 or token.len == 0:
@@ -228,7 +228,9 @@ when defined(shimLogging):
       return
     let c = newArtifactClient(artifactAddr, certs)
     defer: c.close()
+    result.restored = newSeq[string](specs.len)       # the key restored for each cache, "" where there was none: the answer of a `j.cache.restore` step
     for i, d in specs:
+      if d.mode == "save": continue                    # the step of a `j.cache.save` restores nothing
       let f = cacheFind(c, step, token, d.key, cachePatience)
       if not f.ok:
         result.notes.add "cache " & d.key & ": not restored (" & f.detail & ")"
@@ -253,6 +255,7 @@ when defined(shimLogging):
         result.notes.add "cache " & d.key & ": restored only in part (" & u.error & ")"
       else:
         result.notes.add "cache " & d.key & ": restored from " & f.key & " (" & $u.files & " files, " & $f.size & " bytes" & (if u.skipped > 0: ", " & $u.skipped & " entries left out" else: "") & ")"
+      if u.error.len == 0: result.restored[i] = f.key
       if f.key == d.key and u.error.len == 0: result.hit.add d.key
 
   proc saveCaches(artifactAddr, certs: string; step: StepRef; token: string; specs: seq[CacheDecl]; hit: seq[string]; workspace, tmpDir: string): seq[string] =
@@ -262,6 +265,7 @@ when defined(shimLogging):
     let c = newArtifactClient(artifactAddr, certs)
     defer: c.close()
     for i, d in specs:
+      if d.mode == "restore": continue                 # the step of a `j.cache.restore` saves nothing
       if d.key in hit:
         result.add "cache " & d.key & ": not saved (the key was restored, and a key is immutable)"
         continue
@@ -556,6 +560,7 @@ proc main(): int =
       let restored = restoreCaches(artifactAddr, certsDir, step, stepToken, cacheSpecs, workspace, cacheTmp)
       cacheNotes = restored.notes
       cacheHit = restored.hit
+      setCache(restored.restored)
     else:
       cacheNotes.add "cache: not restored (this shim was built without the connection to core that caches need)"
 

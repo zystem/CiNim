@@ -158,6 +158,7 @@ spec:
           secret:
             secretName: {{ required "curve.secretName is required" .Values.curve.secretName }}
             defaultMode: 0440
+            optional: true     # `store.pub` below is there only when the shard uses store nodes of its own (docs/store.md)
             # the core's own key pair, and the client pair that it hands to the controller of each organisation (D-24; until the
             # bootstrap token exchange of IAM-003 exists the controllers use the shared client key)
             items:
@@ -165,6 +166,7 @@ spec:
               - {key: core.key, path: core.key}
               - {key: client.pub, path: client.pub}
               - {key: client.key, path: client.key}
+              - {key: store.pub, path: store.pub}      # the public key of the store nodes (docs/store.md, D-57)
         {{- if and .Values.secrets.kekd.url .Values.secrets.kekd.tlsSecret }}
         - name: kekd-tls
           secret:
