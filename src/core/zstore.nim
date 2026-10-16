@@ -9,7 +9,8 @@
 import std/[tables, strutils, options, atomics, times, sequtils, sysrand, locks]
 import ../common/[stream, zmqcurve]
 import ../store/[wire, sha]
-import storagebackend
+import storagebackend, replicas
+export replicas
 
 type
   ZNode* = ref object
@@ -28,9 +29,7 @@ type
     session: string
     next: uint64
 
-  MissedProc* = proc (key, node, op: string) {.gcsafe.}
-
-  MirrorBackend* = ref object of ObjectBackend
+  MirrorBackend* = ref object of ReplicaBackend
     nodes*: seq[ZNode]
     minAcks*: int
     onMissed*: MissedProc
@@ -319,3 +318,15 @@ method deleteObject*(b: MirrorBackend; key: string): Outcome =
 proc nodeNamed*(b: MirrorBackend; name: string): ZNode =
   for n in b.nodes:
     if n.name == name: return n
+
+# ------------------------------------------------------------------ for the repair (core/replicas.nim)
+
+method nodeNames*(b: MirrorBackend): seq[string] = b.nodes.mapIt(it.name)
+
+method sizeOn*(b: MirrorBackend; node: int; key: string): Probe =
+  let r = b.nodes[node].nodeSize(key)
+  Probe(ok: r.reply.ok, retry: r.reply.retry, notFound: r.reply.code == "not_found", size: r.size, error: r.reply.error)
+
+method deleteOn*(b: MirrorBackend; node: int; key: string): Outcome = outcome(b.nodes[node].nodeDelete(key))
+
+method copyBetween*(b: MirrorBackend; src, dst: int; key: string): Outcome = copyObject(b.nodes[src], b.nodes[dst], key)

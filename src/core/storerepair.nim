@@ -8,7 +8,7 @@
 ##     a node whose disk was lost back in order, and it needs nothing of the nodes but `size`.
 import std/[json, strutils, times, sequtils]
 import ../common/rqlite
-import storagebackend, zstore
+import storagebackend, replicas
 
 const
   maxPause = 3600
@@ -36,7 +36,7 @@ proc settle(c: var RqClient; key, node: string; done: bool; attempts: int; now: 
 type RepairReport* = object
   copied*, deleted*, dropped*, failed*: int
 
-proc repairPass*(c: var RqClient; b: MirrorBackend; now: int64; batch = 50): RepairReport =
+proc repairPass*(c: var RqClient; b: ReplicaBackend; now: int64; batch = 50): RepairReport =
   ## the due tasks, at most `batch`
   let rows = c.query(%*[["SELECT key, node, op, attempts FROM store_repair WHERE next_at <= ? ORDER BY since LIMIT ?", now, batch]])["results"][0]{"values"}
   if rows == nil: return
@@ -44,13 +44,13 @@ proc repairPass*(c: var RqClient; b: MirrorBackend; now: int64; batch = 50): Rep
     let key = row[0].getStr
     let node = row[1].getStr
     let attempts = row[3].getInt
-    let target = b.nodeNamed(node)
-    if target == nil:                                   # the node is not in the settings any more
+    let target = b.indexOf(node)
+    if target < 0:                                      # the node is not in the settings any more
       c.settle(key, node, true, attempts, now, "")
       inc result.dropped
       continue
     if row[2].getStr == "delete":
-      let r = target.nodeDelete(key)
+      let r = b.deleteOn(target, key)
       c.settle(key, node, r.ok, attempts, now, r.error)
       if r.ok: inc result.deleted else: inc result.failed
       continue
@@ -59,25 +59,25 @@ proc repairPass*(c: var RqClient; b: MirrorBackend; now: int64; batch = 50): Rep
       c.settle(key, node, true, attempts, now, "")
       inc result.dropped
       continue
-    var source: ZNode
-    for n in b.nodes:
-      if n.name == node: continue
-      let sz = n.nodeSize(key)
-      if sz.reply.ok:
-        source = n
+    var source = -1
+    for i in 0 ..< b.nodeNames().len:
+      if i == target: continue
+      if b.sizeOn(i, key).ok:
+        source = i
         break
-    if source == nil:
+    if source < 0:
       c.settle(key, node, false, attempts, now, "no other node has the object")
       inc result.failed
       continue
-    let r = copyObject(source, target, key)
+    let r = b.copyBetween(source, target, key)
     c.settle(key, node, r.ok, attempts, now, r.error)
     if r.ok: inc result.copied else: inc result.failed
 
-proc checkNodes*(c: var RqClient; b: MirrorBackend; cursor: var string; now: int64; slice = checkSlice): int =
+proc checkNodes*(c: var RqClient; b: ReplicaBackend; cursor: var string; now: int64; slice = checkSlice): int =
   ## The rows `stored` after `cursor` (a key), `slice` of them from `artifacts` and `caches` together: every node is asked the size, and a node that lacks the object or has another size
   ## gets a `copy` task. `cursor` is left at the last key looked at, "" when the end was reached. Returns the number of tasks made.
-  if b.nodes.len < 2: return 0
+  let names = b.nodeNames()
+  if names.len < 2: return 0
   let rows = c.query(%*[["SELECT s3_key, size FROM (SELECT s3_key, size FROM artifacts WHERE state = 'stored' UNION ALL SELECT s3_key, size FROM caches WHERE state = 'stored') " &
     "WHERE s3_key > ? ORDER BY s3_key LIMIT ?", cursor, slice]])["results"][0]{"values"}
   if rows == nil or rows.len == 0:
@@ -88,13 +88,13 @@ proc checkNodes*(c: var RqClient; b: MirrorBackend; cursor: var string; now: int
     let size = row[1].getBiggestInt
     cursor = key
     var have: seq[bool]
-    for n in b.nodes:
-      let r = n.nodeSize(key)
-      have.add r.reply.ok and r.size == size
+    for i in 0 ..< names.len:
+      let r = b.sizeOn(i, key)
+      have.add r.ok and r.size == size
     if have.anyIt(it):                                    # some node has it right: the others are brought up to it
-      for i, n in b.nodes:
+      for i, name in names:
         if not have[i]:
-          c.noteMissed(key, n.name, "copy", now)
+          c.noteMissed(key, name, "copy", now)
           inc result
     # nobody has it right: nothing to copy from; the object is lost or being written (the sweep and the owner of the row decide)
   if rows.len < slice: cursor = ""

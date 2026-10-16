@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
-import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight, storerepair
+import storeauth, audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight, storerepair
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 
@@ -210,6 +210,15 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http404, "not_found", "metrics are turned off")
           return
         reply(Http200, coreRef.renderCoreMetrics(), ["Content-Type: text/plain; version=0.0.4; charset=utf-8"])
+        return
+      if path == authPath:
+        # D-57: the `forward_auth` of a store node asks whether a request of the core's to it is good (core/storeauth.nim); there is no API token here, the token of that request is the proof
+        var sc = newRq(coreRef.rqliteUrl)
+        let now = getTime().toUnix()
+        let sec = sc.storeSecret(now)
+        # the body is not empty on purpose: GuildenStern follows an empty body with a stray CRLF, which Caddy logs for every request (an "unsolicited response on an idle channel")
+        if sec.len > 0 and storeAuthOk(getRequest(), uri, sec, now): reply(Http200, "ok")
+        else: reply(Http401, "no")
         return
       if path == "/healthz":
         # the probes of the Pod: alive, and says nothing else, so that it needs no token
@@ -679,13 +688,13 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           let bad = st.backend().roundTrip()
           if bad.len > 0: problem(Http502, "storage_unreachable", bad)
-          else: jsonOk(Http200, %*{"ok": true, "kind": (if st.cfg.kind == "nodes": "nodes" else: "s3"), "endpoint": st.cfg.endpoint, "bucket": st.cfg.bucket, "nodes": st.cfg.nodes})
+          else: jsonOk(Http200, %*{"ok": true, "kind": (if st.cfg.isMirror: st.cfg.kind else: "s3"), "endpoint": st.cfg.endpoint, "bucket": st.cfg.bucket, "nodes": st.cfg.nodes})
         elif smeth == "GET":
           let cfg = c.loadConfig()
-          jsonOk(Http200, %*{"configured": cfg.found, "kind": (if cfg.kind == "nodes": "nodes" else: "s3"), "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket,
-                             "access_key_id": cfg.keyId, "nodes": cfg.nodes, "min_acks": (if cfg.kind == "nodes" and cfg.minAcks <= 0: cfg.nodes.len else: cfg.minAcks),
+          jsonOk(Http200, %*{"configured": cfg.found, "kind": (if cfg.isMirror: cfg.kind else: "s3"), "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket,
+                             "access_key_id": cfg.keyId, "nodes": cfg.nodes, "min_acks": (if cfg.isMirror and cfg.minAcks <= 0: cfg.nodes.len else: cfg.minAcks),
                              "transport": (if cfg.kind == "nodes": (if cfg.transport == "plain": "plain" else: "curve") else: ""),
-                             "repair_pending": (if cfg.kind == "nodes": c.pendingRepairs() else: 0)})
+                             "repair_pending": (if cfg.isMirror: c.pendingRepairs() else: 0)})
         elif smeth == "DELETE":
           jsonOk(Http200, %*{"deleted": c.forgetStore()})
         elif smeth == "PUT":
@@ -695,9 +704,9 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           var cfg = StoreConfig(found: true, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr)
           var secret = j{"secret_access_key"}.getStr
-          if j{"kind"}.getStr == "nodes":
+          if j{"kind"}.getStr in ["nodes", "dav"]:
             # docs/store.md: store nodes of our own; the token is what the S3 secret is for the other kind
-            cfg = StoreConfig(found: true, kind: "nodes", minAcks: j{"min_acks"}.getInt(0), transport: j{"transport"}.getStr)
+            cfg = StoreConfig(found: true, kind: j{"kind"}.getStr, minAcks: j{"min_acks"}.getInt(0), transport: j{"transport"}.getStr)
             if j{"nodes"} != nil and j["nodes"].kind == JArray:
               for a in j["nodes"].elems: cfg.nodes.add a.getStr
             secret = j{"token"}.getStr
@@ -719,7 +728,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not saved.ok:
             problem(if saved.retry: Http503 else: Http500, "secrets_error", saved.error)
             return
-          jsonOk(Http200, %*{"configured": true, "kind": (if cfg.kind == "nodes": "nodes" else: "s3"), "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket,
+          jsonOk(Http200, %*{"configured": true, "kind": (if cfg.isMirror: cfg.kind else: "s3"), "endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket,
                              "access_key_id": cfg.keyId, "nodes": cfg.nodes, "checked": true})
         else:
           problem(Http405, "method_not_allowed", "GET, PUT, DELETE, or POST :check")

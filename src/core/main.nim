@@ -81,8 +81,8 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
           # D-57: the store nodes of our own are kept alike: the queue of what a node missed, and a slice of the rows against the nodes
           lastRepair = epochTime()
           let st = c.loadStore()
-          if st.ok and st.cfg.kind == "nodes":
-            let mir = MirrorBackend(st.backend())
+          if st.ok and st.cfg.isMirror:
+            let mir = ReplicaBackend(st.backend())
             let rep = c.repairPass(mir, getTime().toUnix())
             if rep.copied + rep.deleted + rep.dropped + rep.failed > 0:
               echo "core: store repair: ", rep.copied, " copied, ", rep.deleted, " deleted, ", rep.dropped, " dropped, ", rep.failed, " left for later"

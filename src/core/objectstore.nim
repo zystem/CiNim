@@ -5,9 +5,9 @@
 ## no access to the store: its shim moves the bytes to and from the core (core/artifactingest.nim), and the core talks to the store through `ObjectBackend`
 ## (core/storagebackend.nim), which is the seam where the storage module can leave the core. The objects of a run are `<tenant>/<run>/<path>`; a step may only
 ## put and get what its own options declared (`artifacts = {upload = {...}, download = {...}}`), in its own run.
-import std/[json, strutils, sequtils, os]
+import std/[json, strutils, sequtils, os, locks]
 import ../common/[rqlite, sigv4, zmqcurve]
-import secretvault, storagebackend, s3backend, zstore
+import secretvault, storagebackend, s3backend, zstore, httpstore, replicas
 export storagebackend
 
 const
@@ -23,7 +23,8 @@ type
   StoreConfig* = object
     found*: bool
     endpoint*, region*, bucket*, keyId*: string
-    kind*: string                ## "" or "s3": a bucket; "nodes": store nodes of our own (docs/store.md), `nodes` are their addresses, the secret is their token
+    kind*: string                ## "" or "s3": a bucket; "dav": store nodes of our own that are Caddy with WebDAV (docs/store.md), `nodes` are their URLs, the secret is the token the requests are signed with;
+                                 ## "nodes": store nodes of ours over ZeroMQ (the first version of the node, docs/store.md), `nodes` are their addresses, the secret is their token
     nodes*: seq[string]
     minAcks*: int
     transport*: string           ## "" or "curve": CURVE on the link to the nodes; "plain": none, for a network that is encrypted anyway (docs/store.md)
@@ -35,8 +36,19 @@ type
     error*: string               ## when not ok: not_configured, secrets_unavailable, unreadable
     retry*: bool
 
+func isMirror*(cfg: StoreConfig): bool = cfg.kind in ["nodes", "dav"]
+  ## the store is a mirror of store nodes of our own
+
 func checkConfig*(cfg: StoreConfig; secret: string): string =
   ## "" if these may be the settings of the store, else what is wrong
+  if cfg.kind == "dav":
+    if cfg.nodes.len < 1 or cfg.nodes.len > 4: return "nodes is 1..4 URLs of store nodes"
+    for a in cfg.nodes:
+      let rest = if a.startsWith("https://"): a[8 .. ^1] elif a.startsWith("http://"): a[7 .. ^1] else: ""
+      if rest.len == 0 or a.len > 200 or a.anyIt(it < '!' or it > '~') or rest.split('/')[0].count(':') != 1 or '?' in a or '#' in a: return "a node is http://host:port or https://host:port"
+    if cfg.minAcks < 0 or cfg.minAcks > cfg.nodes.len: return "min_acks is 0 (every node, the default) or 1.." & $cfg.nodes.len
+    if secret.len < 8 or secret.len > 256 or secret.anyIt(it < '!' or it > '~'): return "token is 8..256 printable characters"
+    return ""
   if cfg.kind == "nodes":
     if cfg.nodes.len < 1 or cfg.nodes.len > 4: return "nodes is 1..4 addresses of store nodes"
     for a in cfg.nodes:
@@ -81,11 +93,21 @@ func objectKey*(tenant, runId, path: string): string = tenant & "/" & runId & "/
 
 # ------------------------------------------------------------------ the settings
 
+var secretCache: tuple[value: string, at: int64]
+var secretLock: Lock
+initLock(secretLock)
+
+proc forgetStoreSecret*() =
+  ## the settings were changed: the next check of a node's request reads them again
+  withLock secretLock: secretCache = (value: "", at: 0'i64)
+
+
 proc saveStore*(c: var RqClient; kek: KekProvider; cfg: StoreConfig; secret: string; now: int64): tuple[ok, retry: bool, error: string] =
   let put = c.putSecret(kek, platformTenant, secretName, secret, now)
   if not put.ok: return (false, put.retry, put.error)
   let meta = $(%*{"endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "key_id": cfg.keyId, "updated_at": now, "kind": cfg.kind, "nodes": cfg.nodes, "min_acks": cfg.minAcks, "transport": cfg.transport})
   discard c.execute(%*[["INSERT INTO vault_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", metaKey, meta]])
+  forgetStoreSecret()
   (true, false, "")
 
 proc loadConfig*(c: var RqClient): StoreConfig =
@@ -102,6 +124,7 @@ proc loadConfig*(c: var RqClient): StoreConfig =
 
 proc forgetStore*(c: var RqClient): bool =
   discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ? AND name = ?", platformTenant, secretName]])
+  forgetStoreSecret()
   c.execute(%*[["DELETE FROM vault_meta WHERE key = ?", metaKey]])["results"][0]{"rows_affected"}.getInt > 0
 
 proc loadStore*(c: var RqClient): Store =
@@ -123,10 +146,22 @@ proc loadStore*(c: var RqClient): Store =
   result.secret = got.values[0][1]
   result.ok = true
 
+proc storeSecret*(c: var RqClient; now: int64): string =
+  ## the secret that the requests to the HTTP nodes are signed with, "" when the store is not of that kind (or is not ready). Kept for half a minute: every request of a node
+  ## to the core's check asks it, and the settings change rarely (core/storeauth.nim)
+  withLock secretLock:
+    if secretCache.at > 0 and now - secretCache.at < 30: return secretCache.value
+  let st = c.loadStore()
+  let v = if st.ok and st.cfg.kind == "dav": st.secret else: ""
+  withLock secretLock: secretCache = (value: v, at: now)
+  v
+
 var missedHook*: MissedProc          ## set by the core at start: what a store node missed goes into the repair queue (core/storerepair.nim)
 
 proc backend*(s: Store): ObjectBackend =
   ## the store as the core talks to it; the one place that says which backend it is
+  if s.cfg.kind == "dav":
+    return newHttpMirror(s.cfg.nodes.mapIt(newHttpNode(it, s.secret)), s.cfg.minAcks, missedHook)
   if s.cfg.kind == "nodes":
     let certs = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
     var nodes: seq[ZNode]

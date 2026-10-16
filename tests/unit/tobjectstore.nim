@@ -47,3 +47,22 @@ suite "DAT-003 the S3 backend's pieces and the step's rights":
   test "DAT-003 a step may read what its download list names, a directory's contents included, and nothing else":
     check coveredBy(@["dist"], "dist") and coveredBy(@["dist"], "dist/sub/a.txt")
     check not coveredBy(@["dist"], "distribution/a") and not coveredBy(@["dist/a"], "dist/b") and not coveredBy(@[], "x")
+
+  test "D-57 the settings of HTTP store nodes: 1 to 4 addresses with a scheme and a port, a number of confirmations that fits, a token":
+    let ok = StoreConfig(found: true, kind: "dav", nodes: @["http://store-0.store:8080", "https://store-1.store:8443/share"], minAcks: 0)
+    check ok.isMirror and checkConfig(ok, "a-token-long-enough") == ""
+    var bad = ok
+    bad.nodes = @[]
+    check checkConfig(bad, "a-token-long-enough").len > 0
+    bad.nodes = @["http://a:1", "http://b:1", "http://c:1", "http://d:1", "http://e:1"]
+    check checkConfig(bad, "a-token-long-enough").len > 0
+    for a in ["tcp://store-0:19750", "store-0:8080", "http://store-0", "ftp://store-0:21", "http://store-0:8080?x=1", "http://store-0:8080#id", "https://", "http://a b:80"]:
+      bad = ok
+      bad.nodes = @[a]
+      check checkConfig(bad, "a-token-long-enough").len > 0
+    bad = ok
+    bad.minAcks = 3
+    check checkConfig(bad, "a-token-long-enough").len > 0
+    check checkConfig(ok, "short").len > 0
+    check checkConfig(ok, "a token with a space inside").len > 0
+    check not StoreConfig(kind: "").isMirror and StoreConfig(kind: "nodes").isMirror
