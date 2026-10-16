@@ -8,7 +8,7 @@ import std/[json, strutils, os, sequtils, algorithm]
 import checksums/sha2
 import ../common/[rqlite, cachedecl]
 export cachedecl
-import storagebackend, groups
+import storagebackend, groups, objectstore
 
 const
   defaultQuota* = 10'i64 * 1024 * 1024 * 1024
@@ -25,36 +25,36 @@ func likeEscape(s: string): string = s.multiReplace(("\\", "\\\\"), ("%", "\\%")
 
 type Entry* = object
   found*: bool
-  key*, s3Key*, sha256*: string
+  key*, s3Key*, sha256*, store*: string
   size*: int64
 
 proc storedEntry*(c: var RqClient; tenant, scope, key: string): Entry =
-  let v = c.query(%*[["SELECT key, s3_key, size, sha256 FROM caches WHERE tenant_id = ? AND scope = ? AND key = ? AND state = 'stored'", tenant, scope, key]])["results"][0]{"values"}
-  if v != nil and v.len > 0: result = Entry(found: true, key: v[0][0].getStr, s3Key: v[0][1].getStr, size: v[0][2].getBiggestInt, sha256: v[0][3].getStr)
+  let v = c.query(%*[["SELECT key, s3_key, size, sha256, store FROM caches WHERE tenant_id = ? AND scope = ? AND key = ? AND state = 'stored'", tenant, scope, key]])["results"][0]{"values"}
+  if v != nil and v.len > 0: result = Entry(found: true, key: v[0][0].getStr, s3Key: v[0][1].getStr, size: v[0][2].getBiggestInt, sha256: v[0][3].getStr, store: v[0][4].getStr)
 
 proc findEntry*(c: var RqClient; tenant, scope, wanted: string; restoreKeys: seq[string]; now: int64): Entry =
   ## The entry with the key itself, else, for each restore key in order, the latest entry whose key starts with it (VAR: "the latest compatible object"). A hit is a use.
   result = c.storedEntry(tenant, scope, wanted)
   if not result.found:
     for r in restoreKeys:
-      let v = c.query(%*[["SELECT key, s3_key, size, sha256 FROM caches WHERE tenant_id = ? AND scope = ? AND state = 'stored' AND key LIKE ? ESCAPE '\\' ORDER BY created_at DESC, key DESC LIMIT 1",
+      let v = c.query(%*[["SELECT key, s3_key, size, sha256, store FROM caches WHERE tenant_id = ? AND scope = ? AND state = 'stored' AND key LIKE ? ESCAPE '\\' ORDER BY created_at DESC, key DESC LIMIT 1",
         tenant, scope, likeEscape(r) & "%"]])["results"][0]{"values"}
       if v != nil and v.len > 0:
-        result = Entry(found: true, key: v[0][0].getStr, s3Key: v[0][1].getStr, size: v[0][2].getBiggestInt, sha256: v[0][3].getStr)
+        result = Entry(found: true, key: v[0][0].getStr, s3Key: v[0][1].getStr, size: v[0][2].getBiggestInt, sha256: v[0][3].getStr, store: v[0][4].getStr)
         break
   if result.found: discard c.execute(%*[["UPDATE caches SET last_used_at = ? WHERE tenant_id = ? AND scope = ? AND key = ?", now, tenant, scope, result.key]])
 
-proc beginEntry*(c: var RqClient; id, tenant, scope, key, s3Key: string; size: int64; sha256, state, uploadId: string; now: int64): bool =
+proc beginEntry*(c: var RqClient; id, tenant, scope, key, s3Key: string; size: int64; sha256, state, uploadId: string; now: int64; store = ""): bool =
   ## False: the key is there already, stored or being uploaded (a key is immutable; a second saver gives way)
-  c.execute(%*[["INSERT OR IGNORE INTO caches (id, tenant_id, scope, key, s3_key, size, sha256, state, upload_id, created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    id, tenant, scope, key, s3Key, size, sha256, state, uploadId, now, now]])["results"][0]{"rows_affected"}.getInt > 0
+  c.execute(%*[["INSERT OR IGNORE INTO caches (id, tenant_id, scope, key, s3_key, size, sha256, state, upload_id, created_at, last_used_at, store) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    id, tenant, scope, key, s3Key, size, sha256, state, uploadId, now, now, store]])["results"][0]{"rows_affected"}.getInt > 0
 
 proc setEntryUpload*(c: var RqClient; tenant, scope, key, uploadId: string) =
   discard c.execute(%*[["UPDATE caches SET upload_id = ? WHERE tenant_id = ? AND scope = ? AND key = ? AND state = 'uploading'", uploadId, tenant, scope, key]])
 
-proc uploadingEntry*(c: var RqClient; tenant, scope, key: string): tuple[found: bool, s3Key, uploadId: string, size: int64] =
-  let v = c.query(%*[["SELECT s3_key, upload_id, size FROM caches WHERE tenant_id = ? AND scope = ? AND key = ? AND state = 'uploading'", tenant, scope, key]])["results"][0]{"values"}
-  if v != nil and v.len > 0: (true, v[0][0].getStr, v[0][1].getStr, v[0][2].getBiggestInt) else: (false, "", "", 0'i64)
+proc uploadingEntry*(c: var RqClient; tenant, scope, key: string): tuple[found: bool, s3Key, uploadId: string, size: int64, store: string] =
+  let v = c.query(%*[["SELECT s3_key, upload_id, size, store FROM caches WHERE tenant_id = ? AND scope = ? AND key = ? AND state = 'uploading'", tenant, scope, key]])["results"][0]{"values"}
+  if v != nil and v.len > 0: (true, v[0][0].getStr, v[0][1].getStr, v[0][2].getBiggestInt, v[0][3].getStr) else: (false, "", "", 0'i64, "")
 
 proc markEntryStored*(c: var RqClient; tenant, scope, key: string): bool =
   c.execute(%*[["UPDATE caches SET state = 'stored', upload_id = '' WHERE tenant_id = ? AND scope = ? AND key = ? AND state = 'uploading'", tenant, scope, key]])["results"][0]{"rows_affected"}.getInt > 0
@@ -71,8 +71,10 @@ proc cacheQuotaFromEnv*(): int64 =
 proc cacheRetentionFromEnv*(): int64 =
   try: parseBiggestInt(getEnv("CINIM_CACHE_RETENTION", $defaultRetention)) except ValueError: defaultRetention
 
-proc dropObject(be: ObjectBackend; key: string): bool =
-  let r = be.deleteObject(key)
+proc dropObject(ss: StoreSet; store, key: string): bool =
+  let rb = ss.resolve(store)
+  if rb.be == nil: return false              # the store is not there (or its secret cannot be read now): the row stays for another pass
+  let r = rb.be.deleteObject(key)
   r.ok or (not r.retry and "no such object" in r.error.toLowerAscii)
 
 # ------------------------------------------------------------------ the limits: the shard's, the organisation's, the groups'
@@ -128,7 +130,7 @@ const inPool = " AND (? = '' OR EXISTS (SELECT 1 FROM groups g WHERE g.id = c.sc
 proc poolBytes(c: var RqClient; tenant: string; p: Pool): int64 =
   c.query(%*[["SELECT COALESCE(sum(c.size), 0) FROM caches c WHERE c.tenant_id = ?" & inPool, tenant, p.groupPath, p.groupPath, p.groupPath, p.groupPath]])["results"][0]{"values"}[0][0].getBiggestInt
 
-proc makeRoom*(c: var RqClient; be: ObjectBackend; tenant, scope: string; needed: int64; shardQuota: int64): tuple[ok: bool, why: string] =
+proc makeRoom*(c: var RqClient; ss: StoreSet; tenant, scope: string; needed: int64; shardQuota: int64): tuple[ok: bool, why: string] =
   ## The caches are bounded (E-003): an entry of `needed` bytes goes in when every limit that binds it holds - the organisation's, and those of its group and the groups
   ## above - the least recently used entries of that pool giving way. Not ok: it cannot fit even in an empty pool (bigger than the limit), or the store would not let an
   ## entry go; `why` names the limit.
@@ -136,17 +138,17 @@ proc makeRoom*(c: var RqClient; be: ObjectBackend; tenant, scope: string; needed
   for p in c.quotaPools(tenant, scope, shardQuota):
     if needed > p.quota: return (false, "the entry is bigger than " & p.name & " cache quota of " & $p.quota & " bytes")
     while c.poolBytes(tenant, p) + needed > p.quota:
-      let v = c.query(%*[["SELECT c.id, c.s3_key FROM caches c WHERE c.tenant_id = ? AND c.state = 'stored'" & inPool & " ORDER BY c.last_used_at, c.created_at LIMIT 1",
+      let v = c.query(%*[["SELECT c.id, c.s3_key, c.store FROM caches c WHERE c.tenant_id = ? AND c.state = 'stored'" & inPool & " ORDER BY c.last_used_at, c.created_at LIMIT 1",
         tenant, p.groupPath, p.groupPath, p.groupPath, p.groupPath]])["results"][0]{"values"}
       if v == nil or v.len == 0: return (false, "what is held under " & p.name & " cache quota is being uploaded, and is not taken")
-      if not dropObject(be, v[0][1].getStr): return (false, "the store would not let an entry go")
+      if not dropObject(ss, v[0][2].getStr, v[0][1].getStr): return (false, "the store would not let an entry go")
       discard c.execute(%*[["DELETE FROM caches WHERE id = ?", v[0][0].getStr]])
   (true, "")
 
 type SweepReport* = object
   expired*, abandoned*, failed*: int
 
-proc sweepCaches*(c: var RqClient; be: ObjectBackend; now: int64; shardRetention = defaultRetention; abandonAfter = 86400'i64): SweepReport =
+proc sweepCaches*(c: var RqClient; ss: StoreSet; now: int64; shardRetention = defaultRetention; abandonAfter = 86400'i64): SweepReport =
   ## one pass: entries not used for the retention of their scope (the group's, else the organisation's, else the shard's; 0 or less keeps for ever) go, and so does an upload
   ## that was begun and never ended
   let scopes = c.query(%*[["SELECT DISTINCT tenant_id, scope FROM caches WHERE state = 'stored' LIMIT 2000"]])["results"][0]{"values"}
@@ -154,21 +156,22 @@ proc sweepCaches*(c: var RqClient; be: ObjectBackend; now: int64; shardRetention
     for sc in scopes:
       let retention = c.retentionSeconds(sc[0].getStr, sc[1].getStr, shardRetention)
       if retention <= 0: continue
-      let v = c.query(%*[["SELECT id, s3_key FROM caches WHERE tenant_id = ? AND scope = ? AND state = 'stored' AND last_used_at < ? ORDER BY last_used_at LIMIT ?",
+      let v = c.query(%*[["SELECT id, s3_key, store FROM caches WHERE tenant_id = ? AND scope = ? AND state = 'stored' AND last_used_at < ? ORDER BY last_used_at LIMIT ?",
         sc[0].getStr, sc[1].getStr, now - retention, batch]])["results"][0]{"values"}
       if v != nil:
         for row in v:
-          if dropObject(be, row[1].getStr):
+          if dropObject(ss, row[2].getStr, row[1].getStr):
             discard c.execute(%*[["DELETE FROM caches WHERE id = ?", row[0].getStr]])
             inc result.expired
           else: inc result.failed
   if abandonAfter > 0:
-    let v = c.query(%*[["SELECT id, s3_key, upload_id FROM caches WHERE state = 'uploading' AND created_at < ? ORDER BY created_at LIMIT ?", now - abandonAfter, batch]])["results"][0]{"values"}
+    let v = c.query(%*[["SELECT id, s3_key, upload_id, store FROM caches WHERE state = 'uploading' AND created_at < ? ORDER BY created_at LIMIT ?", now - abandonAfter, batch]])["results"][0]{"values"}
     if v != nil:
       for row in v:
         var gone = true
         if row[2].getStr.len > 0:
-          let a = be.abortMultipart(row[1].getStr, row[2].getStr)
+          let rb = ss.resolve(row[3].getStr)
+          let a = if rb.be == nil: fail("the store is not available: " & rb.error, retry = true) else: rb.be.abortMultipart(row[1].getStr, row[2].getStr)
           gone = a.ok or (not a.retry and ("no such" in a.error.toLowerAscii or "nosuchupload" in a.error.toLowerAscii))
         if gone:
           discard c.execute(%*[["DELETE FROM caches WHERE id = ?", row[0].getStr]])
@@ -206,10 +209,10 @@ proc poolUsage*(c: var RqClient; tenant: string; shardQuota: int64): seq[PoolUse
       let p = Pool(quota: row[1].getBiggestInt, groupPath: row[0].getStr)
       result.add PoolUse(name: "group", groupPath: p.groupPath, quota: p.quota, bytes: c.poolBytes(tenant, p))
 
-proc deleteEntries*(c: var RqClient; be: ObjectBackend; tenant, scope, key: string): tuple[deleted, failed: int] =
+proc deleteEntries*(c: var RqClient; ss: StoreSet; tenant, scope, key: string): tuple[deleted, failed: int] =
   ## The stored entries of exactly this scope ('' the organisation's own): the one named by `key`, or every one when `key` is empty. Entries being uploaded stay; the next run that
   ## looks for one finds a miss.
-  var sql = "SELECT id, s3_key FROM caches WHERE tenant_id = ? AND scope = ? AND state = 'stored'"
+  var sql = "SELECT id, s3_key, store FROM caches WHERE tenant_id = ? AND scope = ? AND state = 'stored'"
   var args = %*[sql, tenant, scope]
   if key.len > 0:
     sql.add " AND key = ?"
@@ -217,7 +220,7 @@ proc deleteEntries*(c: var RqClient; be: ObjectBackend; tenant, scope, key: stri
   let v = c.query(%*[args])["results"][0]{"values"}
   if v != nil:
     for row in v:
-      if dropObject(be, row[1].getStr):
+      if dropObject(ss, row[2].getStr, row[1].getStr):
         discard c.execute(%*[["DELETE FROM caches WHERE id = ?", row[0].getStr]])
         inc result.deleted
       else: inc result.failed

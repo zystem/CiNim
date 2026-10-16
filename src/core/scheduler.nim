@@ -923,10 +923,10 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("profile \"" & profile & "\" needs a run that belongs to an organisation")
-  if (hasArtifacts(opts) or cacheDecls(opts).len > 0) and not c.loadConfig().found:
+  if (hasArtifacts(opts) or cacheDecls(opts).len > 0) and c.listStores().len == 0:
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",
-        detail: "the step declares artifacts or a cache, and this shard has no object store (PUT /api/v1/storage)")))
+        detail: "the step declares artifacts or a cache, and this shard has no object store (PUT /api/v1/stores/{name})")))
   let badCache = checkCacheDecl(opts)
   if badCache.len > 0:
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(

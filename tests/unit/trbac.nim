@@ -8,7 +8,7 @@ suite "IAM-001 the roles of the shard":
     check validRole("admin") and validRole("rw") and validRole("dev") and validRole("ro")
     check not validRole("") and not validRole("root") and not validRole("Admin")
   test "an administrator may do anything, a made-up role nothing":
-    for (m, p) in [("GET", "/api/v1/tokens"), ("POST", "/api/v1/users/rw:reset-credentials"), ("PUT", "/api/v1/storage"), ("DELETE", "/api/v1/organizations/acme")]:
+    for (m, p) in [("GET", "/api/v1/tokens"), ("POST", "/api/v1/users/rw:reset-credentials"), ("PUT", "/api/v1/stores"), ("DELETE", "/api/v1/organizations/acme")]:
       check roleMay("admin", m, p)
       check not roleMay("boss", m, p)
 
@@ -55,7 +55,7 @@ suite "IAM-001 what ro may do":
       for p in ["/api/v1/runs", "/api/v1/runs/s1_x", "/api/v1/profile", "/api/v1/organizations/acme/triggers"]:
         check not roleMay("ro", m, p)
   test "read what is for administrators: users, tokens, storage, secrets, controller credentials, reconciliation":
-    for p in ["/api/v1/users", "/api/v1/tokens", "/api/v1/tokens/abc", "/api/v1/storage", "/api/v1/organizations/acme/secrets",
+    for p in ["/api/v1/users", "/api/v1/tokens", "/api/v1/tokens/abc", "/api/v1/stores", "/api/v1/organizations/acme/secrets",
               "/api/v1/organizations/acme/secrets/TOKEN", "/api/v1/organizations:reconcile", "/api/v1/unknown", "/healthz-not-a-route"]:
       check not roleMay("ro", "GET", p)
 
@@ -73,9 +73,9 @@ suite "IAM-001 what dev may do":
     for (m, p) in [("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/runs/s1_x"), ("POST", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
                    ("POST", "/api/v1/organizations/acme/triggers"), ("POST", "/api/v1/organizations/acme/triggers/t1:disable"),
                    ("DELETE", "/api/v1/organizations/acme/triggers/t1"), ("POST", "/api/v1/organizations"), ("POST", "/api/v1/users"),
-                   ("DELETE", "/api/v1/users/ro"), ("POST", "/api/v1/tokens"), ("PUT", "/api/v1/storage"), ("PUT", "/api/v1/users/dev/password")]:
+                   ("DELETE", "/api/v1/users/ro"), ("POST", "/api/v1/tokens"), ("PUT", "/api/v1/stores"), ("PUT", "/api/v1/users/dev/password")]:
       check not roleMay("dev", m, p)
-    for p in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/storage", "/api/v1/audit", "/api/v1/organizations/acme/secrets"]:
+    for p in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/stores", "/api/v1/audit", "/api/v1/organizations/acme/secrets"]:
       check not roleMay("dev", "GET", p)
   test "a dev is not a rw: the same user with both roles may do what rw may":
     check not roleMay("dev", "DELETE", "/api/v1/runs/s1_x") and rolesMay(["dev", "rw"], "DELETE", "/api/v1/runs/s1_x")
@@ -92,7 +92,7 @@ suite "IAM-001 what rw may do":
                    ("POST", "/api/v1/organizations/acme:rotate-controller-credential")]:
       check roleMay("rw", m, p)
   test "but not what is the shard's own: who may do what (the users, the roles, the API tokens) and the object store":
-    for (m, p) in [("GET", "/api/v1/storage"), ("PUT", "/api/v1/storage"), ("POST", "/api/v1/storage:check"), ("GET", "/api/v1/users"), ("POST", "/api/v1/users"), ("DELETE", "/api/v1/users/ann"), ("PUT", "/api/v1/users/ann/password"),
+    for (m, p) in [("GET", "/api/v1/stores"), ("PUT", "/api/v1/stores"), ("POST", "/api/v1/stores:check"), ("GET", "/api/v1/users"), ("POST", "/api/v1/users"), ("DELETE", "/api/v1/users/ann"), ("PUT", "/api/v1/users/ann/password"),
                    ("GET", "/api/v1/roles"), ("GET", "/api/v1/audit"), ("GET", "/api/v1/tokens"), ("POST", "/api/v1/tokens"), ("DELETE", "/api/v1/tokens/abc")]:
       check not roleMay("rw", m, p)
   test "the own password is every user's (the gate asks selfService), the own token is replaced before the gate":

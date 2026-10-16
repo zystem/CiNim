@@ -52,7 +52,7 @@ suite "DAT-006 the sweep of the artifacts":
       let r = newRun()
       let old = be.add(r, "old.txt", "stored", 40 * day)
       let young = be.add(r, "young.txt", "stored", 2 * day)
-      let rep = c.sweepArtifacts(be, now, 30 * day)
+      let rep = c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check rep.expired >= 1
       check not rowExists(old) and rowExists(young)
       check "t1/" & r & "/old.txt" notin be.objects and "t1/" & r & "/young.txt" in be.objects
@@ -60,20 +60,20 @@ suite "DAT-006 the sweep of the artifacts":
       let be = newStore()
       let r = newRun("RUNNING")
       let a = be.add(r, "a.txt", "stored", 400 * day)
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check rowExists(a) and be.objects.len == 1
     test "a retention of 0 or less keeps for ever":
       let be = newStore()
       let r = newRun()
       let a = be.add(r, "a.txt", "stored", 4000 * day)
-      discard c.sweepArtifacts(be, now, 0)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 0)
       check rowExists(a)
     test "an upload that was never finished is aborted in the store and forgotten, after the time allowed; one that is under way now is not touched":
       let be = newStore()
       let r = newRun("RUNNING")
       let stale = be.add(r, "big.bin", "uploading", 3 * day, uploadId = "up-stale-" & r)
       let fresh = be.add(r, "next.bin", "uploading", 60, uploadId = "up-fresh-" & r)
-      let rep = c.sweepArtifacts(be, now, 30 * day, abandonAfter = day)
+      let rep = c.sweepArtifacts(fixedStoreSet(be), now, 30 * day, abandonAfter = day)
       check rep.abandoned >= 1
       check not rowExists(stale) and rowExists(fresh)
       check ("up-stale-" & r) notin be.uploads and ("up-fresh-" & r) in be.uploads
@@ -82,7 +82,7 @@ suite "DAT-006 the sweep of the artifacts":
       let r = newRun()
       let a = be.add(r, "gone.txt", "stored", 40 * day)
       be.objects.clear()
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check not rowExists(a)
     test "a store that does not answer leaves everything for the next pass, and the pass after it does the work":
       let be = newStore()
@@ -90,17 +90,17 @@ suite "DAT-006 the sweep of the artifacts":
       let a = be.add(r, "a.txt", "stored", 40 * day)
       let u = be.add(r, "b.bin", "uploading", 3 * day, uploadId = "up-down-" & r)
       be.down = true
-      let rep = c.sweepArtifacts(be, now, 30 * day)
+      let rep = c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check rep.failed >= 2 and rowExists(a) and rowExists(u)
       be.down = false
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check not rowExists(a) and not rowExists(u)
     test "the artifacts of a run that is not in the database any more are deleted, stored or half uploaded":
       let be = newStore()
       let ghost = "s1_ghost-" & newId()
       let a = be.add(ghost, "a.txt", "stored", 60)
       let b = be.add(ghost, "b.bin", "uploading", 60, uploadId = "up-ghost-" & ghost)
-      let rep = c.sweepArtifacts(be, now, 30 * day)
+      let rep = c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check rep.orphans >= 2
       check not rowExists(a) and not rowExists(b)
       check be.objects.len == 0 and be.uploads.len == 0
@@ -124,7 +124,7 @@ suite "DAT-006 the sweep of the artifacts":
       let a7 = be.add(r7, "a.txt", "stored", 10 * day)             # 10 days old: past 7, within 90 and within the shard's 30
       let a90 = be.add(r90, "a.txt", "stored", 40 * day)           # 40 days old: past the shard's 30, within 90
       let aDef = be.add(rDefault, "a.txt", "stored", 40 * day)     # 40 days old, no setting: the shard's 30
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check not rowExists(a7) and rowExists(a90) and not rowExists(aDef)
     test "an organisation with a retention of its own keeps its artifacts even when the shard keeps nothing for ever... and the shard's 0 still means for ever for the rest":
       let be = newStore()
@@ -138,7 +138,7 @@ suite "DAT-006 the sweep of the artifacts":
       let other = newRun()
       let a = be.add(mine, "a.txt", "stored", 6 * day)
       let b = be.add(other, "a.txt", "stored", 4000 * day)
-      discard c.sweepArtifacts(be, now, 0)                         # the shard keeps for ever
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 0)                         # the shard keeps for ever
       check not rowExists(a) and rowExists(b)
 
 suite "DAT-006 the quota of an organisation":

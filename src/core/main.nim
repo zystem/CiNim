@@ -3,7 +3,7 @@
 ## process; the log-circuit module (loggate.nim polls the VictoriaLogs nodes and vlagent, RUN-015's launch gate)
 ## runs as another thread, and a watchdog thread enforces liveness_timeout and probes rqlite and the log circuit (D-29).
 ## One shard, one execution profile, no directory.
-import std/[times, os, strutils, posix, atomics, uri]
+import std/[times, os, strutils, posix, atomics, uri, tables]
 import common/[rqlite, ctrlauth]
 import apiauth, artifactsweep, storerepair, zstore, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
@@ -72,7 +72,7 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
     var lastSweep = 0.0
     var lastRepair = 0.0
     var lastCheck = 0.0
-    var checkCursor = ""
+    var checkCursors: Table[string, string]
     while not stopServers.load:
       try:
         probeAndAge(c, a.startedAt)
@@ -80,25 +80,28 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
         if epochTime() - lastRepair >= repairSeconds:
           # D-57: the store nodes of our own are kept alike: the queue of what a node missed, and a slice of the rows against the nodes
           lastRepair = epochTime()
-          let st = c.loadStore()
-          if st.ok and st.cfg.isMirror:
+          let due = epochTime() - lastCheck >= checkSeconds
+          if due: lastCheck = epochTime()
+          for e in c.listStores():
+            if not e.cfg.isMirror: continue
+            let st = c.loadStore(e.name)
+            if not st.ok: continue
             let mir = ReplicaBackend(st.backend())
             let rep = c.repairPass(mir, getTime().toUnix())
             if rep.copied + rep.deleted + rep.dropped + rep.failed > 0:
-              echo "core: store repair: ", rep.copied, " copied, ", rep.deleted, " deleted, ", rep.dropped, " dropped, ", rep.failed, " left for later"
-            if epochTime() - lastCheck >= checkSeconds:
-              lastCheck = epochTime()
-              let made = c.checkNodes(mir, checkCursor, getTime().toUnix())
-              if made > 0: echo "core: store check: ", made, " objects are missing from a node or differ; queued for repair"
+              echo "core: store ", e.name, " repair: ", rep.copied, " copied, ", rep.deleted, " deleted, ", rep.dropped, " dropped, ", rep.failed, " left for later"
+            if due:
+              let made = c.checkNodes(mir, checkCursors.mgetOrPut(e.name, ""), getTime().toUnix())
+              if made > 0: echo "core: store ", e.name, " check: ", made, " objects are missing from a node or differ; queued for repair"
         if epochTime() - lastSweep >= artifactSweepSeconds:
-          # DAT-006: expired artifacts, abandoned uploads and orphans leave the store (core/artifactsweep.nim); only when a store is set up
+          # DAT-006: expired artifacts, abandoned uploads and orphans leave the stores (core/artifactsweep.nim); only when a store is set up; each row is dealt with in the store it was written to (D-59)
           lastSweep = epochTime()
-          let store = c.loadStore()
-          if store.ok:
-            let rep = c.sweepArtifacts(store.backend(), getTime().toUnix(), retentionFromEnv(), abandonAfterFromEnv())
+          if c.listStores().len > 0:
+            let ss = newStoreSet(a.rqliteUrl)
+            let rep = c.sweepArtifacts(ss, getTime().toUnix(), retentionFromEnv(), abandonAfterFromEnv())
             if rep.expired + rep.abandoned + rep.orphans + rep.failed > 0:
               echo "core: artifacts swept: ", rep.expired, " expired, ", rep.abandoned, " abandoned uploads, ", rep.orphans, " of runs that are gone, ", rep.failed, " left for the next pass"
-            let cr = c.sweepCaches(store.backend(), getTime().toUnix(), cacheRetentionFromEnv())      # DAT-004: caches not used for the retention, and abandoned uploads
+            let cr = c.sweepCaches(ss, getTime().toUnix(), cacheRetentionFromEnv())      # DAT-004: caches not used for the retention, and abandoned uploads
             if cr.expired + cr.abandoned + cr.failed > 0:
               echo "core: caches swept: ", cr.expired, " not used for long, ", cr.abandoned, " abandoned uploads, ", cr.failed, " left for the next pass"
       except CatchableError as e: stderr.writeLine "core: watchdog: " & e.msg

@@ -42,7 +42,16 @@ proc refuse(code, detail: string): ArtifactAck =
 proc fromOutcome(o: Outcome): ArtifactAck =
   refuse(if o.retry: "store_unavailable" else: "store_error", o.error)
 
-proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; ds: seq[CacheDecl]; be: ObjectBackend; now: int64): ArtifactAck =
+proc backendFor(ss: StoreSet; name: string): tuple[be: ObjectBackend, refusal: ArtifactAck] =
+  ## the backend of the store `name` (D-59), or the answer that refuses the request because it cannot be had
+  let rb = ss.resolve(name)
+  if rb.be != nil: return (rb.be, ArtifactAck())
+  case rb.error
+  of "not_configured": (nil, refuse("store_not_configured", "the shard has no object store (PUT /api/v1/stores/{name})"))
+  of "no_such_store": (nil, refuse("store_not_configured", "the store " & name & " is not there any more"))
+  else: (nil, refuse("store_unavailable", "the object store's key cannot be read now: " & rb.error))
+
+proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; ds: seq[CacheDecl]; ss: StoreSet; now: int64): ArtifactAck =
   ## DAT-004: the step's cache, by the same channel and blocks as its artifacts. `path` is the cache key. A step may find or read only what it declared (its key, or what one of its
   ## restore keys names) and save only the key it declared; a key that is stored is immutable (`cache_exists`: the saver gives way); room is made by dropping the entries that were
   ## used least long ago (cachestore.makeRoom).
@@ -59,7 +68,9 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
     let e = c.storedEntry(tenant, scope, key)
     if not e.found: return refuse("cache_missing", "no such cache entry")
     if req.length == 0 or int(req.length) > readSize or int64(req.offset) >= e.size: return refuse("bad_request", "a block is 1.." & $readSize & " bytes inside the entry")
-    let got = be.readRange(e.s3Key, int64(req.offset), min(int64(req.length), e.size - int64(req.offset)))
+    let rb = ss.backendFor(e.store)
+    if rb.be == nil: return rb.refusal
+    let got = rb.be.readRange(e.s3Key, int64(req.offset), min(int64(req.length), e.size - int64(req.offset)))
     if not got.res.ok: return fromOutcome(got.res)
     result = ack()
     result.data = cast[seq[byte]](got.data)
@@ -72,9 +83,13 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
       let sha = req.sha256.toLowerAscii
       let s3 = objectKeyOf(tenant, scope, key)
       if c.storedEntry(tenant, scope, key).found or c.uploadingEntry(tenant, scope, key).found: return refuse("cache_exists", "the cache key " & key & " is stored already; a key is immutable")
-      let room = c.makeRoom(be, tenant, scope, int64(req.size), cacheQuotaFromEnv())
+      let sname = c.storeFor(tenant, "caches")             # D-59: the store the organisation chose for caches, now; the row remembers it
+      let rb = ss.backendFor(sname)
+      if rb.be == nil: return rb.refusal
+      let be = rb.be
+      let room = c.makeRoom(ss, tenant, scope, int64(req.size), cacheQuotaFromEnv())
       if not room.ok: return refuse("quota_exceeded", room.why)
-      if not c.beginEntry(schema.newId(), tenant, scope, key, s3, int64(req.size), sha, "uploading", "", now): return refuse("cache_exists", "the cache key " & key & " is being saved by another step")
+      if not c.beginEntry(schema.newId(), tenant, scope, key, s3, int64(req.size), sha, "uploading", "", now, sname): return refuse("cache_exists", "the cache key " & key & " is being saved by another step")
       if req.op == "put_object":
         let data = toStr(req.data)
         if uint64(data.len) != req.size or data.len > partSize or hexOf(sha256(data)) != sha:
@@ -98,18 +113,22 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
       let row = c.uploadingEntry(tenant, scope, key)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
       if req.part == 0 or int(req.part) > maxParts or req.data.len == 0 or req.data.len > partSize: return refuse("bad_request", "a part is 1.." & $maxParts & ", 1.." & $partSize & " bytes")
-      let up = be.uploadPart(row.s3Key, row.uploadId, int(req.part), toStr(req.data))
+      let rb = ss.backendFor(row.store)
+      if rb.be == nil: return rb.refusal
+      let up = rb.be.uploadPart(row.s3Key, row.uploadId, int(req.part), toStr(req.data))
       if not up.res.ok: return fromOutcome(up.res)
       result = ack()
       result.etag = up.etag
     of "put_end":
       let row = c.uploadingEntry(tenant, scope, key)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
-      let fin = be.completeMultipart(row.s3Key, row.uploadId, req.parts.mapIt((int(it.part), it.etag)))
+      let rb = ss.backendFor(row.store)
+      if rb.be == nil: return rb.refusal
+      let fin = rb.be.completeMultipart(row.s3Key, row.uploadId, req.parts.mapIt((int(it.part), it.etag)))
       if not fin.ok: return fromOutcome(fin)
-      let sz = be.objectSize(row.s3Key)
+      let sz = rb.be.objectSize(row.s3Key)
       if not sz.res.ok or sz.size != row.size:
-        discard be.deleteObject(row.s3Key)
+        discard rb.be.deleteObject(row.s3Key)
         c.forgetEntry(tenant, scope, key)
         return refuse("size_mismatch", key & ": the store holds " & $sz.size & " bytes, " & $row.size & " were announced")
       discard c.markEntryStored(tenant, scope, key)
@@ -117,13 +136,14 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
     else:       # put_abort
       let row = c.uploadingEntry(tenant, scope, key)
       if row.found:
-        discard be.abortMultipart(row.s3Key, row.uploadId)
+        let rb = ss.backendFor(row.store)
+        if rb.be != nil: discard rb.be.abortMultipart(row.s3Key, row.uploadId)
         c.forgetEntry(tenant, scope, key)
       result = ack()
   else:
     return refuse("bad_request", "the op of a cache request is cache_find, get_block, put_object, put_begin, put_part, put_end or put_abort")
 
-proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): ArtifactAck =
+proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: StoreSet): ArtifactAck =
   if req.job_token.len == 0 or not constantTimeEqual(req.job_token, stepToken(master, req.step.run_id, int(req.step.seq), int(req.step.attempt))):
     return refuse("bad_token", "the step's credential is not right")
   let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id, ru.group_id FROM steps s JOIN runs ru ON ru.id = s.run_id " &
@@ -135,13 +155,8 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
   let decl = artifactDecl(v[0][1].getStr)
   let tenant = v[0][2].getStr
   let scope = v[0][3].getStr
-  let store = c.loadStore()
-  if not store.ok:
-    return refuse(if store.error == "not_configured": "store_not_configured" else: "store_unavailable",
-                  if store.error == "not_configured": "the shard has no object store (PUT /api/v1/storage)" else: "the object store's key cannot be read now: " & store.error)
-  let be = store.backend()
   let now = getTime().toUnix()
-  if req.cache: return handleCache(c, req, tenant, scope, cacheDecls(v[0][1].getStr), be, now)
+  if req.cache: return handleCache(c, req, tenant, scope, cacheDecls(v[0][1].getStr), ss, now)
   let runId = req.step.run_id
   case req.op
   of "get_list":
@@ -156,7 +171,9 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
     let art = c.storedArtifact(runId, req.path)
     if not art.found or not decl.download.coveredBy(req.path): return refuse("not_declared", req.path & " is not an artifact this step may read")
     if req.length == 0 or int(req.length) > readSize or int64(req.offset) >= art.size: return refuse("bad_request", "a block is 1.." & $readSize & " bytes inside the file")
-    let got = be.readRange(art.key, int64(req.offset), min(int64(req.length), art.size - int64(req.offset)))
+    let rb = ss.backendFor(art.store)
+    if rb.be == nil: return rb.refusal
+    let got = rb.be.readRange(art.key, int64(req.offset), min(int64(req.length), art.size - int64(req.offset)))
     if not got.res.ok: return fromOutcome(got.res)
     result = ack()
     result.data = cast[seq[byte]](got.data)
@@ -175,25 +192,31 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
         return refuse("quota_exceeded", "the artifacts of this organisation would pass its quota of " & $quota & " bytes")
       if req.sha256.len != 64 or req.sha256.anyIt(it notin HexDigits): return refuse("bad_request", "sha256 of " & path & " is not 64 hex digits")
       let sha = req.sha256.toLowerAscii
+      let sname = c.storeFor(tenant, "artifacts")          # D-59: the store the organisation chose for artifacts, now; the row remembers it
+      let rb = ss.backendFor(sname)
+      if rb.be == nil: return rb.refusal
+      let be = rb.be
       if req.op == "put_object":
         let data = toStr(req.data)
         if uint64(data.len) != req.size or data.len > partSize: return refuse("bad_request", "put_object holds the whole file, at most " & $partSize & " bytes")
         if hexOf(sha256(data)) != sha: return refuse("bad_request", "the content of " & path & " is not the SHA-256 that was announced")
         let put = be.putObject(key, data)
         if not put.ok: return fromOutcome(put)
-        c.recordArtifact(schema.newId(), tenant, runId, int(req.step.seq), path, key, int64(req.size), sha, "stored", "", now)
+        c.recordArtifact(schema.newId(), tenant, runId, int(req.step.seq), path, key, int64(req.size), sha, "stored", "", now, sname)
         result = ack()
       else:
         let mp = be.createMultipart(key)
         if not mp.res.ok: return fromOutcome(mp.res)
-        c.recordArtifact(schema.newId(), tenant, runId, int(req.step.seq), path, key, int64(req.size), sha, "uploading", mp.uploadId, now)
+        c.recordArtifact(schema.newId(), tenant, runId, int(req.step.seq), path, key, int64(req.size), sha, "uploading", mp.uploadId, now, sname)
         result = ack()
         result.upload_id = mp.uploadId
     of "put_part":
       let row = c.uploadingRow(runId, path)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", path & " has no upload under way with this id")
       if req.part == 0 or int(req.part) > maxParts or req.data.len == 0 or req.data.len > partSize: return refuse("bad_request", "a part is 1.." & $maxParts & ", 1.." & $partSize & " bytes")
-      let up = be.uploadPart(row.key, row.uploadId, int(req.part), toStr(req.data))
+      let rb = ss.backendFor(row.store)
+      if rb.be == nil: return rb.refusal
+      let up = rb.be.uploadPart(row.key, row.uploadId, int(req.part), toStr(req.data))
       if not up.res.ok: return fromOutcome(up.res)
       result = ack()
       result.etag = up.etag
@@ -201,12 +224,14 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
       let row = c.uploadingRow(runId, path)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", path & " has no upload under way with this id")
       let parts = req.parts.mapIt((int(it.part), it.etag))
-      let fin = be.completeMultipart(row.key, row.uploadId, parts)
+      let rb = ss.backendFor(row.store)
+      if rb.be == nil: return rb.refusal
+      let fin = rb.be.completeMultipart(row.key, row.uploadId, parts)
       if not fin.ok: return fromOutcome(fin)
       # the store says that the object is there, with the size that was announced; only then it is the run's artifact
-      let sz = be.objectSize(row.key)
+      let sz = rb.be.objectSize(row.key)
       if not sz.res.ok or sz.size != row.size:
-        discard be.deleteObject(row.key)
+        discard rb.be.deleteObject(row.key)
         c.forgetArtifact(runId, path)
         return refuse("size_mismatch", path & ": the store holds " & $sz.size & " bytes, " & $row.size & " were announced")
       discard c.markStored(runId, path)
@@ -214,7 +239,8 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string): Art
     else:       # put_abort
       let row = c.uploadingRow(runId, path)
       if row.found:
-        discard be.abortMultipart(row.key, row.uploadId)
+        let rb = ss.backendFor(row.store)
+        if rb.be != nil: discard rb.be.abortMultipart(row.key, row.uploadId)
         c.forgetArtifact(runId, path)
       result = ack()
   else:
@@ -230,7 +256,7 @@ proc serveArtifactIngest*(rqliteUrl, certs: string; port: int) {.thread.} =
       let body = conn.receive()
       if body.len == 0: continue
       # an error in one request is the answer to that request; it does not end the core, and a REP socket needs its answer to go on
-      let resp = try: handleArtifact(c, Protobuf.decode(cast[seq[byte]](body), ArtifactRequest), master)
+      let resp = try: handleArtifact(c, Protobuf.decode(cast[seq[byte]](body), ArtifactRequest), master, newStoreSet(rqliteUrl))
                  except CatchableError as e:
                    stderr.writeLine "core: artifact ingest: " & e.msg
                    refuse("internal", e.msg)

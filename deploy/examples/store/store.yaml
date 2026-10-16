@@ -4,7 +4,7 @@
 #   kubectl -n <namespace> create secret generic cinim-store --from-literal=token="$(openssl rand -hex 24)" \
 #       --from-file=store.key=<certs>/curve/store.key --from-file=store.pub=<certs>/curve/store.pub
 #   kubectl -n <namespace> apply -f store.yaml
-#   curl -X PUT .../api/v1/storage -d '{"kind":"nodes","nodes":["tcp://cinim-store-0.cinim-store:19750","tcp://cinim-store-1.cinim-store:19750"],"token":"<the same token>"}'
+#   curl -X PUT .../api/v1/stores/<name> -d '{"kind":"nodes","nodes":["tcp://cinim-store-0.cinim-store:19750","tcp://cinim-store-1.cinim-store:19750"],"token":"<the same token>"}'
 #
 # The core mounts the same `store.pub` (and `client.key`/`client.pub`) in its certs directory. The image is built with tools/image/kaniko-build.sh (target `store`).
 apiVersion: v1

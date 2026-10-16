@@ -5,7 +5,7 @@
 ## no access to the store: its shim moves the bytes to and from the core (core/artifactingest.nim), and the core talks to the store through `ObjectBackend`
 ## (core/storagebackend.nim), which is the seam where the storage module can leave the core. The objects of a run are `<tenant>/<run>/<path>`; a step may only
 ## put and get what its own options declared (`artifacts = {upload = {...}, download = {...}}`), in its own run.
-import std/[json, strutils, sequtils, os, locks]
+import std/[json, strutils, sequtils, os, locks, tables]
 import ../common/[rqlite, sigv4, zmqcurve]
 import secretvault, storagebackend, s3backend, zstore, httpstore, replicas
 export storagebackend
@@ -13,7 +13,6 @@ export storagebackend
 const
   platformTenant* = "_platform"
   secretName = "OBJECTSTORE_SECRET_KEY"
-  metaKey = "objectstore"
   maxFilesPerStep* = 1000
   maxObjectBytes* = 2'i64 * 1024 * 1024 * 1024      ## one artifact
   maxRunBytes* = 10'i64 * 1024 * 1024 * 1024        ## all the artifacts of a run
@@ -31,6 +30,7 @@ type
 
   Store* = object
     ok*: bool
+    name*: string
     cfg*: StoreConfig
     secret*: string
     error*: string               ## when not ok: not_configured, secrets_unavailable, unreadable
@@ -91,54 +91,123 @@ proc hasArtifacts*(optsJson: string): bool =
 
 func objectKey*(tenant, runId, path: string): string = tenant & "/" & runId & "/" & path
 
-# ------------------------------------------------------------------ the settings
+# ------------------------------------------------------------------ the stores
 
-var secretCache: tuple[value: string, at: int64]
+const
+  purposes* = ["artifacts", "caches", "held_logs", "audit"]    ## what an organisation may choose a store for (D-59, docs/storage-module.md)
+
+type StoreEntry* = object
+  ## a named store of the shard, as it is shown: no secret
+  name*: string
+  cfg*: StoreConfig
+  isDefault*: bool
+
+var secretCache: tuple[values: seq[string], at: int64]
 var secretLock: Lock
 initLock(secretLock)
 
 proc forgetStoreSecret*() =
   ## the settings were changed: the next check of a node's request reads them again
-  withLock secretLock: secretCache = (value: "", at: 0'i64)
+  withLock secretLock: secretCache = (values: @[], at: 0'i64)
 
+func validStoreName*(name: string): bool =
+  ## lowercase letters, digits and `-`, starting with a letter, at most 32
+  if name.len < 1 or name.len > 32 or name[0] notin {'a' .. 'z'}: return false
+  for ch in name:
+    if ch notin {'a' .. 'z', '0' .. '9', '-'}: return false
+  true
 
-proc saveStore*(c: var RqClient; kek: KekProvider; cfg: StoreConfig; secret: string; now: int64): tuple[ok, retry: bool, error: string] =
-  let put = c.putSecret(kek, platformTenant, secretName, secret, now)
-  if not put.ok: return (false, put.retry, put.error)
-  let meta = $(%*{"endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "key_id": cfg.keyId, "updated_at": now, "kind": cfg.kind, "nodes": cfg.nodes, "min_acks": cfg.minAcks, "transport": cfg.transport})
-  discard c.execute(%*[["INSERT INTO vault_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", metaKey, meta]])
-  forgetStoreSecret()
-  (true, false, "")
+func validPurpose*(purpose: string): bool = purpose in purposes
 
-proc loadConfig*(c: var RqClient): StoreConfig =
-  let r = c.query(%*[["SELECT value FROM vault_meta WHERE key = ?", metaKey]])
-  let v = r["results"][0]{"values"}
-  if v == nil or v.len == 0: return
+func secretNameOf(name: string): string = secretName & ":" & name
+
+proc configJson(cfg: StoreConfig): string =
+  $(%*{"endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "key_id": cfg.keyId, "nodes": cfg.nodes, "min_acks": cfg.minAcks, "transport": cfg.transport})
+
+proc configOf(kind, config: string): StoreConfig =
   try:
-    let j = parseJson(v[0][0].getStr)
-    result = StoreConfig(found: true, endpoint: j["endpoint"].getStr, region: j["region"].getStr, bucket: j["bucket"].getStr, keyId: j["key_id"].getStr,
-                         kind: j{"kind"}.getStr, minAcks: j{"min_acks"}.getInt(1), transport: j{"transport"}.getStr)
+    let j = parseJson(config)
+    result = StoreConfig(found: true, kind: kind, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr, bucket: j{"bucket"}.getStr, keyId: j{"key_id"}.getStr,
+                         minAcks: j{"min_acks"}.getInt(0), transport: j{"transport"}.getStr)
     if j{"nodes"} != nil and j["nodes"].kind == JArray:
       for a in j["nodes"].elems: result.nodes.add a.getStr
   except CatchableError: result = StoreConfig()
 
-proc forgetStore*(c: var RqClient): bool =
-  discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ? AND name = ?", platformTenant, secretName]])
-  forgetStoreSecret()
-  c.execute(%*[["DELETE FROM vault_meta WHERE key = ?", metaKey]])["results"][0]{"rows_affected"}.getInt > 0
+proc listStores*(c: var RqClient): seq[StoreEntry] =
+  let r = c.query(%*[["SELECT name, kind, config, is_default FROM object_stores ORDER BY name"]])
+  let v = r["results"][0]{"values"}
+  if v != nil:
+    for row in v:
+      result.add StoreEntry(name: row[0].getStr, cfg: configOf(row[1].getStr, row[2].getStr), isDefault: row[3].getInt == 1)
 
-proc loadStore*(c: var RqClient): Store =
-  ## the settings and the secret, ready to sign with
-  result.cfg = c.loadConfig()
-  if not result.cfg.found:
+proc defaultStoreName*(c: var RqClient): string =
+  let v = c.query(%*[["SELECT name FROM object_stores WHERE is_default = 1"]])["results"][0]{"values"}
+  if v != nil and v.len > 0: v[0][0].getStr else: ""
+
+proc setDefaultStore*(c: var RqClient; name: string): bool =
+  ## false if there is no such store
+  let v = c.query(%*[["SELECT count(*) FROM object_stores WHERE name = ?", name]])["results"][0]{"values"}[0][0].getInt
+  if v == 0: return false
+  discard c.execute(%*[["UPDATE object_stores SET is_default = CASE WHEN name = ? THEN 1 ELSE 0 END", name]])
+  true
+
+proc saveStore*(c: var RqClient; kek: KekProvider; name: string; cfg: StoreConfig; secret: string; makeDefault: bool; now: int64): tuple[ok, retry: bool, error: string] =
+  ## a store is made or replaced; the first store of the shard is its default, and so is one that asks for it. The secret is sealed under the tenant `_platform`.
+  if not validStoreName(name): return (false, false, "a store's name is lowercase letters, digits and -, starting with a letter, at most 32")
+  let why = checkConfig(cfg, secret)
+  if why.len > 0: return (false, false, why)
+  let put = c.putSecret(kek, platformTenant, secretNameOf(name), secret, now)
+  if not put.ok: return (false, put.retry, put.error)
+  let cur = c.query(%*[["SELECT count(*) FROM object_stores"]])["results"][0]{"values"}[0][0].getInt
+  discard c.execute(%*[["INSERT INTO object_stores (name, kind, config, is_default, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?) " &
+    "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, config = excluded.config, updated_at = excluded.updated_at",
+    name, (if cfg.kind.len == 0: "s3" else: cfg.kind), configJson(cfg), now, now]])
+  if cur == 0 or makeDefault: discard c.setDefaultStore(name)
+  forgetStoreSecret()
+  (true, false, "")
+
+proc storeInUse(c: var RqClient; name: string): string =
+  ## "" if nothing refers to the store, else what does
+  let org = c.query(%*[["SELECT count(*) FROM org_storage WHERE store_name = ?", name]])["results"][0]{"values"}[0][0].getInt
+  if org > 0: return $org & " organisation setting(s) choose it"
+  let art = c.query(%*[["SELECT count(*) FROM artifacts WHERE store = ?", name]])["results"][0]{"values"}[0][0].getInt
+  if art > 0: return $art & " artifact(s) lie in it"
+  let cac = c.query(%*[["SELECT count(*) FROM caches WHERE store = ?", name]])["results"][0]{"values"}[0][0].getInt
+  if cac > 0: return $cac & " cache entr(ies) lie in it"
+  let hl = c.query(%*[["SELECT count(*) FROM held_logs WHERE store = ?", name]])["results"][0]{"values"}[0][0].getInt
+  if hl > 0: return $hl & " held log(s) lie in it"
+  ""
+
+proc forgetStore*(c: var RqClient; name: string): tuple[ok: bool, error: string] =
+  ## refused while something uses the store, and for the default one while there is another (make that one the default first)
+  let v = c.query(%*[["SELECT is_default FROM object_stores WHERE name = ?", name]])["results"][0]{"values"}
+  if v == nil or v.len == 0: return (false, "no such store")
+  let used = c.storeInUse(name)
+  if used.len > 0: return (false, "the store is in use: " & used)
+  if v[0][0].getInt == 1:
+    let others = c.query(%*[["SELECT count(*) FROM object_stores WHERE name != ?", name]])["results"][0]{"values"}[0][0].getInt
+    if others > 0: return (false, "this is the default store: make another one the default first")
+  discard c.execute(%*[["DELETE FROM object_stores WHERE name = ?", name]])
+  discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ? AND name = ?", platformTenant, secretNameOf(name)]])
+  forgetStoreSecret()
+  (true, "")
+
+proc loadStoreWith*(c: var RqClient; kek: KekProvider; name: string): Store =
+  ## the store `name` ("" is the default one) with its secret, ready to use
+  let want = if name.len > 0: name else: c.defaultStoreName()
+  if want.len == 0:
     result.error = "not_configured"
     return
-  let vk = vaultKek()
-  if not vk.ready:
-    result.error = "secrets_unavailable"
-    result.retry = true
+  var found = false
+  for e in c.listStores():
+    if e.name == want:
+      result.name = e.name
+      result.cfg = e.cfg
+      found = true
+  if not found:
+    result.error = "no_such_store"
     return
-  let got = c.getSecrets(vk.kek, platformTenant, @[secretName])
+  let got = c.getSecrets(kek, platformTenant, @[secretNameOf(want)])
   if not got.ok:
     result.error = if got.retry: "secrets_unavailable" else: "unreadable"
     result.retry = got.retry
@@ -146,15 +215,52 @@ proc loadStore*(c: var RqClient): Store =
   result.secret = got.values[0][1]
   result.ok = true
 
-proc storeSecret*(c: var RqClient; now: int64): string =
-  ## the secret that the requests to the HTTP nodes are signed with, "" when the store is not of that kind (or is not ready). Kept for half a minute: every request of a node
-  ## to the core's check asks it, and the settings change rarely (core/storeauth.nim)
+proc loadStore*(c: var RqClient; name = ""): Store =
+  ## the same with the vault of the process
+  let vk = vaultKek()
+  if not vk.ready:
+    result.error = "secrets_unavailable"
+    result.retry = true
+    return
+  c.loadStoreWith(vk.kek, name)
+
+proc orgStorage*(c: var RqClient; tenant: string): seq[(string, string)] =
+  ## the purposes for which the organisation chose a store, with the store, in the order of the purposes' names
+  let v = c.query(%*[["SELECT purpose, store_name FROM org_storage WHERE tenant_id = ? ORDER BY purpose", tenant]])["results"][0]{"values"}
+  if v != nil:
+    for row in v: result.add (row[0].getStr, row[1].getStr)
+
+proc setOrgStorage*(c: var RqClient; tenant, purpose, store, by: string; now: int64): string =
+  ## "" if done, else why not. An empty `store` clears the choice (the default again).
+  if not validPurpose(purpose): return "the purpose is one of " & purposes.join(", ")
+  if store.len == 0:
+    discard c.execute(%*[["DELETE FROM org_storage WHERE tenant_id = ? AND purpose = ?", tenant, purpose]])
+    return ""
+  let known = c.query(%*[["SELECT count(*) FROM object_stores WHERE name = ?", store]])["results"][0]{"values"}[0][0].getInt
+  if known == 0: return "no such store: " & store
+  discard c.execute(%*[["INSERT INTO org_storage (tenant_id, purpose, store_name, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) " &
+    "ON CONFLICT(tenant_id, purpose) DO UPDATE SET store_name = excluded.store_name, updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+    tenant, purpose, store, by, now]])
+  ""
+
+proc storeFor*(c: var RqClient; tenant, purpose: string): string =
+  ## the name of the store the organisation uses for the purpose: its own choice, else the default of the shard; "" if the shard has no store
+  let v = c.query(%*[["SELECT store_name FROM org_storage WHERE tenant_id = ? AND purpose = ?", tenant, purpose]])["results"][0]{"values"}
+  if v != nil and v.len > 0: return v[0][0].getStr
+  c.defaultStoreName()
+
+proc storeSecrets*(c: var RqClient; now: int64): seq[string] =
+  ## the secrets that the requests to HTTP nodes are signed with: one per store of kind `dav`. Kept for half a minute: every request of a node to the core's check asks for them,
+  ## and the settings change rarely (core/storeauth.nim)
   withLock secretLock:
-    if secretCache.at > 0 and now - secretCache.at < 30: return secretCache.value
-  let st = c.loadStore()
-  let v = if st.ok and st.cfg.kind == "dav": st.secret else: ""
-  withLock secretLock: secretCache = (value: v, at: now)
-  v
+    if secretCache.at > 0 and now - secretCache.at < 30: return secretCache.values
+  var found: seq[string]
+  for e in c.listStores():
+    if e.cfg.kind == "dav":
+      let st = c.loadStore(e.name)
+      if st.ok: found.add st.secret
+  withLock secretLock: secretCache = (values: found, at: now)
+  found
 
 var missedHook*: MissedProc          ## set by the core at start: what a store node missed goes into the repair queue (core/storerepair.nim)
 
@@ -173,19 +279,50 @@ proc backend*(s: Store): ObjectBackend =
     return newMirror(nodes, s.cfg.minAcks, missedHook)
   S3Backend(endpoint: s.cfg.endpoint, region: s.cfg.region, bucket: s.cfg.bucket, keyId: s.cfg.keyId, secret: s.secret)
 
+# ------------------------------------------------------------------ the stores of a pass
+
+type
+  StoreSet* = ref object
+    ## the backends of the stores that one request or one pass of a sweep needs, made when first asked for and kept for the pass. A request that touches rows of several stores
+    ## (a sweep, a listing of caches) asks for each by the name that the row carries. `fixed` is for the tests: every name gives that one store.
+    rqliteUrl: string
+    cache: Table[string, ObjectBackend]
+    fixed: ObjectBackend
+
+  Resolved* = object
+    be*: ObjectBackend
+    error*: string                ## not_configured, no_such_store, secrets_unavailable, unreadable
+    retry*: bool
+
+proc newStoreSet*(rqliteUrl: string): StoreSet = StoreSet(rqliteUrl: rqliteUrl, cache: initTable[string, ObjectBackend]())
+
+proc fixedStoreSet*(be: ObjectBackend): StoreSet =
+  StoreSet(fixed: be, cache: initTable[string, ObjectBackend]())
+
+proc resolve*(ss: StoreSet; name: string): Resolved =
+  ## the backend of the store `name` ("" is the default store)
+  if ss.fixed != nil: return Resolved(be: ss.fixed)
+  if name in ss.cache: return Resolved(be: ss.cache[name])
+  var c = newRq(ss.rqliteUrl)
+  let st = c.loadStore(name)
+  if not st.ok: return Resolved(error: st.error, retry: st.retry)
+  let be = st.backend()
+  ss.cache[name] = be
+  Resolved(be: be)
+
 # ------------------------------------------------------------------ the rows
 
-proc recordArtifact*(c: var RqClient; id, tenant, runId: string; step: int; path, key: string; size: int64; sha256, state, uploadId: string; now: int64) =
-  ## a path is one artifact of a run: a retry of the step puts it again
-  discard c.execute(%*[["INSERT INTO artifacts (id, tenant_id, run_id, step_ordinal, path, s3_key, size, sha256, state, created_at, upload_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " &
+proc recordArtifact*(c: var RqClient; id, tenant, runId: string; step: int; path, key: string; size: int64; sha256, state, uploadId: string; now: int64; store = "") =
+  ## a path is one artifact of a run: a retry of the step puts it again (and may put it in another store)
+  discard c.execute(%*[["INSERT INTO artifacts (id, tenant_id, run_id, step_ordinal, path, s3_key, size, sha256, state, created_at, upload_id, store) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " &
     "ON CONFLICT(run_id, path) DO UPDATE SET step_ordinal = excluded.step_ordinal, size = excluded.size, sha256 = excluded.sha256, state = excluded.state, " &
-    "created_at = excluded.created_at, upload_id = excluded.upload_id",
-    id, tenant, runId, step, path, key, size, sha256, state, now, uploadId]])
+    "created_at = excluded.created_at, upload_id = excluded.upload_id, store = excluded.store",
+    id, tenant, runId, step, path, key, size, sha256, state, now, uploadId, store]])
 
-proc uploadingRow*(c: var RqClient; runId, path: string): tuple[found: bool, key, uploadId: string, size: int64] =
-  let r = c.query(%*[["SELECT s3_key, upload_id, size FROM artifacts WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])
+proc uploadingRow*(c: var RqClient; runId, path: string): tuple[found: bool, key, uploadId: string, size: int64, store: string] =
+  let r = c.query(%*[["SELECT s3_key, upload_id, size, store FROM artifacts WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])
   let v = r["results"][0]{"values"}
-  if v != nil and v.len > 0: (true, v[0][0].getStr, v[0][1].getStr, v[0][2].getBiggestInt) else: (false, "", "", 0'i64)
+  if v != nil and v.len > 0: (true, v[0][0].getStr, v[0][1].getStr, v[0][2].getBiggestInt, v[0][3].getStr) else: (false, "", "", 0'i64, "")
 
 proc markStored*(c: var RqClient; runId, path: string): bool =
   c.execute(%*[["UPDATE artifacts SET state = 'stored', upload_id = '' WHERE run_id = ? AND path = ? AND state = 'uploading'", runId, path]])["results"][0]{"rows_affected"}.getInt > 0
@@ -213,15 +350,15 @@ proc listArtifacts*(c: var RqClient; runId: string): JsonNode =
   if v != nil:
     for row in v: result.add %*{"path": row[0].getStr, "size": row[1].getBiggestInt, "sha256": row[2].getStr, "step": row[3].getInt, "created_at": row[4].getBiggestInt}
 
-proc storedArtifact*(c: var RqClient; runId, path: string): tuple[found: bool, key: string, size: int64, sha256: string] =
-  let r = c.query(%*[["SELECT s3_key, size, sha256 FROM artifacts WHERE run_id = ? AND path = ? AND state = 'stored'", runId, path]])
+proc storedArtifact*(c: var RqClient; runId, path: string): tuple[found: bool, key: string, size: int64, sha256, store: string] =
+  let r = c.query(%*[["SELECT s3_key, size, sha256, store FROM artifacts WHERE run_id = ? AND path = ? AND state = 'stored'", runId, path]])
   let v = r["results"][0]{"values"}
-  if v != nil and v.len > 0: (true, v[0][0].getStr, v[0][1].getBiggestInt, v[0][2].getStr) else: (false, "", 0'i64, "")
+  if v != nil and v.len > 0: (true, v[0][0].getStr, v[0][1].getBiggestInt, v[0][2].getStr, v[0][3].getStr) else: (false, "", 0'i64, "", "")
 
-proc storedUnder*(c: var RqClient; runId, prefix: string): seq[tuple[path, key: string; size: int64; sha256: string]] =
+proc storedUnder*(c: var RqClient; runId, prefix: string): seq[tuple[path, key: string; size: int64; sha256, store: string]] =
   ## the stored artifacts of a run whose path is `prefix` or lies under `prefix/`
-  let r = c.query(%*[["SELECT path, s3_key, size, sha256 FROM artifacts WHERE run_id = ? AND state = 'stored' AND (path = ? OR substr(path, 1, ?) = ?) ORDER BY path",
+  let r = c.query(%*[["SELECT path, s3_key, size, sha256, store FROM artifacts WHERE run_id = ? AND state = 'stored' AND (path = ? OR substr(path, 1, ?) = ?) ORDER BY path",
                       runId, prefix, prefix.len + 1, prefix & "/"]])
   let v = r["results"][0]{"values"}
   if v != nil:
-    for row in v: result.add (row[0].getStr, row[1].getStr, row[2].getBiggestInt, row[3].getStr)
+    for row in v: result.add (row[0].getStr, row[1].getStr, row[2].getBiggestInt, row[3].getStr, row[4].getStr)

@@ -4,7 +4,7 @@
 import std/[unittest, json, os, tables, strutils, times, sequtils]
 import checksums/sha2
 import common/rqlite
-import core/[schema, storagebackend, cachestore, artifactingest, groups]
+import core/[schema, storagebackend, cachestore, objectstore, artifactingest, groups]
 
 type MemStore = ref object of ObjectBackend
   objects: Table[string, string]
@@ -103,11 +103,11 @@ suite "DAT-004 the cache between runs":
       be.save(t, "", "mid", "x".repeat(40), now - 400)
       be.save(t, "", "new", "x".repeat(40), now - 300)
       discard c.findEntry(t, "", "old", @[], now)                                           # used just now: no longer the oldest
-      check c.makeRoom(be, t, "", 40, 130).ok                                                      # 120 held + 40 > 130: one goes, the least recently used (mid)
+      check c.makeRoom(fixedStoreSet(be), t, "", 40, 130).ok                                                      # 120 held + 40 > 130: one goes, the least recently used (mid)
       check not c.storedEntry(t, "", "mid").found and c.storedEntry(t, "", "old").found and c.storedEntry(t, "", "new").found
       check objectKeyOf(t, "", "mid") notin be.objects
-      check not c.makeRoom(be, t, "", 500, 130).ok
-      check c.makeRoom(be, t, "", 1, 0).ok                                                         # no quota: no limit
+      check not c.makeRoom(fixedStoreSet(be), t, "", 500, 130).ok
+      check c.makeRoom(fixedStoreSet(be), t, "", 1, 0).ok                                                         # no quota: no limit
     test "the sweep takes entries not used for the retention and uploads abandoned for a day, and nothing else":
       let t = tenant()
       let be = store()
@@ -116,7 +116,7 @@ suite "DAT-004 the cache between runs":
       discard c.execute(%*[["UPDATE caches SET last_used_at = ? WHERE tenant_id = ? AND key = 'stale'", now - 10 * 86400, t]])
       check c.beginEntry(newId(), t, "", "half", objectKeyOf(t, "", "half"), 10, "s", "uploading", "up9", now - 3 * 86400)
       be.uploads["up9"] = (objectKeyOf(t, "", "half"), initTable[int, string]())
-      let rep = c.sweepCaches(be, now, 7 * 86400)
+      let rep = c.sweepCaches(fixedStoreSet(be), now, 7 * 86400)
       check rep.expired >= 1 and rep.abandoned >= 1
       check not c.storedEntry(t, "", "stale").found and c.storedEntry(t, "", "fresh").found and not c.uploadingEntry(t, "", "half").found
       check "up9" notin be.uploads
@@ -154,14 +154,14 @@ suite "DAT-004 the limits: the shard's, the organisation's, the groups'":
       let be = store()
       be.put(org, "", "a", 60, 300)
       be.put(org, "", "b", 60, 200)
-      check c.makeRoom(be, org, "", 30, 100).ok                  # 0: the shard's 100: 120 held + 30 > 100 -> the oldest go
+      check c.makeRoom(fixedStoreSet(be), org, "", 30, 100).ok                  # 0: the shard's 100: 120 held + 30 > 100 -> the oldest go
       check not has(org, "", "a") and has(org, "", "b")
       setOrg(org, 70, 0)
-      check c.makeRoom(be, org, "", 30, 1000).ok                  # the organisation's 70, not the shard's 1000: b (60) goes
+      check c.makeRoom(fixedStoreSet(be), org, "", 30, 1000).ok                  # the organisation's 70, not the shard's 1000: b (60) goes
       check not has(org, "", "b")
       setOrg(org, -1, 0)
       be.put(org, "", "c", 5000)
-      check c.makeRoom(be, org, "", 9999, 100).ok and has(org, "", "c")
+      check c.makeRoom(fixedStoreSet(be), org, "", 9999, 100).ok and has(org, "", "c")
     test "a group's quota binds the entries of the group and of the groups below it, not its neighbours, and the organisation's binds all":
       let org = newOrg()
       let be = store()
@@ -172,12 +172,12 @@ suite "DAT-004 the limits: the shard's, the organisation's, the groups'":
       be.put(org, team, "t", 50, 400)
       be.put(org, back, "b", 40, 300)
       be.put(org, other, "o", 500, 900)
-      check c.makeRoom(be, org, back, 30, 0).ok                    # team's pool: 50 + 40 + 30 > 100: the least recently used of team and below (t) goes
+      check c.makeRoom(fixedStoreSet(be), org, back, 30, 0).ok                    # team's pool: 50 + 40 + 30 > 100: the least recently used of team and below (t) goes
       check not has(org, team, "t") and has(org, back, "b") and has(org, other, "o")
-      check not c.makeRoom(be, org, back, 150, 0).ok               # bigger than the group's quota
-      check c.makeRoom(be, org, other, 1000, 0).ok                 # the neighbour has no limit of its own
+      check not c.makeRoom(fixedStoreSet(be), org, back, 150, 0).ok               # bigger than the group's quota
+      check c.makeRoom(fixedStoreSet(be), org, other, 1000, 0).ok                 # the neighbour has no limit of its own
       setOrg(org, 600, 0)
-      check c.makeRoom(be, org, other, 200, 0).ok                  # the organisation's 600: 40 + 500 + 200 > 600 -> the least recently used of the whole organisation goes: o (900 s ago), and then it fits
+      check c.makeRoom(fixedStoreSet(be), org, other, 200, 0).ok                  # the organisation's 600: 40 + 500 + 200 > 600 -> the least recently used of the whole organisation goes: o (900 s ago), and then it fits
       check not has(org, other, "o") and has(org, back, "b")
     test "the view: the entries of an organisation, or of a group and the groups below it, the most recently used first, with what each limit holds":
       let org = newOrg()
@@ -217,12 +217,12 @@ suite "DAT-004 the limits: the shard's, the organisation's, the groups'":
       be.put(org, "", "d", 5)
       be.put(other, team, "a", 5)
       check c.beginEntry(newId(), org, team, "half", objectKeyOf(org, team, "half"), 5, "s", "uploading", "up1", now)
-      check c.deleteEntries(be, org, team, "a") == (1, 0)
+      check c.deleteEntries(fixedStoreSet(be), org, team, "a") == (1, 0)
       check not has(org, team, "a") and objectKeyOf(org, team, "a") notin be.objects and has(org, team, "b")
-      check c.deleteEntries(be, org, team, "nope") == (0, 0)
-      check c.deleteEntries(be, org, team, "") == (1, 0)                 # all of team: b; the group below, the root and "half" stay
+      check c.deleteEntries(fixedStoreSet(be), org, team, "nope") == (0, 0)
+      check c.deleteEntries(fixedStoreSet(be), org, team, "") == (1, 0)                 # all of team: b; the group below, the root and "half" stay
       check has(org, back, "c") and has(org, "", "d") and c.uploadingEntry(org, team, "half").found
-      check c.deleteEntries(be, org, "", "") == (1, 0) and not has(org, "", "d")
+      check c.deleteEntries(fixedStoreSet(be), org, "", "") == (1, 0) and not has(org, "", "d")
       check has(other, team, "a")
     test "the retention: the nearest group that says something, then the organisation, then the shard; -1 keeps for ever":
       let org = newOrg()
@@ -246,7 +246,7 @@ suite "DAT-004 the limits: the shard's, the organisation's, the groups'":
       c.setGroupLimit(short, 0, 1)
       c.setGroupLimit(long, 0, -1)
       for scope in [short, long, ""]: be.put(org, scope, "k", 5, 10 * day)
-      let rep = c.sweepCaches(be, now, 7 * day)                      # the shard's 7 days; the organisation has nothing of its own
+      let rep = c.sweepCaches(fixedStoreSet(be), now, 7 * day)                      # the shard's 7 days; the organisation has nothing of its own
       check rep.expired >= 2
       check not has(org, short, "k") and has(org, long, "k") and not has(org, "", "k")
     test "what a group may have is checked: 0 or 1 MiB..1 PiB, and retention -1, 0 or 1..3650":
@@ -278,9 +278,9 @@ suite "DAT-004 the requests of the cache on the channel":
       r.size = uint64(data.len)
       r.sha256 = shaOf(data)
       r.data = cast[seq[byte]](data)
-      check handleCache(c, r, t, "", decls, be, now).accepted
+      check handleCache(c, r, t, "", decls, fixedStoreSet(be), now).accepted
       check be.objects[objectKeyOf(t, "", "deps-1")] == data
-      let again = handleCache(c, r, t, "", decls, be, now)
+      let again = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
       check not again.accepted and again.failure.code == "cache_exists"
     test "a bigger entry goes by put_begin, put_part, put_end, and is stored only when the store has it with the size announced":
       let t = tenant()
@@ -289,17 +289,17 @@ suite "DAT-004 the requests of the cache on the channel":
       var b = req("put_begin", "deps-1")
       b.size = uint64(data.len)
       b.sha256 = shaOf(data)
-      let began = handleCache(c, b, t, "", decls, be, now)
+      let began = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
       check began.accepted and began.upload_id.len > 0
       check not c.storedEntry(t, "", "deps-1").found                          # not stored until it is complete
       var p1 = req("put_part", "deps-1"); p1.upload_id = began.upload_id; p1.part = 1; p1.data = cast[seq[byte]](data[0 ..< 20])
       var p2 = req("put_part", "deps-1"); p2.upload_id = began.upload_id; p2.part = 2; p2.data = cast[seq[byte]](data[20 .. ^1])
-      let a1 = handleCache(c, p1, t, "", decls, be, now)
-      let a2 = handleCache(c, p2, t, "", decls, be, now)
+      let a1 = handleCache(c, p1, t, "", decls, fixedStoreSet(be), now)
+      let a2 = handleCache(c, p2, t, "", decls, fixedStoreSet(be), now)
       check a1.accepted and a2.accepted
       var e = req("put_end", "deps-1"); e.upload_id = began.upload_id
       e.parts = @[ArtifactPart(part: 1, etag: a1.etag), ArtifactPart(part: 2, etag: a2.etag)]
-      check handleCache(c, e, t, "", decls, be, now).accepted
+      check handleCache(c, e, t, "", decls, fixedStoreSet(be), now).accepted
       check c.storedEntry(t, "", "deps-1").found and be.objects[objectKeyOf(t, "", "deps-1")] == data
     test "a size that is not the one announced is refused and nothing stays":
       let t = tenant()
@@ -307,11 +307,11 @@ suite "DAT-004 the requests of the cache on the channel":
       var b = req("put_begin", "deps-1")
       b.size = 99
       b.sha256 = shaOf("x")
-      let began = handleCache(c, b, t, "", decls, be, now)
+      let began = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
       var p1 = req("put_part", "deps-1"); p1.upload_id = began.upload_id; p1.part = 1; p1.data = cast[seq[byte]]("short")
-      let a1 = handleCache(c, p1, t, "", decls, be, now)
+      let a1 = handleCache(c, p1, t, "", decls, fixedStoreSet(be), now)
       var e = req("put_end", "deps-1"); e.upload_id = began.upload_id; e.parts = @[ArtifactPart(part: 1, etag: a1.etag)]
-      let ended = handleCache(c, e, t, "", decls, be, now)
+      let ended = handleCache(c, e, t, "", decls, fixedStoreSet(be), now)
       check not ended.accepted and ended.failure.code == "size_mismatch"
       check not c.storedEntry(t, "", "deps-1").found and not c.uploadingEntry(t, "", "deps-1").found
     test "a step finds and reads what it declared (the key, or what a restore key names) and nothing else; saves its own key only":
@@ -321,24 +321,24 @@ suite "DAT-004 the requests of the cache on the channel":
       check c.beginEntry(newId(), t, "", "deps-0", objectKeyOf(t, "", "deps-0"), 13, shaOf("older archive"), "stored", "", now - 100)
       be.objects[objectKeyOf(t, "", "secret-x")] = "not yours"
       check c.beginEntry(newId(), t, "", "secret-x", objectKeyOf(t, "", "secret-x"), 9, shaOf("not yours"), "stored", "", now)
-      let found = handleCache(c, req("cache_find", "deps-1"), t, "", decls, be, now)
+      let found = handleCache(c, req("cache_find", "deps-1"), t, "", decls, fixedStoreSet(be), now)
       check found.accepted and found.files.len == 1 and found.files[0].path == "deps-0" and found.files[0].size == 13 and found.files[0].sha256 == shaOf("older archive")
       var g = req("get_block", "deps-0"); g.offset = 0; g.length = 5
-      let blk = handleCache(c, g, t, "", decls, be, now)
+      let blk = handleCache(c, g, t, "", decls, fixedStoreSet(be), now)
       check blk.accepted and cast[string](blk.data) == "older"
-      check handleCache(c, req("cache_find", "secret-x"), t, "", decls, be, now).failure.code == "not_declared"
+      check handleCache(c, req("cache_find", "secret-x"), t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"
       var g2 = req("get_block", "secret-x"); g2.offset = 0; g2.length = 5
-      check handleCache(c, g2, t, "", decls, be, now).failure.code == "not_declared"
+      check handleCache(c, g2, t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"
       var w = req("put_object", "deps-0"); w.size = 1; w.sha256 = shaOf("x"); w.data = cast[seq[byte]]("x")
-      check handleCache(c, w, t, "", decls, be, now).failure.code == "not_declared"           # a restore key lets a step read, not save
-      check handleCache(c, req("cache_find", "deps-nothing"), t, "", @[CacheDecl(key: "deps-nothing", paths: @["x"])], be, now).files.len == 0
+      check handleCache(c, w, t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"           # a restore key lets a step read, not save
+      check handleCache(c, req("cache_find", "deps-nothing"), t, "", @[CacheDecl(key: "deps-nothing", paths: @["x"])], fixedStoreSet(be), now).files.len == 0
     test "an entry that does not fit the organisation's quota is refused with quota_exceeded":
       let t = tenant()
       let be = store()
       putEnv("CINIM_CACHE_QUOTA", "10")
       var r = req("put_object", "deps-1")
       r.size = 20; r.sha256 = shaOf("y".repeat(20)); r.data = cast[seq[byte]]("y".repeat(20))
-      let refused = handleCache(c, r, t, "", decls, be, now)
+      let refused = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
       delEnv("CINIM_CACHE_QUOTA")
       check not refused.accepted and refused.failure.code == "quota_exceeded"
       check not c.uploadingEntry(t, "", "deps-1").found

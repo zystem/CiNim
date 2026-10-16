@@ -114,6 +114,12 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS held_logs (
        run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, attempt INTEGER NOT NULL, tenant_id TEXT NOT NULL, s3_key TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
        line_count INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, PRIMARY KEY (run_id, ordinal, attempt))""",
+  # D-59, core/objectstore.nim: the named stores of the shard (kind and settings; the secret is sealed in the vault), one of them the default
+  """CREATE TABLE IF NOT EXISTS object_stores (
+       name TEXT PRIMARY KEY, kind TEXT NOT NULL, config TEXT NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+  # D-59: which store an organisation uses for a purpose (artifacts, caches, held_logs, audit); no row means the shard's default
+  """CREATE TABLE IF NOT EXISTS org_storage (
+       tenant_id TEXT NOT NULL, purpose TEXT NOT NULL, store_name TEXT NOT NULL, updated_by TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, purpose))""",
   # D-57, core/storerepair.nim: what a store node has to be given or to lose so that the nodes agree again; the last operation on a key and a node wins
   """CREATE TABLE IF NOT EXISTS store_repair (
        key TEXT NOT NULL, node TEXT NOT NULL, op TEXT NOT NULL, since INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
@@ -209,6 +215,9 @@ proc migrate*(c: var RqClient) =
       ("organizations", "controller_spec", "TEXT NOT NULL DEFAULT ''"),   # the fingerprint of the controller's Deployment that the core made last (SHD-008); "" = not recorded
       ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
       ("artifacts", "upload_id", "TEXT NOT NULL DEFAULT ''"),     # the store's id of a multipart upload that is under way
+      ("artifacts", "store", "TEXT NOT NULL DEFAULT ''"),         # D-59: the named store the object lies in (''  = the default one at the time of reading)
+      ("caches", "store", "TEXT NOT NULL DEFAULT ''"),
+      ("held_logs", "store", "TEXT NOT NULL DEFAULT ''"),
       ("runs", "fail_code", "TEXT NOT NULL DEFAULT ''"), ("runs", "fail_message", "TEXT NOT NULL DEFAULT ''"),   # why the run did not succeed (executor's FinishRun)
       ("runs", "storage_released", "INTEGER NOT NULL DEFAULT 0"),   # the controller deleted the run's volume (STO-006, core/runstorage.nim)
       ("runs", "params", "TEXT NOT NULL DEFAULT ''"),         # the launch parameters: a JSON object of text values, at most 4 KiB (VAR-002, core/runparams.nim)
@@ -348,6 +357,7 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
     discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ?", o.id]])
+    discard c.execute(%*[["DELETE FROM org_storage WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM artifacts WHERE tenant_id = ?", o.id]])      # the objects stay in the store until a sweeper removes them (not built)
     discard c.execute(%*[["DELETE FROM org_keys WHERE tenant_id = ?", o.id]])
   discard c.execute(%*[["DELETE FROM organizations WHERE slug = ?", slug]])

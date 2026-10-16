@@ -3,7 +3,7 @@
 # core's Service must be reachable from the nodes (CORE below); the nodes' port is for the core only.
 #
 #   kubectl -n <namespace> apply -f caddy-store.yaml
-#   curl -X PUT .../api/v1/storage -d '{"kind":"dav","nodes":["http://cinim-store-dav-0.cinim-store-dav:8080","http://cinim-store-dav-1.cinim-store-dav:8080"],"token":"<any 8..256 characters>"}'
+#   curl -X PUT .../api/v1/stores/<name> -d '{"kind":"dav","nodes":["http://cinim-store-dav-0.cinim-store-dav:8080","http://cinim-store-dav-1.cinim-store-dav:8080"],"token":"<any 8..256 characters>"}'
 #
 # The id of a node in the request is its `host:port` as the core writes it: `cinim-store-dav-0.cinim-store-dav:8080`. The Caddyfile below says the same in `uri ...?node=`, from the name of the Pod
 # (the environment variable NODE_ID is made from it by the shell of the container). For https between the nodes and the core, give the nodes a certificate (`tls /certs/tls.crt /certs/tls.key`

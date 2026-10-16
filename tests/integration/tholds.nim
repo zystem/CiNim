@@ -2,7 +2,7 @@
 ## artifacts does not take the run's artifacts and the core does not release its volume. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, tables, strutils, times, sequtils]
 import common/rqlite
-import core/[schema, scheduler, storagebackend, artifactsweep, runstorage, holds, groups]
+import core/[schema, scheduler, storagebackend, artifactsweep, objectstore, runstorage, holds, groups]
 
 type MemStore = ref object of ObjectBackend
   objects: Table[string, string]
@@ -65,11 +65,11 @@ suite "DAT-006 a legal hold on a run":
       let a1 = be.addArtifact(o.id, held, "old.txt", 40 * day)
       let a2 = be.addArtifact(o.id, free, "old.txt", 40 * day)
       check c.placeHold(held, o.id, "audit", "ann", now).placed
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check rowExists(a1) and (o.id & "/" & held & "/old.txt") in be.objects
       check not rowExists(a2) and (o.id & "/" & free & "/old.txt") notin be.objects
       check c.releaseHold(held)
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check not rowExists(a1) and (o.id & "/" & held & "/old.txt") notin be.objects
     test "the volume of a run under a hold is not released, and is once the hold is gone":
       let o = newOrg()
@@ -121,7 +121,7 @@ suite "DAT-006 a legal hold on a run":
       let be = MemStore(objects: initTable[string, string]())
       var arts: seq[(string, string)]
       for r in [rUp, rMid, rLow, rSide, rRoot]: arts.add (r, be.addArtifact(o.id, r, "f.txt", 40 * day))
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check rowExists(arts[1][1]) and rowExists(arts[2][1])                                      # the group and the one below it are kept
       check not rowExists(arts[0][1]) and not rowExists(arts[3][1]) and not rowExists(arts[4][1])   # above, beside and the root are not
       check c.coveringHold(rLow).held and c.coveringHold(rLow).hold.groupPath == "team/backend" and c.coveringHold(rLow).hold.reason == "case 77"
@@ -129,7 +129,7 @@ suite "DAT-006 a legal hold on a run":
       check "team/backend" in co.getRun(rMid)["held_by"]["group"].getStr and co.getRun(rMid)["held_by"]["level"].getStr == "group"
       check not co.getRun(rUp).hasKey("held_by")
       check c.releaseScopeHold(o.id, mid) and not c.releaseScopeHold(o.id, mid)
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       check not rowExists(arts[1][1]) and not rowExists(arts[2][1])
     test "DAT-006 a hold on the organisation covers every run, those of groups too, and one made later":
       let o = newOrg()
@@ -140,11 +140,11 @@ suite "DAT-006 a legal hold on a run":
       let later = endedRun(o, groupId = g)
       let be = MemStore(objects: initTable[string, string]())
       let ids = [rRoot, rGroup, later].mapIt(be.addArtifact(o.id, it, "f.txt", 40 * day))
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       for i in ids: check rowExists(i)
       check co.getRun(later)["held_by"]["level"].getStr == "organization"
       check c.releaseScopeHold(o.id, "")
-      discard c.sweepArtifacts(be, now, 30 * day)
+      discard c.sweepArtifacts(fixedStoreSet(be), now, 30 * day)
       for i in ids: check not rowExists(i)
     test "DAT-006 the volume of a run under a hold of its group is not released":
       let o = newOrg()

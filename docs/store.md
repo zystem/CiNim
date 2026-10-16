@@ -86,7 +86,7 @@ Measured with the core's `HttpMirror` in a release build against real Caddy node
 
 ## Settings
 
-`PUT /api/v1/storage` takes either the S3 settings (as before), or `{"kind": "dav", "nodes": ["http://host:port", ...], "token", "min_acks"}` for the HTTP nodes (see "The node on Caddy"), or `{"kind": "nodes", "nodes": ["tcp://cinim-store-0.cinim-store:19750", "tcp://cinim-store-1.cinim-store:19750"], "token": "...", "min_acks": 0, "transport": "curve"}` (`min_acks` 0 or left out: every node confirms, see "The mirror"; `transport` `plain` for a link without CURVE inside a network that is encrypted anyway, the nodes then run with `CINIM_STORE_TRANSPORT=plain`; see "Speed"). The token is sealed like the S3 secret (docs/artifacts.md). The core's CURVE keys come from the certs directory (`store.pub`); the nodes hold `store.key`.
+`PUT /api/v1/stores/{name}` takes either the S3 settings (as before), or `{"kind": "dav", "nodes": ["http://host:port", ...], "token", "min_acks"}` for the HTTP nodes (see "The node on Caddy"), or `{"kind": "nodes", "nodes": ["tcp://cinim-store-0.cinim-store:19750", "tcp://cinim-store-1.cinim-store:19750"], "token": "...", "min_acks": 0, "transport": "curve"}` (`min_acks` 0 or left out: every node confirms, see "The mirror"; `transport` `plain` for a link without CURVE inside a network that is encrypted anyway, the nodes then run with `CINIM_STORE_TRANSPORT=plain`; see "Speed"). The token is sealed like the S3 secret (docs/artifacts.md). The core's CURVE keys come from the certs directory (`store.pub`); the nodes hold `store.key`.
 
 ## Speed and what bounds it
 

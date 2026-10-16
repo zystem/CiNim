@@ -8,12 +8,12 @@ A step can leave files for later steps and for people: its **artifacts**. They l
 2. Tell the core where it is and give it the key. The secret is sealed in the database like a step secret (D-45) and is never answered again:
 
 ```
-PUT /api/v1/storage
-{"endpoint": "http://garage:3900", "region": "garage", "bucket": "cinim-artifacts",
+PUT /api/v1/stores/garage-main
+{"default": true, "endpoint": "http://garage:3900", "region": "garage", "bucket": "cinim-artifacts",
  "access_key_id": "GK…", "secret_access_key": "…"}
 ```
 
-The core tries the settings before it keeps them: it puts, reads and deletes one small object, and answers `400 storage_unreachable` with the store's own words if that fails. `GET /api/v1/storage` shows the settings without the secret, `POST /api/v1/storage:check` repeats the round trip, `DELETE /api/v1/storage` forgets them. The core needs its secrets set up first (`secrets_unavailable`, docs/hardware-key.md).
+The core tries the settings before it keeps them: it puts, reads and deletes one small object, and answers `400 storage_unreachable` with the store's own words if that fails. A shard holds several **named stores** (D-59: a Garage bucket and/or Caddy nodes); the first one is the default. `GET /api/v1/stores` lists them without the secrets, `POST /api/v1/stores/{name}:check` repeats the round trip, `POST /api/v1/stores/{name}:default` changes the default, `DELETE /api/v1/stores/{name}` forgets one that nothing uses (a store that holds artifacts, caches or an organisation's choice is refused, `409 store_in_use`). Which store an organisation uses for what: `PUT /api/v1/organizations/{slug}/storage` `{"artifacts": "garage-main", "caches": "caddy-main"}` (an empty name is the default; `GET` shows the choice and the stores). A row remembers the store it was written to, so a change affects new objects only. The core needs its secrets set up first (`secrets_unavailable`, docs/hardware-key.md).
 
 ## In a pipeline
 
@@ -73,11 +73,11 @@ A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artif
 
 ## Moving the storage module out of the core
 
-*Built as a store of our own (2026-10-16): docs/store.md, D-57. The `RemoteBackend` below is `MirrorBackend` over `cinim-store` nodes, spoken to over ZeroMQ with CURVE; the S3 backend stays as the other choice (`PUT /api/v1/storage`). What follows is the original statement of the seam.*
+*Built as a store of our own (2026-10-16): docs/store.md, D-57. The `RemoteBackend` below is `MirrorBackend` over `cinim-store` nodes, spoken to over ZeroMQ with CURVE; the S3 backend stays as the other choice (`PUT /api/v1/stores/{name}`). What follows is the original statement of the seam.*
 
 This is the rule of D-49 applied to the store: the core is the source of the settings of every permanent module, so the storage service is started with only the core's address and its transport keys; the store's endpoint, bucket and key are the core's (sealed in its database) and go to the service with the request or when it connects, never into the service's environment.
 
-What the core asks of a store is `ObjectBackend` (`src/core/storagebackend.nim`): eight operations (put an object, create / upload a part of / complete / abort a multipart upload, read a range, size, delete), none of which keeps state between calls. Built: `S3Backend` (`src/core/s3backend.nim`), in the core's process. To run the storage module as a separate service, write a `RemoteBackend` that sends the same eight operations as requests over ZeroMQ with CURVE, and a service that answers them with an `S3Backend`. The core stays in charge: the settings and the key are the core's (sealed in its database, `PUT /api/v1/storage`) and are sent to the service with a request or when it connects, the service keeps nothing, and `ArtifactIngest` may be served by that service too, with the shims pointed to it by `--artifact-addr` (the step credential would then be checked against a key the core derives for it, not the core's own). Nothing in a step, a shim or a script changes.
+What the core asks of a store is `ObjectBackend` (`src/core/storagebackend.nim`): eight operations (put an object, create / upload a part of / complete / abort a multipart upload, read a range, size, delete), none of which keeps state between calls. Built: `S3Backend` (`src/core/s3backend.nim`), in the core's process. To run the storage module as a separate service, write a `RemoteBackend` that sends the same eight operations as requests over ZeroMQ with CURVE, and a service that answers them with an `S3Backend`. The core stays in charge: the settings and the key are the core's (sealed in its database, `PUT /api/v1/stores/{name}`) and are sent to the service with a request or when it connects, the service keeps nothing, and `ArtifactIngest` may be served by that service too, with the shims pointed to it by `--artifact-addr` (the step credential would then be checked against a key the core derives for it, not the core's own). Nothing in a step, a shim or a script changes.
 
 ## Checked on the TESTING cluster
 

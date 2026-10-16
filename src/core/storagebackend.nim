@@ -37,7 +37,7 @@ method objectSize*(b: ObjectBackend; key: string): tuple[res: Outcome, size: int
 method deleteObject*(b: ObjectBackend; key: string): Outcome {.base.} = fail("not implemented")
 
 proc roundTrip*(b: ObjectBackend): string =
-  ## "" if an object can be put, read back and deleted, and a multipart upload can be started and cancelled; else what failed. The check of `PUT /api/v1/storage`.
+  ## "" if an object can be put, read back and deleted, and a multipart upload can be started and cancelled; else what failed. The check of `PUT /api/v1/stores/{name}`.
   let key = "_check/probe"
   let body = "cinim object store check"
   let put = b.putObject(key, body)
