@@ -204,6 +204,31 @@ suite "RUN-009 the conductor":
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ? AND state = 'CANCELED'", r]])["results"][0]["values"][0][0].getInt == 2
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 3         # a2 was never made
       stop p
+    test "RUN-006 ci.finally: the cleanup step is made after a step failed, and the run ends FAILED with the first error":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t6c")
+      let script = """
+        return ci.pipeline({ main = function(run)
+          ci.finally(function() ci.job({image = "x"}, function(j) j:sh("clean") end) end)
+          ci.job({image = "x"}, function(j) j:sh("work") end)
+          ci.job({image = "x"}, function(j) j:sh("never") end)
+        end })"""
+      let r = co.createRun(script, "t1", o.profile)
+      proc ordinalOf(cmd: string): int =
+        c.query(%*[["SELECT ordinal FROM steps WHERE run_id = ? AND command = ?", r, cmd]])["results"][0]["values"][0][0].getInt
+      let deadline = epochTime() + 40
+      while epochTime() < deadline and pendingOrdinals(r).len < 1: sleep 200
+      let w = ordinalOf("work")
+      discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ? AND ordinal = ?", r, w]])
+      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: uint32(w), attempt: 1), state: STEP_STATE_FAILED, exit_code: 3, termination_reason: "failed"))
+      let d2 = epochTime() + 40
+      while epochTime() < d2 and c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ? AND command = 'clean'", r]])["results"][0]["values"][0][0].getInt == 0: sleep 200
+      check stateOf(r) == "RUNNING"                                              # the run waits for its cleanup
+      finishStep(r, ordinalOf("clean"))
+      check waitState(r, "FAILED")
+      check c.query(%*[["SELECT fail_message FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr.contains("step failed with code 3")
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 2
+      stop p
     test "PIP-006 a script with more than 200 steps ends before it makes a single one, with step_limit":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t7")

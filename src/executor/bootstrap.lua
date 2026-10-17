@@ -1149,6 +1149,7 @@ local function parallel(spec, a, b)
   return run_parallel(entries, opts)
 end
 
+local finals = {}                       -- the cleanups of `ci.finally`, in the order registered
 G.ci = {
   now = function() return tonumber(call("now", "")) end,
   random = function() return tonumber(call("random", "")) end,
@@ -1163,6 +1164,12 @@ G.ci = {
   end,
   parallel = parallel,
   matrix = matrix,
+  finally = function(fn)
+    if type(fn) ~= "function" then error("ci.finally: a function expected", 2) end
+    if cur.path ~= "m" then error("ci.finally: only in main, not inside a branch of ci.parallel", 2) end
+    if #finals >= 16 then error("ci.finally: at most 16 cleanups", 2) end
+    finals[#finals + 1] = fn
+  end,
   pipeline = function(spec) return spec end,  -- metadata phase, pure, not journaled (PIP-002)
   string = param_ctor("string"), number = param_ctor("number"), bool = param_ctor("bool"), choice = param_ctor("choice"),
   job = function(opts, fn)
@@ -1196,7 +1203,22 @@ local function run_main(fn, run)
     local typed, json = resolve_params(rawget(v, "params"), given)
     if json ~= "" then call("params", json) end
     run.params = typed
-    return v.main(run)
+    -- `ci.finally` (RUN-006): the cleanups registered while `main` ran are run when it ends, by success or by error, last registered first. The run ends with main's error if it
+    -- had one, else with the first error of a cleanup; every cleanup is tried. The end of the run by a limit (a repeated id, too many steps) is not cleaned up after.
+    local ok, res = pcall(v.main, run)
+    local function fatal(e) return type(e) == "string" and (e:find("duplicate_id:", 1, true) or e:find("step_limit:", 1, true)) end
+    if not ok and fatal(res) then error(res, 0) end
+    local later_ok, later = true, nil
+    for i = #finals, 1, -1 do
+      local fok, ferr = pcall(finals[i])
+      if not fok then
+        if fatal(ferr) then error(ferr, 0) end
+        if later_ok then later_ok, later = false, ferr end
+      end
+    end
+    if not ok then error(res, 0) end
+    if not later_ok then error(later, 0) end
+    return res
   end
   return v
 end
