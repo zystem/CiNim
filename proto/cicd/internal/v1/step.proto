@@ -42,12 +42,15 @@ message StepReportAck {
 message ArtifactPart {
   uint32 part = 1;                   // from 1
   string etag = 2;                   // what the store answered for that part
+  string sha256 = 3;                 // direct transfer (D-61): the digest of the part, computed by the shim from its file; the core compares it with what the module recorded for the part
 }
 
 message ArtifactFile {
   string path = 1;
   uint64 size = 2;
   string sha256 = 3;                 // hex
+  string grant = 4;                  // direct transfer (D-61): a token to read this file from the storage module, with `direct_path`; empty: read it with get_block
+  string direct_path = 5;            // the path on the module's port for shims (`ArtifactAck.direct_url`)
 }
 
 message ArtifactRequest {
@@ -67,6 +70,7 @@ message ArtifactRequest {
   uint32 length = 12;                // get_block
   bytes data = 13;                   // put_object, put_part
   repeated string names = 14;        // get_list; cache_find: the restore keys (prefixes), in order
+  bool direct = 16;                  // the shim can send the bytes straight to the storage module (D-61): put_begin may answer with a grant, and put_end then names the digest of every part
   bool cache = 15;                   // DAT-004: the request is about the step's cache, not its artifacts: `path` is the cache key, `op` is cache_find (answers with `files`: the entry found, if any),
                                      // get_block, put_object, put_begin, put_part, put_end or put_abort. A key that is stored already is `cache_exists`: a key is immutable
 }
@@ -79,4 +83,7 @@ message ArtifactAck {
   string etag = 5;                   // put_part
   bytes data = 6;                    // get_block
   repeated ArtifactFile files = 7;   // get_list
+  string direct_url = 8;             // direct transfer (D-61): where the storage module takes the shims' bytes, e.g. http://cinim-storage.cinim-001.svc:18091 (get_list, cache_find, put_begin)
+  string grant = 9;                  // put_begin: the token for putting the parts of this upload with `direct_path`; empty: send the parts to the core with put_part
+  string direct_path = 10;           // put_begin: the path the parts are PUT to, with ?upload=<upload_id>&part=<n>
 }

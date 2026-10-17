@@ -34,11 +34,15 @@ var
   listLock: Lock
 initLock(listLock)
 
-proc configureStorage*(url, secret, shard: string) =
-  ## called once at start (or by a test); an empty `url` means no module is set up
+var directBase: string
+
+proc configureStorage*(url, secret, shard: string; direct = "") =
+  ## called once at start (or by a test); an empty `url` means no module is set up. `direct` is where the shims put their bytes (the module's port for shims, D-61), as the shims reach it
+  ## from their own namespaces; empty: the bytes go through the core
   moduleUrl = url.strip(chars = {'/'})
   moduleSecret = secret
   moduleShard = shard
+  directBase = direct.strip(chars = {'/'})
   withLock listLock: listCache = (ModuleStores(), 0'i64)
 
 proc forgetStoreList*() =
@@ -46,6 +50,9 @@ proc forgetStoreList*() =
   withLock listLock: listCache = (ModuleStores(), 0'i64)
 
 proc storageConfigured*(): bool = moduleUrl.len > 0 and moduleSecret.len > 0
+
+proc directUrl*(): string = (if storageConfigured(): directBase else: "")
+  ## "" when the shims send their bytes through the core
 
 func encodeKey(p: string): string =
   ## a path for the request line: everything but the unreserved characters and `/` is `%XX`
@@ -168,3 +175,22 @@ proc moduleStores*(): ModuleStores =
   let fresh = fetchStores()
   if fresh.ok: withLock listLock: listCache = (fresh, now)
   fresh
+
+# ------------------------------------------------------------------ the direct transfer of a shim (D-61)
+
+proc grantFor*(store, key, upload, mode: string): string =
+  ## the token a shim puts the parts of an upload with (`mode` "w") or reads an object with ("r"); "" when the shims go through the core, or the store has no name to bind it to
+  if directUrl().len == 0 or store.len == 0: return ""
+  signGrant(moduleSecret, moduleShard, store, key, upload, mode, getTime().toUnix())
+
+proc directPath*(store, key: string): string = "/s/" & store & "/" & encodeKey(key)
+
+method uploadedParts*(b: RemoteBackend; key, uploadId: string): tuple[res: Outcome, known: bool, parts: seq[PartRecord]] =
+  let a = call(HttpGet, b.objectUri(key, "upload=" & encodeUrl(uploadId, usePlus = false) & "&parts"))
+  let o = a.outcomeOf
+  if not o.ok: return (o, false, @[])
+  try:
+    var parts: seq[PartRecord]
+    for p in parseJson(a.body)["parts"]: parts.add (p["part"].getInt, p["sha256"].getStr, p["size"].getBiggestInt)
+    (done(), true, parts)
+  except CatchableError: (fail("the storage module's list of parts is not understood"), false, @[])

@@ -59,6 +59,12 @@ proc collect*(src: BodySource; size: int64): tuple[ok: bool, data: string] =
   let whole = src(proc (chunk: string): bool = (buf.add chunk; true))
   (whole and int64(buf.len) == size, buf)
 
+type PartRecord* = tuple[part: int, sha256: string, size: int64]
+
+method uploadedParts*(b: ObjectBackend; key, uploadId: string): tuple[res: Outcome, known: bool, parts: seq[PartRecord]] {.base.} = (done(), false, @[])
+  ## D-61: what the storage module itself received for a multipart upload that a shim sent straight to it: the digest and the size of every part. `known` is false for a backend that keeps no such
+  ## record (the parts came through the core then, and the core has seen them).
+
 method putStream*(b: ObjectBackend; key: string; size: int64; sha256: string; src: BodySource): Outcome {.base.} =
   ## a whole object of `size` bytes (up to `partSize`) read from `src`; `sha256` is the hex digest of it, which a node that can verify is told before the bytes. The backends that
   ## can stream override it; this one reads it all and calls `putObject`.

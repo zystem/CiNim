@@ -28,6 +28,20 @@ proc forgetObject*(c: var RqClient; store, key: string) =
 proc inInventory(c: var RqClient; store, key: string): bool =
   c.query(%*[["SELECT count(*) FROM storage_objects WHERE store = ? AND key = ?", store, key]])["results"][0]{"values"}[0][0].getInt > 0
 
+# ------------------------------------------------------------------ the parts a shim sent directly (D-61)
+
+proc recordPart*(c: var RqClient; store, key, upload: string; part: int; sha256: string; size: int64; now: int64) =
+  discard c.execute(%*[["INSERT INTO storage_parts (store, key, upload, part, sha256, size, written_at) VALUES (?, ?, ?, ?, ?, ?, ?) " &
+    "ON CONFLICT(store, key, upload, part) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, written_at = excluded.written_at", store, key, upload, part, sha256, size, now]])
+
+proc partsOf*(c: var RqClient; store, key, upload: string): seq[tuple[part: int, sha256: string, size: int64]] =
+  let v = c.query(%*[["SELECT part, sha256, size FROM storage_parts WHERE store = ? AND key = ? AND upload = ? ORDER BY part", store, key, upload]])["results"][0]{"values"}
+  if v != nil:
+    for row in v: result.add (row[0].getInt, row[1].getStr, row[2].getBiggestInt)
+
+proc forgetParts*(c: var RqClient; store, key, upload: string) =
+  discard c.execute(%*[["DELETE FROM storage_parts WHERE store = ? AND key = ? AND upload = ?", store, key, upload]])
+
 # ------------------------------------------------------------------ the queue
 
 proc noteMissed*(c: var RqClient; store, key, node, op: string; now: int64) =

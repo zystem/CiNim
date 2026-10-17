@@ -126,6 +126,12 @@ proc networkDefaults(): tuple[egress, ingress: string] =
   result.egress = if getEnv("CINIM_NETWORK_EGRESS") == "open": "open" else: "restricted"
   result.ingress = if getEnv("CINIM_NETWORK_INGRESS") == "open": "open" else: "closed"
 
+proc directPort(): int =
+  ## D-61: the port of the storage module for shims, from CINIM_STORAGE_DIRECT_URL (http://host:port); 0 when the shard has none
+  let u = getEnv("CINIM_STORAGE_DIRECT_URL")
+  if u.len == 0: return 0
+  try: parseUri(u).port.parseInt except ValueError: 0
+
 proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionConfig =
   ## SHD-007: what the objects of an organisation are made from. In the `multi` mode (a router is configured) the core also makes
   ## the Ingress <basePath>/<slug>/ of the organisation; the host and the base path are those of the public URL.
@@ -163,7 +169,7 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
   let nd = networkDefaults()
   ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet,
                   egressOpen: (if egress.len > 0: egress else: nd.egress) == "open", ingressOpen: (if ingress.len > 0: ingress else: nd.ingress) == "open",
-                  build: buildOn, buildEgress: buildEgress, stepEphemeralLimit: getEnv("CINIM_STEP_EPHEMERAL_LIMIT"), buildIngress: buildIngress,
+                  storageDirectPort: directPort(), build: buildOn, buildEgress: buildEgress, stepEphemeralLimit: getEnv("CINIM_STEP_EPHEMERAL_LIMIT"), buildIngress: buildIngress,
                   deploy: deployOn, deployEgress: deployEgress, conductors: conductorImage.len > 0, deployKubeApiServer: getEnv("CINIM_DEPLOY_KUBE_APISERVER") == "true",
                   controllerImage: getEnv("CINIM_CONTROLLER_IMAGE"), stateClass: getEnv("CINIM_CONTROLLER_STATE_CLASS"),
                   multi: cfg.url.len > 0, host: pub.hostname, basePath: pub.path,

@@ -102,7 +102,7 @@ proc runRouterClient(a: tuple[rqliteUrl: string]) {.thread.} =
 
 proc main() =
   # D-60: the stores are the storage module's; the core holds its address and the secret its calls are signed with (a Secret of the shard)
-  configureStorage(getEnv("CINIM_STORAGE_URL"), getEnv("CINIM_STORAGE_TOKEN"), shardName)
+  configureStorage(getEnv("CINIM_STORAGE_URL"), getEnv("CINIM_STORAGE_TOKEN"), shardName, getEnv("CINIM_STORAGE_DIRECT_URL"))
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   var c = newRq(rqliteUrl)
   var profileId: string

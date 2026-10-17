@@ -4,6 +4,7 @@
 ##   CINIM_STORAGE_SHARDS      `<shard>=<secret>;<shard>=<secret>`: the shards it serves and the secret of each (the core of that shard signs its calls with it)
 ##                             (or, for one shard: CINIM_STORAGE_TOKEN, and CINIM_SHARD, default 001)
 ##   CINIM_STORAGE_ADMIN_TOKEN the operator's token for /v1/admin/... (at least 16 characters)
+##   CINIM_STORAGE_SHIM_PORT, CINIM_STORAGE_SHIM_THREADS  the port for shims (18091, 0: none) and its threads (8): the direct transfer of D-61
 ##   CINIM_STORAGE_THREADS     the threads of the HTTP server (16); each holds a receive buffer of 10 MiB, so memory is about 20 MiB a thread at the busiest
 ##   CINIM_STORAGE_REPAIR_SECONDS, CINIM_STORAGE_CHECK_SECONDS  how often the repair queue is worked (60) and a slice of the inventory is checked against the nodes (600)
 ##   CINIM_STORAGE_SEAL_KEY    the key the stores' secrets are sealed under in the database (at least 16 characters; keep it apart from the database)
@@ -48,6 +49,8 @@ proc main() =
       sleep 2000
   let port = parseInt(getEnv("CINIM_STORAGE_PORT", "18090"))
   discard startServer(port, parseInt(getEnv("CINIM_STORAGE_THREADS", "16")))
+  let shimPort = parseInt(getEnv("CINIM_STORAGE_SHIM_PORT", "18091"))       # D-61: the port for shims (0: none)
+  if shimPort > 0: discard startShimServer(shimPort, parseInt(getEnv("CINIM_STORAGE_SHIM_THREADS", "8")))
   var repair: Thread[void]
   createThread(repair, repairLoop)
   echo "storage: serving shards ", toSeq(secrets.keys).join(","), " on port ", port

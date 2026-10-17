@@ -36,6 +36,7 @@ type
     deploy*: bool                               ## the shard has the deploy profile (D-48): a step with `profile = "deploy"` is an ordinary Pod that may reach what `deployEgress` lists
     deployEgress*: JsonNode                     ## NetworkPolicy egress rules of the deploy Pods (an array, like buildEgress), or the string "all"; nil: closed
     conductors*: bool                           ## the shard has a conductor image (CINIM_CONDUCTOR_IMAGE): the namespace gets the policy that lets a conductor Pod reach the core's push channel
+    storageDirectPort*: int                     ## D-61: the shard's storage module takes the bytes of the shims on this port (0: it does not); a step Pod may reach it, and nothing else of the module
     deployKubeApiServer*: bool                  ## also a CiliumNetworkPolicy that lets the deploy Pods reach the Kubernetes API server (the entity `kube-apiserver`): a NetworkPolicy cannot name it under Cilium
 
   CurveKeys* = object                           ## what the controller of an organisation needs to reach the core (D-24)
@@ -170,6 +171,12 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
          {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}, {"protocol": "TCP", "port": 19744}]}]}},
     %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "controller-no-ingress", ns),
        "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": controllerName}}, "policyTypes": ["Ingress"]}}]
+  if cfg.storageDirectPort > 0:
+    # D-61: the bytes of an artifact or a cache go straight to the storage module, on its port for shims, with a grant from the core; no other port of the module is open to a step Pod
+    for p in result.mitems:
+      if p{"metadata"}{"name"}.getStr.endsWith("allow-dns-and-collector"):
+        p["spec"]["egress"].add %*{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": cfg.shardNamespace}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": "cinim-storage"}}}],
+                                   "ports": [{"protocol": "TCP", "port": cfg.storageDirectPort}]}
   if cfg.conductors:
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-conductor", ns),
        "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": conductorName}}, "policyTypes": ["Egress"], "egress": [

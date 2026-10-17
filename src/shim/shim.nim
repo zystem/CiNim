@@ -173,23 +173,16 @@ when defined(shimLogging):
     ## the artifacts the step asked for, from this run, into the workspace, block by block; "" or what went wrong
     let c = newArtifactClient(artifactAddr, certs)
     defer: c.close()
-    let list = ask(c, step, token, ArtifactRequest(op: "get_list", names: names), patience)
+    let list = ask(c, step, token, ArtifactRequest(op: "get_list", names: names, direct: true), patience)
     if not list.ok: return list.code & ": " & list.detail
     for f in list.ack.files:
       if not safeRel(f.path): return "core named the path " & f.path & ", which is not inside the workspace"
       let dest = workspace / f.path
       createDir(parentDir(dest))
-      var part = open(dest & ".part", fmWrite)
-      var off = 0'u64
-      while off < f.size:
-        let r = ask(c, step, token, ArtifactRequest(op: "get_block", path: f.path, offset: off, length: uint32(min(uint64(readSize), f.size - off))), patience)
-        if not r.ok or r.ack.data.len == 0:
-          part.close()
-          removeFile(dest & ".part")
-          return f.path & ": " & (if r.ok: "an empty block" else: r.code & ": " & r.detail)
-        discard part.writeBuffer(unsafeAddr r.ack.data[0], r.ack.data.len)
-        off += uint64(r.ack.data.len)
-      part.close()
+      let err = c.fetchTo(step, token, f.path, f.size, dest & ".part", patience, directUrl = list.ack.direct_url, grant = f.grant, directPath = f.direct_path)
+      if err.len > 0:
+        removeFile(dest & ".part")
+        return err
       moveFile(dest & ".part", dest)
       if fileSha256(dest) != f.sha256:
         removeFile(dest)
@@ -215,7 +208,7 @@ when defined(shimLogging):
       proc (f: ManifestFile): tuple[ok, retry: bool; detail: string] =
         let r = putFile(c, step, token, f.path, workspace / f.path, f.size, f.sha256, patience)
         (r.ok, r.retry, r.code & ": " & r.detail),
-      proc (f: ManifestFile) = say "artifact " & f.path & " put (" & $f.size & " bytes)")
+      proc (f: ManifestFile) = say "artifact " & f.path & " put (" & $f.size & " bytes" & (if lastPutDirect: ", straight to the storage module" else: "") & ")")
     if d.ok: UploadResult() else: UploadResult(failure: d.path & ": " & d.detail, undelivered: d.retry)
 
   const cachePatience = 30          ## seconds: a cache is a convenience, a core that does not answer is not waited for long
@@ -239,7 +232,7 @@ when defined(shimLogging):
         result.notes.add "cache " & d.key & ": miss"
         continue
       let tmp = tmpDir / ("cache-" & $step.seq & "-" & $step.attempt & "-" & $i & ".bin")
-      let err = cacheFetch(c, step, token, f.key, f.size, tmp, cachePatience)
+      let err = cacheFetch(c, step, token, f.key, f.size, tmp, cachePatience, f.directUrl, f.grant, f.directPath)
       if err.len > 0:
         result.notes.add "cache " & d.key & ": not restored (" & err & ")"
         removeFile(tmp)

@@ -32,3 +32,21 @@ suite "D-60 the module's seal and the core's token":
     check not verifyTarget("s3cr3t-of-shard", "001", "GET", "/v1/stores/a/objects/k?stat", "", now)
     check not verifyTarget("s3cr3t-of-shard", "001", "GET", "/v1/stores/a/objects/k?stat", "v1.1.2", now)
     check not verifyTarget("", "001", "GET", "/x", t, now)
+
+  test "D-61 a grant is good for one shard, store, key, upload and mode, and for two hours":
+    let now = 1_700_000_000'i64
+    let g = signGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", now)
+    check g.startsWith("g1.001.") and grantShard(g) == "001" and grantShard("v1.1.2") == "" and verifyGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", g, now + 7000)
+    check not verifyGrant("s3cr3t-of-shard", "002", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", g, now)       # another shard
+    check not verifyGrant("s3cr3t-of-shard", "001", "caddy-main", "acme/s1_run/dist/app.bin", "up1", "w", g, now)       # another store
+    check not verifyGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/other.bin", "up1", "w", g, now)    # another key
+    check not verifyGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/app.bin", "up2", "w", g, now)       # another upload
+    check not verifyGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/app.bin", "", "r", g, now)         # not a grant to read
+    check not verifyGrant("another-secret", "001", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", g, now)
+    check not verifyGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", g, now + grantLifetime + 1)    # expired
+    check not verifyGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", "", now)
+    check not verifyGrant("s3cr3t-of-shard", "001", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", "g1.1.2", now)
+    check not verifyGrant("s3cr3t-of-shard", "002", "garage-main", "acme/s1_run/dist/app.bin", "up1", "w", g, now)
+    # a token of the core's calls is not a grant, and the other way round
+    check not verifyTarget("s3cr3t-of-shard", "001", "PUT", "/x", g, now)
+    check not verifyGrant("s3cr3t-of-shard", "001", "garage-main", "k", "u", "w", signTarget("s3cr3t-of-shard", "001", "PUT", "/x", now), now)

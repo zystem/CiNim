@@ -91,6 +91,10 @@ proc fileSha256*(path: string): string =
     st.update(buf.toOpenArray(0, n - 1))
   for c in st.digest(): result.add toHex(ord(c), 2).toLowerAscii
 
+proc blockSha256*(data: string): string =
+  ## the digest of one block (a part of an upload), as the shim reports it to the core
+  for c in secureHash(Sha_256, data): result.add toHex(ord(c), 2).toLowerAscii
+
 proc readBlock*(path: string; offset, length: int64): string =
   ## `length` bytes of the file from `offset` (fewer at its end)
   var f = open(path, fmRead)

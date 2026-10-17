@@ -48,6 +48,9 @@ logs:
 # `tokenSecret.name`, which is the secret of this shard in the module's `shards`). Without `url` the shard has no object store: a step that asks for artifacts or a cache is refused.
 storage:
   url: ""                             # http://cinim-storage:18090
+  # D-61: where the shims of the steps put the bytes of artifacts and caches, as the Pods of the organisations reach it (their namespaces are not this one, so the name has the namespace):
+  # http://cinim-storage.<namespace of the shard>.svc:18091. Empty: the bytes go through the core. The chart cinim-storage must have its port for shims on (`shim.port`).
+  directUrl: ""
   tokenSecret:
     name: ""
     key: token

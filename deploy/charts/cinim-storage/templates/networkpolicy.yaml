@@ -17,6 +17,14 @@ spec:
         - podSelector: {matchLabels: {app.kubernetes.io/part-of: cinim-storage}}
       ports:
         - {protocol: TCP, port: 18090}
+{{- if .Values.shim.port }}
+    # D-61: the shims of the shard's organisations reach the port for shims and no other port of the module
+    - from:
+        - namespaceSelector:
+            matchLabels: {cinim.io/shard: {{ .Values.shard | quote }}}
+      ports:
+        - {protocol: TCP, port: {{ .Values.shim.port }}}
+{{- end }}
 {{- if .Values.stores.caddy.enabled }}
 ---
 apiVersion: networking.k8s.io/v1

@@ -51,6 +51,43 @@ proc backendFor(ss: StoreSet; name: string): tuple[be: ObjectBackend, refusal: A
   of "no_such_store": (nil, refuse("store_not_configured", "the store " & name & " is not there any more"))
   else: (nil, refuse("store_unavailable", "the object store's key cannot be read now: " & rb.error))
 
+
+# ------------------------------------------------------------------ the direct transfer of a shim (D-61, docs/storage-module.md)
+
+proc offerDirect(a: var ArtifactAck; req: ArtifactRequest; store, key, upload: string) =
+  ## the shim said it can put the bytes straight to the storage module, and the shard has the module's port for shims: it gets a grant for this upload and the path to put the parts to
+  if not req.direct: return
+  let g = grantFor(store, key, upload, "w")
+  if g.len == 0: return
+  a.grant = g
+  a.direct_url = directUrl()
+  a.direct_path = directPath(store, key)
+
+proc offerRead(f: var ArtifactFile; req: ArtifactRequest; store, key: string) =
+  if not req.direct: return
+  let g = grantFor(store, key, "", "r")
+  if g.len == 0: return
+  f.grant = g
+  f.direct_path = directPath(store, key)
+
+type DirectCheck = enum dcNotDirect, dcAgree, dcDiffer, dcLater, dcBad
+
+proc checkDirectParts(be: ObjectBackend; key, uploadId: string; parts: seq[ArtifactPart]): tuple[verdict: DirectCheck, detail: string, outcome: Outcome] =
+  ## The digests the shim reported over its own channel against those the module made of the bytes it received (D-61). `dcNotDirect`: the parts came through the core.
+  let given = parts.countIt(it.sha256.len > 0)
+  if given == 0: return (dcNotDirect, "", done())
+  if given != parts.len: return (dcBad, "put_end names the digest of some parts and not of others", done())
+  for p in parts:
+    if p.sha256.len != 64 or p.sha256.anyIt(it notin "0123456789abcdef"): return (dcBad, "the digest of part " & $p.part & " is not 64 lower-case hex digits", done())
+  let got = be.uploadedParts(key, uploadId)
+  if not got.res.ok: return (dcLater, "", got.res)
+  if not got.known: return (dcBad, "this store keeps no record of parts sent directly", done())
+  if got.parts.len != parts.len: return (dcDiffer, "the shim sent " & $parts.len & " parts, the module received " & $got.parts.len, done())
+  for i, p in parts:
+    if int(p.part) != got.parts[i].part or p.sha256 != got.parts[i].sha256:
+      return (dcDiffer, "part " & $p.part & " is not what the module received", done())
+  (dcAgree, "", done())
+
 proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; ds: seq[CacheDecl]; ss: StoreSet; now: int64): ArtifactAck =
   ## DAT-004: the step's cache, by the same channel and blocks as its artifacts. `path` is the cache key. A step may find or read only what it declared (its key, or what one of its
   ## restore keys names) and save only the key it declared; a key that is stored is immutable (`cache_exists`: the saver gives way); room is made by dropping the entries that were
@@ -62,7 +99,11 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
     if d.len == 0: return refuse("not_declared", key & " is not a cache key this step declared")
     let found = c.findEntry(tenant, scope, key, d[0].restoreKeys, now)
     result = ack()
-    if found.found: result.files.add ArtifactFile(path: found.key, size: uint64(found.size), sha256: found.sha256)
+    if found.found:
+      var f = ArtifactFile(path: found.key, size: uint64(found.size), sha256: found.sha256)
+      f.offerRead(req, found.store, found.s3Key)
+      result.files.add f
+      if f.grant.len > 0: result.direct_url = directUrl()
   of "get_block":
     if not ds.mayFind(key): return refuse("not_declared", key & " is not a cache this step may read")
     let e = c.storedEntry(tenant, scope, key)
@@ -109,6 +150,7 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
         c.setEntryUpload(tenant, scope, key, mp.uploadId)
         result = ack()
         result.upload_id = mp.uploadId
+        result.offerDirect(req, sname, s3, mp.uploadId)
     of "put_part":
       let row = c.uploadingEntry(tenant, scope, key)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
@@ -124,6 +166,15 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
       let rb = ss.backendFor(row.store)
       if rb.be == nil: return rb.refusal
+      let dg = checkDirectParts(rb.be, row.s3Key, row.uploadId, req.parts)
+      case dg.verdict
+      of dcLater: return fromOutcome(dg.outcome)
+      of dcBad: return refuse("bad_request", dg.detail)
+      of dcDiffer:
+        discard rb.be.abortMultipart(row.s3Key, row.uploadId)
+        c.forgetEntry(tenant, scope, key)
+        return refuse("digest_mismatch", key & ": " & dg.detail)
+      else: discard
       let fin = rb.be.completeMultipart(row.s3Key, row.uploadId, req.parts.mapIt((int(it.part), it.etag)))
       if not fin.ok: return fromOutcome(fin)
       let sz = rb.be.objectSize(row.s3Key)
@@ -166,7 +217,11 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
       if name notin decl.download: return refuse("not_declared", name & " is not in the step's download list")
       let found = c.storedUnder(runId, name)
       if found.len == 0: return refuse("artifact_missing", "this run has no artifact " & name)
-      for f in found: result.files.add ArtifactFile(path: f.path, size: uint64(f.size), sha256: f.sha256)
+      for f in found:
+        var af = ArtifactFile(path: f.path, size: uint64(f.size), sha256: f.sha256)
+        af.offerRead(req, f.store, f.key)
+        result.files.add af
+        if af.grant.len > 0: result.direct_url = directUrl()
   of "get_block":
     let art = c.storedArtifact(runId, req.path)
     if not art.found or not decl.download.coveredBy(req.path): return refuse("not_declared", req.path & " is not an artifact this step may read")
@@ -210,6 +265,7 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
         c.recordArtifact(schema.newId(), tenant, runId, int(req.step.seq), path, key, int64(req.size), sha, "uploading", mp.uploadId, now, sname)
         result = ack()
         result.upload_id = mp.uploadId
+        result.offerDirect(req, sname, key, mp.uploadId)
     of "put_part":
       let row = c.uploadingRow(runId, path)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", path & " has no upload under way with this id")
@@ -226,6 +282,15 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
       let parts = req.parts.mapIt((int(it.part), it.etag))
       let rb = ss.backendFor(row.store)
       if rb.be == nil: return rb.refusal
+      let dg = checkDirectParts(rb.be, row.key, row.uploadId, req.parts)
+      case dg.verdict
+      of dcLater: return fromOutcome(dg.outcome)
+      of dcBad: return refuse("bad_request", dg.detail)
+      of dcDiffer:
+        discard rb.be.abortMultipart(row.key, row.uploadId)
+        c.forgetArtifact(runId, path)
+        return refuse("digest_mismatch", path & ": " & dg.detail)
+      else: discard
       let fin = rb.be.completeMultipart(row.key, row.uploadId, parts)
       if not fin.ok: return fromOutcome(fin)
       # the store says that the object is there, with the size that was announced; only then it is the run's artifact

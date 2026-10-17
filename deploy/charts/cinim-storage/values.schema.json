@@ -19,6 +19,7 @@
                 "image": {"type": "object", "properties": {"repository": {"type": "string"}, "tag": {"type": "string"}}}}},
       "external": {"type": "array", "items": {"type": "object", "required": ["name", "endpoint", "bucket", "secretName"],
                    "properties": {"name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"}, "endpoint": {"type": "string", "pattern": "^https?://.+$"}}}}}},
+    "shim": {"type": "object", "properties": {"port": {"type": "integer", "minimum": 0, "maximum": 65535}, "threads": {"type": "integer", "minimum": 1}}},
     "networkPolicy": {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
   }
 }

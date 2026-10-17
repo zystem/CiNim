@@ -171,6 +171,24 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
             for p in r["ports"]: ports.add p["port"].getInt
     check 19744 in ports and 19742 in ports and 19743 in ports
     check not toStore
+  test "D-61 with the port of the storage module for shims a step Pod may reach that port of the module and no other":
+    var cfgDirect = buildCfg()
+    check cfgDirect.storageDirectPort == 0
+    var without: seq[string]
+    for st in organizationSteps(cfgDirect, "acme", curve, "BT").steps:
+      if st.kind == "NetworkPolicy" and st.objectName == "allow-dns-and-collector":
+        for r in st.obj["spec"]["egress"]: without.add r["to"][0]{"podSelector"}{"matchLabels"}{"app.kubernetes.io/name"}.getStr
+    check "cinim-storage" notin without
+    cfgDirect.storageDirectPort = 18091
+    var found = false
+    for st in organizationSteps(cfgDirect, "acme", curve, "BT").steps:
+      if st.kind == "NetworkPolicy" and st.objectName == "allow-dns-and-collector":
+        for r in st.obj["spec"]["egress"]:
+          if r["to"][0]{"podSelector"}{"matchLabels"}{"app.kubernetes.io/name"}.getStr == "cinim-storage":
+            found = true
+            check r["ports"].len == 1 and r["ports"][0]["port"].getInt == 18091
+            check r["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"].getStr == "cinim-001"
+    check found
   test "without an internet setting a build Pod may reach DNS, the collector and what the operator opened, nothing else":
     var closed, opened: seq[string]
     for st in organizationSteps(buildCfg(), "acme", curve, "BT").steps:

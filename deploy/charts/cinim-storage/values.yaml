@@ -68,6 +68,13 @@ stores:
 tools:
   image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 
+# The port of the module for shims (D-61, docs/storage-module.md "Direct transfer from the shim"): a step's shim sends the bytes of an artifact or a cache entry straight here, with a grant that the
+# core made, and only their digests go through the core. It has a thread pool of its own so that step code cannot take the threads of the core's calls. 0 turns the port off. The shard's chart
+# turns the feature on with `storage.directUrl`; the network policy of the organisations' namespaces (made by the core) lets a step Pod reach this port and no other of the module.
+shim:
+  port: 18091
+  threads: 8
+
 module:
   threads: 16                         # of the HTTP server; a body is streamed (64 KiB buffers), so a thread costs little: 6 blocks of 8 MiB at once peaked at 34 MiB in tstorageproc
   resources:

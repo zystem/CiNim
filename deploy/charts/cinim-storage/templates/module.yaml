@@ -26,9 +26,14 @@ spec:
           command: ["/cinim-storage"]
           ports:
             - {name: http, containerPort: 18090}
+            {{- if .Values.shim.port }}
+            - {name: shim, containerPort: {{ .Values.shim.port }}}
+            {{- end }}
           env:
             - {name: CINIM_RQLITE_URL, value: {{ .Values.rqliteUrl | quote }}}
             - {name: CINIM_STORAGE_PORT, value: "18090"}
+            - {name: CINIM_STORAGE_SHIM_PORT, value: {{ .Values.shim.port | int | quote }}}
+            - {name: CINIM_STORAGE_SHIM_THREADS, value: {{ .Values.shim.threads | int | quote }}}
             - {name: CINIM_STORAGE_THREADS, value: {{ .Values.module.threads | int | quote }}}
             - {name: CINIM_STORAGE_REPAIR_SECONDS, value: {{ .Values.repairSeconds | int | quote }}}
             - {name: CINIM_STORAGE_CHECK_SECONDS, value: {{ .Values.checkSeconds | int | quote }}}
@@ -57,3 +62,6 @@ spec:
   selector: {app.kubernetes.io/name: cinim-storage}
   ports:
     - {name: http, port: 18090, targetPort: http}
+    {{- if .Values.shim.port }}
+    - {name: shim, port: {{ .Values.shim.port }}, targetPort: shim}
+    {{- end }}

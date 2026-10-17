@@ -6,6 +6,7 @@ import std/[unittest, json, os, strutils, tables, locks, times, uri, sequtils]
 import checksums/sha2
 import common/[rqlite, storagebackend]
 import storage/[schema, seal, registry, repair, replicas, service, storeauth, httpstore]
+import common/storagetoken
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -248,6 +249,50 @@ suite "D-60 the storage module's API":
         false
       check put(broken, body.len).code == 503                                                # the sender broke off: try again
       check put(bodyOf(body), 9 * 1024 * 1024).code == 413
+      check coreCall("DELETE", u).code == 200
+
+    test "D-61 a shim puts the parts of an upload straight to the module with a grant, the module keeps their digests, and the core can read them back before it completes":
+      let key = "acme/s1_run/direct.bin"
+      let u = objUri(garage, key)
+      let up = coreCall("POST", u & "?uploads").js["upload_id"].getStr
+      let a = "A".repeat(100_000)
+      let b = "B".repeat(70_000)
+      let now = getTime().toUnix()
+      proc shimCall(meth, path: string; body = ""; grant = ""; extra: seq[(string, string)] = @[]; src: BodySource = nil): Reply =
+        var h = @[("Authorization", "Bearer " & grant)] & extra
+        let bs = if src != nil: src else: bodyOf(body)
+        shimDispatch(meth, path, raw(meth, path, h), bs, int64(body.len), now)
+      let w = signGrant(secret1, "001", garage, key, up, "w", now)
+      let path = "/s/" & garage & "/" & encodePath(key)
+      let p1 = shimCall("PUT", path & "?upload=" & up & "&part=1", a, w, @[("X-Content-SHA256", shaOf(a))])
+      check p1.code == 200 and p1.js["etag"].getStr.len > 0
+      check shimCall("PUT", path & "?upload=" & up & "&part=2", b, w, @[("X-Content-SHA256", shaOf(b))]).code == 200
+      # a grant for another key, another upload, another store, a read grant, none, a wrong digest, no digest
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, signGrant(secret1, "001", garage, "acme/s1_run/other.bin", up, "w", now), @[("X-Content-SHA256", shaOf(b))]).code == 401
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, signGrant(secret1, "001", garage, key, "another", "w", now), @[("X-Content-SHA256", shaOf(b))]).code == 401
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, signGrant(secret1, "001", caddy, key, up, "w", now), @[("X-Content-SHA256", shaOf(b))]).code == 401
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, signGrant(secret1, "001", garage, key, "", "r", now), @[("X-Content-SHA256", shaOf(b))]).code == 401
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, "", @[("X-Content-SHA256", shaOf(b))]).code == 401
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, signGrant(secret2, "001", garage, key, up, "w", now), @[("X-Content-SHA256", shaOf(b))]).code == 401   # the secret of another shard
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, w, @[("X-Content-SHA256", shaOf("not it"))]).code == 400
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, w).code == 400
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", "", w, @[("X-Content-SHA256", shaOf(""))]).code == 400                       # empty
+      check shimCall("DELETE", path & "?upload=" & up, "", w).code == 405
+      # what the module recorded is what the core reads back, and nothing for the part that was refused
+      let parts = coreCall("GET", u & "?upload=" & up & "&parts").js["parts"]
+      check parts.len == 2 and parts[0]["part"].getInt == 1 and parts[0]["sha256"].getStr == shaOf(a) and parts[0]["size"].getInt == a.len and parts[1]["sha256"].getStr == shaOf(b)
+      let etags = @[(1, p1.js["etag"].getStr), (2, shimCall("PUT", path & "?upload=" & up & "&part=2", b, w, @[("X-Content-SHA256", shaOf(b))]).js["etag"].getStr)]
+      check coreCall("POST", u & "?upload=" & up, $ %*{"parts": [[1, etags[0][1]], [2, etags[1][1]]]}).code == 200
+      check memObjects[slot(garage, "001/" & key)] == a & b
+      check coreCall("GET", u & "?upload=" & up & "&parts").js["parts"].len == 0                                                       # forgotten when the upload is complete
+      # a read with a read grant, by ranges, and not with a write grant
+      let r = signGrant(secret1, "001", garage, key, "", "r", now)
+      check shimCall("GET", path, "", r, @[("Range", "bytes=99998-100001")]).body == "AABB"
+      check shimCall("GET", path, "", w, @[("Range", "bytes=0-3")]).code == 401
+      check shimCall("GET", path, "", r).code == 400
+      check shimCall("GET", "/s/" & garage & "/" & encodePath("acme/s1_run/missing.bin"), "", signGrant(secret1, "001", garage, "acme/s1_run/missing.bin", "", "r", now), @[("Range", "bytes=0-3")]).code == 404
+      check shimCall("PUT", path & "?upload=" & up & "&part=3", b, signGrant(secret1, "009", garage, key, up, "w", now), @[("X-Content-SHA256", shaOf(b))]).code == 401   # a shard the module does not serve
+      check shimDispatch("GET", "/v1/stores", raw("GET", "/v1/stores", @[("X-Cinim-Shard", "001")]), bodyOf(""), 0, now).code == 404         # the core's routes are not on this port
       check coreCall("DELETE", u).code == 200
 
     test "D-60 keys that are not keys, a store that is not there, the default by `_default`":

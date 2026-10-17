@@ -5,13 +5,16 @@ import std/[unittest, json, os, tables, strutils, times, sequtils]
 import checksums/sha2
 import common/rqlite
 import common/storagebackend
-import core/[schema, cachestore, objectstore, artifactingest, groups]
+import core/[schema, cachestore, objectstore, artifactingest, groups, storageclient]
+import common/storagetoken
 
 type MemStore = ref object of ObjectBackend
+  direct: seq[PartRecord]                       ## what the storage module would report for a direct upload
   objects: Table[string, string]
   uploads: Table[string, tuple[key: string, parts: Table[int, string]]]
   next: int
 
+method uploadedParts(b: MemStore; key, uploadId: string): tuple[res: Outcome, known: bool, parts: seq[PartRecord]] = (done(), true, b.direct)
 method putObject(b: MemStore; key, data: string): Outcome =
   b.objects[key] = data
   done()
@@ -25,8 +28,11 @@ method uploadPart(b: MemStore; key, uploadId: string; part: int; data: string): 
   (done(), "etag" & $part)
 method completeMultipart(b: MemStore; key, uploadId: string; parts: seq[(int, string)]): Outcome =
   var all = ""
-  for (n, _) in parts: all.add b.uploads[uploadId].parts[n]
-  b.objects[key] = all
+  var sent = true
+  for (n, _) in parts:
+    if n notin b.uploads[uploadId].parts: sent = false          # the parts went straight to the module (D-61): the test put the object there
+    else: all.add b.uploads[uploadId].parts[n]
+  if sent: b.objects[key] = all
   b.uploads.del uploadId
   done()
 method abortMultipart(b: MemStore; key, uploadId: string): Outcome =
@@ -302,6 +308,53 @@ suite "DAT-004 the requests of the cache on the channel":
       e.parts = @[ArtifactPart(part: 1, etag: a1.etag), ArtifactPart(part: 2, etag: a2.etag)]
       check handleCache(c, e, t, "", decls, fixedStoreSet(be), now).accepted
       check c.storedEntry(t, "", "deps-1").found and be.objects[objectKeyOf(t, "", "deps-1")] == data
+    test "D-61 a shim that can send its bytes straight to the module is given a grant, and the upload is completed only when the digests it reported are those the module made":
+      configureStorage("http://module.test:18090", "a-secret-of-the-shard-for-grants", "001", "http://module.test:18091")
+      defer: configureStorage("", "", "001")
+      let t = tenant()
+      discard c.execute(%*[["INSERT OR REPLACE INTO org_storage (tenant_id, purpose, store_name, updated_by, updated_at) VALUES (?, 'caches', 'mem', 'test', 1)", t]])
+      let be = store()
+      let data = "a".repeat(20) & "b".repeat(20)
+      var b = req("put_begin", "deps-1")
+      b.size = uint64(data.len)
+      b.sha256 = shaOf(data)
+      let plain = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)                       # a shim that cannot: no grant, the bytes come through the core
+      check plain.accepted and plain.grant.len == 0 and plain.direct_url.len == 0
+      var gone = req("put_abort", "deps-1"); gone.upload_id = plain.upload_id
+      check handleCache(c, gone, t, "", decls, fixedStoreSet(be), now).accepted
+      b.direct = true
+      let began = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
+      check began.accepted and began.grant.startsWith("g1.001.") and began.direct_url == "http://module.test:18091"
+      check began.direct_path == "/s/mem/" & objectKeyOf(t, "", "deps-1")
+      check verifyGrant("a-secret-of-the-shard-for-grants", "001", "mem", objectKeyOf(t, "", "deps-1"), began.upload_id, "w", began.grant, now)
+      be.objects[objectKeyOf(t, "", "deps-1")] = data                                            # what completing the upload at the store would leave
+      var e = req("put_end", "deps-1"); e.upload_id = began.upload_id
+      # the shim's digests differ from the module's: nothing is stored, the upload is dropped
+      be.direct = @[(1, shaOf(data[0 ..< 20]), 20'i64), (2, shaOf("not what the shim has"), 20'i64)]
+      e.parts = @[ArtifactPart(part: 1, etag: "e1", sha256: shaOf(data[0 ..< 20])), ArtifactPart(part: 2, etag: "e2", sha256: shaOf(data[20 .. ^1]))]
+      let differ = handleCache(c, e, t, "", decls, fixedStoreSet(be), now)
+      check not differ.accepted and differ.failure.code == "digest_mismatch"
+      check not c.storedEntry(t, "", "deps-1").found and not c.uploadingEntry(t, "", "deps-1").found
+      # a second try that agrees
+      let again = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
+      check again.accepted and again.grant.len > 0
+      e.upload_id = again.upload_id
+      be.direct = @[(1, shaOf(data[0 ..< 20]), 20'i64), (2, shaOf(data[20 .. ^1]), 20'i64)]
+      be.objects[objectKeyOf(t, "", "deps-1")] = data
+      check handleCache(c, e, t, "", decls, fixedStoreSet(be), now).accepted
+      check c.storedEntry(t, "", "deps-1").found
+      # digests for some parts only, or in the wrong form
+      let third = handleCache(c, b, t, "", @[CacheDecl(key: "deps-2", paths: @["x"])], fixedStoreSet(be), now)
+      check not third.accepted                                                                    # (not its key: refused before anything else)
+      # the entry is offered for a direct read, with a grant for reading and the path of the object
+      var find = req("cache_find", "deps-1")
+      find.direct = true
+      let found = handleCache(c, find, t, "", decls, fixedStoreSet(be), now)
+      check found.files.len == 1 and found.files[0].grant.startsWith("g1.001.") and found.files[0].direct_path == "/s/mem/" & objectKeyOf(t, "", "deps-1") and found.direct_url == "http://module.test:18091"
+      check verifyGrant("a-secret-of-the-shard-for-grants", "001", "mem", objectKeyOf(t, "", "deps-1"), "", "r", found.files[0].grant, now)
+      find.direct = false
+      check handleCache(c, find, t, "", decls, fixedStoreSet(be), now).files[0].grant.len == 0   # a shim that cannot is not offered one
+
     test "a size that is not the one announced is refused and nothing stays":
       let t = tenant()
       let be = store()

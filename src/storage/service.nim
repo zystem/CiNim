@@ -191,9 +191,15 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
       if not r.ok: return outcomeReply(r)
       let sz = be.objectSize(full)
       c.recordObject(l.name, full, (if sz.res.ok: sz.size else: -1'i64), now)       # -1: not known; the check only looks that the object is there
+      c.forgetParts(l.name, full, q["upload"])
       return jsonReply(200, %*{"size": (if sz.res.ok: sz.size else: -1'i64)})
     return problem(400, "invalid_request", "POST takes ?uploads or ?upload={id}")
   of "GET":
+    if "parts" in q and "upload" in q:
+      # D-61: what the module received from a shim for this upload, part by part (the digest it made of the bytes, and their number); the core compares it with what the shim reported
+      var items = newJArray()
+      for p in c.partsOf(l.name, full, q["upload"]): items.add %*{"part": p.part, "sha256": p.sha256, "size": p.size}
+      return jsonReply(200, %*{"parts": items})
     if "stat" in q:
       let r = be.objectSize(full)
       if not r.res.ok: return outcomeReply(r.res)
@@ -214,6 +220,7 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
   of "DELETE":
     if "upload" in q:
       let r = be.abortMultipart(full, q["upload"])
+      c.forgetParts(l.name, full, q["upload"])
       return (if r.ok: jsonReply(200, %*{"aborted": true}) else: outcomeReply(r))
     let r = be.deleteObject(full)
     if not r.ok and r.error != "no such object": return outcomeReply(r)
@@ -333,6 +340,75 @@ proc dispatch*(meth, uri, raw, body: string; now: int64): Reply =
   ## the same with a body that is in memory (the tests)
   dispatch(meth, uri, raw, bodyOf(body), int64(body.len), now)
 
+# ------------------------------------------------------------------ the port for shims (D-61)
+
+proc shimDispatch*(meth, uri, raw: string; src: BodySource; bodyLen: int64; now: int64): Reply =
+  ## The calls of a step's shim, on a port and a thread pool of their own so that step code cannot take the threads the core's calls need. The shim holds a **grant** that the core made for
+  ## one upload (to put its parts) or one object (to read it): a part is `PUT /s/{store}/{key}?upload={id}&part={n}` with `X-Content-SHA256`, a read is `GET /s/{store}/{key}` with a `Range`.
+  ## The module checks the grant, streams the part to the store, makes the digest of what it received and keeps it (`storage_parts`); the core compares those digests with the ones the shim
+  ## sent over its own channel before it completes the upload. Nothing else is open here: no listing, no delete, no complete.
+  let qpos = uri.find('?')
+  let path = decodeUrl(if qpos >= 0: uri[0 ..< qpos] else: uri, decodePlus = false)
+  let rawQuery = if qpos >= 0: uri[qpos + 1 .. ^1] else: ""
+  if path == "/healthz": return jsonReply(200, %*{"status": "ok"})
+  if not path.startsWith("/s/"): return problem(404, "not_found", "no such route")
+  let rest = path[3 .. ^1]
+  let slash = rest.find('/')
+  if slash < 1: return problem(404, "not_found", "no such route")
+  let store = rest[0 ..< slash]
+  let key = rest[slash + 1 .. ^1]
+  let grant = bearer(raw)
+  let shard = grantShard(grant)                    # the grant says which shard it is for; the secret of that shard checks it
+  if not validShard(shard) or not cfg.shardSecrets.hasKey(shard) or store == defaultName or not validObjectKey(key):
+    return problem(401, "unauthorized", "the grant is wrong, expired, or not for this call")
+  let secret = cfg.shardSecrets[shard]
+  let q = parseQuery(rawQuery)
+  var c = newRq(cfg.rqliteUrl)
+  try:
+    case meth
+    of "PUT":
+      let upload = q.getOrDefault("upload")
+      if not verifyGrant(secret, shard, store, key, upload, "w", grant, now): return problem(401, "unauthorized", "the grant is wrong, expired, or not for this call")
+      var n = 0
+      try: n = parseInt(q.getOrDefault("part"))
+      except ValueError: discard
+      if upload.len == 0 or n < 1 or n > maxParts: return problem(400, "invalid_part", "a part is PUT with ?upload={id}&part=1.." & $maxParts)
+      let given = raw.headerOf("x-content-sha256").toLowerAscii
+      if given.len != 64 or not given.allCharsInSet({'0' .. '9', 'a' .. 'f'}): return problem(400, "sha256_required", "X-Content-SHA256 is the hex digest of the part, sent with the request")
+      if bodyLen <= 0: return problem(400, "empty_body", "a part is at least one byte")
+      if bodyLen > partSize: return problem(413, "too_large", "a part is 1.." & $partSize & " bytes")
+      let l = c.loadStore(cfg.key, store)
+      if not l.ok: return problem(if l.error == "no_such_store": 404 else: 409, l.error, "the store is not ready: " & l.error)
+      let be = maker()(l, nil)
+      let full = shard & "/" & key
+      let dg = Digest(h: initSha256())
+      let r = be.uploadPartStream(full, upload, n, bodyLen, given, src.hashing(dg))
+      if not r.res.ok: return outcomeReply(r.res)
+      if dg.n != bodyLen or dg.h.hexDigest() != given: return problem(400, "sha256_mismatch", "the body is not the one X-Content-SHA256 names")
+      c.recordPart(l.name, full, upload, n, given, bodyLen, now)
+      return jsonReply(200, %*{"etag": r.etag})
+    of "GET":
+      if not verifyGrant(secret, shard, store, key, "", "r", grant, now): return problem(401, "unauthorized", "the grant is wrong, expired, or not for this call")
+      let range = raw.headerOf("range")
+      if not range.startsWith("bytes="): return problem(400, "range_required", "a read names a range: Range: bytes=a-b")
+      let ends = range[6 .. ^1].split('-')
+      var a, b: int64
+      try:
+        if ends.len != 2: raise newException(ValueError, "range")
+        a = parseBiggestInt(ends[0])
+        b = parseBiggestInt(ends[1])
+      except ValueError: return problem(400, "invalid_range", "Range: bytes=a-b, with both ends")
+      if a < 0 or b < a or b - a + 1 > 8 * 1024 * 1024: return problem(400, "invalid_range", "a read is 1 byte to 8 MiB")
+      let l = c.loadStore(cfg.key, store)
+      if not l.ok: return problem(if l.error == "no_such_store": 404 else: 409, l.error, "the store is not ready: " & l.error)
+      let r = maker()(l, nil).readRange(shard & "/" & key, a, b - a + 1)
+      if not r.res.ok: return outcomeReply(r.res)
+      return Reply(code: 206, body: r.data, headers: @["Content-Type: application/octet-stream"])
+    else:
+      return problem(405, "method_not_allowed", "PUT or GET")
+  except RqError as e:
+    return problem(503, "database_unavailable", e.msg, @["Retry-After: 5"])
+
 # ------------------------------------------------------------------ the background pass
 
 var stopRepair*: Atomic[bool]
@@ -369,38 +445,59 @@ proc repairLoop*() {.thread.} =
 
 # ------------------------------------------------------------------ the server
 
-proc onRequest() {.gcsafe, nimcall, raises: [].} =
+type Router = proc (meth, uri, raw: string; src: BodySource; bodyLen: int64; now: int64): Reply {.nimcall, gcsafe.}
+
+proc serve(route: Router) =
+  ## the callback of a server: the headers first (the buffer is reused for the body), the body as a source, the answer after the whole body has been read
+  let meth = getMethod()
+  let uri = getUri()
+  let raw = http.request[0 ..< http.requestlen]  # the headers (getRequest is for the Compact mode)
+  var bodyLen = 0'i64
+  try: bodyLen = parseBiggestInt(raw.headerOf("content-length"))
+  except ValueError: discard
+  var read = false
+  let src: BodySource = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =
+    read = true
+    var live = true
+    for (state, chunk) in receiveStream():
+      if state == Fail: return false
+      if chunk.len > 0 and live: live = sink(chunk)
+      if state == Complete: break
+    true
+  if bodyLen > 16 * 1024 * 1024:
+    reply(Http413, "{\"error\":\"too_large\"}", ["Content-Type: application/json"])
+    return
+  let r = route(meth, uri, raw, src, bodyLen, getTime().toUnix())
+  if bodyLen > 0 and not read: discard src(proc (chunk: string): bool = false)      # a route that did not want the body: read to the end and dropped, or the sender gets a reset
+  let code = HttpCode(r.code)
+  if r.headers.len > 0: reply(code, r.body, r.headers) else: reply(code, r.body)
+
+proc guarded(route: Router) {.gcsafe, raises: [].} =
   {.cast(gcsafe).}:
-    try:
-      let meth = getMethod()
-      let uri = getUri()
-      let raw = http.request[0 ..< http.requestlen]  # the headers (getRequest is for the Compact mode); the buffer is reused for the body, so they are read first
-      var bodyLen = 0'i64
-      try: bodyLen = parseBiggestInt(raw.headerOf("content-length"))
-      except ValueError: discard
-      var read = false
-      let src: BodySource = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =
-        read = true
-        var live = true
-        for (state, chunk) in receiveStream():
-          if state == Fail: return false
-          if chunk.len > 0 and live: live = sink(chunk)
-          if state == Complete: break
-        true
-      if bodyLen > 16 * 1024 * 1024:
-        reply(Http413, "{\"error\":\"too_large\"}", ["Content-Type: application/json"])
-        return
-      let r = dispatch(meth, uri, raw, src, bodyLen, getTime().toUnix())
-      if bodyLen > 0 and not read: discard src(proc (chunk: string): bool = false)      # a route that did not want the body: read to the end and dropped, or the sender gets a reset
-      let code = HttpCode(r.code)
-      if r.headers.len > 0: reply(code, r.body, r.headers) else: reply(code, r.body)
+    try: serve(route)
     except Exception as e:
       try: reply(Http500, "{\"error\":\"internal\",\"detail\":" & $(%e.msg) & "}", ["Content-Type: application/json"])
       except Exception: discard
+
+proc coreRoute(meth, uri, raw: string; src: BodySource; bodyLen: int64; now: int64): Reply {.nimcall, gcsafe.} =
+  {.cast(gcsafe).}: dispatch(meth, uri, raw, src, bodyLen, now)
+
+proc shimRoute(meth, uri, raw: string; src: BodySource; bodyLen: int64; now: int64): Reply {.nimcall, gcsafe.} =
+  {.cast(gcsafe).}: shimDispatch(meth, uri, raw, src, bodyLen, now)
+
+proc onRequest() {.gcsafe, nimcall, raises: [].} = guarded(coreRoute)
+proc onShimRequest() {.gcsafe, nimcall, raises: [].} = guarded(shimRoute)
 
 proc startServer*(port: int; threads = 16): HttpServer =
   ## the server of the module. The body is read piece by piece (`Streaming`), so a thread's buffer is small (64 KiB) whatever the size of a block (docs/storage-module.md, "The streaming PUT")
   result = newService(onRequest, streaming = true)
   result.bufferlength = 64 * 1024
   result.sockettimeoutms = 60000
+  discard result.start(port, uint(threads))
+
+proc startShimServer*(port: int; threads = 8): HttpServer =
+  ## the port for shims (D-61): a pool of its own, so that a step that holds connections open cannot take the threads of the core's calls
+  result = newService(onShimRequest, streaming = true)
+  result.bufferlength = 64 * 1024
+  result.sockettimeoutms = 30000
   discard result.start(port, uint(threads))

@@ -16,6 +16,11 @@ const ddl = [
        store TEXT NOT NULL, key TEXT NOT NULL, node TEXT NOT NULL, op TEXT NOT NULL, since INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
        next_at INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', PRIMARY KEY (store, key, node))""",
   "CREATE INDEX IF NOT EXISTS storage_repair_due ON storage_repair (next_at)",
+  # the parts of an upload that a shim sent straight to the module (D-61): the digest the module made of the bytes it received, and their number; the core compares them with what the shim
+  # reported over its own channel before it completes the upload
+  """CREATE TABLE IF NOT EXISTS storage_parts (
+       store TEXT NOT NULL, key TEXT NOT NULL, upload TEXT NOT NULL, part INTEGER NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, written_at INTEGER NOT NULL,
+       PRIMARY KEY (store, key, upload, part))""",
   # a job that only one replica of the module does at a time (the repair pass): the holder and the time its hold ends
   """CREATE TABLE IF NOT EXISTS storage_lease (name TEXT PRIMARY KEY, holder TEXT NOT NULL, until INTEGER NOT NULL)""",
 ]

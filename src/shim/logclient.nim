@@ -10,7 +10,7 @@ import ../common/zmqcurve
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import crunchy
-import logspool, shimlog, secretmask, artifacts
+import logspool, shimlog, secretmask, artifacts, directclient
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -269,13 +269,19 @@ proc fetchStepSecrets*(coreAddr, certs: string; step: StepRef; token: string): F
 # ------------------------------------------------------------------ the artifacts (DAT-003): the client of the core's ArtifactIngest, for the shim's own upload and for its drain mode
 
 type
+  DirectState = enum dsUnknown, dsYes, dsNo
+
   ArtifactClient* = ref object
     target, certs: string
     conn: ZConnection
     open: bool
+    directState: DirectState       ## D-61: whether the core offers to send the bytes straight to the storage module and the module can be reached from here
+    direct: DirectClient
+    directBase: string
 
   ArtifactReply* = object
     ok*, retry*: bool          ## not ok and retry: the core or the store did not answer now, the same request may work later
+    viaDirect*: bool           ## the bytes went straight to the storage module (D-61)
     ack*: ArtifactAck
     code*, detail*: string
 
@@ -285,6 +291,16 @@ proc close*(c: ArtifactClient) =
   if c.open:
     try: c.conn.close() except CatchableError: discard
     c.open = false
+  if c.direct != nil:
+    c.direct.close()
+    c.direct = nil
+
+proc directFor(c: ArtifactClient; base: string): DirectClient =
+  if c.direct == nil or c.directBase != base:
+    if c.direct != nil: c.direct.close()
+    c.direct = newDirectClient(base)
+    c.directBase = base
+  c.direct
 
 proc call*(c: ArtifactClient; req: ArtifactRequest; timeoutMs = 60000): ArtifactReply =
   ## One request to the core's ArtifactIngest (DAT-003) over the same kind of authenticated channel as the log, answered once. The connection is kept
@@ -323,18 +339,21 @@ proc ask*(c: ArtifactClient; step: StepRef; token: string; req: ArtifactRequest;
     if result.ok or not result.retry or epochTime() >= until: return
     sleep 2000
 
-proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; size: int64; sha256: string; patience: int; cache = false): ArtifactReply =
-  ## One file into the store: whole in one request when it is at most one part, otherwise as a multipart upload (begin, parts, end). A failed upload is aborted, so that
-  ## the store frees the parts. `path` is the file's name as the artifact (relative to the workspace), `absPath` where it is now.
-  if size <= partSize:
+proc putViaCore(c: ArtifactClient; step: StepRef; token, path, absPath: string; size: int64; sha256: string; patience: int; cache: bool; started = ""): ArtifactReply =
+  ## One file into the store through the core: whole in one request when it is at most one part, otherwise as a multipart upload (begin, parts, end; `started` is an upload that put_begin
+  ## opened already). A failed upload is aborted, so that the store frees the parts.
+  if size <= partSize and started.len == 0:
     return ask(c, step, token, ArtifactRequest(op: "put_object", cache: cache, path: path, size: uint64(size), sha256: sha256,
                                                data: cast[seq[byte]](readBlock(absPath, 0, size))), patience)
-  result = ask(c, step, token, ArtifactRequest(op: "put_begin", cache: cache, path: path, size: uint64(size), sha256: sha256), patience)
-  if not result.ok: return
-  let uploadId = result.ack.upload_id
+  var uploadId = started
+  if uploadId.len == 0:
+    result = ask(c, step, token, ArtifactRequest(op: "put_begin", cache: cache, path: path, size: uint64(size), sha256: sha256), patience)
+    if not result.ok: return
+    uploadId = result.ack.upload_id
   var parts: seq[ArtifactPart]
   var off = 0'i64
   var n = 0'u32
+  result.ok = true
   while off < size and result.ok:
     inc n
     result = ask(c, step, token, ArtifactRequest(op: "put_part", cache: cache, path: path, upload_id: uploadId, part: n,
@@ -346,24 +365,90 @@ proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; si
   if not result.ok:
     discard c.call(ArtifactRequest(header: Header(protocol: 1), step: step, job_token: token, op: "put_abort", cache: cache, path: path, upload_id: uploadId), 15000)
 
-proc cacheFind*(c: ArtifactClient; step: StepRef; token, key: string; patience: int): tuple[ok, found: bool; key: string; size: uint64; sha256, detail: string] =
-  ## DAT-004: the entry for `key` - the key itself or, failing that, what one of the step's restore keys names (the core chooses; it knows the step's declaration)
-  let r = ask(c, step, token, ArtifactRequest(op: "cache_find", cache: true, path: key), patience)
-  if not r.ok: return (false, false, "", 0'u64, "", r.code & ": " & r.detail)
-  if r.ack.files.len == 0: return (true, false, "", 0'u64, "", "")
-  (true, true, r.ack.files[0].path, r.ack.files[0].size, r.ack.files[0].sha256, "")
+proc abortUpload(c: ArtifactClient; step: StepRef; token, path, uploadId: string; cache: bool) =
+  discard c.call(ArtifactRequest(header: Header(protocol: 1), step: step, job_token: token, op: "put_abort", cache: cache, path: path, upload_id: uploadId), 15000)
 
-proc cacheFetch*(c: ArtifactClient; step: StepRef; token, key: string; size: uint64; dest: string; patience: int): string =
-  ## the entry's bytes into the file `dest`, block by block; "" or what went wrong
+proc putDirect(c: ArtifactClient; step: StepRef; token, path, absPath: string; size: int64; patience: int; cache: bool; began: ArtifactAck): tuple[reply: ArtifactReply, fallback: bool] =
+  ## The parts go to the storage module with the grant, each with its digest; the core is told the digest of every part when the upload ends and completes it only if the module received
+  ## the same. A module that cannot be reached from here (or does not take the grant) is `fallback`: the upload is dropped and goes through the core.
+  let d = c.directFor(began.direct_url)
+  var parts: seq[ArtifactPart]
+  var off = 0'i64
+  var n = 0
+  while off < size:
+    inc n
+    let data = readBlock(absPath, off, partSize)
+    let sha = blockSha256(data)
+    let r = d.putPart(began.direct_path, began.grant, began.upload_id, n, data, sha, patience)
+    if not r.ok:
+      abortUpload(c, step, token, path, began.upload_id, cache)
+      if r.fallback: return (ArtifactReply(), true)
+      return (ArtifactReply(retry: r.retry, code: (if r.retry: "store_unavailable" else: "direct_failed"), detail: r.detail), false)
+    parts.add ArtifactPart(part: uint32(n), etag: r.etag, sha256: sha)
+    off += partSize
+  var reply = ask(c, step, token, ArtifactRequest(op: "put_end", cache: cache, path: path, upload_id: began.upload_id, parts: parts), patience)
+  if not reply.ok: abortUpload(c, step, token, path, began.upload_id, cache)
+  reply.viaDirect = reply.ok
+  (reply, false)
+
+var lastPutDirect* {.threadvar.}: bool       ## whether the last file `putFile` delivered went straight to the storage module (the step's log says so)
+
+proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; size: int64; sha256: string; patience: int; cache = false): ArtifactReply =
+  ## One file into the store. If the core offers it (D-61) the bytes go straight to the storage module and only their digests go through the core; otherwise, or when the module cannot be
+  ## reached from this Pod, through the core: whole in one request when it is at most one part, else as a multipart upload. `path` is the file's name as the artifact (relative to the
+  ## workspace), `absPath` where it is now.
+  lastPutDirect = false
+  if c.directState != dsNo and size > 0:
+    let began = ask(c, step, token, ArtifactRequest(op: "put_begin", cache: cache, path: path, size: uint64(size), sha256: sha256, direct: true), patience)
+    if not began.ok: return began
+    if began.ack.grant.len > 0 and began.ack.direct_url.len > 0:
+      let sent = putDirect(c, step, token, path, absPath, size, patience, cache, began.ack)
+      if not sent.fallback:
+        c.directState = dsYes
+        lastPutDirect = sent.reply.ok
+        return sent.reply
+      c.directState = dsNo                  # not reachable from here: the core's channel from now on
+    else:
+      c.directState = dsNo
+      if size > partSize: return putViaCore(c, step, token, path, absPath, size, sha256, patience, cache, started = began.ack.upload_id)
+      abortUpload(c, step, token, path, began.ack.upload_id, cache)
+  putViaCore(c, step, token, path, absPath, size, sha256, patience, cache)
+
+const directReadSize = 1024 * 1024   ## a block of a read from the storage module: a read is one string in the module (and copied a few times), and every thread keeps the most it has had
+
+proc fetchTo*(c: ArtifactClient; step: StepRef; token, path: string; size: uint64; dest: string; patience: int; cache = false; directUrl = ""; grant = ""; directPath = ""): string =
+  ## A stored file, block by block, into the file `dest`: from the storage module with the grant when the core gave one (D-61), else (or when the module cannot be reached from here) from
+  ## the core. "" or what went wrong. The caller checks the digest of the whole.
   var part = open(dest, fmWrite)
   defer: part.close()
   var off = 0'u64
+  if grant.len > 0 and directUrl.len > 0 and c.directState != dsNo:
+    let d = c.directFor(directUrl)
+    while off < size:
+      let r = d.getRange(directPath, grant, int64(off), int64(min(uint64(directReadSize), size - off)), patience)
+      if r.fallback:
+        c.directState = dsNo
+        break
+      if not r.ok or r.data.len == 0: return path & ": " & (if r.ok: "an empty block" else: r.detail)
+      discard part.writeBuffer(unsafeAddr r.data[0], r.data.len)
+      off += uint64(r.data.len)
   while off < size:
-    let r = ask(c, step, token, ArtifactRequest(op: "get_block", cache: true, path: key, offset: off, length: uint32(min(uint64(readSize), size - off))), patience)
-    if not r.ok or r.ack.data.len == 0: return key & ": " & (if r.ok: "an empty block" else: r.code & ": " & r.detail)
+    let r = ask(c, step, token, ArtifactRequest(op: "get_block", cache: cache, path: path, offset: off, length: uint32(min(uint64(readSize), size - off))), patience)
+    if not r.ok or r.ack.data.len == 0: return path & ": " & (if r.ok: "an empty block" else: r.code & ": " & r.detail)
     discard part.writeBuffer(unsafeAddr r.ack.data[0], r.ack.data.len)
     off += uint64(r.ack.data.len)
   ""
+
+proc cacheFind*(c: ArtifactClient; step: StepRef; token, key: string; patience: int): tuple[ok, found: bool; key: string; size: uint64; sha256, detail, directUrl, grant, directPath: string] =
+  ## DAT-004: the entry for `key` - the key itself or, failing that, what one of the step's restore keys names (the core chooses; it knows the step's declaration)
+  let r = ask(c, step, token, ArtifactRequest(op: "cache_find", cache: true, path: key, direct: true), patience)
+  if not r.ok: return (false, false, "", 0'u64, "", r.code & ": " & r.detail, "", "", "")
+  if r.ack.files.len == 0: return (true, false, "", 0'u64, "", "", "", "", "")
+  (true, true, r.ack.files[0].path, r.ack.files[0].size, r.ack.files[0].sha256, "", r.ack.direct_url, r.ack.files[0].grant, r.ack.files[0].direct_path)
+
+proc cacheFetch*(c: ArtifactClient; step: StepRef; token, key: string; size: uint64; dest: string; patience: int; directUrl = ""; grant = ""; directPath = ""): string =
+  ## the entry's bytes into the file `dest`, block by block; "" or what went wrong
+  c.fetchTo(step, token, key, size, dest, patience, cache = true, directUrl = directUrl, grant = grant, directPath = directPath)
 
 proc drainLogSpool*(collectorAddr, certs, spoolDir: string; step: StepRef; patience: int): tuple[ok: bool, detail: string] =
   ## The drain (docs/artifacts.md): what the log spool still holds is sent to LogIngest, exactly as the sender thread of a step would have, and the blocks the core
