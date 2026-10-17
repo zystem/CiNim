@@ -32,12 +32,12 @@ type
 const hostKinds = ["now", "random", "sh", "sleep", "job_sh", "params", "lock", "unlock", "par_cancel", "par_peek"]
 
 proc cancelPayload(text: string; placeKeys: Table[string, string]): string =
-  ## The decision of `fail_fast` as the script's scheduler writes it (bootstrap.lua): the path of the `ci.parallel`, the branch that failed, the branches not started (commas), and
+  ## The decision of `fail_fast` as the script's scheduler writes it (bootstrap.lua): the path of the `ci.parallel`, the branch that failed, the branches not started (tabs), and
   ## then the place of each step to cancel (`ctx<TAB>line<TAB>nth`), one to a line. The journal and the core get it as JSON with the places turned into the keys of the steps.
   let lines = text.split('\n')
   var d = %*{"by": (if lines.len > 0: lines[0] else: ""), "failed": (if lines.len > 1: lines[1] else: ""), "unstarted": [], "steps": []}
   if lines.len > 2:
-    for u in lines[2].split(','):
+    for u in lines[2].split('\t'):
       if u.len > 0: d["unstarted"].add %u
   for i in 3 ..< lines.len:
     let key = placeKeys.getOrDefault(lines[i], "")

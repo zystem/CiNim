@@ -154,9 +154,10 @@ function ci.job(opts, fn) end
 ---@param fn fun(j: Job)
 ---@return JobResult
 function ci.deploy(env, fn) end
+---@overload fun(combinations: table[], fn: fun(combination: table), opts?: ParallelOpts): table   # a branch for each combination of ci.matrix, named `arch=amd64,os=linux`; max_parallel and fail_fast of the matrix are the defaults
 ---@param branches table<string,fun()>
 ---@param opts? ParallelOpts
----@return table<string,any>               # results by branch name
+---@return table<string,{ok:boolean,value?:any,error?:string,canceled?:boolean}>   # results by branch name
 function ci.parallel(branches, opts) end
 ---@param fn fun()
 ---@return Handle

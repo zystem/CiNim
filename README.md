@@ -9,8 +9,8 @@ the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the laun
 their Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), API tokens with scopes (IAM-003), users with the roles admin, rw, dev, ro (basic RBAC, IAM-001), step secrets sealed in the
 database under a master key that can live in a hardware token (D-45, `docs/hardware-key.md`), triggers (schedule, webhook, manual), artifacts that go through the core
 to the storage module (D-60), a service of its own with Garage and/or Caddy nodes behind it (D-46, D-58) and a choice of store per organisation (D-59), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
-(SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). The steps of a run share a volume (STO-001: a claim per run, `/cicd/workspace` and `/cicd/state`). Not built yet: the UI (apart from the router page), `j.checkout`,
-caches, `ci.matrix` (`ci.parallel` with `fail_fast` is built, `docs/parallel.md` sections 9b and 9c), `ci.input`, `ci.finally`, plugins, plain variables of the four levels, OIDC/RBAC, the audit log and backups. The delivery plan is
+(SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). The steps of a run share a volume (STO-001: a claim per run, `/cicd/workspace` and `/cicd/state`). Steps run in parallel: `ci.parallel` (with `max_parallel`, `fail_fast`, nesting) and `ci.matrix` (`docs/parallel.md`). Not built yet: the UI (apart from the router page), `j.checkout`,
+caches, `ci.input`, `ci.finally`, plugins, plain variables of the four levels, OIDC/RBAC, the audit log and backups. The delivery plan is
 section 17 of the specification; the sections of the specification describe the target, and the status above is the one that holds.
 
 ## Structure

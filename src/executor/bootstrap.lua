@@ -166,7 +166,7 @@ end
 -- Lua API v1 (6.7, lua/stdlib/cicd.d.lua), stage-1 subset: ci.pipeline, ci.job, Job:sh. One
 -- `Job:sh` call is one step (RUN-002); `ci.job` itself is plain Lua control flow, not a host call,
 -- same as `for`/`pcall` are not journaled --- only what a job's steps actually do is (PIP-003).
--- `matrix`, `parallel`, `use`, `ci.input`, services and secrets are not implemented yet.
+-- `use`, `ci.input`, services and `ci.spawn` are not implemented yet (`ci.parallel` and `ci.matrix` are: docs/parallel.md).
 
 -- The limit of steps in a run and the ids that the author gives to jobs and steps (docs/parallel.md section 3). A run has at most 200 steps: the 201st is an error
 -- returned to the author (`step_limit`). An id is 1 to 8 letters and digits starting with a letter (so that it cannot be taken for a number), unique in the run, and a repeat
@@ -858,9 +858,119 @@ local function plain(v, depth)
   return true
 end
 
-local function parallel(spec, opts)
-  if type(spec) ~= "table" then error("ci.parallel: a table of branches expected (name = function, or a list of functions)", 2) end
-  if opts ~= nil and type(opts) ~= "table" then error("ci.parallel: the options are a table", 2) end
+-- `ci.matrix{ axes, include, exclude, max_parallel, fail_fast }` (PIP-009, lua/stdlib/cicd.d.lua): pure, not journaled. The combinations of the axes (sorted by name, the values in the
+-- order given), without those an `exclude` entry matches in all its keys, and with the `include` ones that are not there; at most 200, checked at the call. The result is a list
+-- of tables axis -> value; `ci.parallel(list, fn, opts)` makes a branch of each, named `arch=amd64,os=linux` (the keys sorted), with the combination as its argument, and takes
+-- `max_parallel` and `fail_fast` of the matrix unless its own options give them. A value is a string (1 to 64 characters, no control character and none of , = [ ]), a number or a boolean.
+local matrices = setmetatable({}, { __mode = "k" })          -- the list that ci.matrix made -> its max_parallel and fail_fast
+local AXIS_PAT = "^[A-Za-z_][A-Za-z0-9_]*$"
+
+local function scalar_text(v, what)
+  local t = type(v)
+  if t == "number" then return (mtype(v) == "integer") and format_("%d", v) or format_("%.14g", v) end
+  if t == "boolean" then return v and "true" or "false" end
+  if t == "string" then
+    if #v < 1 or #v > 64 or v:find("[%c,=%[%]]") then error(what .. ": a string value is 1 to 64 characters, with no control character and none of , = [ ]", 4) end
+    return v
+  end
+  error(what .. ": a value is a string, a number or a boolean", 4)
+end
+
+local function combo_label(c, what)
+  local keys = {}
+  for k in rawnext, c do
+    if type(k) ~= "string" or not k:match(AXIS_PAT) then error(what .. ": a combination is a table axis = value; '" .. tostring_(k) .. "' is not an axis name", 3) end
+    keys[#keys + 1] = k
+  end
+  if #keys == 0 then error(what .. ": a combination has at least one axis", 3) end
+  tsort(keys)
+  local parts = {}
+  for i = 1, #keys do parts[i] = keys[i] .. "=" .. scalar_text(c[keys[i]], what .. " " .. keys[i]) end
+  return table.concat(parts, ",")
+end
+
+local function matches(c, pattern)
+  for k, v in rawnext, pattern do
+    if c[k] ~= v then return false end
+  end
+  return true
+end
+
+local function matrix(spec)
+  if type(spec) ~= "table" then error("ci.matrix: a table { axes = {...}, include = {...}, exclude = {...} } expected", 2) end
+  for k in rawnext, spec do
+    if k ~= "axes" and k ~= "include" and k ~= "exclude" and k ~= "max_parallel" and k ~= "fail_fast" then error("ci.matrix: unknown field '" .. tostring_(k) .. "'", 2) end
+  end
+  if spec.max_parallel ~= nil and not (mtype(spec.max_parallel) == "integer" and spec.max_parallel >= 1) then error("ci.matrix: max_parallel is a whole number of at least 1", 2) end
+  if spec.fail_fast ~= nil and type(spec.fail_fast) ~= "boolean" then error("ci.matrix: fail_fast must be a boolean", 2) end
+  local axes = spec.axes
+  if type(axes) ~= "table" then error("ci.matrix: axes = { name = { values } } expected", 2) end
+  local names = {}
+  for k, vals in rawnext, axes do
+    if type(k) ~= "string" or not k:match(AXIS_PAT) then error("ci.matrix: an axis name is letters, digits and _, not starting with a digit", 2) end
+    if type(vals) ~= "table" or rawlen(vals) < 1 or rawlen(vals) > MAX_BRANCHES then error("ci.matrix: the axis " .. k .. " is a list of 1 to " .. MAX_BRANCHES .. " values", 2) end
+    local seen = {}
+    for i = 1, rawlen(vals) do
+      local t = scalar_text(vals[i], "ci.matrix: the axis " .. k)
+      if seen[t] then error("ci.matrix: the axis " .. k .. " has the value " .. t .. " twice", 2) end
+      seen[t] = true
+    end
+    names[#names + 1] = k
+  end
+  if #names == 0 then error("ci.matrix: axes has at least one axis", 2) end
+  tsort(names)
+  local size = 1
+  for i = 1, #names do
+    size = size * rawlen(axes[names[i]])
+    if size > 10000 then error("ci.matrix: the axes make more than 10000 combinations; at most " .. MAX_BRANCHES .. " are allowed", 2) end
+  end
+  local list = { {} }
+  for i = 1, #names do
+    local axis, vals, next_list = names[i], axes[names[i]], {}
+    for _, c in ipairs(list) do
+      for v = 1, rawlen(vals) do
+        local copy = {}
+        for k2, x in rawnext, c do copy[k2] = x end
+        copy[axis] = vals[v]
+        next_list[#next_list + 1] = copy
+      end
+    end
+    list = next_list
+  end
+  local function entries(what, v)
+    if v == nil then return {} end
+    if type(v) ~= "table" then error("ci.matrix: " .. what .. " is a list of tables axis = value", 3) end
+    for i = 1, rawlen(v) do
+      if type(v[i]) ~= "table" then error("ci.matrix: " .. what .. " is a list of tables axis = value", 3) end
+      combo_label(v[i], "ci.matrix " .. what)
+    end
+    return v
+  end
+  local excl = entries("exclude", spec.exclude)
+  local kept = {}
+  for _, c in ipairs(list) do
+    local drop = false
+    for i = 1, rawlen(excl) do if matches(c, excl[i]) then drop = true break end end
+    if not drop then kept[#kept + 1] = c end
+  end
+  local present = {}
+  for i = 1, #kept do present[combo_label(kept[i], "ci.matrix")] = true end
+  local incl = entries("include", spec.include)
+  for i = 1, rawlen(incl) do
+    local label = combo_label(incl[i], "ci.matrix include")
+    if not present[label] then
+      present[label] = true
+      local copy = {}
+      for k, x in rawnext, incl[i] do copy[k] = x end
+      kept[#kept + 1] = copy
+    end
+  end
+  if #kept > MAX_BRANCHES then error("ci.matrix: " .. #kept .. " combinations; at most " .. MAX_BRANCHES .. " are allowed", 2) end
+  matrices[kept] = { max_parallel = spec.max_parallel, fail_fast = spec.fail_fast }
+  return kept
+end
+
+local function run_parallel(entries, opts)
   opts = opts or {}
   for k in rawnext, opts do
     if not PARALLEL_FIELDS[k] then error("ci.parallel: unknown option '" .. tostring_(k) .. "'", 2) end
@@ -873,17 +983,10 @@ local function parallel(spec, opts)
   end
   local pctx = cur
   if pctx.depth >= MAX_DEPTH then error("ci.parallel: nesting is at most " .. MAX_DEPTH .. " levels", 2) end
-  local br, n = {}, 0
-  for k, fn in stable_pairs(spec) do
-    n = n + 1
-    if n > MAX_BRANCHES then error("ci.parallel: at most " .. MAX_BRANCHES .. " branches", 2) end
-    local label
-    if mtype(k) == "integer" then label = tostring_(k)
-    elseif type(k) == "string" then label = check_id(k, "ci.parallel: a branch name"); label = k
-    else error("ci.parallel: a branch is named by a string or is a place in a list", 2) end
-    if type(fn) ~= "function" then error("ci.parallel: branch '" .. label .. "' is not a function", 2) end
-    br[n] = { key = k, label = label, fn = fn, state = "new" }
-  end
+  local n = #entries
+  if n > MAX_BRANCHES then error("ci.parallel: at most " .. MAX_BRANCHES .. " branches", 2) end
+  local br = {}
+  for i = 1, n do br[i] = { key = entries[i].key, label = entries[i].label, fn = entries[i].fn, state = "new" } end
   pctx.pars = pctx.pars + 1
   local base = pctx.path .. ".p" .. pctx.pars
   for i = 1, n do br[i].ctx = new_ctx(base .. "[" .. br[i].label .. "]", pctx.depth + 1) end
@@ -970,7 +1073,7 @@ local function parallel(spec, opts)
         if br[i].state == "new" then unstarted[#unstarted + 1] = br[i].label
         elseif br[i].state == "parked" then collect(br[i]) end
       end
-      raw_call("par_cancel", base .. "\n" .. first.label .. "\n" .. table.concat(unstarted, ",") .. (#steps > 0 and ("\n" .. table.concat(steps, "\n")) or ""), base)
+      raw_call("par_cancel", base .. "\n" .. first.label .. "\n" .. table.concat(unstarted, "\t") .. (#steps > 0 and ("\n" .. table.concat(steps, "\n")) or ""), base)
       for i = 1, n do if br[i].state ~= "done" then cancel(br[i]) end end
     end
   end
@@ -1000,6 +1103,52 @@ local function parallel(spec, opts)
   return results
 end
 
+-- `ci.parallel(branches, opts)`: branches is a table name = function (or a list of functions); `ci.parallel(combinations, fn, opts)`: a list of combinations (`ci.matrix`) and the function
+-- every branch runs with its combination.
+local function parallel(spec, a, b)
+  if type(spec) ~= "table" then error("ci.parallel: a table of branches expected (name = function, or a list of functions)", 2) end
+  local fn, opts = nil, a
+  if type(a) == "function" then fn, opts = a, b end
+  if opts ~= nil and type(opts) ~= "table" then error("ci.parallel: the options are a table", 2) end
+  local entries = {}
+  if fn then
+    local n = rawlen(spec)
+    for k in rawnext, spec do
+      if not (mtype(k) == "integer" and k >= 1 and k <= n) then error("ci.parallel: with a function the first argument is a list of combinations (ci.matrix)", 2) end
+    end
+    if n > MAX_BRANCHES then error("ci.parallel: at most " .. MAX_BRANCHES .. " branches", 2) end
+    local seen = {}
+    for i = 1, n do
+      local c = spec[i]
+      if type(c) ~= "table" then error("ci.parallel: with a function the first argument is a list of combinations (ci.matrix)", 2) end
+      local label = combo_label(c, "ci.parallel")
+      if seen[label] then error("ci.parallel: the combination " .. label .. " is in the list twice", 2) end
+      seen[label] = true
+      entries[i] = { key = label, label = label, fn = function() return fn(c) end }
+    end
+    local d = matrices[spec]
+    if d then
+      local merged = {}
+      if opts then for k, v in rawnext, opts do merged[k] = v end end
+      for _, f in ipairs({ "max_parallel", "fail_fast" }) do
+        if merged[f] == nil then merged[f] = d[f] end
+      end
+      opts = merged
+    end
+  else
+    for k, f in stable_pairs(spec) do
+      local label
+      if mtype(k) == "integer" then label = tostring_(k)
+      elseif type(k) == "string" then label = check_id(k, "ci.parallel: a branch name"); label = k
+      else error("ci.parallel: a branch is named by a string or is a place in a list", 2) end
+      if type(f) ~= "function" then error("ci.parallel: branch '" .. label .. "' is not a function", 2) end
+      entries[#entries + 1] = { key = k, label = label, fn = f }
+      if #entries > MAX_BRANCHES then error("ci.parallel: at most " .. MAX_BRANCHES .. " branches", 2) end
+    end
+  end
+  return run_parallel(entries, opts)
+end
+
 G.ci = {
   now = function() return tonumber(call("now", "")) end,
   random = function() return tonumber(call("random", "")) end,
@@ -1013,6 +1162,7 @@ G.ci = {
     return { exit = tonumber(code), outputs = out }
   end,
   parallel = parallel,
+  matrix = matrix,
   pipeline = function(spec) return spec end,  -- metadata phase, pure, not journaled (PIP-002)
   string = param_ctor("string"), number = param_ctor("number"), bool = param_ctor("bool"), choice = param_ctor("choice"),
   job = function(opts, fn)

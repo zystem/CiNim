@@ -595,3 +595,129 @@ suite "RUN-006 fail_fast: the first failure cancels the branches that still run"
     check r.result.status == esDone and r.result.value == "falsetrueW"
     r = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
     check r.asked.len == 0 and r.result.status == esDone and r.result.value == "falsetrueW"
+
+proc runPure(script: string): ExecResult =
+  ## a script that must not reach the host at all (ci.matrix is pure)
+  var sb = newSandbox()
+  var j: Journal
+  let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
+    doAssert false, "the host was asked: " & kind
+    none(string)
+  replay.execute(sb, j, script, host)
+
+suite "PIP-009 ci.matrix":
+  test "the product of the axes, in the order of the axes (sorted by name) and of the values; pure, no host call":
+    let r = runPure("""
+      return ci.pipeline({ main = function(run)
+        local m = ci.matrix { axes = { os = { "linux", "mac" }, arch = { "amd64", "arm64" } } }
+        local out = {}
+        for _, c in ipairs(m) do out[#out + 1] = c.arch .. "/" .. c.os end
+        return #m .. ":" .. table.concat(out, ",")
+      end })""")
+    check r.status == esDone and r.value == "4:amd64/linux,amd64/mac,arm64/linux,arm64/mac"
+  test "exclude removes the combinations that match all the keys of an entry; include adds a combination, once":
+    let r = runPure("""
+      return ci.pipeline({ main = function(run)
+        local m = ci.matrix {
+          axes = { target = { "server", "worker" }, arch = { "amd64", "arm64" } },
+          exclude = { { target = "worker", arch = "arm64" } },
+          include = { { target = "docs", arch = "any" }, { target = "server", arch = "amd64" } },
+        }
+        local out = {}
+        for _, c in ipairs(m) do out[#out + 1] = c.target .. "-" .. c.arch end
+        return table.concat(out, ",")
+      end })""")
+    check r.status == esDone and r.value == "server-amd64,worker-amd64,server-arm64,docs-any"
+  test "numbers and booleans are values; a combination is a table the script may read":
+    let r = runPure("""
+      return ci.pipeline({ main = function(run)
+        local m = ci.matrix { axes = { jdk = { 17, 21 }, fast = { true } } }
+        return tostring(m[1].jdk) .. tostring(m[2].jdk) .. tostring(m[2].fast) .. #m
+      end })""")
+    check r.status == esDone and r.value == "1721true2"
+  test "at most 200 combinations, checked at the call":
+    let r = runPure("""
+      return ci.pipeline({ main = function(run)
+        local a, b = {}, {}
+        for i = 1, 15 do a[i] = "a" .. i end
+        for i = 1, 14 do b[i] = "b" .. i end
+        ci.matrix { axes = { x = a, y = b } }
+      end })""")
+    check r.status == esFailed and "at most 200" in r.message
+  test "a matrix that is not well formed is refused with the reason":
+    for (spec, why) in [("{}", "axes"), ("{ axes = {} }", "axes"), ("{ axes = { x = {} } }", "x"), ("{ axes = { x = { {} } } }", "x"),
+                        ("{ axes = { ['1x'] = { 'a' } } }", "axis name"), ("{ axes = { x = { 'a,b' } } }", "x"), ("{ axes = { x = { 'a' } }, bogus = 1 }", "bogus"),
+                        ("{ axes = { x = { 'a' } }, exclude = 3 }", "exclude"), ("{ axes = { x = { 'a', 'a' } } }", "twice")]:
+      let r = runPure("return ci.pipeline({ main = function(run) ci.matrix(" & spec & ") end })")
+      check r.status == esFailed
+      check "ci.matrix" in r.message and why in r.message
+  const matrixRun = """
+    return ci.pipeline({ main = function(run)
+      local m = ci.matrix { axes = { os = { "linux", "mac" }, arch = { "amd64", "arm64" } }, max_parallel = MAXP, fail_fast = FAST }
+      local r = ci.parallel(m, function(c)
+        ci.job({image = "x"}, function(j) j:sh("build " .. c.os .. "-" .. c.arch) end)
+        return c.os .. c.arch
+      end OPTS)
+      return r["arch=amd64,os=linux"].value .. r["arch=arm64,os=mac"].value
+    end })"""
+  proc matrixScript(maxp = "nil", fast = "nil", opts = ""): string = matrixRun.replace("MAXP", maxp).replace("FAST", fast).replace("OPTS", opts)
+  test "ci.parallel(matrix, fn): a branch for each combination, named by it, started in the order of the combinations, the combination is its argument":
+    let script = matrixScript()
+    let table = buildTable(script).table
+    var j: Journal
+    var r = runRound(script, table, j, initHashSet[string]())
+    check r.asked == @["build linux-amd64", "build mac-amd64", "build linux-arm64", "build mac-arm64"]
+    r = runRound(script, table, j, ["build linux-amd64", "build mac-amd64", "build linux-arm64", "build mac-arm64"].toHashSet)
+    check r.result.status == esDone and r.result.value == "linuxamd64macarm64"
+  test "the same keys and numbers whatever order the combinations finish in":
+    let script = matrixScript()
+    var first: seq[string]
+    var firstNumbers: Table[string, int]
+    for order in [@['a', 'b', 'c', 'd'], @['d', 'c', 'b', 'a'], @['c', 'a', 'd', 'b']]:
+      # the commands start with "build "; rank them by the letter after it, which is the first letter of "linux"/"mac" and "amd64"/"arm64" combined: use the position instead
+      let table = buildTable(script).table
+      var jr: Journal
+      var done = initHashSet[string]()
+      var rank = initTable[string, int]()
+      let cmds = ["build linux-amd64", "build mac-amd64", "build linux-arm64", "build mac-arm64"]
+      for i, ch in order: rank[cmds[ord(ch) - ord('a')]] = i
+      var last: Round
+      for k in 0 ..< 20:
+        last = runRound(script, table, jr, done)
+        for c, n in last.numbers: firstNumbers[c] = n
+        if last.result.status != esSuspended: break
+        var pending = last.asked.filterIt(it notin done)
+        pending.sort(proc (a, b: string): int = cmp(rank[a], rank[b]))
+        done.incl pending[0]
+      check last.result.status == esDone and last.result.value == "linuxamd64macarm64"
+      let keys = jr.entries.mapIt(it.key).sorted
+      if first.len == 0: first = keys else: check keys == first
+    check firstNumbers.len == 4
+  test "max_parallel of the matrix limits the branches started; the options of ci.parallel override it":
+    var script = matrixScript(maxp = "2")
+    var table = buildTable(script).table
+    var j: Journal
+    var r = runRound(script, table, j, initHashSet[string]())
+    check r.asked == @["build linux-amd64", "build mac-amd64"]
+    script = matrixScript(maxp = "2", opts = ", { max_parallel = 3 }")
+    table = buildTable(script).table
+    var j2: Journal
+    r = runRound(script, table, j2, initHashSet[string]())
+    check r.asked.len == 3
+  test "fail_fast of the matrix cancels the other combinations":
+    let script = matrixScript(fast = "true").replace("return r[", "return \"x\" --")
+    let table = buildTable(script).table
+    var j: Journal
+    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, table, j, ["build mac-amd64"].toHashSet, initHashSet[string]())
+    check r.result.status == esFailed and "canceled:" in r.result.message
+    check r.cancels.len == 1 and r.cancels[0]["steps"].len == 3
+  test "a list of combinations that was not made by ci.matrix is taken too, and a function with branches by name is refused":
+    let r = runPure("""
+      return ci.pipeline({ main = function(run)
+        local r = ci.parallel({ { v = "a" }, { v = "b" } }, function(c) return c.v end)
+        return r["v=a"].value .. r["v=b"].value
+      end })""")
+    check r.status == esDone and r.value == "ab"
+    let bad = runPure("""return ci.pipeline({ main = function(run) ci.parallel({ x = function() end }, function() end) end })""")
+    check bad.status == esFailed and "list of combinations" in bad.message
