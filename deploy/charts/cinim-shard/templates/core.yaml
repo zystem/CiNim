@@ -54,6 +54,7 @@ spec:
             - {name: CINIM_VICTORIALOGS_URL, value: {{ include "cinim-shard.victoriaLogsUrls" . | quote }}}
             - {name: CINIM_VLAGENT_URL, value: {{ include "cinim-shard.vlagentUrl" . | quote }}}
             - {name: CINIM_METRICS, value: {{ .Values.metrics.enabled | quote }}}
+            - {name: CINIM_API_THREADS, value: {{ .Values.core.apiThreads | int | quote }}}
             - {name: CINIM_CERTS, value: /etc/cinim}
             # what the core makes the objects of an organisation from (SHD-007)
             - {name: CINIM_CONTROLLER_IMAGE, value: {{ include "cinim-shard.controllerImage" . | quote }}}

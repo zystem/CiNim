@@ -358,6 +358,16 @@ REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/i
 
 A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
 
+Every binary has a build stage of its own in the Dockerfile (`build-core`, `build-storage`, `build-controller` with `build-shim`, ...), and the script runs Kaniko with `--skip-unused-stages`, so a target builds only what it needs: `TARGETS="storage:cinim-storage"` compiles the module and nothing else. Do not build Go (the Caddy image) in a build Pod on a node that also runs rqlite; it starved the node once.
+
+### Building on this machine (the quick way for iterations)
+
+`tools/image/build-local.sh <tag> [target ...]` compiles the binaries in a container of the dependencies image `cinim-deps:local` (the stage `deps` of the same Dockerfile: libzmq, libsodium, the Kubernetes client with libcurl, the nimble packages; made once, 3-4 minutes) with the working tree mounted and Nim's C files kept in `build/nimcache/<binary>`, so that the next build recompiles only what changed, then puts the images together from `tools/image/Dockerfile.local`, and with `REGISTRY=<host>` pushes them with `skopeo` (plain HTTP). Measured on a 32-core workstation: the module 3 s after a change of one file, the core 23 s, the controller with the shim and the conductor together 42 s with the push. It builds the working tree as it is, so for a release use the build Pod.
+
+```bash
+REGISTRY=registry.example.com tools/image/build-local.sh h84 core storage controller conductor
+```
+
 ## The storage module (the chart `cinim-storage`)
 
 The object stores of a shard are the storage module's (D-60, docs/storage-module.md); the chart `deploy/charts/cinim-storage` installs it into the namespace of the shard, with Garage (D-46), Caddy nodes (D-58), both, or neither (stores that are already there are listed in `stores.external`). Images: `TARGETS="storage:cinim-storage caddy-store:cinim-store-dav" tools/image/kaniko-build.sh`.

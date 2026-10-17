@@ -43,7 +43,7 @@ spec:
             tgt=""; [ "\$t" != "-" ] && tgt="--target=\$t"
             /kaniko/executor --dockerfile=/workspace/$DOCKERFILE --context=dir:///workspace \$tgt \\
               --destination=$REG/\$n:$TAG --cache=true --cache-repo=$REG/cinim-cache --insecure --insecure-pull --skip-tls-verify \\
-              --skip-tls-verify-pull --use-new-run=true
+              --skip-tls-verify-pull --use-new-run=true --skip-unused-stages=true
           done
       securityContext: {capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]}}
       resources: {requests: {cpu: "1", memory: 2Gi}, limits: {memory: 12Gi}}

@@ -22,6 +22,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 - The shim has two builds: without `-d:shimLogging` (no ZeroMQ, what the unit tests use) and with it (the real one). Check both: `nim check -d:shimLogging src/shim/shim.nim` and without.
 - The job controller needs the Kubernetes C client (`-d:k8sPrefix=...`); without it use `nim check -d:k8sPrefix=/opt/k8s src/jobcontroller/main.nim` to type-check only.
 - After a change to `proto/`: `tools/proto/nim_flatten.sh build/nimproto`.
+- Quick iterations: `REGISTRY=<host> tools/image/build-local.sh <tag> core storage ...` builds on the workstation with a persistent Nim cache and pushes with `skopeo` (seconds after a change; docs/deployment.md). Releases and anything that must not depend on this machine: the build Pod.
 - Images are built in the cluster with `REGISTRY=<host:port as the Pods reach it> TAG=<tag> tools/image/kaniko-build.sh` (both images; Kaniko runs as a build Pod, it needs a few minutes; the script's own
   `kubectl logs -f` may time out before the build ends: wait for the Pod `kaniko-images` in `cinim-build` to be `Succeeded`). Roll out: scale the executor to 0, `kubectl set image` for the core and the
   executor, `CINIM_CONTROLLER_IMAGE` on the core, the controller's image in the organisation's namespace, then the executor back to 1 (two executors on one run during a rollout cause trouble).

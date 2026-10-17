@@ -200,6 +200,7 @@ network:
   ingress: closed                     # closed | open
 
 core:
+  apiThreads: 64                      # the threads of the HTTP API; each keeps a heap of its own, so a shard that is not busy may use fewer (docs/deployment.md)
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {memory: 512Mi}

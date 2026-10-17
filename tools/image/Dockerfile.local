@@ -1,0 +1,39 @@
+# The runtime stages of tools/image/Dockerfile.kaniko for images whose binaries were built on this machine (tools/image/build-local.sh): the same contents, with the binaries
+# taken from the build context instead of from a build stage. Keep the two files alike.
+FROM scratch AS core
+COPY core-static /core
+COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 65532:65532
+EXPOSE 18081 19742 19743 19744 19745
+ENTRYPOINT ["/core"]
+
+FROM scratch AS storage
+COPY storage-static /cinim-storage
+COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 65532:65532
+EXPOSE 18090
+ENTRYPOINT ["/cinim-storage"]
+
+FROM scratch AS conductor
+COPY conductor-static /conductor
+USER 65532:65532
+ENTRYPOINT ["/conductor"]
+
+FROM scratch AS controller
+COPY controller-static /controller
+COPY cicd-shim /cicd-shim
+ENV CINIM_SHIM_BIN=/cicd-shim
+USER 65532:65532
+ENTRYPOINT ["/controller"]
+
+FROM scratch AS kekd-emu
+COPY kekd-emu /kekd-emu
+USER 65532:65532
+EXPOSE 8443
+ENTRYPOINT ["/kekd-emu"]
+
+# the Caddy node: the binary of tools/store/build-caddy.sh (build/caddy-store) on the Caddy image
+FROM caddy:2 AS caddy-store
+COPY caddy-store /usr/bin/caddy
+USER 65532:65532
+EXPOSE 8080

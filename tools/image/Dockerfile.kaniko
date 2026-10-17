@@ -2,7 +2,7 @@
 # Alpine stage (musl end to end, as tools/shim/build_static.sh, build_core.sh and build_controller.sh do with `docker run`) and copied into
 # scratch images. Run it with tools/image/kaniko-build.sh, or by hand with Kaniko and --target=core and --target=controller (the second run
 # finds every RUN of the build stage in the cache, --cache=true).
-FROM nimlang/nim:2.2.4-alpine AS build
+FROM nimlang/nim:2.2.4-alpine AS deps
 RUN apk add --no-cache bash coreutils upx g++ make cmake git autoconf automake libtool linux-headers curl openssl-dev openssl-libs-static \
     zlib-dev zlib-static sqlite-dev sqlite-static ca-certificates
 # libsodium and libzmq as static archives (the ZeroMQ transport, D-24)
@@ -20,32 +20,73 @@ RUN K8S_STATIC=1 /src/tools/k8s/build_client.sh /opt/k8s >/dev/null
 # the nimble packages, from the package file alone so that this layer is cached
 COPY cinim.nimble /src/cinim.nimble
 RUN cd /src && nimble install -y --depsOnly
+# one build stage for every binary (Kaniko is run with --skip-unused-stages: a target builds only its own)
+FROM deps AS build-shim
 COPY . /src
 WORKDIR /src
 RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null; \
     F="--opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static"; \
     SSL="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto"; \
     nim c -d:release -d:shimLogging $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/cicd-shim src/shim/shim.nim; \
+    strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null
+
+FROM deps AS build-core
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null; \
+    F="--opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static"; \
+    SSL="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto"; \
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm" -o:/out/core-static src/core/main.nim; \
+    strip /out/*; cp /etc/ssl/certs/ca-certificates.crt /out/
+
+FROM deps AS build-conductor
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null; \
+    F="--opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static"; \
+    SSL="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto"; \
     nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/conductor-static src/conductor/main.nim; \
+    strip /out/*
+
+FROM deps AS build-storage
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null; \
+    F="--opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static"; \
+    SSL="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto"; \
     nim c -d:release -d:ssl -d:curlStatic $F $SSL --passL:"-L/opt/zmq/lib -L/opt/k8s/lib -lsodium -lcurl -lssl -lcrypto -lz -lm" -o:/out/storage-static src/storage/main.nim; \
+    strip /out/*; cp /etc/ssl/certs/ca-certificates.crt /out/
+
+FROM deps AS build-controller
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null; \
+    F="--opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static"; \
+    SSL="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto"; \
     nim c -d:release -d:k8sPrefix=/opt/k8s -d:k8sStatic $F --dynlibOverride:sqlite3 --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm" -o:/out/controller-static src/jobcontroller/main.nim; \
+    strip /out/*
+
+FROM deps AS build-kekd-emu
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null; \
+    F="--opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static"; \
+    SSL="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto"; \
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lsodium -lssl -lcrypto -lm" -o:/out/kekd-emu tools/kekd-emu/main.nim; \
-    strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null; \
-    cp /etc/ssl/certs/ca-certificates.crt /out/; ls -l /out
+    strip /out/*
 
 # the image of the shard (chart cinim-shard): the core
 FROM scratch AS core
-COPY --from=build /out/core-static /core
-COPY --from=build /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build-core /out/core-static /core
+COPY --from=build-core /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65532:65532
 EXPOSE 18081 19742 19743 19744 19745
 ENTRYPOINT ["/core"]
 
 # the image of the storage module (docs/storage-module.md, D-60): a Deployment with no volume; the settings are in rqlite and in the environment
 FROM scratch AS storage
-COPY --from=build /out/storage-static /cinim-storage
-COPY --from=build /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build-storage /out/storage-static /cinim-storage
+COPY --from=build-storage /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65532:65532
 EXPOSE 18090
 ENTRYPOINT ["/cinim-storage"]
@@ -64,21 +105,21 @@ EXPOSE 8080
 
 # the image of the conductors of an organisation (docs/conductors.md): the supervisor and, in the same program, the run process it starts
 FROM scratch AS conductor
-COPY --from=build /out/conductor-static /conductor
+COPY --from=build-conductor /out/conductor-static /conductor
 USER 65532:65532
 ENTRYPOINT ["/conductor"]
 
 # the image of the job controller of an organisation (SHD-007): the controller and the shim that it puts into every step Pod
 FROM scratch AS controller
-COPY --from=build /out/controller-static /controller
-COPY --from=build /out/cicd-shim /cicd-shim
+COPY --from=build-controller /out/controller-static /controller
+COPY --from=build-shim /out/cicd-shim /cicd-shim
 ENV CINIM_SHIM_BIN=/cicd-shim
 USER 65532:65532
 ENTRYPOINT ["/controller"]
 
 # the emulator of the key service (tools/kekd-emu): for developing and testing the core without a card. NOT for production.
 FROM scratch AS kekd-emu
-COPY --from=build /out/kekd-emu /kekd-emu
+COPY --from=build-kekd-emu /out/kekd-emu /kekd-emu
 USER 65532:65532
 EXPOSE 8443
 ENTRYPOINT ["/kekd-emu"]
