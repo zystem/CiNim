@@ -1416,4 +1416,4 @@ proc serveApi*(co: Core; port: int) =
     stderr.writeLine "core: neither CINIM_ADMIN_TOKEN nor CINIM_AUTH=on is set: the API is OPEN, anyone who can reach it may start runs and create organisations (development only)"
   let s = newService(onRequest)      # common/httpsrv.nim: the one way the server is made
   # every thread has a heap of its own that keeps what it has had (about 1 MiB at the first request, more for a big answer): the threads are a value (CINIM_API_THREADS), not a constant
-  discard s.start(port, uint(max(2, parseInt(getEnv("CINIM_API_THREADS", "64"))))) 
+  discard s.start(port, uint(max(2, parseInt(getEnv("CINIM_API_THREADS", "8"))))) 

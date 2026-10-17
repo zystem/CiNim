@@ -368,6 +368,15 @@ Every binary has a build stage of its own in the Dockerfile (`build-core`, `buil
 REGISTRY=registry.example.com tools/image/build-local.sh h84 core storage controller conductor
 ```
 
+### Memory of the core
+
+Measured on the TESTING cluster (the core's `VmRSS` read through an ephemeral container) and by `tools/bench/ingestmem.nim`:
+
+* **At start** 27-31 MiB with 34 threads (8 API threads) or 86 (64).
+* **The threads of the API.** Every thread of the HTTP server has a heap of its own that keeps what it has had: about 1 MiB at its first request, more after a big answer. 100 requests spread over 64 threads cost about 60 MiB, over 8 threads 8 MiB. After the same load (100 requests, two runs with a 20 MB artifact, a run with a cache) the core was at 134 MiB with 64 threads and 79 MiB with 8. `core.apiThreads` (`CINIM_API_THREADS`) is 8 by default.
+* **The path of the artifacts.** One thread serves all the shims, and it keeps the high-water mark of its heap: a block of 8 MiB lives in four copies at once (the message from ZeroMQ, the request decoded from Protobuf with its temporary buffer, the string made of it for the store), 33 MiB at the peak and 41 MiB kept; it appeared once, with the first big upload, and a later one did not add to it. The direct transfer from the shim (docs/storage-module.md, D-61) takes the bytes out of the core.
+* The limit of the core's Pod, 512 MiB, is enough with room to spare.
+
 ## The storage module (the chart `cinim-storage`)
 
 The object stores of a shard are the storage module's (D-60, docs/storage-module.md); the chart `deploy/charts/cinim-storage` installs it into the namespace of the shard, with Garage (D-46), Caddy nodes (D-58), both, or neither (stores that are already there are listed in `stores.external`). Images: `TARGETS="storage:cinim-storage caddy-store:cinim-store-dav" tools/image/kaniko-build.sh`.
