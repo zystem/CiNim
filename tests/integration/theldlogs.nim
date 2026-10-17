@@ -3,7 +3,8 @@
 ## goes when the hold is released. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, tables, strutils, times]
 import common/rqlite
-import core/[schema, scheduler, storagebackend, holds, groups, heldlogs]
+import common/storagebackend
+import core/[schema, scheduler, holds, groups, heldlogs]
 
 type MemStore = ref object of ObjectBackend
   objects: Table[string, string]

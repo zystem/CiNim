@@ -43,6 +43,15 @@ logs:
   victoriaLogsUrls: []
   vlagentUrl: ""
 
+# The storage module (D-60, docs/storage-module.md): the object stores of the shard (artifacts, caches) are a service of its own, installed by the chart `cinim-storage`
+# (into the same namespace, so that it finds this shard's rqlite). The core holds only its address and the secret its calls are signed with (the key `key` of the Secret
+# `tokenSecret.name`, which is the secret of this shard in the module's `shards`). Without `url` the shard has no object store: a step that asks for artifacts or a cache is refused.
+storage:
+  url: ""                             # http://cinim-storage:18090
+  tokenSecret:
+    name: ""
+    key: token
+
 # false turns /metrics of the core off (CINIM_METRICS). monitor.enabled creates the scrape objects of the monitoring operator: for the core
 # (ServiceMonitor or VMServiceScrape, it has a Service) and for rqlite (PodMonitor or VMPodScrape, its chart has no monitor). operator is
 # `prometheus` (the Prometheus operator CRDs) or `victoriametrics` (the VictoriaMetrics operator's own objects); the CRDs must exist, so

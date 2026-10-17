@@ -4,7 +4,8 @@
 import std/[unittest, json, os, tables, strutils, times, sequtils]
 import checksums/sha2
 import common/rqlite
-import core/[schema, storagebackend, cachestore, objectstore, artifactingest, groups]
+import common/storagebackend
+import core/[schema, cachestore, objectstore, artifactingest, groups]
 
 type MemStore = ref object of ObjectBackend
   objects: Table[string, string]

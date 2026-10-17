@@ -42,6 +42,15 @@ spec:
             - {name: CINIM_NAMESPACE_PREFIX, value: {{ .Values.namespacePrefix | quote }}}
             - {name: CINIM_PUBLIC_URL, value: {{ include "cinim-shard.publicUrl" . | quote }}}
             - {name: CINIM_RQLITE_URL, value: {{ include "cinim-shard.rqliteUrl" . | quote }}}
+            {{- if .Values.storage.url }}
+            # the storage module (D-60, chart cinim-storage): the stores of the shard are its; the core holds its address and the secret its calls are signed with
+            - {name: CINIM_STORAGE_URL, value: {{ .Values.storage.url | quote }}}
+            - name: CINIM_STORAGE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "storage.tokenSecret.name is required when storage.url is set" .Values.storage.tokenSecret.name }}
+                  key: {{ default "token" .Values.storage.tokenSecret.key }}
+            {{- end }}
             - {name: CINIM_VICTORIALOGS_URL, value: {{ include "cinim-shard.victoriaLogsUrls" . | quote }}}
             - {name: CINIM_VLAGENT_URL, value: {{ include "cinim-shard.vlagentUrl" . | quote }}}
             - {name: CINIM_METRICS, value: {{ .Values.metrics.enabled | quote }}}
@@ -158,7 +167,6 @@ spec:
           secret:
             secretName: {{ required "curve.secretName is required" .Values.curve.secretName }}
             defaultMode: 0440
-            optional: true     # `store.pub` below is there only when the shard uses store nodes of its own (docs/store.md)
             # the core's own key pair, and the client pair that it hands to the controller of each organisation (D-24; until the
             # bootstrap token exchange of IAM-003 exists the controllers use the shared client key)
             items:
@@ -166,7 +174,6 @@ spec:
               - {key: core.key, path: core.key}
               - {key: client.pub, path: client.pub}
               - {key: client.key, path: client.key}
-              - {key: store.pub, path: store.pub}      # the public key of the store nodes (docs/store.md, D-57)
         {{- if and .Values.secrets.kekd.url .Values.secrets.kekd.tlsSecret }}
         - name: kekd-tls
           secret:

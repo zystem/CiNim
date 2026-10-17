@@ -9,11 +9,12 @@
 ## its chunks are written under `.up/<upload id>/`, and one MOVE of that directory onto the object's directory publishes it (a rename on the node; an earlier version of the object is
 ## replaced as a whole). An abandoned upload is a directory in `.up/` that the core's sweep aborts. The size of an object is what a PROPFIND of its directory adds up to.
 ##
-## `HttpMirror` is the backend: the same rules as core/zstore.nim `MirrorBackend` (every write to every node at once, succeeds when `minAcks` have it - by default all - and each node
+## `HttpMirror` is the backend: the rules of D-57 (every write to every node at once, succeeds when `minAcks` have it - by default all - and each node
 ## that did not is reported through `onMissed` for the repair queue; a read tries the nodes in turn). The requests to the nodes of one call go out together on one thread's dispatcher.
 import std/[asyncdispatch, strutils, tables, atomics, times, sysrand, sequtils, uri, os, net, algorithm]
-import ../store/[layout, sha]
-import storagebackend, replicas, storeauth, davclient
+import layout, sha
+import ../common/storagebackend
+import replicas, storeauth, davclient
 export replicas
 
 type

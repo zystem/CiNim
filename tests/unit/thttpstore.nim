@@ -1,7 +1,7 @@
 ## D-57 (docs/store.md): the pure parts of the store on HTTP nodes - how a key becomes a path, the chunk names, the etag of a part, and the reading of the listing a WebDAV node gives
 ## (the text below is what the module answers to a PROPFIND of an object directory). The nodes themselves are tested in tests/integration/tstorehttp.nim.
 import std/[unittest, strutils]
-import core/httpstore
+import storage/httpstore
 
 const listing = """<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/acme/o~obj/</D:href><D:propstat><D:prop><D:displayname>o~obj</D:displayname><D:resourcetype><D:collection xmlns:D="DAV:"/></D:resourcetype><D:getlastmodified>Fri, 16 Oct 2026 16:48:46 GMT</D:getlastmodified></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response><D:response><D:href>/acme/o~obj/.c0000001</D:href><D:propstat><D:prop><D:displayname>.c0000001</D:displayname><D:getcontentlength>8</D:getcontentlength><D:resourcetype></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response><D:response><D:href>/acme/o~obj/.c0000000</D:href><D:propstat><D:prop><D:displayname>.c0000000</D:displayname><D:getcontentlength>8388608</D:getcontentlength><D:resourcetype></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"""
 

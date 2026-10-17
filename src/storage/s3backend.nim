@@ -2,7 +2,7 @@
 ## (common/sigv4.nim), one HTTP request per operation. Nothing is kept between calls.
 import std/[strutils, httpclient, times]
 import ../common/sigv4
-import storagebackend
+import ../common/storagebackend
 
 type S3Backend* = ref object of ObjectBackend
   endpoint*, region*, bucket*, keyId*, secret*: string

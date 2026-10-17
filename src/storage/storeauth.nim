@@ -1,5 +1,5 @@
 ## The tokens that the core's calls to an HTTP store node carry (docs/store.md, D-57): a store node is Caddy with the WebDAV module (docs/store.md "The node"); it keeps no secret
-## and no list of users. Every request carries `Authorization: Bearer v1.<expires>.<mac>`, and Caddy's `forward_auth` asks the core `GET /api/v1/internal/store-auth?node=<id>`
+## and no list of users. Every request carries `Authorization: Bearer v1.<expires>.<mac>`, and Caddy's `forward_auth` asks the module `GET /v1/internal/node-auth?node=<id>`
 ## before it lets the request in; the core checks the token with the secret of the store (the token of the settings), which it alone has.
 ##
 ## The MAC is HMAC-SHA256 under that secret of the node's id, the method, the **decoded path** and the time the token stops being good, so a token made for one request is no
@@ -7,10 +7,9 @@
 ## to itself, for a minute or two. The path is decoded on both sides, so how it was written (`%41` or `A`) and what Caddy makes of it do not matter; the query is not signed.
 import std/[strutils, uri]
 import crunchy
+import ../common/storagetoken
+export storagetoken
 
-const
-  tokenLifetime* = 120        ## seconds a token is good for
-  clockSkew* = 30             ## seconds a token may be from the future (the clocks of the core and of a node are not the same)
 
 func hexOf(a: array[32, uint8]): string =
   const digits = "0123456789abcdef"
@@ -49,7 +48,7 @@ proc verifyRequest*(secret, node, meth, rawUri, token: string; now: int64): bool
 
 # ------------------------------------------------------------------ the answer to the node's forward_auth
 
-const authPath* = "/api/v1/internal/store-auth"      ## what a node's `forward_auth` asks (docs/store.md): `GET <authPath>?node=<id of the node>`
+const authPath* = "/v1/internal/node-auth"      ## what a node's `forward_auth` asks (docs/store.md): `GET <authPath>?node=<id of the node>`
 
 func headerOf*(rawRequest, name: string): string =
   ## the value of a header of a raw HTTP request, "" when there is none; only the header part is looked at, the name is case-insensitive
@@ -74,3 +73,4 @@ proc storeAuthOk*(rawRequest, uri, secret: string; now: int64): bool =
   let auth = rawRequest.headerOf("authorization")
   if auth.len < 8 or auth[0 ..< 7].toLowerAscii != "bearer ": return false
   verifyRequest(secret, uri.queryParam("node"), rawRequest.headerOf("x-forwarded-method"), rawRequest.headerOf("x-forwarded-uri"), auth[7 .. ^1].strip, now)
+

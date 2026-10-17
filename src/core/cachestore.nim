@@ -8,7 +8,8 @@ import std/[json, strutils, os, sequtils, algorithm]
 import checksums/sha2
 import ../common/[rqlite, cachedecl]
 export cachedecl
-import storagebackend, groups, objectstore
+import ../common/storagebackend
+import groups, objectstore
 
 const
   defaultQuota* = 10'i64 * 1024 * 1024 * 1024
@@ -73,9 +74,10 @@ proc cacheRetentionFromEnv*(): int64 =
 
 proc dropObject(ss: StoreSet; store, key: string): bool =
   let rb = ss.resolve(store)
-  if rb.be == nil: return false              # the store is not there (or its secret cannot be read now): the row stays for another pass
+  if rb.be == nil: return false              # no storage module is set up: the row stays for another pass
   let r = rb.be.deleteObject(key)
-  r.ok or (not r.retry and "no such object" in r.error.toLowerAscii)
+  # a store the module does not have any more (the operator forgot it, D-60) holds nothing the core can reach: the row goes
+  r.ok or (not r.retry and ("no such object" in r.error.toLowerAscii or r.error == "no such store"))
 
 # ------------------------------------------------------------------ the limits: the shard's, the organisation's, the groups'
 

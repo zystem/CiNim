@@ -5,7 +5,8 @@
 import std/[unittest, os, osproc, strutils, strtabs, sequtils, times, locks, net, httpclient, atomics, algorithm]
 import checksums/sha2
 import common/httpsrv
-import core/[httpstore, storagebackend, storeauth]
+import storage/[httpstore, storeauth]
+import common/storagebackend
 
 const
   port1 = 29871

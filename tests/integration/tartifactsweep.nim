@@ -1,7 +1,8 @@
 ## DAT-006: the sweep of the artifacts (core/artifactsweep.nim), against a real rqlite and a store in memory. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, tables, strutils, times]
 import common/rqlite
-import core/[schema, scheduler, storagebackend, artifactsweep, objectstore, retrypolicy]
+import common/storagebackend
+import core/[schema, scheduler, artifactsweep, objectstore, retrypolicy]
 
 type MemStore = ref object of ObjectBackend
   objects: Table[string, string]

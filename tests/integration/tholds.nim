@@ -2,7 +2,8 @@
 ## artifacts does not take the run's artifacts and the core does not release its volume. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, tables, strutils, times, sequtils]
 import common/rqlite
-import core/[schema, scheduler, storagebackend, artifactsweep, objectstore, runstorage, holds, groups]
+import common/storagebackend
+import core/[schema, scheduler, artifactsweep, objectstore, runstorage, holds, groups]
 
 type MemStore = ref object of ObjectBackend
   objects: Table[string, string]

@@ -1,0 +1,79 @@
+# The storage module `cinim-storage` and the stores behind it (docs/storage-module.md). One release per shard, into the namespace of the shard
+# (helm install cinim-storage ./cinim-storage -n cinim-001), so that it finds the shard's rqlite; the core is pointed at it by `storage.url` of the chart cinim-shard.
+# Required: image.repository, and either secrets.existingSecret or the four secrets below.
+
+# The image of the module (tools/image/Dockerfile.kaniko, target storage).
+image:
+  repository: ""
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# The shards this module serves. The module's state lives in rqlite (tables storage_*), so it has no volume and a replica can be killed at any time.
+# Normally it is the one shard whose namespace it is installed into, and `rqliteUrl` is that shard's rqlite. A module that serves several shards
+# needs an rqlite of its own (that you run) in `rqliteUrl`, and more than one entry in `secrets.shards`.
+shard: "001"
+rqliteUrl: http://rqlite
+replicas: 1                           # more than one is fine: the repair pass is done by the one that holds the lease
+repairSeconds: 60                     # how often the repair queue of a Caddy mirror is worked
+checkSeconds: 600                     # how often a slice of the inventory is compared with the nodes
+
+# The secrets. Give an existing Secret, or give the values and the chart makes the Secret `cinim-storage` of them. Nothing is generated at render time.
+#   shards       <shard>=<secret>;<shard>=<secret>   the secret each core signs its calls with (the key `shard-<shard>` is also made, for the core's `storage.tokenSecret`)
+#   adminToken   the operator's token for /v1/admin/stores... (at least 16 characters); the core does not hold it
+#   sealKey      the key the stores' secrets are sealed under in the database (at least 16 characters); keep it apart from the database and its backups
+#   nodeToken    the token the requests to the Caddy nodes are signed with (8..256 characters; only for the Caddy store)
+secrets:
+  existingSecret: ""                  # keys: shards, adminToken, sealKey, nodeToken, shard-<shard>
+  shards: {}                          # {"001": "<at least 16 characters>"}
+  adminToken: ""
+  sealKey: ""
+  nodeToken: ""
+
+# The stores. Any of them can be on; an organisation chooses among those that are (docs/artifacts.md). `default: true` makes a store the default one at every install
+# and upgrade; with none marked, the first one registered is the default (and an operator's change with `:default` stays).
+stores:
+  # Garage, installed by this chart: one node (a StatefulSet) on one volume, S3 on 3900. A sidecar makes its layout, the bucket and an access key once and tells the module.
+  garage:
+    enabled: true
+    name: garage-main
+    default: false
+    bucket: cinim-artifacts
+    capacityBytes: 7000000000         # what the layout gives the node; keep it below the volume
+    image: dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020
+    persistence: {size: 8Gi, storageClass: ""}
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 512Mi}
+  # Caddy nodes with the WebDAV module of the CiNim fork (docs/store.md): a StatefulSet of nodes, each on a volume of its own, that the module mirrors.
+  caddy:
+    enabled: false
+    name: caddy-main
+    default: false
+    nodes: 2                          # 1 to 4
+    minAcks: 0                        # 0: every node must confirm a write; 1 keeps writing with a node away (the repair gives it back)
+    image:                            # tools/image/Dockerfile.kaniko, target caddy-store (TARGETS=caddy-store:cinim-store-dav)
+      repository: ""
+      tag: latest
+    persistence: {size: 100Gi, storageClass: ""}
+    spreadAcrossNodes: true           # one node of the mirror per machine, so that the copies are not on one disk
+    resources:
+      requests: {cpu: 100m, memory: 64Mi}
+      limits: {memory: 512Mi}
+  # Buckets that are already there (Garage somewhere else, or any S3-compatible store): the module is told once, with the key from your Secret.
+  external: []
+  #  - {name: archive, default: false, endpoint: "http://garage.other:3900", region: garage, bucket: cinim-artifacts,
+  #     secretName: archive-s3, accessKeyIdKey: accessKeyId, secretAccessKeyKey: secretAccessKey}
+
+# The bookkeeping image of the sidecar and the registration Job: busybox (wget, sed), by digest.
+tools:
+  image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+
+module:
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+
+# Ingress to the module only from the core of the shard and from what this chart installs; the Caddy nodes and Garage only from the module.
+networkPolicy:
+  enabled: true
+  coreLabels: {app.kubernetes.io/name: cinim-core}

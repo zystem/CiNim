@@ -3,9 +3,9 @@
 ## process; the log-circuit module (loggate.nim polls the VictoriaLogs nodes and vlagent, RUN-015's launch gate)
 ## runs as another thread, and a watchdog thread enforces liveness_timeout and probes rqlite and the log circuit (D-29).
 ## One shard, one execution profile, no directory.
-import std/[times, os, strutils, posix, atomics, uri, tables]
+import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
-import apiauth, artifactsweep, storerepair, zstore, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
+import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -62,42 +62,21 @@ proc runLogIngest(a: tuple[co: Collector, certs: string, port: int]) {.thread.} 
 proc runStepReport(a: StepReportArgs) {.thread.} = serveStepReport(a.rqliteUrl, a.certs, a.port, a.profileId)
 const
   artifactSweepSeconds = 600.0       ## how often the artifacts are looked at (DAT-006)
-  repairSeconds = 60.0               ## how often the repair queue of the store nodes is worked (D-57, core/storerepair.nim)
-  checkSeconds = 600.0               ## how often a slice of the rows is checked against the nodes
 
 proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thread.} =
   ## every few seconds: steps whose Pod never came up or whose shim went quiet (liveness_timeout, D-29)
   {.cast(gcsafe).}:
     var c = newRq(a.rqliteUrl)
     var lastSweep = 0.0
-    var lastRepair = 0.0
-    var lastCheck = 0.0
-    var checkCursors: Table[string, string]
     while not stopServers.load:
       try:
         probeAndAge(c, a.startedAt)
         watchdogPass(c, a.profileId, a.startedAt)
-        if epochTime() - lastRepair >= repairSeconds:
-          # D-57: the store nodes of our own are kept alike: the queue of what a node missed, and a slice of the rows against the nodes
-          lastRepair = epochTime()
-          let due = epochTime() - lastCheck >= checkSeconds
-          if due: lastCheck = epochTime()
-          for e in c.listStores():
-            if not e.cfg.isMirror: continue
-            let st = c.loadStore(e.name)
-            if not st.ok: continue
-            let mir = ReplicaBackend(st.backend())
-            let rep = c.repairPass(mir, getTime().toUnix())
-            if rep.copied + rep.deleted + rep.dropped + rep.failed > 0:
-              echo "core: store ", e.name, " repair: ", rep.copied, " copied, ", rep.deleted, " deleted, ", rep.dropped, " dropped, ", rep.failed, " left for later"
-            if due:
-              let made = c.checkNodes(mir, checkCursors.mgetOrPut(e.name, ""), getTime().toUnix())
-              if made > 0: echo "core: store ", e.name, " check: ", made, " objects are missing from a node or differ; queued for repair"
         if epochTime() - lastSweep >= artifactSweepSeconds:
           # DAT-006: expired artifacts, abandoned uploads and orphans leave the stores (core/artifactsweep.nim); only when a store is set up; each row is dealt with in the store it was written to (D-59)
           lastSweep = epochTime()
-          if c.listStores().len > 0:
-            let ss = newStoreSet(a.rqliteUrl)
+          if storesReady():
+            let ss = newStoreSet()
             let rep = c.sweepArtifacts(ss, getTime().toUnix(), retentionFromEnv(), abandonAfterFromEnv())
             if rep.expired + rep.abandoned + rep.orphans + rep.failed > 0:
               echo "core: artifacts swept: ", rep.expired, " expired, ", rep.abandoned, " abandoned uploads, ", rep.orphans, " of runs that are gone, ", rep.failed, " left for the next pass"
@@ -122,11 +101,8 @@ proc runRouterClient(a: tuple[rqliteUrl: string]) {.thread.} =
     serveRouterClient(readOrgs, addr stopServers)
 
 proc main() =
-  objectstore.missedHook = proc (key, node, what: string) {.gcsafe.} =
-    ## what a store node missed goes into the repair queue (D-57)
-    {.cast(gcsafe).}:
-      var hc = newRq(rqliteUrl)
-      hc.noteMissed(key, node, what, getTime().toUnix())
+  # D-60: the stores are the storage module's; the core holds its address and the secret its calls are signed with (a Secret of the shard)
+  configureStorage(getEnv("CINIM_STORAGE_URL"), getEnv("CINIM_STORAGE_TOKEN"), shardName)
   setStdIoUnbuffered()           # a supervisor that kills the process must still find its log complete
   var c = newRq(rqliteUrl)
   var profileId: string

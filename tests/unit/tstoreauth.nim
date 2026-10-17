@@ -1,6 +1,6 @@
 ## D-57 (docs/store.md): the tokens of the calls to an HTTP store node. One token is good for one node, one method, one path, for a short time. Pure.
 import std/[unittest, strutils]
-import core/storeauth
+import storage/storeauth
 
 const secret = "a-store-secret-of-some-length"
 

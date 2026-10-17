@@ -1,6 +1,6 @@
-## What the repair of a mirrored store needs from the mirror (core/storerepair.nim): which nodes there are, and one thing at a time done on one node or between two. The mirror of
-## the ZeroMQ nodes (core/zstore.nim) and the mirror of the HTTP nodes (core/httpstore.nim) both are a `ReplicaBackend`.
-import storagebackend
+## What the repair of a mirrored store needs from the mirror (storage/repair.nim): which nodes there are, and one thing at a time done on one node or between two. The mirror of the HTTP nodes
+## (storage/httpstore.nim) is a `ReplicaBackend`.
+import ../common/storagebackend
 
 type
   MissedProc* = proc (key, node, op: string) {.gcsafe.}    ## a node did not take a write or a delete (`op` is `copy` or `delete`): the core puts it in the repair queue

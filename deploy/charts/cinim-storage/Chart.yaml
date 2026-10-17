@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cinim-storage
+description: The storage module of CiNim (D-60, docs/storage-module.md) - the service that keeps the object stores of a shard (artifacts, caches) - and, as the operator chooses, Garage (S3), Caddy nodes with WebDAV (a mirror), or both, or a store that is already there.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

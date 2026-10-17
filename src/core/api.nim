@@ -8,7 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
-import storeauth, audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight, storerepair
+import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 
@@ -210,17 +210,6 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http404, "not_found", "metrics are turned off")
           return
         reply(Http200, coreRef.renderCoreMetrics(), ["Content-Type: text/plain; version=0.0.4; charset=utf-8"])
-        return
-      if path == authPath:
-        # D-57: the `forward_auth` of a store node asks whether a request of the core's to it is good (core/storeauth.nim); there is no API token here, the token of that request is the proof
-        var sc = newRq(coreRef.rqliteUrl)
-        let now = getTime().toUnix()
-        var authorised = false
-        for sec in sc.storeSecrets(now):           # one secret per HTTP store (D-59); the token says which node it is for
-          if storeAuthOk(getRequest(), uri, sec, now): authorised = true
-        # the body is not empty on purpose: GuildenStern follows an empty body with a stray CRLF, which Caddy logs for every request (an "unsolicited response on an idle channel")
-        if authorised: reply(Http200, "ok")
-        else: reply(Http401, "no")
         return
       if path == "/healthz":
         # the probes of the Pod: alive, and says nothing else, so that it needs no token
@@ -676,103 +665,20 @@ proc onRequest() {.raises: [], gcsafe.} =
           kubernetes[ns] = stepsJson(r)
         jsonOk(Http200, %*{"slug": slug, "namespace": ns, "generation": c.credentialRow(ns).generation, "rotated": rotated, "kubernetes": kubernetes})
         return
-      if path == "/api/v1/stores" or path.startsWith("/api/v1/stores/"):
-        # D-59: the named stores of the shard (core/objectstore.nim), an administrator's calls; the secret of a store is sealed in the database and never answered.
-        #   GET /api/v1/stores                  the stores, one of them the default
-        #   PUT /api/v1/stores/{name}           make or replace a store: {endpoint, region, bucket, access_key_id, secret_access_key} (an S3 bucket, Garage) or
-        #                                       {kind: "dav" | "nodes", nodes, token, min_acks} (our own nodes); "default": true makes it the default. It is tried first.
-        #   DELETE /api/v1/stores/{name}        forget one that nothing uses and that is not the default
-        #   POST /api/v1/stores/{name}:check    the round trip again;   POST /api/v1/stores/{name}:default    make it the default
-        var c = newRq(coreRef.rqliteUrl)
-        let smeth = getMethod()
-        var nameS = path["/api/v1/stores".len .. ^1].strip(chars = {'/'})
-        var actionS = ""
-        let colon = nameS.find(':')
-        if colon >= 0:
-          actionS = nameS[colon .. ^1]
-          nameS = nameS[0 ..< colon]
-        func storeJson(e: StoreEntry): JsonNode =
-          %*{"name": e.name, "kind": (if e.cfg.kind.len == 0: "s3" else: e.cfg.kind), "default": e.isDefault, "endpoint": e.cfg.endpoint, "region": e.cfg.region, "bucket": e.cfg.bucket,
-             "access_key_id": e.cfg.keyId, "nodes": e.cfg.nodes, "min_acks": (if e.cfg.isMirror and e.cfg.minAcks <= 0: e.cfg.nodes.len else: e.cfg.minAcks),
-             "transport": (if e.cfg.kind == "nodes": (if e.cfg.transport == "plain": "plain" else: "curve") else: "")}
-        if nameS.len == 0:
-          if smeth != "GET" or actionS.len > 0:
-            problem(Http405, "method_not_allowed", "GET")
-            return
-          var items = newJArray()
-          for e in c.listStores():
-            var sj = storeJson(e)
-            if e.cfg.isMirror: sj["repair_pending"] = %c.pendingRepairs()
-            items.add sj
-          jsonOk(Http200, %*{"stores": items, "purposes": purposes})
-        elif actionS == ":check":
-          if smeth != "POST":
-            problem(Http405, "method_not_allowed", "POST")
-            return
-          let st = c.loadStore(nameS)
-          if not st.ok:
-            problem(if st.retry: Http503 else: Http409, "store_" & st.error, "the store is not ready: " & st.error)
-            return
-          let bad = st.backend().roundTrip()
-          if bad.len > 0: problem(Http502, "storage_unreachable", bad)
-          else: jsonOk(Http200, %*{"ok": true, "name": nameS, "kind": (if st.cfg.kind.len == 0: "s3" else: st.cfg.kind)})
-        elif actionS == ":default":
-          if smeth != "POST":
-            problem(Http405, "method_not_allowed", "POST")
-            return
-          if not c.setDefaultStore(nameS):
-            problem(Http404, "store_not_found", "no such store: " & nameS)
-            return
-          forgetStoreSecret()
-          jsonOk(Http200, %*{"name": nameS, "default": true})
-        elif actionS.len > 0:
-          problem(Http404, "not_found", "no such action")
-        elif smeth == "DELETE":
-          let gone = c.forgetStore(nameS)
-          if not gone.ok:
-            problem(if gone.error == "no such store": Http404 else: Http409, if gone.error == "no such store": "store_not_found" else: "store_in_use", gone.error)
-            return
-          jsonOk(Http200, %*{"deleted": true, "name": nameS})
-        elif smeth == "PUT":
-          let j = try: parseJson(getBody()) except JsonParsingError: nil
-          if j == nil or j.kind != JObject:
-            problem(Http400, "invalid_request", "the body is {endpoint, region, bucket, access_key_id, secret_access_key} or {kind, nodes, token, min_acks}")
-            return
-          var cfg = StoreConfig(found: true, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr)
-          var secret = j{"secret_access_key"}.getStr
-          if j{"kind"}.getStr in ["nodes", "dav"]:
-            # docs/store.md: store nodes of our own; the token is what the S3 secret is for the other kind
-            cfg = StoreConfig(found: true, kind: j{"kind"}.getStr, minAcks: j{"min_acks"}.getInt(0), transport: j{"transport"}.getStr)
-            if j{"nodes"} != nil and j["nodes"].kind == JArray:
-              for a in j["nodes"].elems: cfg.nodes.add a.getStr
-            secret = j{"token"}.getStr
-          if not validStoreName(nameS):
-            problem(Http400, "invalid_request", "a store's name is lowercase letters, digits and -, starting with a letter, at most 32")
-            return
-          let why = checkConfig(cfg, secret)
-          if why.len > 0:
-            problem(Http400, "invalid_request", why)
-            return
-          let vk = vaultKek()
-          if not vk.ready:
-            reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": vaultError()}),
-                  ["Content-Type: application/problem+json", "Retry-After: 15"])
-            return
-          # the settings are tried before they are kept: a store that does not take an object is not one to write down
-          let bad = Store(ok: true, cfg: cfg, secret: secret).backend().roundTrip()
-          if bad.len > 0:
-            problem(Http400, "storage_unreachable", bad)
-            return
-          let saved = c.saveStore(vk.kek, nameS, cfg, secret, j{"default"}.getBool(false), getTime().toUnix())
-          if not saved.ok:
-            problem(if saved.retry: Http503 else: Http500, "secrets_error", saved.error)
-            return
-          var found = newJNull()
-          for e in c.listStores():
-            if e.name == nameS: found = storeJson(e)
-          jsonOk(Http200, %*{"store": found, "checked": true})
-        else:
-          problem(Http405, "method_not_allowed", "GET, PUT, DELETE, or POST :check / :default")
+      if path == "/api/v1/stores":
+        # D-60: the stores are the storage module's (docs/storage-module.md); the operator makes and changes them there, with the module's admin token. The core shows what the module has,
+        # so that an administrator sees which names an organisation may choose.
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET; the stores are made and changed in the storage module (docs/storage-module.md)")
+          return
+        let known = moduleStores()
+        if not known.ok:
+          problem(if known.error == "not_configured": Http409 else: Http502, if known.error == "not_configured": "storage_not_configured" else: "storage_unreachable",
+                  if known.error == "not_configured": "this shard has no storage module (CINIM_STORAGE_URL)" else: known.error)
+          return
+        var items = newJArray()
+        for e in known.stores: items.add %*{"name": e.name, "kind": e.kind, "default": e.isDefault}
+        jsonOk(Http200, %*{"stores": items, "default": known.defaultName, "purposes": purposes})
         return
       if path == "/api/v1/variables" or path.startsWith("/api/v1/variables/"):
         # VAR-001, D-54: the variables of the shard, the lowest level: every step of every organisation gets them. An administrator writes them (rbac.nim)
@@ -806,8 +712,9 @@ proc onRequest() {.raises: [], gcsafe.} =
           var effective = newJObject()
           for p in purposes: effective[p] = %sc.storeFor(orgS.id, p)
           var names = newJArray()
-          for e in sc.listStores(): names.add %e.name
-          %*{"organization": slugS, "storage": chosen, "effective": effective, "default": sc.defaultStoreName(), "stores": names}
+          let known = moduleStores()
+          for e in known.stores: names.add %e.name
+          %*{"organization": slugS, "storage": chosen, "effective": effective, "default": known.defaultName, "stores": names}
         if getMethod() == "GET":
           jsonOk(Http200, choiceJson())
         elif getMethod() == "PUT":
@@ -869,7 +776,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if keyQ.len == 0 and not allQ:
             problem(Http400, "invalid_request", "name the entry with ?key=<key>, or every entry of the scope with ?all=true (and ?group=<path> for a group's; none is the organisation's own)")
             return
-          let gone = cc.deleteEntries(newStoreSet(coreRef.rqliteUrl), orgC.id, groupId, keyQ)
+          let gone = cc.deleteEntries(newStoreSet(), orgC.id, groupId, keyQ)
           if gone.deleted > 0: cc.record(getTime().toUnix(), actorOf(who), "cache.delete", slugC & (if groupQ.len > 0: "/" & groupQ else: ""), "ok", (if keyQ.len > 0: keyQ else: "all") & ": " & $gone.deleted)
           jsonOk(Http200, %*{"organization": slugC, "group": groupQ, "deleted": gone.deleted, "failed": gone.failed})
         else:
@@ -1393,7 +1300,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         if wanted.size > maxDownloadBytes:
           problem(Http413, "too_big", "the artifact is bigger than " & $maxDownloadBytes & " bytes; it is read from the store directly")
           return
-        let rb = newStoreSet(coreRef.rqliteUrl).resolve(wanted.store)
+        let rb = newStoreSet().resolve(wanted.store)
         if rb.be == nil:
           problem(Http503, "store_" & rb.error, "the object store is not ready: " & rb.error)
           return

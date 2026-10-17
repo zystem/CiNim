@@ -1,0 +1,58 @@
+{{- if or .Values.stores.caddy.enabled .Values.stores.external }}
+# Tells the module about the stores that are not Garage of this chart (its sidecar does that itself): the Caddy nodes, and buckets that are already there. Repeated at every install and
+# upgrade; the module tries each store before it keeps it, so the Job waits (up to ten minutes) for the module and the nodes to come up.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cinim-storage-register
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "cinim-storage.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 1800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cinim-storage-register
+        {{- include "cinim-storage.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: register
+          image: {{ .Values.tools.image | quote }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              {{- include "cinim-storage.registerFn" . | nindent 14 }}
+              {{- if .Values.stores.caddy.enabled }}
+              {{- $c := .Values.stores.caddy }}
+              nodes=""
+              {{- range $i := until (int $c.nodes) }}
+              nodes="$nodes${nodes:+,}\"http://cinim-storage-caddy-{{ $i }}.cinim-storage-caddy:8080\""
+              {{- end }}
+              register {{ $c.name | quote }} "{\"kind\":\"dav\",\"nodes\":[$nodes],\"token\":\"$NODE_TOKEN\",\"min_acks\":{{ $c.minAcks | int }},\"default\":{{ $c.default }}}"
+              {{- end }}
+              {{- range $i, $e := .Values.stores.external }}
+              register {{ $e.name | quote }} "{\"endpoint\":\"{{ $e.endpoint }}\",\"region\":\"{{ default "garage" $e.region }}\",\"bucket\":\"{{ $e.bucket }}\",\"access_key_id\":\"$EXT_{{ $i }}_ID\",\"secret_access_key\":\"$EXT_{{ $i }}_SECRET\",\"default\":{{ default false $e.default }}}"
+              {{- end }}
+          env:
+            {{- include "cinim-storage.adminEnv" . | nindent 12 }}
+            {{- if .Values.stores.caddy.enabled }}
+            - name: NODE_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ include "cinim-storage.secret" . }}, key: nodeToken}}
+            {{- end }}
+            {{- range $i, $e := .Values.stores.external }}
+            - name: EXT_{{ $i }}_ID
+              valueFrom: {secretKeyRef: {name: {{ $e.secretName | quote }}, key: {{ default "accessKeyId" $e.accessKeyIdKey | quote }}}}
+            - name: EXT_{{ $i }}_SECRET
+              valueFrom: {secretKeyRef: {name: {{ $e.secretName | quote }}, key: {{ default "secretAccessKey" $e.secretAccessKeyKey | quote }}}}
+            {{- end }}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 5m, memory: 8Mi}, limits: {memory: 32Mi}}
+{{- end }}

@@ -11,7 +11,8 @@
 ## log store already (the copy is made from what is there).
 import std/[json, strutils, times]
 import ../common/[rqlite, states]
-import storagebackend, holds
+import ../common/storagebackend
+import holds
 
 const
   waitComplete* = 3600'i64       ## seconds after a step ended that a log that is not complete waits to become so, before it is copied as it is

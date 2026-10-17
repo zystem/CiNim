@@ -4,16 +4,24 @@ A step can leave files for later steps and for people: its **artifacts**. They l
 
 ## Setting the store up (an administrator, once per shard)
 
-1. Run the store: `deploy/examples/garage/garage.yaml` (docs/deployment.md). It makes the bucket `cinim-artifacts` and the key `cinim`.
-2. Tell the core where it is and give it the key. The secret is sealed in the database like a step secret (D-45) and is never answered again:
+The stores are the **storage module's** (docs/storage-module.md, D-60), a service of its own that the core talks to. The core holds only the module's address and the secret its calls are signed with (`CINIM_STORAGE_URL`, `CINIM_STORAGE_TOKEN`, a Secret of the shard).
+
+1. Install the chart `cinim-storage` (docs/deployment.md "The storage module"): the module and, as you choose, Garage (it makes the bucket `cinim-artifacts` and a key, and registers the store), Caddy nodes (docs/store.md), or both. The chart does steps 1 and 2 for them; what follows is what it does and what you do by hand for another store.
+2. Tell the module about a store with its **admin token** (`CINIM_STORAGE_ADMIN_TOKEN`; the core does not hold it). The secret is sealed in the module's table with the module's own key and is never answered again:
 
 ```
-PUT /api/v1/stores/garage-main
+PUT <module>/v1/admin/stores/garage-main
+Authorization: Bearer <admin token>
 {"default": true, "endpoint": "http://garage:3900", "region": "garage", "bucket": "cinim-artifacts",
  "access_key_id": "GK…", "secret_access_key": "…"}
+
+PUT <module>/v1/admin/stores/caddy-main
+{"kind": "dav", "nodes": ["http://cinim-store-dav-0.cinim-store-dav:8080", "http://cinim-store-dav-1.cinim-store-dav:8080"], "token": "<8..256 characters>", "min_acks": 0}
 ```
 
-The core tries the settings before it keeps them: it puts, reads and deletes one small object, and answers `400 storage_unreachable` with the store's own words if that fails. A shard holds several **named stores** (D-59: a Garage bucket and/or Caddy nodes); the first one is the default. `GET /api/v1/stores` lists them without the secrets, `POST /api/v1/stores/{name}:check` repeats the round trip, `POST /api/v1/stores/{name}:default` changes the default, `DELETE /api/v1/stores/{name}` forgets one that nothing uses (a store that holds artifacts, caches or an organisation's choice is refused, `409 store_in_use`). Which store an organisation uses for what: `PUT /api/v1/organizations/{slug}/storage` `{"artifacts": "garage-main", "caches": "caddy-main"}` (an empty name is the default; `GET` shows the choice and the stores). A row remembers the store it was written to, so a change affects new objects only. The core needs its secrets set up first (`secrets_unavailable`, docs/hardware-key.md).
+The module tries the settings before it keeps them: it puts, reads and deletes one small object and starts and cancels a multipart upload, and answers `400 storage_unreachable` with the store's own words if that fails. A module holds several **named stores** (D-59); the first one is the default. `GET /v1/admin/stores` lists them without secrets, with the number of objects and the repair queue, `POST /v1/admin/stores/{name}:check` repeats the round trip, `:default` changes the default, `DELETE /v1/admin/stores/{name}` forgets one that holds no object (`?force=1` forgets one that does, and leaves the objects where they are).
+
+3. The core shows the names: `GET /api/v1/stores` (an administrator). Which store an organisation uses for what: `PUT /api/v1/organizations/{slug}/storage` `{"artifacts": "garage-main", "caches": "caddy-main"}` (an empty name is the default; `GET` shows the choice and the stores). A row of an artifact or a cache remembers the store it was written to, so a change affects new objects only. A store that the operator forgot while rows still name it is a store the core can no longer reach: the sweep drops those rows.
 
 ## In a pipeline
 
@@ -69,15 +77,13 @@ An object the store says it does not have is as good as deleted; a store that do
 
 ## Network
 
-A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artifacts) and DNS, and nothing else: the object store is not reachable from a step Pod and needs no NetworkPolicy of its own. The store has to be reachable from the core, with a plain `http://` or an `https://` endpoint (the core talks to it with its own HTTP client).
+A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artifacts) and DNS, and nothing else: the object store is not reachable from a step Pod and needs no NetworkPolicy of its own. The storage module has to be reachable from the core (plain `http://` or `https://`, the core talks to it with its own HTTP client), and the stores from the module.
 
-## Moving the storage module out of the core
+## The storage module
 
-*Built as a store of our own (2026-10-16): docs/store.md, D-57. The `RemoteBackend` below is `MirrorBackend` over `cinim-store` nodes, spoken to over ZeroMQ with CURVE; the S3 backend stays as the other choice (`PUT /api/v1/stores/{name}`). What follows is the original statement of the seam.*
+*Built (2026-10-17, D-60): docs/storage-module.md. The core talks to the module through `RemoteBackend` (`src/core/storageclient.nim`), which is `ObjectBackend` over the module's HTTP API with a signed token per request; the module (`src/storage`) keeps the stores, the inventory and the repair, and answers with an `S3Backend` (Garage) or an `HttpMirror` (Caddy nodes).*
 
-This is the rule of D-49 applied to the store: the core is the source of the settings of every permanent module, so the storage service is started with only the core's address and its transport keys; the store's endpoint, bucket and key are the core's (sealed in its database) and go to the service with the request or when it connects, never into the service's environment.
-
-What the core asks of a store is `ObjectBackend` (`src/core/storagebackend.nim`): eight operations (put an object, create / upload a part of / complete / abort a multipart upload, read a range, size, delete), none of which keeps state between calls. Built: `S3Backend` (`src/core/s3backend.nim`), in the core's process. To run the storage module as a separate service, write a `RemoteBackend` that sends the same eight operations as requests over ZeroMQ with CURVE, and a service that answers them with an `S3Backend`. The core stays in charge: the settings and the key are the core's (sealed in its database, `PUT /api/v1/stores/{name}`) and are sent to the service with a request or when it connects, the service keeps nothing, and `ArtifactIngest` may be served by that service too, with the shims pointed to it by `--artifact-addr` (the step credential would then be checked against a key the core derives for it, not the core's own). Nothing in a step, a shim or a script changes.
+What the core asks of a store is `ObjectBackend` (`src/common/storagebackend.nim`): eight operations (put an object, create / upload a part of / complete / abort a multipart upload, read a range, size, delete), none of which keeps state between calls. The core stays in charge of who may read or write what and of the quotas; the module knows shards and stores, not organisations. Nothing in a step, a shim or a script changes.
 
 ## Checked on the TESTING cluster
 

@@ -28,8 +28,7 @@ RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null
     nim c -d:release -d:shimLogging $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/cicd-shim src/shim/shim.nim; \
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm" -o:/out/core-static src/core/main.nim; \
     nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/conductor-static src/conductor/main.nim; \
-    nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/store-static src/store/main.nim; \
-    nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/storectl-static src/store/ctl.nim; \
+    nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lsodium -lssl -lcrypto -lm" -o:/out/storage-static src/storage/main.nim; \
     nim c -d:release -d:k8sPrefix=/opt/k8s -d:k8sStatic $F --dynlibOverride:sqlite3 --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm" -o:/out/controller-static src/jobcontroller/main.nim; \
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lsodium -lssl -lcrypto -lm" -o:/out/kekd-emu tools/kekd-emu/main.nim; \
     strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null; \
@@ -43,15 +42,15 @@ USER 65532:65532
 EXPOSE 18081 19742 19743 19744 19745
 ENTRYPOINT ["/core"]
 
-# the image of a store node (docs/store.md, D-57): the node and, beside it, the command-line client for the companion containers that move backups
-FROM scratch AS store
-COPY --from=build /out/store-static /cinim-store
-COPY --from=build /out/storectl-static /cinim-storectl
+# the image of the storage module (docs/storage-module.md, D-60): a Deployment with no volume; the settings are in rqlite and in the environment
+FROM scratch AS storage
+COPY --from=build /out/storage-static /cinim-storage
+COPY --from=build /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65532:65532
-EXPOSE 19750
-ENTRYPOINT ["/cinim-store"]
+EXPOSE 18090
+ENTRYPOINT ["/cinim-storage"]
 
-# the image of an HTTP store node (docs/store.md, D-57): Caddy with the WebDAV module of the CiNim fork. `CADDY_WEBDAV_REF` is the branch or tag of github.com/zystem/caddy-webdav.
+# the image of an HTTP store node (docs/store.md, D-58): Caddy with the WebDAV module of the CiNim fork. `CADDY_WEBDAV_REF` is the branch or tag of github.com/zystem/caddy-webdav.
 # Build it with TARGETS=caddy-store:cinim-store-dav (tools/image/kaniko-build.sh); it needs the network of the build Pod for the Go modules.
 FROM caddy:2-builder AS caddy-build
 ARG CADDY_WEBDAV_REF=cinim-store

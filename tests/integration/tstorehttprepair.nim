@@ -1,8 +1,9 @@
 ## DAT-003, D-57 (docs/store.md): keeping two HTTP store nodes alike - the repair queue in the database and its pass over real nodes (`build/caddy-store`), the pause after a failure, and the check of
-## the rows of `artifacts` and `caches` against the nodes, through the same code as for the ZeroMQ nodes (core/replicas.nim). Needs CINIM_RQLITE_URL.
+## the rows of `artifacts` and `caches` against the nodes, through the code of the module (storage/repair.nim, storage/replicas.nim). Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, osproc, strutils, strtabs, sequtils, times, locks, net]
 import common/[rqlite, httpsrv]
-import core/[schema, httpstore, storagebackend, storerepair, storeauth]
+import storage/[schema, httpstore, repair, storeauth]
+import common/storagebackend
 
 const
   port1 = 29874
@@ -17,7 +18,7 @@ proc onAuth() {.gcsafe, nimcall, raises: [].} =
       if getUri().startsWith(authPath) and storeAuthOk(getRequest(), getUri(), secret, epochTime().int64): reply(Http200, "ok") else: reply(Http401, "no")
     except CatchableError: reply(Http500, "error")
 
-suite "D-57 the repair of the HTTP store":
+suite "D-57 the repair of the HTTP store (the module)":
   if url.len == 0:
     echo "  skipped: CINIM_RQLITE_URL is not set"
   elif not fileExists("build/caddy-store") and execCmd("tools/store/build-caddy.sh") != 0:
@@ -60,19 +61,19 @@ suite "D-57 the repair of the HTTP store":
     var p2 = startNode(base / "n2", port2)
     var c = newRq(url)
     migrate(c)
-    let sfx = newId()[^8 .. ^1].toLowerAscii
+    let sfx = $getCurrentProcessId()
+    let store = "repairtest"
+    discard c.execute(%*[["DELETE FROM storage_objects WHERE store = ?", store], ["DELETE FROM storage_repair WHERE store = ?", store]])
     let now = getTime().toUnix()
     var hookLock: Lock
     initLock(hookLock)
     proc hook(key, nodeName, what: string) {.gcsafe.} =
       {.cast(gcsafe).}:
         var hc = newRq(url)
-        withLock hookLock: hc.noteMissed(key, nodeName, what, getTime().toUnix())
-    proc addArtifact(key: string; size: int; state = "stored") =
-      discard c.execute(%*[["INSERT INTO artifacts (id, tenant_id, run_id, step_ordinal, path, s3_key, size, sha256, state, created_at) VALUES (?, 't', ?, 0, ?, ?, ?, 'x', ?, ?)",
-        newId(), "run-" & sfx, key, key, size, state, now]])
+        withLock hookLock: hc.noteMissed(store, key, nodeName, what, getTime().toUnix())
+    proc addArtifact(key: string; size: int; state = "stored") = c.recordObject(store, key, size, now)
     proc taskOf(key: string): seq[string] =
-      let v = c.query(%*[["SELECT op, attempts, next_at FROM store_repair WHERE key = ?", key]])["results"][0]{"values"}
+      let v = c.query(%*[["SELECT op, attempts, next_at FROM storage_repair WHERE store = ? AND key = ?", store, key]])["results"][0]{"values"}
       if v != nil and v.len > 0: @[v[0][0].getStr, $v[0][1].getInt, $v[0][2].getInt] else: @[]
     let a = node(port1)
     let b = node(port2)
@@ -88,7 +89,7 @@ suite "D-57 the repair of the HTTP store":
       addArtifact(key, 27)
       check taskOf(key)[0] == "copy"
       p2 = startNode(base / "n2", port2)
-      let rep = c.repairPass(bothNodes, now + 1)
+      let rep = c.repairPass(store, bothNodes, now + 1)
       check rep.copied >= 1
       check b2.readRange(key, 0, 100).data == "given to the first node only"
       check taskOf(key).len == 0
@@ -101,40 +102,40 @@ suite "D-57 the repair of the HTTP store":
       let p2r = a2.uploadPart(key, up.uploadId, 2, data[partSize .. ^1])
       check a2.completeMultipart(key, up.uploadId, @[(1, p1r.etag), (2, p2r.etag)]).ok
       addArtifact(key, data.len)
-      c.noteMissed(key, b.name, "copy", now)
-      check c.repairPass(bothNodes, now + 1).copied >= 1
+      c.noteMissed(store, key, b.name, "copy", now)
+      check c.repairPass(store, bothNodes, now + 1).copied >= 1
       check b2.objectSize(key).size == data.len
       check b2.readRange(key, partSize - 3, 6).data == data[partSize - 3 ..< partSize + 3]
     test "the last operation on a key and a node wins: a delete that is followed by a write is a copy":
       let key = "t/rp-" & sfx & "/last"
-      c.noteMissed(key, b.name, "delete", now)
+      c.noteMissed(store, key, b.name, "delete", now)
       check taskOf(key)[0] == "delete"
-      c.noteMissed(key, b.name, "copy", now + 1)
+      c.noteMissed(store, key, b.name, "copy", now + 1)
       check taskOf(key)[0] == "copy"
     test "a delete task deletes on the node and goes":
       let key = "t/rp-" & sfx & "/gone"
       check a2.putObject(key, "x").ok and b2.putObject(key, "x").ok
-      c.noteMissed(key, b.name, "delete", now)
-      let rep = c.repairPass(bothNodes, now + 1)
+      c.noteMissed(store, key, b.name, "delete", now)
+      let rep = c.repairPass(store, bothNodes, now + 1)
       check rep.deleted >= 1 and b2.objectSize(key).res.ok == false and a2.objectSize(key).res.ok and taskOf(key).len == 0
-    test "a copy of an object that is not in the database any more is dropped, not made":
+    test "a copy of an object that is not in the inventory any more is dropped, not made":
       let key = "t/rp-" & sfx & "/swept"
       check a2.putObject(key, "x").ok
-      c.noteMissed(key, b.name, "copy", now)                                   # no row for it
-      let rep = c.repairPass(bothNodes, now + 1)
+      c.noteMissed(store, key, b.name, "copy", now)                                   # no inventory row for it
+      let rep = c.repairPass(store, bothNodes, now + 1)
       check rep.dropped >= 1 and not b2.objectSize(key).res.ok and taskOf(key).len == 0
     test "a copy that cannot be made waits, with a pause that grows, and is tried again":
       let key = "t/rp-" & sfx & "/nowhere"
       addArtifact(key, 5)
-      c.noteMissed(key, b.name, "copy", now)                                   # neither node has it
+      c.noteMissed(store, key, b.name, "copy", now)                                   # neither node has it
       let t = now + 1000
-      check c.repairPass(bothNodes, t).failed >= 1
+      check c.repairPass(store, bothNodes, t).failed >= 1
       let first = taskOf(key)
       check first[1] == "1" and parseInt(first[2]) >= t + 30
-      check c.repairPass(bothNodes, t + 1).failed == 0                         # not due yet
-      check c.repairPass(bothNodes, t + 100).failed >= 1
+      check c.repairPass(store, bothNodes, t + 1).failed == 0                         # not due yet
+      check c.repairPass(store, bothNodes, t + 100).failed >= 1
       check a2.putObject(key, "12345").ok                                      # the object appears on a node: the next try gives it to the other
-      check c.repairPass(bothNodes, t + 10000).copied >= 1 and b2.objectSize(key).size == 5 and taskOf(key).len == 0
+      check c.repairPass(store, bothNodes, t + 10000).copied >= 1 and b2.objectSize(key).size == 5 and taskOf(key).len == 0
     test "the check of the rows makes a copy task for what a node lacks or has with another size, and for nothing else":
       let pre = "t/rc-" & sfx & "/"
       for (name, onA, onB) in [("both", "same", "same"), ("only-a", "from a", ""), ("short-on-b", "full size", "short"), ("only-b", "", "from b")]:
@@ -147,14 +148,14 @@ suite "D-57 the repair of the HTTP store":
       cursor.setLen cursor.len - 1
       var made = 0
       for _ in 0 ..< 20:
-        made += c.checkNodes(bothNodes, cursor, now, slice = 2)
+        made += c.checkNodes(store, bothNodes, cursor, now, slice = 2)
         if cursor == "" or cursor > pre & "~": break
       check taskOf(pre & "only-a")[0] == "copy" and taskOf(pre & "short-on-b")[0] == "copy" and taskOf(pre & "only-b")[0] == "copy"
       check taskOf(pre & "both").len == 0 and taskOf(pre & "nowhere").len == 0
       check made >= 3
     test "one node is no mirror: the check makes no tasks":
       var cursor = ""
-      check c.checkNodes(a2, cursor, now) == 0
+      check c.checkNodes(store, a2, cursor, now) == 0
     p1.stop()
     p2.stop()
     shutdown()

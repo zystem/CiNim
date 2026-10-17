@@ -358,9 +358,19 @@ REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/i
 
 A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
 
-## Object storage for artifacts (Garage)
+## The storage module (the chart `cinim-storage`)
 
-`deploy/examples/garage/garage.yaml` runs Garage v2.4.1 (D-46) in the shard's namespace: one StatefulSet pod on an 8 GiB volume, the Service `garage` (S3 on 3900, admin API on 3903). Its secrets are made on the volume at the first start, and a sidecar makes the layout, the bucket `cinim-artifacts` and the access key `cinim` (idempotent). `kubectl -n <ns> apply -f deploy/examples/garage/garage.yaml`; change the volume size in the file first if the cluster is small (the test cluster could not give 20 GiB). The key is read with `kubectl -n <ns> exec garage-0 -c init -- cat /var/lib/garage/secrets/cinim-s3` (the platform will keep it sealed in its database once the core talks to the store). Checked: a PUT and a GET with SigV4 from another Pod (`curl --aws-sigv4 aws:amz:garage:s3`) and an anonymous GET refused (403). Then tell the core: `PUT /api/v1/stores/{name}` (docs/artifacts.md). A step Pod never reaches the store; only the core does.
+The object stores of a shard are the storage module's (D-60, docs/storage-module.md); the chart `deploy/charts/cinim-storage` installs it into the namespace of the shard, with Garage (D-46), Caddy nodes (D-58), both, or neither (stores that are already there are listed in `stores.external`). Images: `TARGETS="storage:cinim-storage caddy-store:cinim-store-dav" tools/image/kaniko-build.sh`.
+
+```bash
+helm install cinim-storage deploy/charts/cinim-storage -n cinim-001 \
+  --set image.repository=<registry>/cinim-storage --set image.tag=<tag> \
+  --set secrets.shards.001=<16+ characters> --set secrets.adminToken=<16+> --set secrets.sealKey=<16+> \
+  --set stores.garage.enabled=true \
+  --set stores.caddy.enabled=true --set stores.caddy.image.repository=<registry>/cinim-store-dav --set secrets.nodeToken=<8..256>
+```
+
+Then the shard's chart is pointed at it: `storage.url=http://cinim-storage:18090`, `storage.tokenSecret.name=cinim-storage`, `storage.tokenSecret.key=shard-001`. Garage is one node on one volume (`replication_factor = 1`: the volume is the only copy, so back it up; a production store needs three nodes in three zones, which the chart does not make); its secrets are made on the volume at the first start. Keep `secrets.sealKey` apart from the database and its backups: a database restored without it holds stores whose secrets cannot be opened. A step Pod never reaches a store; only the module does, and the chart's network policies let only the core and the chart's own Pods reach the module. Not tried on a cluster yet (phase 4).
 
 ## The volume the steps of a run share
 

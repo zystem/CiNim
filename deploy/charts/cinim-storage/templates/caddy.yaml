@@ -1,0 +1,113 @@
+{{- if .Values.stores.caddy.enabled }}
+{{- $c := .Values.stores.caddy }}
+# Caddy nodes with the WebDAV module of the CiNim fork (docs/store.md, D-58). They know nothing of each other: the module writes to all of them and repairs from its inventory. A node
+# keeps no secret: its `forward_auth` asks the module whether each request is good (storage/storeauth.nim). The nodes are registered with the module by the Job `cinim-storage-register`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cinim-storage-caddy
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "cinim-storage.labels" . | nindent 4 }}
+data:
+  Caddyfile: |
+    {
+      order webdav before file_server
+      auto_https off
+      admin off
+    }
+    :8080 {
+      # the probes of the Pod need no token
+      handle /__health {
+        respond 200
+      }
+      handle {
+        forward_auth {$MODULE} {
+          uri /v1/internal/node-auth?node={$NODE_ID}:8080
+        }
+        webdav {
+          root /data
+          atomic_put
+          create_dirs
+          sync full
+          tmp_age 24h
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cinim-storage-caddy
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "cinim-storage.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {app.kubernetes.io/name: cinim-storage-caddy}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cinim-storage-caddy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: cinim-storage-caddy
+    {{- include "cinim-storage.labels" . | nindent 4 }}
+spec:
+  serviceName: cinim-storage-caddy
+  replicas: {{ $c.nodes }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: {app.kubernetes.io/name: cinim-storage-caddy}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cinim-storage-caddy
+        {{- include "cinim-storage.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+      {{- if $c.spreadAcrossNodes }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage-caddy}}
+      {{- end }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: store
+          image: {{ printf "%s:%s" (required "stores.caddy.image.repository is required" $c.image.repository) $c.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # NODE_ID is the host:port-less name the module uses for this Pod: <pod>.<service>; the Caddyfile adds the port
+          command: [sh, -c, 'NODE_ID="$(hostname).cinim-storage-caddy" exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile']
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: MODULE, value: "cinim-storage:18090"}
+            - {name: XDG_DATA_HOME, value: /tmp/xdg}
+            - {name: XDG_CONFIG_HOME, value: /tmp/xdgc}
+          readinessProbe: {httpGet: {path: /__health, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /__health, port: http}, initialDelaySeconds: 10, periodSeconds: 10, failureThreshold: 6}
+          resources: {{- toYaml $c.resources | nindent 12 }}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /etc/caddy, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: cinim-storage-caddy}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if $c.persistence.storageClass }}
+        storageClassName: {{ $c.persistence.storageClass | quote }}
+        {{- end }}
+        resources: {requests: {storage: {{ $c.persistence.size | quote }}}}
+{{- end }}

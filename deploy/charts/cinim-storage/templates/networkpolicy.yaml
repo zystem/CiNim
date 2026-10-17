@@ -1,0 +1,54 @@
+{{- if .Values.networkPolicy.enabled }}
+# Who may reach what: the module is reached by the core of the shard and by what this chart installs (the Caddy nodes ask it who may call them; Garage's sidecar and the Job
+# register stores); the Caddy nodes and Garage are reached by the module only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cinim-storage
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "cinim-storage.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.coreLabels | nindent 14 }}
+        - podSelector: {matchLabels: {app.kubernetes.io/part-of: cinim-storage}}
+      ports:
+        - {protocol: TCP, port: 18090}
+{{- if .Values.stores.caddy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cinim-storage-caddy
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "cinim-storage.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage-caddy}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage}}
+      ports:
+        - {protocol: TCP, port: 8080}
+{{- end }}
+{{- if .Values.stores.garage.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cinim-storage-garage
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "cinim-storage.labels" . | nindent 4 }}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage-garage}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage}}
+      ports:
+        - {protocol: TCP, port: 3900}
+{{- end }}
+{{- end }}

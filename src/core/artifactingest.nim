@@ -47,7 +47,7 @@ proc backendFor(ss: StoreSet; name: string): tuple[be: ObjectBackend, refusal: A
   let rb = ss.resolve(name)
   if rb.be != nil: return (rb.be, ArtifactAck())
   case rb.error
-  of "not_configured": (nil, refuse("store_not_configured", "the shard has no object store (PUT /api/v1/stores/{name})"))
+  of "not_configured": (nil, refuse("store_not_configured", "the shard has no storage module (CINIM_STORAGE_URL, docs/storage-module.md)"))
   of "no_such_store": (nil, refuse("store_not_configured", "the store " & name & " is not there any more"))
   else: (nil, refuse("store_unavailable", "the object store's key cannot be read now: " & rb.error))
 
@@ -256,7 +256,7 @@ proc serveArtifactIngest*(rqliteUrl, certs: string; port: int) {.thread.} =
       let body = conn.receive()
       if body.len == 0: continue
       # an error in one request is the answer to that request; it does not end the core, and a REP socket needs its answer to go on
-      let resp = try: handleArtifact(c, Protobuf.decode(cast[seq[byte]](body), ArtifactRequest), master, newStoreSet(rqliteUrl))
+      let resp = try: handleArtifact(c, Protobuf.decode(cast[seq[byte]](body), ArtifactRequest), master, newStoreSet())
                  except CatchableError as e:
                    stderr.writeLine "core: artifact ingest: " & e.msg
                    refuse("internal", e.msg)

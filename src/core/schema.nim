@@ -114,17 +114,9 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS held_logs (
        run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, attempt INTEGER NOT NULL, tenant_id TEXT NOT NULL, s3_key TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
        line_count INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, PRIMARY KEY (run_id, ordinal, attempt))""",
-  # D-59, core/objectstore.nim: the named stores of the shard (kind and settings; the secret is sealed in the vault), one of them the default
-  """CREATE TABLE IF NOT EXISTS object_stores (
-       name TEXT PRIMARY KEY, kind TEXT NOT NULL, config TEXT NOT NULL, is_default INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
-  # D-59: which store an organisation uses for a purpose (artifacts, caches, held_logs, audit); no row means the shard's default
+  # D-59: which store an organisation uses for a purpose (artifacts, caches, held_logs, audit); no row means the module's default. The stores themselves are the storage module's (D-60)
   """CREATE TABLE IF NOT EXISTS org_storage (
        tenant_id TEXT NOT NULL, purpose TEXT NOT NULL, store_name TEXT NOT NULL, updated_by TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, purpose))""",
-  # D-57, core/storerepair.nim: what a store node has to be given or to lose so that the nodes agree again; the last operation on a key and a node wins
-  """CREATE TABLE IF NOT EXISTS store_repair (
-       key TEXT NOT NULL, node TEXT NOT NULL, op TEXT NOT NULL, since INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
-       last_error TEXT NOT NULL DEFAULT '', PRIMARY KEY (key, node))""",
-  "CREATE INDEX IF NOT EXISTS store_repair_due ON store_repair (next_at)",
   # the variables of the shard itself, the lowest level (VAR-001, D-54): every step of every organisation of the shard gets them
   """CREATE TABLE IF NOT EXISTS shard_variables (
        name TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)""",
@@ -187,6 +179,10 @@ proc migrate*(c: var RqClient) =
   var stmts = newJArray()
   for s in ddl: stmts.add %s
   discard c.execute(stmts, transaction = true)
+  # D-60: the stores moved to the storage module; what the core kept of them before is gone (docs/compat.md)
+  for s in ["DROP TABLE IF EXISTS object_stores", "DROP TABLE IF EXISTS store_repair", "DELETE FROM step_secrets WHERE tenant_id = '_platform' AND name LIKE 'OBJECTSTORE_SECRET_KEY%'",
+            "DELETE FROM vault_meta WHERE key = 'objectstore'"]:
+    discard c.execute(%*[[s]])
   # D-54: there is no project; a run and a trigger belong to a group (or to the organisation). A shard made before has the column and an index on it
   for table in ["runs", "triggers"]:
     if c.hasColumn(table, "project_id"):

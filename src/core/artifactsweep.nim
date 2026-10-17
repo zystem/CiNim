@@ -10,7 +10,8 @@
 ## is tested against a store in memory.
 import std/[json, strutils, times, os]
 import ../common/[rqlite, states]
-import storagebackend, holds, objectstore
+import ../common/storagebackend
+import holds, objectstore
 
 const
   defaultRetention* = 30 * 86400'i64
@@ -32,9 +33,10 @@ proc abandonAfterFromEnv*(): int64 =
 
 proc dropObject(ss: StoreSet; store, key: string): bool =
   let rb = ss.resolve(store)
-  if rb.be == nil: return false              # the store is not there (or its secret cannot be read now): the row stays for another pass
+  if rb.be == nil: return false              # no storage module is set up: the row stays for another pass
   let r = rb.be.deleteObject(key)
-  r.ok or (not r.retry and "no such object" in r.error.toLowerAscii)
+  # a store the module does not have any more (the operator forgot it, D-60) holds nothing the core can reach: the row goes
+  r.ok or (not r.retry and ("no such object" in r.error.toLowerAscii or r.error == "no such store"))
 
 proc abortUpload(ss: StoreSet; store, key, uploadId: string): Outcome =
   let rb = ss.resolve(store)

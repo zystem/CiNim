@@ -1,0 +1,12 @@
+{{- if not .Values.secrets.existingSecret }}
+{{- if not .Values.secrets.shards }}{{ fail "secrets.shards is required (for example {\"001\": \"<at least 16 characters>\"}), or secrets.existingSecret" }}{{ end }}
+{{- range $shard, $sec := .Values.secrets.shards }}
+{{- if not (regexMatch "^[0-9]{1,16}$" (toString $shard)) }}{{ fail (printf "a shard is made of digits only (SHD-001): %q" $shard) }}{{ end }}
+{{- if lt (len (toString $sec)) 16 }}{{ fail (printf "the secret of shard %s is shorter than 16 characters" $shard) }}{{ end }}
+{{- end }}
+{{- if lt (len .Values.secrets.adminToken) 16 }}{{ fail "secrets.adminToken is shorter than 16 characters" }}{{ end }}
+{{- if lt (len .Values.secrets.sealKey) 16 }}{{ fail "secrets.sealKey is shorter than 16 characters" }}{{ end }}
+{{- if and .Values.stores.caddy.enabled (or (lt (len .Values.secrets.nodeToken) 8) (gt (len .Values.secrets.nodeToken) 256)) }}{{ fail "secrets.nodeToken is 8..256 characters when the Caddy store is on" }}{{ end }}
+{{- end }}
+{{- if and .Values.stores.caddy.enabled (or (lt (int .Values.stores.caddy.nodes) 1) (gt (int .Values.stores.caddy.nodes) 4)) }}{{ fail "stores.caddy.nodes is 1 to 4" }}{{ end }}
+{{- if not (or .Values.stores.garage.enabled .Values.stores.caddy.enabled .Values.stores.external) }}{{ fail "no store is on: enable stores.garage, stores.caddy, or list stores.external" }}{{ end }}

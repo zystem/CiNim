@@ -8,7 +8,7 @@ the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the laun
 (reason, message, events, node), organisations with a namespace and a job controller each (SHD-001 to SHD-009: create, switch off, delete, the reconciliation with
 their Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), API tokens with scopes (IAM-003), users with the roles admin, rw, dev, ro (basic RBAC, IAM-001), step secrets sealed in the
 database under a master key that can live in a hardware token (D-45, `docs/hardware-key.md`), triggers (schedule, webhook, manual), artifacts that go through the core
-to an S3-compatible store (Garage, D-46), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
+to the storage module (D-60), a service of its own with Garage and/or Caddy nodes behind it (D-46, D-58) and a choice of store per organisation (D-59), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
 (SHD-009). CiNim builds its own images that way (`deploy/examples/self-build`). The steps of a run share a volume (STO-001: a claim per run, `/cicd/workspace` and `/cicd/state`). Not built yet: the UI (apart from the router page), `j.checkout`,
 caches, `ci.parallel`, `ci.matrix`, `ci.input`, `ci.finally`, plugins, plain variables of the four levels, OIDC/RBAC, the audit log and backups. The delivery plan is
 section 17 of the specification; the sections of the specification describe the target, and the status above is the one that holds.
@@ -18,6 +18,7 @@ section 17 of the specification; the sections of the specification describe the 
 | Component | Directory | Role |
 |---|---|---|
 | core | `src/core` | scheduler, log collector (a proxy to vlagent), launch gate, REST API, `/metrics`; state in rqlite |
+| storage module | `src/storage`, `deploy/charts/cinim-storage` | the object stores of a shard behind one HTTP API (D-60): Garage (S3) and/or Caddy nodes with WebDAV, the inventory, the repair; state in rqlite, no volume |
 | job controller | `src/jobcontroller` | creates and tracks step Pods (logic is separate from Kubernetes: `logic.nim` and `backend.nim`), state in sqlite |
 | conductor | `src/conductor`, `src/executor` | Supervisor and run processes; Lua sandbox, journal, replay |
 | shim | `src/shim` | runs the step's command in the Pod: secret masking, log spool, metrics, timeout, events in the Pod log |
@@ -36,7 +37,9 @@ Transport between services: ZeroMQ with CURVE (D-24). HTTP layer: GuildenStern (
 - `docs/variables.md` — the plain variables of an organisation, their precedence under the launch parameters;
 - `docs/hardware-key.md` — the master key of the step secrets in a hardware token (SmartCard-HSM), the key service and its emulator;
 - `docs/triggers.md` — launch parameters and triggers;
-- `docs/artifacts.md` — artifacts, the object store, the spool fallback, moving the storage module out of the core;
+- `docs/artifacts.md` — artifacts, the object store, the spool fallback;
+- `docs/storage-module.md` — the storage module (`cinim-storage`): its API, the stores, the choice per organisation, the phases;
+- `docs/store.md` — the Caddy nodes of the store, the mirror and the measurements that chose them;
 - `docs/ci-pitfalls.md` — known pitfalls of other CI systems and how this platform handles them;
 - `docs/state-machines.md` — state machines (generated: `nim c -r tools/gen_state_docs.nim`);
 - `docs/threat-model.md` — the threat model;

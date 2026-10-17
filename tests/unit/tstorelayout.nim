@@ -1,7 +1,7 @@
 ## DAT-003, D-57 (docs/store.md): how the store node names a file for a key. Every segment of a key becomes one safe file name, the name can be turned back into the key, a name that is
 ## too long keeps a readable start and a hash, and a key that could be a trick (`..`, an empty segment, a control character) is refused and never rewritten. Pure.
 import std/[unittest, strutils, sequtils]
-import store/layout
+import storage/layout
 
 suite "D-57 the escape of a segment":
   test "letters, digits and - _ . + = @ , ( ) stay, a space inside stays":
