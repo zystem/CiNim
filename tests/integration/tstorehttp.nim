@@ -5,7 +5,7 @@
 import std/[unittest, os, osproc, strutils, strtabs, sequtils, times, locks, net, httpclient, atomics, algorithm]
 import checksums/sha2
 import common/httpsrv
-import storage/[httpstore, storeauth]
+import storage/[httpstore, storeauth, curlstream]
 import common/storagebackend
 
 const
@@ -308,6 +308,61 @@ suite "D-57 the mirror over two HTTP nodes":
     check takeMissed() == @[("m/r/slow.txt", "127.0.0.1:29878", "copy")]
     check m.readRange("m/r/slow.txt", 0, 10).data == "x"                           # the stuck node is tried in turn too, and the answer comes from the other
     stuck.close()
+
+suite "D-60 the mirror takes a body as a stream":
+  # the module passes a body on piece by piece through libcurl (storage/curlstream.nim); the nodes check it against the digest they were told first
+  if not listening(port2): p2 = startNode(root2, port2)
+  proc staged(root: string): int = (if dirExists(root / ".up"): toSeq(walkDir(root / ".up")).len else: 0)
+  let staged0 = staged(root1)                                                                  # what earlier tests left there (abandoned uploads), which is not these tests' to judge
+  test "8 MiB in pieces of 64 KiB reaches both nodes whole, and is read back":
+    let m = newHttpMirror(@[n1, n2], 0, note)
+    let data = blob(partSize, 3)
+    check m.putStream("s/r/stream.bin", data.len, sha(data), bodyOf(data, 65536)).ok
+    check readFile(root1 / objectDir("s/r/stream.bin")[1 .. ^1] / ".c0000000") == data
+    check readFile(root2 / objectDir("s/r/stream.bin")[1 .. ^1] / ".c0000000") == data
+    check m.objectSize("s/r/stream.bin").size == data.len
+    check m.readRange("s/r/stream.bin", 100, 10).data == data[100 ..< 110]
+    check staged(root1) == staged0                                                              # nothing is left of the staging
+    check m.deleteObject("s/r/stream.bin").ok
+  test "a digest that is not the body's is refused by the nodes and nothing is published; a sender that breaks off leaves nothing":
+    let m = newHttpMirror(@[n1, n2], 0, note)
+    let data = blob(300_000, 5)
+    let bad = m.putStream("s/r/bad.bin", data.len, sha("another"), bodyOf(data, 4096))
+    check not bad.ok
+    check not m.objectSize("s/r/bad.bin").res.ok
+    let broken: BodySource = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =
+      discard sink(data[0 ..< 100_000])
+      false
+    let cut = m.putStream("s/r/cut.bin", data.len, sha(data), broken)
+    check not cut.ok and cut.retry
+    check not m.objectSize("s/r/cut.bin").res.ok
+    check staged(root1) == staged0
+  test "a node that is away: by default the write fails and may be tried again, with one confirmation it succeeds and the node is named":
+    discard takeMissed()
+    stop p2
+    let strict = newHttpMirror(@[n1, n2], 0, note)
+    let data = blob(1_000_000, 9)
+    let r = strict.putStream("s/r/strict.bin", data.len, sha(data), bodyOf(data, 65536))
+    check not r.ok and r.retry                                                                 # (the node that was up has it: a write that fails on one node is not undone on the other, as before)
+    let lenient = newHttpMirror(@[n1, n2], 1, note)
+    check lenient.putStream("s/r/lenient.bin", data.len, sha(data), bodyOf(data, 65536)).ok
+    check takeMissed() == @[("s/r/lenient.bin", n2.name, "copy")]
+    check lenient.readRange("s/r/lenient.bin", 0, 50).data == data[0 ..< 50]
+    p2 = startNode(root2, port2)
+  test "a multipart upload sent as streams comes back whole; a part with a wrong digest is refused":
+    let m = newHttpMirror(@[n1, n2], 0, note)
+    let a = blob(partSize, 1)
+    let b = blob(777_777, 2)
+    let up = m.createMultipart("s/r/mp.bin")
+    check up.res.ok
+    let p1 = m.uploadPartStream("s/r/mp.bin", up.uploadId, 1, a.len, sha(a), bodyOf(a, 65536))
+    let p2r = m.uploadPartStream("s/r/mp.bin", up.uploadId, 2, b.len, sha(b), bodyOf(b, 65536))
+    check p1.res.ok and p2r.res.ok and p1.etag == etagOf(a) and p2r.etag == etagOf(b)
+    check not m.uploadPartStream("s/r/mp.bin", up.uploadId, 3, b.len, sha("another"), bodyOf(b, 65536)).res.ok
+    check m.completeMultipart("s/r/mp.bin", up.uploadId, @[(1, p1.etag), (2, p2r.etag)]).ok
+    check m.objectSize("s/r/mp.bin").size == a.len + b.len
+    check m.readRange("s/r/mp.bin", partSize - 3, 6).data == (a & b)[partSize - 3 ..< partSize + 3]
+    check m.deleteObject("s/r/mp.bin").ok
 
 suite "D-57 an HTTP node over TLS":
   test "a node with a certificate is spoken to over https, its certificate checked against the file in CINIM_STORE_CA":

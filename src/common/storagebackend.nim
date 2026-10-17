@@ -21,6 +21,12 @@ const
   readSize* = 4 * 1024 * 1024      ## a block of a read
   maxParts* = 10000                ## the limit of S3
 
+type
+  BodySource* = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.}
+    ## a body that is read piece by piece (storage/service.nim): `src(sink)` hands each piece to `sink` as it arrives and returns true when the whole body has come, false when the
+    ## sender broke off. When `sink` answers false the piece is not wanted any more (the transfer it fed has failed), but the source reads the rest and drops it, so that the sender
+    ## still gets an answer and not a reset. A body is read once.
+
 proc fail*(error: string; retry = false): Outcome = Outcome(ok: false, retry: retry, error: error)
 proc done*(): Outcome = Outcome(ok: true)
 
@@ -35,6 +41,36 @@ method readRange*(b: ObjectBackend; key: string; offset, length: int64): tuple[r
 method objectSize*(b: ObjectBackend; key: string): tuple[res: Outcome, size: int64] {.base.} = (fail("not implemented"), -1'i64)
   ## `res.ok` and a size, or `res.ok` false and `res.error` "no such object" when it is not there
 method deleteObject*(b: ObjectBackend; key: string): Outcome {.base.} = fail("not implemented")
+
+proc bodyOf*(data: string; piece = 65536): BodySource =
+  ## a body that is already in memory, as a source (the tests, and the backends that have no streaming of their own)
+  result = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =
+    var live = true
+    var i = 0
+    while i < data.len:
+      let n = min(piece, data.len - i)
+      if live: live = sink(data[i ..< i + n])
+      i += n
+    true
+
+proc collect*(src: BodySource; size: int64): tuple[ok: bool, data: string] =
+  ## the whole body in one string; not ok if the sender broke off or sent another number of bytes than `size`
+  var buf = newStringOfCap(int(min(size, 16 * 1024 * 1024)))
+  let whole = src(proc (chunk: string): bool = (buf.add chunk; true))
+  (whole and int64(buf.len) == size, buf)
+
+method putStream*(b: ObjectBackend; key: string; size: int64; sha256: string; src: BodySource): Outcome {.base.} =
+  ## a whole object of `size` bytes (up to `partSize`) read from `src`; `sha256` is the hex digest of it, which a node that can verify is told before the bytes. The backends that
+  ## can stream override it; this one reads it all and calls `putObject`.
+  let got = collect(src, size)
+  if not got.ok: return fail("the body did not come whole", retry = true)
+  b.putObject(key, got.data)
+
+method uploadPartStream*(b: ObjectBackend; key, uploadId: string; part: int; size: int64; sha256: string; src: BodySource): tuple[res: Outcome, etag: string] {.base.} =
+  ## the same for a part of a multipart upload; `sha256` is the hex digest of the part, which a node that can verify is told before the bytes
+  let got = collect(src, size)
+  if not got.ok: return (fail("the body did not come whole", retry = true), "")
+  b.uploadPart(key, uploadId, part, got.data)
 
 proc roundTrip*(b: ObjectBackend): string =
   ## "" if an object can be put, read back and deleted, and a multipart upload can be started and cancelled; else what failed. The check of `PUT /api/v1/stores/{name}`.

@@ -138,7 +138,9 @@ proc raw(meth, uri: string; headers: seq[(string, string)]): string =
 proc coreCall(meth, uri: string; body = ""; shard = "001"; secret = secret1; extra: seq[(string, string)] = @[]; signedAt = 0'i64): Reply =
   let now = getTime().toUnix()
   let token = signTarget(secret, shard, meth, target(uri), if signedAt > 0: signedAt else: now)
-  dispatch(meth, uri, raw(meth, uri, @[("Authorization", "Bearer " & token), ("X-Cinim-Shard", shard)] & extra), body, now)
+  var more = extra                                   # a PUT of an object or a part names the digest of its body (the module streams it and the stores check it)
+  if meth == "PUT" and body.len > 0 and extra.allIt(it[0].toLowerAscii != "x-content-sha256"): more.add ("X-Content-SHA256", shaOf(body))
+  dispatch(meth, uri, raw(meth, uri, @[("Authorization", "Bearer " & token), ("X-Cinim-Shard", shard)] & more), body, now)
 
 proc adminCall(meth, uri: string; body = ""; token = adminTok): Reply =
   dispatch(meth, uri, raw(meth, uri, @[("Authorization", "Bearer " & token)]), body, getTime().toUnix())
@@ -178,6 +180,15 @@ suite "D-60 the storage module's API":
       check adminCall("DELETE", "/v1/admin/stores/via-post").code == 200
       check adminCall("PUT", "/v1/admin/stores/x1", $ %*{"endpoint": "ftp://nowhere", "bucket": "cinim", "access_key_id": "k", "secret_access_key": "s"}).code == 400
 
+    test "D-60 a store saved without being marked becomes the default when there is none (a registration cut off after its row)":
+      let key = sealKey("a-seal-key-for-the-storage-tests")
+      var c2 = newRq(url)
+      check c2.defaultStoreName() == garage
+      discard c2.execute(%*[["UPDATE storage_stores SET is_default = 0"]])
+      check c2.defaultStoreName() == ""
+      check c2.saveStore(key, garage, StoreConfig(kind: "s3", endpoint: "http://garage.test:3900", region: "garage", bucket: "cinim-artifacts", keyId: "GKabc"), "s3cret-of-garage", false, 1) == ""
+      check c2.defaultStoreName() == garage
+
     test "D-60 a call of the core needs a token made for its shard, method and target":
       check coreCall("GET", "/v1/stores").code == 200
       let list = coreCall("GET", "/v1/stores").js
@@ -205,6 +216,8 @@ suite "D-60 the storage module's API":
       check part.code == 206 and part.body == "storage"
       check coreCall("GET", u).code == 400                                                       # a read names a range
       check coreCall("PUT", u, body, extra = @[("X-Content-SHA256", shaOf("another"))]).code == 400
+      check not memObjects.hasKey(slot(garage, "001/acme/s1_run/dist/app one.txt"))      # a body that is not the one named is taken back (a store that checks nothing had already kept it)
+      check coreCall("PUT", u, body).code == 200
       # another shard does not see it, whatever the key
       check coreCall("GET", u & "?stat", shard = "002", secret = secret2).code == 404
       check coreCall("PUT", u, "of shard two", shard = "002", secret = secret2).code == 200
@@ -215,6 +228,27 @@ suite "D-60 the storage module's API":
       check c.query(%*[["SELECT count(*) FROM storage_objects WHERE store = ? AND key = ?", garage, "001/acme/s1_run/dist/app one.txt"]])["results"][0]{"values"}[0][0].getInt == 0
       check coreCall("DELETE", u).code == 200                                                    # deleting what is not there is fine
       discard coreCall("DELETE", u, shard = "002", secret = secret2)
+
+    test "D-60 a PUT is a stream: it needs the digest first, takes a body in small pieces, and a sender that breaks off leaves nothing":
+      let u = objUri(garage, "acme/s1_run/streamed.bin")
+      let body = "0123456789abcdefghij".repeat(1000)
+      let at = getTime().toUnix()
+      proc put(src: BodySource; len: int; withSha = true; sha = ""): Reply =
+        let tok = signTarget(secret1, "001", "PUT", target(u), at)
+        var h = @[("Authorization", "Bearer " & tok), ("X-Cinim-Shard", "001")]
+        if withSha: h.add ("X-Content-SHA256", (if sha.len > 0: sha else: shaOf(body)))
+        dispatch("PUT", u, raw("PUT", u, h), src, int64(len), at)
+      check put(bodyOf(body), body.len, withSha = false).code == 400                       # no digest: refused before a byte is read
+      check put(bodyOf(body, piece = 7), body.len).code == 200                              # seven bytes at a time
+      check memObjects[slot(garage, "001/acme/s1_run/streamed.bin")] == body
+      check put(bodyOf(body, piece = 4096), body.len, sha = shaOf("not it")).code == 400
+      check not memObjects.hasKey(slot(garage, "001/acme/s1_run/streamed.bin"))               # the store was told to forget what did not match
+      let broken: BodySource = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =
+        discard sink(body[0 ..< 100])
+        false
+      check put(broken, body.len).code == 503                                                # the sender broke off: try again
+      check put(bodyOf(body), 9 * 1024 * 1024).code == 413
+      check coreCall("DELETE", u).code == 200
 
     test "D-60 keys that are not keys, a store that is not there, the default by `_default`":
       check coreCall("PUT", "/v1/stores/" & garage & "/objects/a/../b", "x").code == 400

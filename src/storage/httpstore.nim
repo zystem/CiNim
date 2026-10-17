@@ -14,7 +14,7 @@
 import std/[asyncdispatch, strutils, tables, atomics, times, sysrand, sequtils, uri, os, net, algorithm]
 import layout, sha
 import ../common/storagebackend
-import replicas, storeauth, davclient
+import replicas, storeauth, davclient, curlstream
 export replicas
 
 type
@@ -349,6 +349,63 @@ method uploadPart*(b: HttpMirror; key, uploadId: string; part: int; data: string
     let w = rs.worst
     return (fail(w.error, retry = w.retry), "")
   (done(), etagOf(data))
+
+# ------------------------------------------------------------------ the same as a stream (docs/storage-module.md, "The streaming PUT")
+
+proc streamChunk(b: HttpMirror; dir: string; index: int; size: int64; sha256: string; src: BodySource): tuple[rs: seq[NodeRes], srcOk: bool] =
+  ## a chunk written as a stream to every node at once, through libcurl: the body is passed on piece by piece as the module reads it, and each node checks it against `sha256`, which it is
+  ## told first (`X-Content-SHA256`); a node that answers another digest is not trusted
+  var targets: seq[UpTarget]
+  let now = getTime().toUnix()
+  for n in b.nodes:
+    let target = n.prefix & encodePath(dir & "/" & chunkName(index))
+    targets.add UpTarget(url: n.base & target, caFile: getEnv("CINIM_STORE_CA"), timeoutMs: n.timeoutMs,
+                         headers: @["Authorization: Bearer " & signRequest(n.secret, n.name, "PUT", target, now), hashHeader & ": " & sha256])
+  let sent = streamUpload(targets, size, src)
+  result.srcOk = sent.sourceOk
+  for i, n in b.nodes:
+    let u = sent.results[i]
+    var res = n.verdict(Resp(status: u.status, body: u.body, headers: u.headers, error: n.name & ": " & u.error, silent: u.status == 0), "a PUT of a chunk")
+    if res.ok and res.etag.len > 0 and res.etag != sha256:
+      res = NodeRes(ok: false, retry: true, error: n.name & " stored another content than it was sent")
+    result.rs.add res
+
+proc publishOrDiscard(n: HttpNode; sent: NodeRes; stage, objDir: string): Future[NodeRes] {.async.} =
+  ## after a chunk was written: the node that has it publishes it (one MOVE), the one that has not drops what it may have staged
+  if not sent.ok:
+    discard await n.discardOn(stage)
+    return sent
+  let r = await n.publishOn(stage, objDir)
+  if not r.ok: discard await n.discardOn(stage)
+  return r
+
+method putStream*(b: HttpMirror; key: string; size: int64; sha256: string; src: BodySource): Outcome =
+  let why = validKey(key)
+  if why.len > 0: return fail("the key is not good: " & why)
+  if size > partSize: return fail("a put is at most " & $partSize & " bytes; use a multipart upload")
+  let stage = stagePath(newId())
+  let sent = b.streamChunk(stage, 0, size, sha256, src)
+  if not sent.srcOk:
+    discard gather(b.nodes.mapIt(it.discardOn(stage)))
+    return fail("the body did not come whole", retry = true)
+  let rs = gather(b.nodes.mapIt(it.publishOrDiscard(sent.rs[b.nodes.find(it)], stage, objectDir(key))))
+  if rs.acks < b.minAcks:
+    let w = rs.worst
+    return fail(w.error, retry = w.retry)
+  for i, r in rs:
+    if not r.ok: b.missed(key, i, "copy")
+  done()
+
+method uploadPartStream*(b: HttpMirror; key, uploadId: string; part: int; size: int64; sha256: string; src: BodySource): tuple[res: Outcome, etag: string] =
+  if uploadId.len != 32 or not uploadId.allCharsInSet({'0' .. '9', 'a' .. 'f'}): return (fail("no such upload"), "")
+  if part < 1 or part > maxParts: return (fail("parts are numbered 1.." & $maxParts), "")
+  if size > partSize: return (fail("a part is at most " & $partSize & " bytes"), "")
+  let sent = b.streamChunk(stagePath(uploadId), part - 1, size, sha256, src)
+  if not sent.srcOk: return (fail("the body did not come whole", retry = true), "")
+  if sent.rs.acks < b.minAcks:
+    let w = sent.rs.worst
+    return (fail(w.error, retry = w.retry), "")
+  (done(), sha256 & "-" & $size)         # the etag of a part is its digest and its length (etagOf)
 
 method completeMultipart*(b: HttpMirror; key, uploadId: string; parts: seq[(int, string)]): Outcome =
   if parts.len == 0 or parts.len > maxParts: return fail("an upload has 1.." & $maxParts & " parts")

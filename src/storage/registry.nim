@@ -86,11 +86,11 @@ proc saveStore*(c: var RqClient; key: openArray[byte]; name: string; cfg: StoreC
   if not validStoreName(name): return "a store's name is lowercase letters, digits and -, starting with a letter, at most 32"
   let why = checkConfig(cfg, secret)
   if why.len > 0: return why
-  let none = c.query(%*[["SELECT count(*) FROM storage_stores"]])["results"][0]{"values"}[0][0].getInt == 0
   discard c.execute(%*[["INSERT INTO storage_stores (name, kind, config, secret, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?) " &
     "ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, config = excluded.config, secret = excluded.secret, updated_at = excluded.updated_at",
     name, cfg.kind, configJson(cfg), seal(key, name, secret), now, now]])
-  if none or makeDefault: discard c.setDefaultStore(name)
+  # the default is the first store; "no default" rather than "no store" is the test, so that a registration that was cut off between the row and the mark is put right by the next one
+  if makeDefault or c.defaultStoreName().len == 0: discard c.setDefaultStore(name)
   ""
 
 proc forgetStore*(c: var RqClient; name: string; force: bool): string =

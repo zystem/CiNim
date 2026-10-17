@@ -10,5 +10,7 @@
 import guildenstern/[dispatcher, httpserver]
 export dispatcher, httpserver
 
-proc newService*(onrequest: proc() {.gcsafe, nimcall, raises: [].}): HttpServer =
-  newHttpServer(onrequest, headerfields = ["content-length"])
+proc newService*(onrequest: proc() {.gcsafe, nimcall, raises: [].}; streaming = false): HttpServer =
+  ## `streaming`: the body is not read for the callback; it reads it itself, piece by piece, with `receiveStream` (the storage module does, storage/service.nim). The default reads the
+  ## whole body into the receive buffer (`bufferlength`) first.
+  newHttpServer(onrequest, headerfields = ["content-length"], contenttype = (if streaming: Streaming else: Compact))

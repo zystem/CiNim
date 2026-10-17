@@ -28,7 +28,7 @@ RUN set -eu; mkdir -p /out; tools/proto/nim_flatten.sh build/nimproto >/dev/null
     nim c -d:release -d:shimLogging $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/cicd-shim src/shim/shim.nim; \
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm" -o:/out/core-static src/core/main.nim; \
     nim c -d:release $F --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm" -o:/out/conductor-static src/conductor/main.nim; \
-    nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lsodium -lssl -lcrypto -lm" -o:/out/storage-static src/storage/main.nim; \
+    nim c -d:release -d:ssl -d:curlStatic $F $SSL --passL:"-L/opt/zmq/lib -L/opt/k8s/lib -lsodium -lcurl -lssl -lcrypto -lz -lm" -o:/out/storage-static src/storage/main.nim; \
     nim c -d:release -d:k8sPrefix=/opt/k8s -d:k8sStatic $F --dynlibOverride:sqlite3 --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm" -o:/out/controller-static src/jobcontroller/main.nim; \
     nim c -d:release -d:ssl $F $SSL --passL:"-L/opt/zmq/lib -lsodium -lssl -lcrypto -lm" -o:/out/kekd-emu tools/kekd-emu/main.nim; \
     strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null; \
@@ -54,6 +54,8 @@ ENTRYPOINT ["/cinim-storage"]
 # Build it with TARGETS=caddy-store:cinim-store-dav (tools/image/kaniko-build.sh); it needs the network of the build Pod for the Go modules.
 FROM caddy:2-builder AS caddy-build
 ARG CADDY_WEBDAV_REF=cinim-store
+# no file capability on the binary (xcaddy would set cap_net_bind_service and then fail to run it in a build Pod without that capability); the node listens on 8080
+ENV XCADDY_SETCAP=0
 RUN xcaddy build --with github.com/zystem/caddy-webdav@${CADDY_WEBDAV_REF} --output /caddy-store
 FROM caddy:2 AS caddy-store
 COPY --from=caddy-build /caddy-store /usr/bin/caddy

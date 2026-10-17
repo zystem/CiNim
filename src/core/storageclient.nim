@@ -113,7 +113,7 @@ method createMultipart*(b: RemoteBackend; key: string): tuple[res: Outcome, uplo
   except CatchableError: (fail("the storage module's answer is not an upload id"), "")
 
 method uploadPart*(b: RemoteBackend; key, uploadId: string; part: int; data: string): tuple[res: Outcome, etag: string] =
-  let a = call(HttpPut, b.objectUri(key, "upload=" & encodeUrl(uploadId, usePlus = false) & "&part=" & $part), data)
+  let a = call(HttpPut, b.objectUri(key, "upload=" & encodeUrl(uploadId, usePlus = false) & "&part=" & $part), data, [("X-Content-SHA256", shaHex(data))])
   let o = a.outcomeOf
   if not o.ok: return (o, "")
   try: (done(), parseJson(a.body)["etag"].getStr)

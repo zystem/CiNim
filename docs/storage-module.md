@@ -1,6 +1,6 @@
 # The storage module (`cinim-storage`): a service of its own, with Garage and Caddy behind it
 
-*Status: **phases 0 to 3 are built** (2026-10-17: the choice of store per organisation, D-59; the module as a service of its own, `src/storage`, D-60); the chart (phase 3, `deploy/charts/cinim-storage`) is built too; the check on the TESTING cluster (phase 4) is not. It replaces the store settings that live in the core today (`vault_meta` `objectstore`, `core/objectstore.nim`) and moves the code of `core/s3backend.nim`, `core/httpstore.nim`, `core/storerepair.nim` and `core/storeauth.nim` out of the core. Decisions of the owner (2026-10-17): a service and a chart of their own; the mirror, the repair and the check live in the module, which keeps its state in **rqlite** (the shard's by default) and has **no local state at all**, so it is a plain Deployment that can be restarted at once; the administrator of an organisation chooses its store; the ZeroMQ node `cinim-store` (D-57) goes; tenants are **not** unique across shards, so the shard is part of every key; the protocol is for us to choose.*
+*Status: **phases 0 to 4 are done** (2026-10-17: the choice of store per organisation, D-59; the module as a service of its own, `src/storage`, D-60; its chart `deploy/charts/cinim-storage`; the check on the TESTING cluster, with the findings in "Phase 4 as done"). It replaces the store settings that live in the core today (`vault_meta` `objectstore`, `core/objectstore.nim`) and moves the code of `core/s3backend.nim`, `core/httpstore.nim`, `core/storerepair.nim` and `core/storeauth.nim` out of the core. Decisions of the owner (2026-10-17): a service and a chart of their own; the mirror, the repair and the check live in the module, which keeps its state in **rqlite** (the shard's by default) and has **no local state at all**, so it is a plain Deployment that can be restarted at once; the administrator of an organisation chooses its store; the ZeroMQ node `cinim-store` (D-57) goes; tenants are **not** unique across shards, so the shard is part of every key; the protocol is for us to choose.*
 
 ## What it is
 
@@ -21,9 +21,9 @@ The operations are those of `ObjectBackend`, with the store's name; the action i
 
 | Operation | Request |
 |---|---|
-| put an object (up to 8 MiB) | `PUT /v1/stores/{store}/objects/{key}` with `X-Content-SHA256` (checked when given) |
+| put an object (up to 8 MiB) | `PUT /v1/stores/{store}/objects/{key}` with `X-Content-SHA256` (required; the body is streamed, see below) |
 | start a multipart upload | `POST /v1/stores/{store}/objects/{key}?uploads` -> `{"upload_id"}` |
-| upload a part | `PUT /v1/stores/{store}/objects/{key}?upload={id}&part={n}` -> `{"etag"}` |
+| upload a part | `PUT /v1/stores/{store}/objects/{key}?upload={id}&part={n}` with `X-Content-SHA256` -> `{"etag"}` |
 | complete / abort | `POST …?upload={id}` with `{"parts": [[1, "etag"], ...]}` / `DELETE …?upload={id}` |
 | read a range | `GET /v1/stores/{store}/objects/{key}` with `Range: bytes=a-b` (206; at most 16 MiB) |
 | size | `GET …?stat` -> `{"size"}` |
@@ -32,7 +32,7 @@ The operations are those of `ObjectBackend`, with the store's name; the action i
 | the nodes of a Caddy store ask | `GET /v1/internal/node-auth?node=<id>` (`forward_auth`) |
 | the operator's calls | `/v1/admin/stores...` with the admin token (`Authorization: Bearer <token>`, which the core does not hold): `GET`; `PUT /{name}`, `DELETE /{name}[?force=1]`, `POST /{name}:check`, `POST /{name}:default` |
 
-Errors: 401 (the token), 404 `no_such_object` / `no_such_store`, 409 `not_configured`, 400 for a bad key, range, part or digest, 413 above 8 MiB in one call, 502 when the store said no, 503 with `Retry-After` when the store or the database did not answer (the core treats 5xx and 429 as "try again").
+Errors: 401 (the token), 404 `no_such_object` / `no_such_store`, 409 `not_configured`, 400 for a bad key, range, part or digest (`sha256_required`, `sha256_mismatch`), 413 above 8 MiB in one call, 502 when the store said no, 503 with `Retry-After` when the store or the database did not answer (the core treats 5xx and 429 as "try again").
 
 The core says which shard it is (the header `X-Cinim-Shard`, signed into the token; a header that does not match the token is refused). **The shard is part of every key** in the module: an object `acme/s1_01a1/dist/app.txt` of shard `001` lies as `001/acme/s1_01a1/dist/app.txt`, because the names of tenants repeat between shards. The core still decides who may read or write what (the shim has no route to the store, D-46). The module does not know organisations.
 
@@ -65,7 +65,19 @@ The core says which shard it is (the header `X-Cinim-Shard`, signed into the tok
 * **Network policies** (`networkPolicy.enabled`): the module is reached by the core's Pods and by what the chart installs; the Caddy nodes and Garage only by the module.
 * `default: true` on a store makes it the default at every install and upgrade; with none marked, the first one registered is, and an operator's `:default` stays.
 
-The shard's chart (`cinim-shard`) got `storage: {url, tokenSecret: {name, key}}` and nothing else about stores: the core's `CINIM_STORAGE_URL` and `CINIM_STORAGE_TOKEN`. The sample `helm template` of both charts renders; the registration scripts were run against a stand-in module with the real busybox. **Not tried on a cluster** (phase 4).
+The shard's chart (`cinim-shard`) got `storage: {url, tokenSecret: {name, key}}` and nothing else about stores: the core's `CINIM_STORAGE_URL` and `CINIM_STORAGE_TOKEN`. The sample `helm template` of both charts renders; the registration scripts were run against a stand-in module with the real busybox. Tried on the TESTING cluster in phase 4 (below).
+
+## The streaming PUT (2026-10-17)
+
+The first version took a block whole: the server read a body of up to 8 MiB into a receive buffer of 10 MiB per thread, copied it into a string, and the backends copied it again, so that 16 threads were 170 MiB at rest and the module was killed at 256 MiB (phase 4). It is a stream now:
+
+* **The server** (`common/httpsrv.nim` `newService(streaming = true)`, GuildenStern `Streaming`) has a receive buffer of 64 KiB per thread and gives a route its body as a `BodySource` (`common/storagebackend.nim`): a function that hands the pieces to a sink as they arrive. A route that does not want the body, or a transfer that has failed, has the rest read and dropped, so that the sender gets an answer and not a reset.
+* **A PUT of an object or a part needs `X-Content-SHA256`** (the hex digest of the body; `400 sha256_required` without it) and a `Content-Length` of at most 8 MiB. The core's `RemoteBackend` sends it for both. The digest is told to the store before the bytes: a Caddy node checks it as it writes (a body that is not it is refused and never published), and the module makes the digest as the pieces pass and compares at the end (a store that checks nothing, such as a presigned S3 PUT, has kept the object: the module deletes it, `400 sha256_mismatch`).
+* **The backends** have two more methods, `putStream` and `uploadPartStream` (`ObjectBackend`; the default reads the body whole and calls the old ones, which is what the test doubles do). `HttpMirror` writes a chunk to all nodes at once through libcurl (`storage/curlstream.nim`: a `curl_multi` with a read function per node, which takes a piece, passes it on, and reads the next only when every transfer that is still alive has taken it, so a slow node slows the sender and a block is never in memory), then publishes it with one `MOVE` on the nodes that have it. A node that fails drops out of the pass and its result is kept; whether enough nodes confirmed is decided as before (`minAcks`, the repair queue). `S3Backend` streams to a presigned URL the same way.
+* **Measured** (a spike on the workstation, then `tstorageproc`): eight parallel PUTs of 8 MiB to two Caddy nodes peaked at 17 MiB in the module (302 MiB when the body was buffered, 16 threads), with the same speed (600-700 MiB/s on loopback); six parallel blocks of 8 MiB through the whole chain peaked at 34 MiB. The memory no longer depends on the size of a block or the number of threads, so the block can stay 8 MiB (S3 wants 5 MiB or more).
+* **libcurl is found at run time** (`libcurl.so.4`) in tests and on a workstation, and linked in with `-d:curlStatic` in the image (`tools/image/Dockerfile.kaniko`, the static libcurl that the Kubernetes client build makes in `/opt/k8s`). That is one reason the storage is a module of its own: the libraries that suit a store go there, not into the core.
+* **Tried on the TESTING cluster** (images `h80` of the module and the core, the static libcurl of the image linked in): 20 MB in three parts to Garage (the S3 path, which has no local test) and to the Caddy mirror, both read back with the SHA-256 the step printed; a PUT of 300 KB with a wrong digest to Garage answered `400` and left no object; a Caddy node scaled away during an upload held the step until it came back, then both nodes had the object. The module's memory read by `kubectl top` was 5 MiB at rest and 87-131 MiB after the 20 MB runs (steps upload and then download, and a download is still read into a string, and the allocator keeps what it has had), against 374 MiB before; a version of the core older than this one (it does not send the digest of a part) is refused with `sha256_required`, so the two are rolled out together.
+* **Not streamed**: a read (`GET` of a range, up to 4 MiB, is one string) and the core's side (`RemoteBackend` and ArtifactIngest hold the block, as it comes in one ZeroMQ message). A direct upload from the shim to the module would take the core out of the path (see the open points).
 
 ## Phase 1 as built (D-59)
 
@@ -77,13 +89,27 @@ In the core, before the module exists: tables `object_stores` (name, kind, confi
 
 What is not done: **uploads that were never completed** are aborted by the core's sweep as before, the module keeps no list of them; an object put but whose inventory write failed is found by nobody; the module does not **count bytes** per shard; one **admin token** for all stores; `held_logs` and `audit` are purposes without a user yet.
 
+## Phase 4 as done (the TESTING cluster, 2026-10-17)
+
+Images `h79` (the core, the module, the Caddy node), the chart `cinim-storage` installed next to the shard's release with Garage and two Caddy nodes, the shard's release upgraded with `storage.url`; the old Garage and the ZeroMQ nodes of that shard were deleted (no migration). Checked, with a job of two steps for the organisation `acme`:
+
+* Both stores registered (Garage by its sidecar, Caddy by the hook Job); the round trip of the Caddy store passed through the module's `forward_auth`. `GET /api/v1/stores` and `GET/PUT .../organizations/acme/storage` showed and changed the choice.
+* **Artifacts on Caddy**: a 6-byte and a 20 MB file (three parts) uploaded by one step, downloaded by the API with the same SHA-256 as the step printed; the object is a directory of chunks on **both** nodes. **Caches on Garage**: a run missed and saved, the next hit.
+* **A Caddy node away** (`cinim-storage-caddy` scaled to 1): the step's upload waited (the write is refused while a node is away); after the node came back the run ended `SUCCEEDED` and the object was on both nodes.
+* **The organisation's store switched** (artifacts to Garage): an artifact written earlier still read from Caddy with the same SHA-256, a new one went to Garage (the module's counts: Caddy 3 objects, Garage 2).
+* **The module's Pod killed in the middle of a run**: back in 7 s, the run ended `SUCCEEDED` with both artifacts, the 20 MB file with the SHA-256 the step printed.
+
+Found, and what was done: (1) **the module was OOM-killed at 256 MiB** on the first large upload (16 threads each holding a 10 MiB buffer, and an 8 MiB body copied a few times): the chart's default is now 256 MiB requested and 1 GiB as the limit, and the thread count is a value (`module.threads`, `CINIM_STORAGE_THREADS`). (2) **A registration cut off between the row and the mark left a store without a default** (the cluster's rqlite was slow): `saveStore` now makes a store the default when there is none, test in `tstorage`. (3) The Kaniko build of the Caddy image failed (`xcaddy` sets a file capability and then cannot run the binary in a build Pod; the Dockerfile now has `XCADDY_SETCAP=0`, **not tried again**) and its Go build starved a worker, so that two nodes were `NotReady` for some ten minutes with rqlite on one of them: the Caddy image was built on a workstation (`docker build` of `build/caddy-store`, `skopeo copy`) and pushed. **The cluster runs the module image `h79`, which has neither fix (2) nor the thread value**; the default was set by hand.
+
+Not checked: the repair pass on the cluster (the chart's Caddy store has `minAcks` 0, so a write is refused rather than missed), a node that lost its disk, Garage with more than one node, two replicas of the module and the lease, a day of work, the load of many shims at once.
+
 ## Phases (each is tested first and can stop there)
 
 0. **Measure** (done 2026-10-17): the HTTP server of the services (GuildenStern, `common/httpsrv.nim`) with bodies of 8 MiB on one machine: PUT 150-573 MB/s, GET about 1.9 GB/s, resident memory 112 MiB; it needs `bufferlength` of 10 MiB for `Compact` mode (a body must fit the receive buffer). **The protocol is HTTP** with the token per request.
 1. **In the core, still one process** (built 2026-10-17, D-59): a registry of named stores, the `store` column, the per-organisation choice and its API, the audit event; Garage and Caddy through the code that exists. This already gives the choice of store to organisations.
 2. **The module** (built 2026-10-17, D-60): `src/storage` with the API, the registry and the inventory in `storage_*` tables of rqlite, the shard in every key, the mirror and repair moved from the core, the lease for the pass; the core uses `RemoteBackend`. The in-process backends and the ZeroMQ node are removed.
 3. **The chart** (built 2026-10-17) `cinim-storage` with the Garage bootstrap (a sidecar) and the Caddy StatefulSet, the `storage:` values of `cinim-shard`, the examples replaced, a note on moving an existing shard: **there is no migration**: the store that exists today (its settings and its objects) is deleted, and the stores of the module start empty (decision of the owner, 2026-10-17).
-4. **On the TESTING cluster**: install with Garage, with Caddy, with both; select per organisation; kill a Caddy node; kill the module and see it come back at once; switch an organisation and read the old objects.
+4. **On the TESTING cluster** (done 2026-10-17, see above): install with Garage, with Caddy, with both; select per organisation; kill a Caddy node; kill the module and see it come back at once; switch an organisation and read the old objects.
 
 ## Open points
 

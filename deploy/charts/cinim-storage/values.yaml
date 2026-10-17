@@ -69,9 +69,10 @@ tools:
   image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 
 module:
+  threads: 16                         # of the HTTP server; a body is streamed (64 KiB buffers), so a thread costs little: 6 blocks of 8 MiB at once peaked at 34 MiB in tstorageproc
   resources:
-    requests: {cpu: 50m, memory: 64Mi}
-    limits: {memory: 256Mi}
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 512Mi}             # 256Mi was OOM-killed on the first 20 MB upload before the body was streamed (phase 4)
 
 # Ingress to the module only from the core of the shard and from what this chart installs; the Caddy nodes and Garage only from the module.
 networkPolicy:

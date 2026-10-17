@@ -1,8 +1,9 @@
 ## `ObjectBackend` over the S3 API (core/storagebackend.nim): Garage, MinIO, or S3 itself, path-style, with presigned URLs made by the core for its own calls
 ## (common/sigv4.nim), one HTTP request per operation. Nothing is kept between calls.
-import std/[strutils, httpclient, times]
+import std/[strutils, httpclient, times, os]
 import ../common/sigv4
 import ../common/storagebackend
+import curlstream
 
 type S3Backend* = ref object of ObjectBackend
   endpoint*, region*, bucket*, keyId*, secret*: string
@@ -52,6 +53,27 @@ proc call(b: S3Backend; meth: HttpMethod; key: string; extra: openArray[(string,
     result.res = fail("the store did not answer: " & e.msg, retry = true)
 
 method putObject*(b: S3Backend; key, data: string): Outcome = b.call(HttpPut, key, body = data).res
+
+proc streamTo(b: S3Backend; key: string; extra: openArray[(string, string)]; size: int64; src: BodySource): tuple[res: Outcome, etag: string] =
+  ## one PUT of `size` bytes read from `src` as it comes, through libcurl, to a presigned URL (the payload is not signed, so the caller checks the digest, see storage/service.nim)
+  let url = presignObject("PUT", b.endpoint, b.bucket, key, b.region, b.keyId, b.secret, getTime().toUnix(), callExpires, extra)
+  let sent = streamUpload(@[UpTarget(url: url, timeoutMs: 120000, caFile: getEnv("CINIM_STORE_CA"))], size, src)
+  if not sent.sourceOk: return (fail("the body did not come whole", retry = true), "")
+  let r = sent.results[0]
+  if r.status div 100 == 2:
+    for (k, v) in r.headers:
+      if k == "etag": return (done(), v)
+    return (done(), "")
+  if r.status == 0: return (fail("the store did not answer: " & r.error, retry = true), "")
+  (fail(s3Error(r.status, r.body), retry = r.status in [429, 500, 502, 503, 504]), "")
+
+method putStream*(b: S3Backend; key: string; size: int64; sha256: string; src: BodySource): Outcome =
+  b.streamTo(key, [], size, src).res
+
+method uploadPartStream*(b: S3Backend; key, uploadId: string; part: int; size: int64; sha256: string; src: BodySource): tuple[res: Outcome, etag: string] =
+  let r = b.streamTo(key, [("partNumber", $part), ("uploadId", uploadId)], size, src)
+  if r.res.ok and r.etag.len == 0: return (fail("the store gave no ETag for the part"), "")
+  r
 
 method createMultipart*(b: S3Backend; key: string): tuple[res: Outcome, uploadId: string] =
   let r = b.call(HttpPost, key, [("uploads", "")])

@@ -29,6 +29,7 @@ spec:
           env:
             - {name: CINIM_RQLITE_URL, value: {{ .Values.rqliteUrl | quote }}}
             - {name: CINIM_STORAGE_PORT, value: "18090"}
+            - {name: CINIM_STORAGE_THREADS, value: {{ .Values.module.threads | int | quote }}}
             - {name: CINIM_STORAGE_REPAIR_SECONDS, value: {{ .Values.repairSeconds | int | quote }}}
             - {name: CINIM_STORAGE_CHECK_SECONDS, value: {{ .Values.checkSeconds | int | quote }}}
             - name: CINIM_STORAGE_SHARDS

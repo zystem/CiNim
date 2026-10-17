@@ -4,6 +4,7 @@
 ##   CINIM_STORAGE_SHARDS      `<shard>=<secret>;<shard>=<secret>`: the shards it serves and the secret of each (the core of that shard signs its calls with it)
 ##                             (or, for one shard: CINIM_STORAGE_TOKEN, and CINIM_SHARD, default 001)
 ##   CINIM_STORAGE_ADMIN_TOKEN the operator's token for /v1/admin/... (at least 16 characters)
+##   CINIM_STORAGE_THREADS     the threads of the HTTP server (16); each holds a receive buffer of 10 MiB, so memory is about 20 MiB a thread at the busiest
 ##   CINIM_STORAGE_REPAIR_SECONDS, CINIM_STORAGE_CHECK_SECONDS  how often the repair queue is worked (60) and a slice of the inventory is checked against the nodes (600)
 ##   CINIM_STORAGE_SEAL_KEY    the key the stores' secrets are sealed under in the database (at least 16 characters; keep it apart from the database)
 import std/[os, strutils, tables, atomics, posix, times, json, sequtils]
@@ -46,7 +47,7 @@ proc main() =
       if tries > 60: fatal("rqlite does not answer: " & e.msg)
       sleep 2000
   let port = parseInt(getEnv("CINIM_STORAGE_PORT", "18090"))
-  discard startServer(port)
+  discard startServer(port, parseInt(getEnv("CINIM_STORAGE_THREADS", "16")))
   var repair: Thread[void]
   createThread(repair, repairLoop)
   echo "storage: serving shards ", toSeq(secrets.keys).join(","), " on port ", port

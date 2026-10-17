@@ -131,6 +131,29 @@ suite "D-60 the storage module as a process":
       let inv = c.query(%*[["SELECT count(*) FROM storage_objects WHERE store = 'caddy-main'"]])["results"][0]{"values"}[0][0].getInt
       check inv == 1
 
+    test "D-60 the module streams: several blocks at once, and its memory stays small (the peak is read from /proc)":
+      let be = RemoteBackend(store: "caddy-main")
+      var blocks = newSeq[string](6)
+      for i in 0 ..< blocks.len:
+        blocks[i] = newString(partSize)
+        for j in 0 ..< blocks[i].len: blocks[i][j] = char((j * 31 + i * 7) mod 251)
+      var threads = newSeq[Thread[(int, string)]](blocks.len)
+      proc up(a: (int, string)) {.thread.} =
+        {.cast(gcsafe).}:
+          let b = RemoteBackend(store: "caddy-main")
+          discard b.putObject("acme/s1_run/stream-" & $a[0], a[1])
+      for i in 0 ..< blocks.len: createThread(threads[i], up, (i, blocks[i]))
+      for t in threads.mitems: joinThread(t)
+      for i in 0 ..< blocks.len:
+        check be.objectSize("acme/s1_run/stream-" & $i).size == partSize
+        check be.readRange("acme/s1_run/stream-" & $i, 1000, 5000).data == blocks[i][1000 ..< 6000]
+        check be.deleteObject("acme/s1_run/stream-" & $i).ok
+      var peak = 0
+      for line in lines("/proc/" & $module.processID & "/status"):
+        if line.startsWith("VmHWM:"): peak = parseInt(line.splitWhitespace()[1]) div 1024
+      echo "  (the module's peak resident memory: ", peak, " MiB)"
+      check peak > 0 and peak < 120                           # 16 threads with a 10 MiB buffer each, as before the streaming, were 170 MiB at rest
+
     test "D-60 another shard does not see the object, and a core with a wrong secret is refused":
       configureStorage("http://127.0.0.1:" & $modulePort, secret2, "002")
       let other = RemoteBackend(store: "caddy-main")

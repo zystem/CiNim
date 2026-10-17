@@ -15,9 +15,8 @@
 ##
 ## `dispatch` is the whole of it without a socket, so that the tests call it directly; `serveStorage` puts it behind GuildenStern.
 import std/[json, strutils, uri, times, tables, locks, os, atomics, sequtils]
-import checksums/sha2
 import ../common/[rqlite, storagebackend, httpsrv, storagetoken]
-import schema, seal, registry, repair, replicas, storeauth, httpstore
+import schema, seal, registry, repair, replicas, storeauth, httpstore, sha
 
 type
   BackendMaker* = proc (l: Loaded; onMissed: MissedProc): ObjectBackend {.gcsafe, nimcall.}
@@ -62,9 +61,6 @@ func equalConstTime(a, b: string): bool =
   var diff = a.len xor b.len
   for i in 0 ..< min(a.len, b.len): diff = diff or (ord(a[i]) xor ord(b[i]))
   diff == 0
-
-func sha256Hex(s: string): string =
-  for c in secureHash(Sha_256, s): result.add toHex(ord(c), 2).toLowerAscii
 
 func bearer(raw: string): string =
   let auth = raw.headerOf("authorization")
@@ -117,7 +113,28 @@ proc missedHook(url, store: string): MissedProc =
 
 # ------------------------------------------------------------------ the core's calls
 
-proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[string, string]; raw, body: string; now: int64): Reply =
+const maxSmallBody = 1024 * 1024        ## a body that is read whole (a JSON of the admin API, the list of parts of a complete)
+
+proc readSmall(src: BodySource; len: int64): tuple[ok: bool, data: string] =
+  ## the body of a request that is not an object: read to the end, at most `maxSmallBody`
+  if len > maxSmallBody:
+    discard src(proc (chunk: string): bool = false)       # read and dropped, so that the sender gets the answer
+    return (false, "")
+  collect(src, len)
+
+type Digest = ref object
+  h: Sha256
+  n: int64
+
+proc hashing(src: BodySource; d: Digest): BodySource =
+  ## `src`, with the digest of what passes made as it goes
+  result = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =
+    src(proc (chunk: string): bool =
+      d.h.update chunk
+      d.n += chunk.len
+      sink(chunk))
+
+proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[string, string]; raw: string; src: BodySource; bodyLen: int64; now: int64): Reply =
   let name = if storeArg == defaultName: "" else: storeArg
   let l = c.loadStore(cfg.key, name)
   if not l.ok:
@@ -130,21 +147,30 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
   let be = maker()(l, if l.cfg.isMirror: missedHook(cfg.rqliteUrl, l.name) else: nil)
   case meth
   of "PUT":
+    # the body is a stream (docs/storage-module.md, "The streaming PUT"): it is passed on to the store as it comes and never held whole. The digest is told before the bytes, so that a node
+    # can check it as it writes; the module makes it too, and a body that is not the one named is taken back
+    let given = raw.headerOf("x-content-sha256").toLowerAscii
+    if given.len != 64 or not given.allCharsInSet({'0' .. '9', 'a' .. 'f'}): return problem(400, "sha256_required", "X-Content-SHA256 is the hex digest of the body, sent with the request")
+    if bodyLen > partSize: return problem(413, "too_large", "an object in one call, or a part, is at most " & $partSize & " bytes; use a multipart upload")
+    if bodyLen <= 0: return problem(400, "empty_body", "an object is at least one byte")
+    let dg = Digest(h: initSha256())
+    let body = src.hashing(dg)
     if "upload" in q:
       var n = 0
       try: n = parseInt(q.getOrDefault("part"))
       except ValueError: discard
       if n < 1 or n > maxParts: return problem(400, "invalid_part", "part is 1.." & $maxParts)
-      let r = be.uploadPart(full, q["upload"], n, body)
+      let r = be.uploadPartStream(full, q["upload"], n, bodyLen, given, body)
       if not r.res.ok: return outcomeReply(r.res)
+      if dg.n != bodyLen or dg.h.hexDigest() != given: return problem(400, "sha256_mismatch", "the body is not the one X-Content-SHA256 names")
       return jsonReply(200, %*{"etag": r.etag})
-    let given = raw.headerOf("x-content-sha256").toLowerAscii
-    if given.len > 0 and given != sha256Hex(body): return problem(400, "sha256_mismatch", "the body is not the one X-Content-SHA256 names")
-    if body.len > partSize: return problem(413, "too_large", "an object in one call is at most " & $partSize & " bytes; use a multipart upload")
-    let r = be.putObject(full, body)
+    let r = be.putStream(full, bodyLen, given, body)
     if not r.ok: return outcomeReply(r)
-    c.recordObject(l.name, full, body.len, now)
-    return jsonReply(200, %*{"size": body.len})
+    if dg.n != bodyLen or dg.h.hexDigest() != given:
+      discard be.deleteObject(full)                              # what a store that does not check what it is given has kept
+      return problem(400, "sha256_mismatch", "the body is not the one X-Content-SHA256 names")
+    c.recordObject(l.name, full, bodyLen, now)
+    return jsonReply(200, %*{"size": bodyLen})
   of "POST":
     if "uploads" in q:
       let r = be.createMultipart(full)
@@ -152,8 +178,10 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
       return jsonReply(200, %*{"upload_id": r.uploadId})
     if "upload" in q:
       var parts: seq[(int, string)]
+      let small = readSmall(src, bodyLen)
+      if not small.ok: return problem(400, "invalid_request", "the body is a list of parts, at most 1 MiB")
       try:
-        let j = parseJson(body)
+        let j = parseJson(small.data)
         if j.kind != JObject or j{"parts"} == nil or j["parts"].kind != JArray or j["parts"].len == 0 or j["parts"].len > maxPartsInComplete: return problem(400, "invalid_request", "the body is {\"parts\": [[1, \"etag\"], ...]}")
         for p in j["parts"].elems:
           if p.kind != JArray or p.len != 2 or p[0].kind != JInt or p[1].kind != JString: return problem(400, "invalid_request", "a part is [number, \"etag\"]")
@@ -196,7 +224,7 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
 
 # ------------------------------------------------------------------ the operator's calls
 
-proc admin(c: var RqClient; meth, rest, rawQuery, body: string; now: int64): Reply =
+proc admin(c: var RqClient; meth, rest, rawQuery: string; src: BodySource; bodyLen: int64; now: int64): Reply =
   ## /v1/admin/stores                       GET  the stores with the number of objects and the repair queue
   ## /v1/admin/stores/{name}                PUT (or POST)  {kind: "s3" | "dav", endpoint, region, bucket, access_key_id, secret_access_key | nodes, token, min_acks, default}: tried first, then kept
   ##                                        DELETE  [?force=1]
@@ -236,7 +264,8 @@ proc admin(c: var RqClient; meth, rest, rawQuery, body: string; now: int64): Rep
   # POST does what PUT does, for the registration scripts of the chart, which have only busybox `wget` (it cannot PUT)
   if meth notin ["PUT", "POST"]: return problem(405, "method_not_allowed", "GET, PUT, DELETE, or POST :check / :default")
   var j: JsonNode
-  try: j = parseJson(body)
+  let small = readSmall(src, bodyLen)
+  try: j = (if small.ok: parseJson(small.data) else: nil)
   except JsonParsingError: j = nil
   if j == nil or j.kind != JObject: return problem(400, "invalid_request", "the body is {kind, endpoint, region, bucket, access_key_id, secret_access_key} or {kind: dav, nodes, token, min_acks}")
   var sc = StoreConfig(kind: j{"kind"}.getStr("s3"), endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr)
@@ -261,8 +290,9 @@ proc admin(c: var RqClient; meth, rest, rawQuery, body: string; now: int64): Rep
 
 # ------------------------------------------------------------------ the dispatch
 
-proc dispatch*(meth, uri, raw, body: string; now: int64): Reply =
-  ## one request, answered; `uri` is the request target (path and query), `raw` the whole request (the headers are read from it)
+proc dispatch*(meth, uri, raw: string; src: BodySource; bodyLen: int64; now: int64): Reply =
+  ## one request, answered; `uri` is the request target (path and query), `raw` the whole request (the headers are read from it), `src` the body, `bodyLen` its length. A route that does
+  ## not read the body leaves it to the caller, which reads it to the end before it answers (onRequest).
   let qpos = uri.find('?')
   let path = decodeUrl(if qpos >= 0: uri[0 ..< qpos] else: uri, decodePlus = false)
   let rawQuery = if qpos >= 0: uri[qpos + 1 .. ^1] else: ""
@@ -278,7 +308,7 @@ proc dispatch*(meth, uri, raw, body: string; now: int64): Reply =
       return (if ok: Reply(code: 200, body: "ok") else: Reply(code: 401, body: "no"))
     if path.startsWith("/v1/admin/"):
       if cfg.adminToken.len < 16 or not equalConstTime(bearer(raw), cfg.adminToken): return problem(401, "unauthorized", "the admin token is wrong or none")
-      if path.startsWith("/v1/admin/stores"): return c.admin(meth, path["/v1/admin/stores".len .. ^1].strip(chars = {'/'}), rawQuery, body, now)
+      if path.startsWith("/v1/admin/stores"): return c.admin(meth, path["/v1/admin/stores".len .. ^1].strip(chars = {'/'}), rawQuery, src, bodyLen, now)
       return problem(404, "not_found", "no such route")
     if path == "/v1/stores" or path.startsWith("/v1/stores/"):
       let shard = raw.headerOf("x-cinim-shard")
@@ -294,10 +324,14 @@ proc dispatch*(meth, uri, raw, body: string; now: int64): Reply =
       if slash < 1 or not rest[slash + 1 .. ^1].startsWith("objects/"): return problem(404, "not_found", "no such route")
       let store = rest[0 ..< slash]
       let key = rest[slash + 1 + "objects/".len .. ^1]
-      return c.objectCall(shard, store, key, meth, parseQuery(rawQuery), raw, body, now)
+      return c.objectCall(shard, store, key, meth, parseQuery(rawQuery), raw, src, bodyLen, now)
     return problem(404, "not_found", "no such route")
   except RqError as e:
     return problem(503, "database_unavailable", e.msg, @["Retry-After: 5"])
+
+proc dispatch*(meth, uri, raw, body: string; now: int64): Reply =
+  ## the same with a body that is in memory (the tests)
+  dispatch(meth, uri, raw, bodyOf(body), int64(body.len), now)
 
 # ------------------------------------------------------------------ the background pass
 
@@ -338,7 +372,26 @@ proc repairLoop*() {.thread.} =
 proc onRequest() {.gcsafe, nimcall, raises: [].} =
   {.cast(gcsafe).}:
     try:
-      let r = dispatch(getMethod(), getUri(), getRequest(), getBody(), getTime().toUnix())
+      let meth = getMethod()
+      let uri = getUri()
+      let raw = http.request[0 ..< http.requestlen]  # the headers (getRequest is for the Compact mode); the buffer is reused for the body, so they are read first
+      var bodyLen = 0'i64
+      try: bodyLen = parseBiggestInt(raw.headerOf("content-length"))
+      except ValueError: discard
+      var read = false
+      let src: BodySource = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =
+        read = true
+        var live = true
+        for (state, chunk) in receiveStream():
+          if state == Fail: return false
+          if chunk.len > 0 and live: live = sink(chunk)
+          if state == Complete: break
+        true
+      if bodyLen > 16 * 1024 * 1024:
+        reply(Http413, "{\"error\":\"too_large\"}", ["Content-Type: application/json"])
+        return
+      let r = dispatch(meth, uri, raw, src, bodyLen, getTime().toUnix())
+      if bodyLen > 0 and not read: discard src(proc (chunk: string): bool = false)      # a route that did not want the body: read to the end and dropped, or the sender gets a reset
       let code = HttpCode(r.code)
       if r.headers.len > 0: reply(code, r.body, r.headers) else: reply(code, r.body)
     except Exception as e:
@@ -346,8 +399,8 @@ proc onRequest() {.gcsafe, nimcall, raises: [].} =
       except Exception: discard
 
 proc startServer*(port: int; threads = 16): HttpServer =
-  ## the server of the module; a body of an object is at most 8 MiB, and `Compact` mode wants it in the receive buffer (docs/storage-module.md, phase 0)
-  result = newService(onRequest)
-  result.bufferlength = 10 * 1024 * 1024
+  ## the server of the module. The body is read piece by piece (`Streaming`), so a thread's buffer is small (64 KiB) whatever the size of a block (docs/storage-module.md, "The streaming PUT")
+  result = newService(onRequest, streaming = true)
+  result.bufferlength = 64 * 1024
   result.sockettimeoutms = 60000
   discard result.start(port, uint(threads))
