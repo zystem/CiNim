@@ -414,7 +414,7 @@ proc putFile*(c: ArtifactClient; step: StepRef; token, path, absPath: string; si
       abortUpload(c, step, token, path, began.ack.upload_id, cache)
   putViaCore(c, step, token, path, absPath, size, sha256, patience, cache)
 
-const directReadSize = 1024 * 1024   ## a block of a read from the storage module: a read is one string in the module (and copied a few times), and every thread keeps the most it has had
+const directReadSize = 8 * 1024 * 1024   ## a block of a read from the storage module (the module streams it, so the size costs it nothing)
 
 proc fetchTo*(c: ArtifactClient; step: StepRef; token, path: string; size: uint64; dest: string; patience: int; cache = false; directUrl = ""; grant = ""; directPath = ""): string =
   ## A stored file, block by block, into the file `dest`: from the storage module with the grant when the core gave one (D-61), else (or when the module cannot be reached from here) from

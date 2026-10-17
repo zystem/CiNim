@@ -147,12 +147,13 @@ suite "D-60 the storage module as a process":
       for i in 0 ..< blocks.len:
         check be.objectSize("acme/s1_run/stream-" & $i).size == partSize
         check be.readRange("acme/s1_run/stream-" & $i, 1000, 5000).data == blocks[i][1000 ..< 6000]
+        check be.readRange("acme/s1_run/stream-" & $i, 0, partSize).data == blocks[i]                          # a whole block, streamed by the module
         check be.deleteObject("acme/s1_run/stream-" & $i).ok
       var peak = 0
       for line in lines("/proc/" & $module.processID & "/status"):
         if line.startsWith("VmHWM:"): peak = parseInt(line.splitWhitespace()[1]) div 1024
       echo "  (the module's peak resident memory: ", peak, " MiB)"
-      check peak > 0 and peak < 120                           # 16 threads with a 10 MiB buffer each, as before the streaming, were 170 MiB at rest
+      check peak > 0 and peak < 100                           # 16 threads with a 10 MiB buffer each, as before the streaming, were 170 MiB at rest; reads are streamed too
 
     test "D-60 another shard does not see the object, and a core with a wrong secret is refused":
       configureStorage("http://127.0.0.1:" & $modulePort, secret2, "002")

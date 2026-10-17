@@ -75,6 +75,18 @@ method uploadPartStream*(b: S3Backend; key, uploadId: string; part: int; size: i
   if r.res.ok and r.etag.len == 0: return (fail("the store gave no ETag for the part"), "")
   r
 
+method readStream*(b: S3Backend; key: string; offset, length: int64; sink: PieceSink): Outcome =
+  ## a read that goes to `sink` as it arrives, through libcurl, from a presigned URL (the Range header is not among the signed ones, the signature covers the host only)
+  if length <= 0: return done()
+  let url = presignObject("GET", b.endpoint, b.bucket, key, b.region, b.keyId, b.secret, getTime().toUnix(), callExpires)
+  let r = streamDownload(url, @["Range: bytes=" & $offset & "-" & $(offset + length - 1)], getEnv("CINIM_STORE_CA"), 120000, sink)
+  if r.stopped: return fail("the reader went away")
+  if r.status in 200 .. 299: return done()
+  if r.status == 416: return done()                                  # past the end: nothing there
+  if r.status == 404: return fail("no such object")
+  if r.status == 0: return fail("the store did not answer: " & r.error, retry = true)
+  fail(s3Error(r.status, r.body), retry = r.status in [429, 500, 502, 503, 504])
+
 method createMultipart*(b: S3Backend; key: string): tuple[res: Outcome, uploadId: string] =
   let r = b.call(HttpPost, key, [("uploads", "")])
   if not r.res.ok: return (r.res, "")

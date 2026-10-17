@@ -25,6 +25,7 @@ type
     code*: int
     body*: string
     headers*: seq[string]
+    stream*: proc (sink: PieceSink): Outcome {.closure.}   ## a body that is read from the store and sent as it comes (a read of a range), instead of `body`; the server runs it
 
   ServiceConfig* = object
     rqliteUrl*: string
@@ -39,6 +40,7 @@ const
   maxKeyLen = 1024
   defaultName = "_default"
   maxPartsInComplete = maxParts
+  maxReadBytes = 256 * 1024 * 1024         ## one read; it is streamed, so the limit is a guard against a mistake and not a size in memory
 
 var cfg*: ServiceConfig                      ## set once before the server starts; the threads only read it
 var secretCache: tuple[values: seq[string], at: int64]
@@ -213,10 +215,8 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
       a = parseBiggestInt(ends[0])
       b = parseBiggestInt(ends[1])
     except ValueError: return problem(400, "invalid_range", "Range: bytes=a-b, with both ends")
-    if a < 0 or b < a or b - a + 1 > 16 * 1024 * 1024: return problem(400, "invalid_range", "a read is 1 byte to 16 MiB")
-    let r = be.readRange(full, a, b - a + 1)
-    if not r.res.ok: return outcomeReply(r.res)
-    return Reply(code: 206, body: r.data, headers: @["Content-Type: application/octet-stream"])
+    if a < 0 or b < a or b - a + 1 > maxReadBytes: return problem(400, "invalid_range", "a read is 1 byte to " & $(maxReadBytes div (1024 * 1024)) & " MiB")
+    return Reply(code: 206, headers: @["Content-Type: application/octet-stream"], stream: proc (sink: PieceSink): Outcome = be.readStream(full, a, b - a + 1, sink))
   of "DELETE":
     if "upload" in q:
       let r = be.abortMultipart(full, q["upload"])
@@ -336,9 +336,17 @@ proc dispatch*(meth, uri, raw: string; src: BodySource; bodyLen: int64; now: int
   except RqError as e:
     return problem(503, "database_unavailable", e.msg, @["Retry-After: 5"])
 
+proc materialized*(r: Reply): Reply =
+  ## the answer with its stream read into `body` (the tests, which have no socket to send it to)
+  if r.stream == nil: return r
+  var data = ""
+  let res = r.stream(proc (chunk: string): bool = (data.add chunk; true))
+  if not res.ok and data.len == 0: return outcomeReply(res)
+  Reply(code: r.code, body: data, headers: r.headers)
+
 proc dispatch*(meth, uri, raw, body: string; now: int64): Reply =
   ## the same with a body that is in memory (the tests)
-  dispatch(meth, uri, raw, bodyOf(body), int64(body.len), now)
+  materialized(dispatch(meth, uri, raw, bodyOf(body), int64(body.len), now))
 
 # ------------------------------------------------------------------ the port for shims (D-61)
 
@@ -398,12 +406,12 @@ proc shimDispatch*(meth, uri, raw: string; src: BodySource; bodyLen: int64; now:
         a = parseBiggestInt(ends[0])
         b = parseBiggestInt(ends[1])
       except ValueError: return problem(400, "invalid_range", "Range: bytes=a-b, with both ends")
-      if a < 0 or b < a or b - a + 1 > 8 * 1024 * 1024: return problem(400, "invalid_range", "a read is 1 byte to 8 MiB")
+      if a < 0 or b < a or b - a + 1 > maxReadBytes: return problem(400, "invalid_range", "a read is 1 byte to " & $(maxReadBytes div (1024 * 1024)) & " MiB")
       let l = c.loadStore(cfg.key, store)
       if not l.ok: return problem(if l.error == "no_such_store": 404 else: 409, l.error, "the store is not ready: " & l.error)
-      let r = maker()(l, nil).readRange(shard & "/" & key, a, b - a + 1)
-      if not r.res.ok: return outcomeReply(r.res)
-      return Reply(code: 206, body: r.data, headers: @["Content-Type: application/octet-stream"])
+      let be = maker()(l, nil)
+      let full = shard & "/" & key
+      return Reply(code: 206, headers: @["Content-Type: application/octet-stream"], stream: proc (sink: PieceSink): Outcome = be.readStream(full, a, b - a + 1, sink))
     else:
       return problem(405, "method_not_allowed", "PUT or GET")
   except RqError as e:
@@ -470,6 +478,21 @@ proc serve(route: Router) =
   let r = route(meth, uri, raw, src, bodyLen, getTime().toUnix())
   if bodyLen > 0 and not read: discard src(proc (chunk: string): bool = false)      # a route that did not want the body: read to the end and dropped, or the sender gets a reset
   let code = HttpCode(r.code)
+  if r.stream != nil:
+    # a read: the answer begins with the first piece, so that an error before it (no such object, the store away) is still an answer with a status; an error after it ends the connection
+    var started = false
+    let res = r.stream(proc (chunk: string): bool =
+      if not started:
+        started = replyStartChunked(code, r.headers)
+        if not started: return false
+      replyContinueChunked(chunk))
+    if started:
+      if res.ok: discard replyFinishChunked()
+      else: closeSocket(CloseCalled, "a read failed after it began")
+    else:
+      let e = if res.ok: Reply(code: r.code, body: "", headers: r.headers) else: outcomeReply(res)
+      reply(HttpCode(e.code), e.body, e.headers)
+    return
   if r.headers.len > 0: reply(code, r.body, r.headers) else: reply(code, r.body)
 
 proc guarded(route: Router) {.gcsafe, raises: [].} =

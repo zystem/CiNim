@@ -44,6 +44,7 @@ const
 proc curl_global_init(flags: clong): cint {.curlImp.}
 proc curl_easy_init(): Curl {.curlImp.}
 proc curl_easy_cleanup(h: Curl) {.curlImp.}
+proc curl_easy_perform(h: Curl): cint {.curlImp.}
 proc curl_easy_pause(h: Curl; bits: cint): cint {.curlImp.}
 proc curl_easy_setopt(h: Curl; opt: cint): cint {.curlImp, varargs.}
 proc curl_easy_getinfo(h: Curl; info: cint): cint {.curlImp, varargs.}
@@ -229,3 +230,72 @@ proc streamUpload*(targets: seq[UpTarget]; size: int64; src: BodySource): tuple[
     curl_slist_free_all(lists[i])
   discard curl_multi_cleanup(multi)
   (outRes, srcOk)
+
+# ------------------------------------------------------------------ a read as a stream
+
+type
+  DownState = object
+    handle: Curl
+    sink: PieceSink
+    status: int                      ## the answer's status, asked of libcurl when the first byte comes
+    delivered: int64                 ## bytes handed to the sink
+    stopped: bool                    ## the sink did not want more
+    errBody: string                  ## the start of an answer that is not a success
+
+  DownResult* = object
+    status*: int                     ## 0: there was no answer
+    error*: string                   ## when status is 0: what libcurl said
+    delivered*: int64                ## bytes that went to the sink
+    stopped*: bool                   ## the sink refused more
+    body*: string                    ## the start of an answer that was not a success (up to 4 KiB)
+
+proc downCb(buf: pointer; size, nmemb: csize_t; user: pointer): csize_t {.cdecl.} =
+  let d = cast[ptr DownState](user)
+  let n = int(size * nmemb)
+  if d.status == 0:
+    var code: clong
+    discard curl_easy_getinfo(d.handle, CURLINFO_RESPONSE_CODE, addr code)
+    d.status = int(code)
+  if d.status in 200 .. 299:
+    if n == 0: return 0
+    var piece = newString(n)
+    copyMem(addr piece[0], buf, n)
+    if not d.sink(piece):
+      d.stopped = true
+      return 0                       # libcurl ends the transfer with a write error
+    d.delivered += n
+  elif d.errBody.len < 4096 and n > 0:
+    let take = min(n, 4096 - d.errBody.len)
+    let old = d.errBody.len
+    d.errBody.setLen(old + take)
+    copyMem(addr d.errBody[old], buf, take)
+  csize_t(n)
+
+proc streamDownload*(url: string; headers: seq[string]; caFile: string; timeoutMs: int; sink: PieceSink): DownResult =
+  ## A GET whose body goes to `sink` as it arrives (docs/storage-module.md, "Streaming reads"): an answer that is not a success is kept (the start of it) and not sent on.
+  ensureInit()
+  var st = DownState(sink: sink)
+  let h = curl_easy_init()
+  st.handle = h
+  discard curl_easy_setopt(h, CURLOPT_URL, cstring(url))
+  discard curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1.clong)
+  discard curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT_MS, 5000.clong)
+  discard curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1.clong)
+  discard curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, clong(if timeoutMs > 0: max(1, timeoutMs div 1000) else: 30))
+  discard curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, cast[pointer](downCb))
+  discard curl_easy_setopt(h, CURLOPT_WRITEDATA, addr st)
+  if caFile.len > 0: discard curl_easy_setopt(h, CURLOPT_CAINFO, cstring(caFile))
+  var l: pointer = nil
+  for hd in headers: l = curl_slist_append(l, cstring(hd))
+  if l != nil: discard curl_easy_setopt(h, CURLOPT_HTTPHEADER, l)
+  let rc = curl_easy_perform(h)
+  var code: clong
+  discard curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, addr code)
+  result.status = int(code)
+  result.delivered = st.delivered
+  result.stopped = st.stopped
+  result.body = st.errBody
+  if rc != 0 and not st.stopped: result.error = $curl_easy_strerror(rc)
+  if rc != 0 and result.status == 0: result.error = (if result.error.len > 0: result.error else: "the transfer failed")
+  if l != nil: curl_slist_free_all(l)
+  curl_easy_cleanup(h)

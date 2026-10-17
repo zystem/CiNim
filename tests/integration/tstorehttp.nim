@@ -349,6 +349,40 @@ suite "D-60 the mirror takes a body as a stream":
     check takeMissed() == @[("s/r/lenient.bin", n2.name, "copy")]
     check lenient.readRange("s/r/lenient.bin", 0, 50).data == data[0 ..< 50]
     p2 = startNode(root2, port2)
+  test "D-61 a read goes to the sink piece by piece, across the border of two chunks, past the end, with a node away, and stops when the reader goes away":
+    let m = newHttpMirror(@[n1, n2], 0, note)
+    let a = blob(partSize, 21)
+    let b = blob(300_000, 22)
+    let whole = a & b
+    let up = m.createMultipart("s/r/read.bin")
+    let e1 = m.uploadPartStream("s/r/read.bin", up.uploadId, 1, a.len, sha(a), bodyOf(a, 65536))
+    let e2 = m.uploadPartStream("s/r/read.bin", up.uploadId, 2, b.len, sha(b), bodyOf(b, 65536))
+    check m.completeMultipart("s/r/read.bin", up.uploadId, @[(1, e1.etag), (2, e2.etag)]).ok
+    proc readAll(mm: HttpMirror; off, len: int64): tuple[res: Outcome, data: string, pieces: int] =
+      var data = ""
+      var pieces = 0
+      let r = mm.readStream("s/r/read.bin", off, len, proc (chunk: string): bool = (data.add chunk; inc pieces; true))
+      (r, data, pieces)
+    let across = readAll(m, partSize - 1000, 5000)
+    check across.res.ok and across.data == whole[partSize - 1000 ..< partSize + 4000]
+    let everything = readAll(m, 0, whole.len)
+    check everything.res.ok and everything.data == whole and everything.pieces > 1
+    let tail = readAll(m, whole.len - 10, 1000)                                             # past the end: what there is
+    check tail.res.ok and tail.data == whole[whole.len - 10 .. ^1]
+    let none = readAll(m, whole.len + 5, 100)
+    check none.res.ok and none.data == ""
+    var missing = ""
+    check not m.readStream("s/r/nothing.bin", 0, 100, proc (chunk: string): bool = (missing.add chunk; true)).ok and missing == ""
+    var seen = 0
+    let cut = m.readStream("s/r/read.bin", 0, whole.len, proc (chunk: string): bool = (seen += chunk.len; false))
+    check not cut.ok and "reader went away" in cut.error and seen > 0 and seen < whole.len
+    # a node away: the other one answers, and the stream is unbroken
+    stop p1
+    let one = readAll(m, partSize - 1000, 5000)
+    check one.res.ok and one.data == whole[partSize - 1000 ..< partSize + 4000]
+    p1 = startNode(root1, port1)
+    check m.deleteObject("s/r/read.bin").ok
+
   test "a multipart upload sent as streams comes back whole; a part with a wrong digest is refused":
     let m = newHttpMirror(@[n1, n2], 0, note)
     let a = blob(partSize, 1)

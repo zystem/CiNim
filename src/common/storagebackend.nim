@@ -59,11 +59,28 @@ proc collect*(src: BodySource; size: int64): tuple[ok: bool, data: string] =
   let whole = src(proc (chunk: string): bool = (buf.add chunk; true))
   (whole and int64(buf.len) == size, buf)
 
-type PartRecord* = tuple[part: int, sha256: string, size: int64]
+type
+  PartRecord* = tuple[part: int, sha256: string, size: int64]
+  PieceSink* = proc (chunk: string): bool {.closure.}
+    ## where the pieces of a read go as they come (`readStream`); false: nobody wants more (the reader went away)
+
+const readPiece* = 256 * 1024          ## the size of the pieces a backend without a stream of its own cuts a read into
 
 method uploadedParts*(b: ObjectBackend; key, uploadId: string): tuple[res: Outcome, known: bool, parts: seq[PartRecord]] {.base.} = (done(), false, @[])
   ## D-61: what the storage module itself received for a multipart upload that a shim sent straight to it: the digest and the size of every part. `known` is false for a backend that keeps no such
   ## record (the parts came through the core then, and the core has seen them).
+
+method readStream*(b: ObjectBackend; key: string; offset, length: int64; sink: PieceSink): Outcome {.base.} =
+  ## The same as `readRange`, but the bytes go to `sink` piece by piece as the store gives them, so that a read of any length is never in memory whole. The backends that can stream
+  ## override it; this one reads it all and cuts it into pieces. An error after the first piece is an error of the stream: the pieces that went out went out.
+  let got = b.readRange(key, offset, length)
+  if not got.res.ok: return got.res
+  var i = 0
+  while i < got.data.len:
+    let n = min(readPiece, got.data.len - i)
+    if not sink(got.data[i ..< i + n]): return fail("the reader went away")
+    i += n
+  done()
 
 method putStream*(b: ObjectBackend; key: string; size: int64; sha256: string; src: BodySource): Outcome {.base.} =
   ## a whole object of `size` bytes (up to `partSize`) read from `src`; `sha256` is the hex digest of it, which a node that can verify is told before the bytes. The backends that

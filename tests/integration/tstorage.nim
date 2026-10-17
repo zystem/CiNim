@@ -261,7 +261,7 @@ suite "D-60 the storage module's API":
       proc shimCall(meth, path: string; body = ""; grant = ""; extra: seq[(string, string)] = @[]; src: BodySource = nil): Reply =
         var h = @[("Authorization", "Bearer " & grant)] & extra
         let bs = if src != nil: src else: bodyOf(body)
-        shimDispatch(meth, path, raw(meth, path, h), bs, int64(body.len), now)
+        materialized(shimDispatch(meth, path, raw(meth, path, h), bs, int64(body.len), now))
       let w = signGrant(secret1, "001", garage, key, up, "w", now)
       let path = "/s/" & garage & "/" & encodePath(key)
       let p1 = shimCall("PUT", path & "?upload=" & up & "&part=1", a, w, @[("X-Content-SHA256", shaOf(a))])

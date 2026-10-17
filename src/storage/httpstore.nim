@@ -440,6 +440,55 @@ method readRange*(b: HttpMirror; key: string; offset, length: int64): tuple[res:
     if not r.notFound: lastFail = fail(r.res.error, retry = r.res.retry)
   (lastFail, "")
 
+method readStream*(b: HttpMirror; key: string; offset, length: int64; sink: PieceSink): Outcome =
+  ## A read that goes to `sink` as the nodes give it (docs/storage-module.md, "Streaming reads"): the range is cut at the borders of the chunks, each piece comes from the first node
+  ## that answers, and a node that fails in the middle of a chunk is replaced by the next one from the byte where it stopped, so the reader sees one unbroken stream.
+  let why = validKey(key)
+  if why.len > 0: return fail("the key is not good: " & why)
+  var pos = offset
+  var left = length
+  var emitted = false
+  var lastFail = fail("no such object")
+  while left > 0:
+    let now = getTime().toUnix()                      # a long stream outlives a token
+    let index = int(pos div partSize)
+    let inChunk = pos mod partSize
+    let want = min(left, partSize - inChunk)
+    var done = 0'i64                                  # bytes of this piece that went to the sink
+    var finished = false
+    var allMissing = true
+    for i in b.order():
+      let n = b.nodes[i]
+      let target = n.prefix & encodePath(objectDir(key) & "/" & chunkName(index))
+      let r = streamDownload(n.base & target, @["Authorization: Bearer " & signRequest(n.secret, n.name, "GET", target, now),
+                                              "Range: bytes=" & $(inChunk + done) & "-" & $(inChunk + want - 1)], getEnv("CINIM_STORE_CA"), n.timeoutMs,
+                             proc (chunk: string): bool =
+                               emitted = true
+                               sink(chunk))
+      done += r.delivered
+      pos += r.delivered
+      left -= r.delivered
+      if r.stopped: return fail("the reader went away")
+      if r.status == 404:
+        continue                                      # this node does not have it: another may
+      allMissing = false
+      if r.status == 416:
+        finished = true                               # past the end of the chunk: nothing there, the object ended
+        left = 0
+        break
+      if r.status in 200 .. 299 and r.error.len == 0:
+        if done < want: left = 0                      # a short chunk is the last one
+        finished = true
+        break
+      lastFail = fail(if r.status == 0: n.name & ": " & r.error else: n.name & " answered " & $r.status & " to a GET of a chunk",
+                      retry = r.status == 0 or r.status in [408, 422, 423, 429, 500, 502, 503, 504, 507])
+    if not finished:
+      if allMissing:
+        if emitted or pos != offset: left = 0         # a chunk past the end: the object ended
+        else: return fail("no such object")
+      else: return lastFail
+  done()
+
 method objectSize*(b: HttpMirror; key: string): tuple[res: Outcome, size: int64] =
   let why = validKey(key)
   if why.len > 0: return (fail("the key is not good: " & why), -1'i64)
