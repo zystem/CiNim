@@ -418,7 +418,8 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
         discard c.appendRow(t.step.run_id, stepJournalKey(c, t.step.run_id, int(t.step.seq)), "job_sh", plv[0][0].getStr, res, alongside = %*[
           ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
            protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
-           t.step.run_id, int(t.step.seq), attempt]])
+           t.step.run_id, int(t.step.seq), attempt],
+          ["UPDATE runs SET dirty = 1 WHERE id = ?", t.step.run_id]])
         # the shim could not hand over its artifacts or its log: they are on the run's volume, to be fetched when the controller is told to (core/drains.nim)
         c.noteUndelivered(t.step.run_id, int(t.step.seq), attempt, reason, int(t.exit_code), now)
       except RqError as e:
@@ -764,7 +765,7 @@ proc takeRunLease*(c: var RqClient; master, runId, owner: string; versions: seq[
   let now = getTime().toUnix()
   let st = leaseStateOf(c, runId)
   if not canTake(st, now): return ""
-  let r = c.execute(%*[["UPDATE runs SET lease_attempt = lease_attempt + 1, lease_until = ?, lease_owner = ? " &
+  let r = c.execute(%*[["UPDATE runs SET lease_attempt = lease_attempt + 1, lease_until = ?, lease_owner = ?, dirty = 0 " &
     "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state = ? " &
     (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "RETURNING lease_attempt",
     now + leaseTtlSeconds, owner, runId, st.attempt, now, protoName(rsRunning)]])
@@ -804,8 +805,8 @@ proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versi
   if places <= 0: return
   # one look at what is free: the runs that were led before come first. When nothing is free (the usual case) that is the only query.
   let r = c.query(%*[["SELECT id, lease_attempt FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND profile_id = ? " &
-    (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND id NOT IN " &
-    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?)) AND id NOT IN (SELECT run_id FROM lock_waiters) ORDER BY (lease_attempt > 0) DESC, created_at LIMIT ?",
+    (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND (dirty = 1 OR id NOT IN " &
+    "(SELECT run_id FROM steps WHERE state IN (?, ?, ?))) AND id NOT IN (SELECT run_id FROM lock_waiters) ORDER BY (lease_attempt > 0) DESC, created_at LIMIT ?",
     protoName(rsRunning), getTime().toUnix(), profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), places]])
   var led, fresh: seq[string]
   let vals = r["results"][0]{"values"}
@@ -868,6 +869,11 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     discard c.appendRow(req.run_id, req.key, "params", json, "")
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
+  if req.kind == "park":
+    # every branch of the run waits for something: the lease goes back, and the run is leased again when a step of it has ended (`dirty`) or none is in flight
+    giveBackLease(c, req.run_id, caller.attempt)
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind == "table":
     # the table of step numbers (docs/parallel.md section 3.4), made by the executor before the run's first call: kept once, the first one stays
     if req.payload.len > maxStepTable:
@@ -890,7 +896,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     let nowL = getTime().toUnix()
     if req.kind == lockKind:
       if not c.acquire(req.run_id, lockProfile, name, req.key, cast[string](req.payload), nowL, jobKey):
-        giveBackLease(c, req.run_id, caller.attempt)
+        # pending: the executor gives the lease back (`park`) when no branch can go on
         return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
           kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: true)))
     else:
@@ -961,7 +967,8 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     "VALUES (?, ?, ?, ?, 'sh', ?, ?, ?, ?, ?, ?, ?)",
     schema.newId(), req.run_id, jobId, number, protoName(ssPending), profileId, image, cmd, opts, profile, now]])
   kickProfile(profileId)       # the push channel hands it to the organisation's controller at once
-  giveBackLease(c, req.run_id, caller.attempt)       # the executor suspends the run: it can be leased again as soon as the step is done
+  # pending (`suspended`): the step waits or runs. The lease stays with the executor, which goes on with its other branches and gives it back with `park` when none can
+  # (docs/parallel.md section 6); the end of the step marks the run dirty, and the run is leased again.
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
     kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: true)))
 

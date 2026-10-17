@@ -9,7 +9,11 @@ import luac, sandbox, journal
 
 type
   HostCallProc* = proc (seq: int; kind, payload: string): Option[string] {.closure.}
-    ## Performs a call. `none` suspends the run (approval, waiting for a step).
+    ## Performs a call. `none` is "pending": the call has no answer yet (a step that waits or runs, a lock that is not the run's turn). The branch that made it waits; the others
+    ## go on, and when none can the run is suspended (docs/parallel.md section 5). A call that is pending stays so for the rest of this execution.
+
+  HostSuspend* = object of CatchableError
+    ## Raised by a host that must stop the execution at once and suspend the run, whatever the branches could still do (the lease was lost).
 
   HostRefusal* = object of CatchableError
     ## Raised by a host when the core refuses a call for good (an unknown secret, a profile the shard does not have): the run fails with `code` and the
@@ -35,12 +39,17 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
               params: seq[(string, string)] = @[];
               onSite: proc (seq: int; kind: string; line: int) = nil;
               onCall: proc (seq: int; kind, key: string) = nil;
-              stepKey: proc (): string = nil): ExecResult =
+              stepKey: proc (): string = nil;
+              onPlace: proc (seq: int; kind: string; line: int; ctx: string; nth: int) = nil): ExecResult =
   ## `params` are the launch parameters given when the run was created, as text. `onSite` is told, for every host call that has one, the line of the script it was made on
   ## (a step: docs/parallel.md section 3.4); the table of step numbers is made from it. Every call has a **key**, the identity under which the journal keeps its answer: for a
   ## step `stepKey()` (the caller's `s<number>`; without one `s<n>`, the n-th step), for any other call `<kind>#<n>`, the n-th call of that kind. The journal is found by key, so
   ## a record may be missing or be anywhere (a retry of only the failed steps, branches that end in any order): a call without a record goes to the host. `onCall` is told
   ## the key before the host is.
+  ## `ctx` and `nth` say where a call is made in the tree of branches (docs/parallel.md section 3.1): `ctx` is the path (`m` for `main`, `m.p1[unit]` for the branch `unit` of the first
+  ## `ci.parallel` of `main`) and `nth` the number of this call there: the n-th call of its kind in that context, or for a step the n-th that was made on `line` there. Both are
+  ## counted by the script in the branch, never by the order in which the host answered, so the key of a call is the same in every replay. `onPlace` is told them for every call
+  ## (once, when the call is first made, right before the host is asked), `onSite` the line only.
   ## `runId` is passed to a real (`ci.pipeline`) script's `main(run)` as `run.run_id` (`lua/stdlib/cicd.d.lua`'s `Run` is a bigger table; only `run_id` exists so far). A script that
   ## returns a plain value directly, as the sandbox test fixtures do, ignores the extra argument.
   if not j.verify():
@@ -67,7 +76,8 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
 
   var nargs = 2.cint
   var seq = 0
-  var kindCount = initTable[string, int]()
+  var stepsMade = 0                              # the n-th step, the key of a step when the caller gives no numbers (`stepKey`)
+  var firstPending = ""                          # what the run waits for, for the message of a suspension
   var index = initTable[string, int]()           # key -> place in j.entries, so that a long journal is not searched at every call
   for i, e in j.entries: index[e.key] = i
   # A run that was run again (docs/parallel.md section 11): the journal holds records of kind `retry`, each naming the keys it supersedes. The record of a step that failed stays in
@@ -91,23 +101,27 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
     let hit = sb.limitCode()
     if hit.len > 0: return failed(hit, "limit exceeded")
     if rs == LUA_YIELD:
-      if nres notin 2 .. 3: return failed("script_error", "malformed host call")
-      var line = 0
-      if nres == 3:                  # kind, payload and the line of the script the call was made on
-        line = int(lua_tointegerx(co, -1, nil))
-        lua_settop(co, -2)
-      let kind = fetchString(co, -2)
-      let payload = fetchString(co, -1)
+      let base = lua_gettop(co) - nres + 1
+      let kind = if nres >= 1: fetchString(co, base) else: ""
+      if kind == "__suspend":                    # every branch waits for something (bootstrap.lua `park`)
+        return ExecResult(status: esSuspended, code: "suspended", message: firstPending)
+      if nres != 5: return failed("script_error", "malformed host call")
+      let payload = fetchString(co, base + 1)
+      let line = int(lua_tointegerx(co, base + 2, nil))
+      let ctx = fetchString(co, base + 3)
+      let nth = int(lua_tointegerx(co, base + 4, nil))
       lua_settop(co, 0)
       if kind notin hostKinds:
         return failed("script_error", "unknown host call '" & kind & "'")
       if onSite != nil: onSite(seq, kind, line)          # line 0: the host call has none (a step without one is numbered from the overflow)
+      if onPlace != nil: onPlace(seq, kind, line, ctx, nth)
       var res: string
-      let n = kindCount.getOrDefault(kind, 0)
-      kindCount[kind] = n + 1
-      let key = effectiveKey(if kind == "job_sh": (if stepKey != nil: stepKey() else: "s" & $n) else: kind & "#" & $n)
+      let base0 = if kind == "job_sh": (if stepKey != nil: stepKey() else: "s" & $stepsMade) else: kind & "#" & $nth
+      let key = effectiveKey(if kind != "job_sh" and ctx != "m": ctx & "/" & base0 else: base0)
+      if kind == "job_sh": inc stepsMade
       if onCall != nil: onCall(seq, kind, key)
       let at = index.getOrDefault(key, -1)
+      var pending = false
       if at >= 0:
         let e = j.entries[at]
         if e.kind != kind or e.payload != payload:
@@ -123,15 +137,21 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
           r = host(seq, kind, payload)
         except HostRefusal as refused:
           return failed(if refused.code.len > 0: refused.code else: "script_error", refused.msg)
+        except HostSuspend:
+          return ExecResult(status: esSuspended, code: "suspended", message: "waiting on seq " & $seq & " " & kind)
         if r.isNone:
-          return ExecResult(status: esSuspended, code: "suspended",
-                            message: "waiting on seq " & $seq & " " & kind)
-        res = r.get
-        let e = j.append(key, kind, payload, res)
-        index[key] = j.entries.len - 1
-        if onAppend != nil: onAppend(e)
-      inc seq
-      discard lua_pushlstring(co, res.cstring, csize_t(res.len))
+          pending = true
+          if firstPending.len == 0: firstPending = "waiting on seq " & $seq & " " & kind
+        else:
+          res = r.get
+          let e = j.append(key, kind, payload, res)
+          index[key] = j.entries.len - 1
+          if onAppend != nil: onAppend(e)
+      if pending:
+        lua_pushnil(co)                          # the branch that asked parks; nothing else of this call is kept
+      else:
+        inc seq
+        discard lua_pushlstring(co, res.cstring, csize_t(res.len))
       nargs = 1
     elif rs == LUA_OK:
       result = ExecResult(status: esDone, code: "ok")

@@ -231,6 +231,7 @@ proc migrate*(c: var RqClient) =
       ("runs", "lease_attempt", "INTEGER NOT NULL DEFAULT 0"),    # RUN-008, core/runlease.nim: the attempt of the last lease of the run,
       ("runs", "lease_until", "INTEGER NOT NULL DEFAULT 0"),      # when it runs out (0: given back),
       ("runs", "lease_owner", "TEXT NOT NULL DEFAULT ''"),        # and to whom (the executor's id, for the operator)
+      ("runs", "dirty", "INTEGER NOT NULL DEFAULT 0"),            # docs/parallel.md section 6: a step of the run has ended (or a lock came to it) since it was last leased; the run may be led again even with other steps in flight
       ("execution_profiles", "pod_limit", "INTEGER NOT NULL DEFAULT 20"),              # RUN-004, core/admission.nim: step Pods in flight of the organisation
       ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20"),   # the share of it one run may hold
       ("execution_profiles", "runs_per_conductor", "INTEGER NOT NULL DEFAULT 10"),      # docs/conductors.md: runs one conductor Pod leads at once

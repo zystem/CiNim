@@ -176,6 +176,8 @@ suite "PIP-014 locks of jobs":
       let hb = leased(b)
       let waitAnswer = hb.call("lock", l, "lock#0")
       check suspended(waitAnswer)
+      check leaseUntil(b) > 0                           # pending: the executor gives the lease back itself when no branch can go on
+      check answered(hb.call("park", "", ""))
       check leaseUntil(b) == 0
       check answered(ha.call("unlock", l, "unlock#0"))
       check c.holderOf(defaultProfile, l) == b
@@ -189,6 +191,7 @@ suite "PIP-014 locks of jobs":
       discard ha.call("lock", l, "lock#0")
       let hb = leased(b)
       check suspended(hb.call("lock", l, "lock#0"))
+      discard hb.call("park", "", "")
       var got: seq[string]
       for g in c.leaseForConductor(defaultProfile, master, "cond-t", @[1], 50): got.add g.run_id
       check b notin got

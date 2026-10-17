@@ -140,6 +140,47 @@ suite "RUN-009 the conductor":
       check c.query(%*[["SELECT step_table FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr.startsWith("{\"v\":1")
       check c.query(%*[["SELECT group_concat(seq) FROM run_journal WHERE run_id = ? AND seq >= 0", r]])["results"][0]["values"][0][0].getStr == "0,1,2,3"
       stop p
+    test "PIP-003 ci.parallel: the steps of all branches are made together, a branch goes on when its step ends while the others still run, and the run ends":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t6p")
+      let script = """
+        return ci.pipeline({ main = function(run)
+          local r = ci.parallel({
+            a = function() ci.job({image = "x"}, function(j) j:sh("a1"); j:sh("a2") end) end,
+            b = function() ci.job({image = "x"}, function(j) j:sh("b1"); j:sh("b2") end) end,
+            c = function() ci.job({image = "x"}, function(j) j:sh("c1"); j:sh("c2") end) end,
+          })
+          ci.job({image = "x"}, function(j) j:sh("tail") end)
+          return "done"
+        end })"""
+      let r = co.createRun(script, "t1", o.profile)
+      proc commands(): seq[string] =
+        let v = c.query(%*[["SELECT command FROM steps WHERE run_id = ? AND state = 'PENDING' ORDER BY ordinal", r]])["results"][0]{"values"}
+        if v != nil:
+          for row in v: result.add row[0].getStr
+      proc ordinalOf(cmd: string): int =
+        c.query(%*[["SELECT ordinal FROM steps WHERE run_id = ? AND command = ?", r, cmd]])["results"][0]["values"][0][0].getInt
+      proc waitCommands(want: seq[string]; seconds = 40): bool =
+        let deadline = epochTime() + seconds.float
+        while epochTime() < deadline:
+          if commands() == want: return true
+          sleep 200
+        false
+      check waitCommands(@["a1", "b1", "c1"])                                  # all three first steps at once
+      sleep 500
+      check c.query(%*[["SELECT lease_until FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getInt == 0       # the run waits without a lease
+      finishStep(r, ordinalOf("c1"))                                            # c goes on at once; a and b still wait for their Pods
+      check waitCommands(@["a1", "b1", "c2"])
+      finishStep(r, ordinalOf("a1"))
+      check waitCommands(@["a2", "b1", "c2"])
+      for cmd in ["c2", "b1", "a2"]: finishStep(r, ordinalOf(cmd))
+      check waitCommands(@["b2"])
+      finishStep(r, ordinalOf("b2"))
+      check waitCommands(@["tail"])
+      finishStep(r, ordinalOf("tail"))
+      check waitState(r, "SUCCEEDED")
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 7
+      stop p
     test "PIP-006 a script with more than 200 steps ends before it makes a single one, with step_limit":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t7")

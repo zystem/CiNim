@@ -24,13 +24,15 @@ suite "RUN-008 the lease of a run":
     proc jobSh(run, token: string; seq = 1'u64): ExecutorResponse =
       handleCall(c, co, HostCall(run_id: run, lease_token: token, seq: seq, kind: "job_sh", numbered: true, step_no: uint32(seq),
         payload: cast[seq[byte]]("job-1\talpine\t\t\techo hi")), master)
+    proc park(run, token: string): ExecutorResponse =
+      handleCall(c, co, HostCall(run_id: run, lease_token: token, seq: 9, kind: "park"), master)
     proc refused(r: ExecutorResponse): bool =
       r.body.kind == ExecutorResponseBodyKind.failure and r.body.failure.code == "lease_lost"
     proc answered(r: ExecutorResponse): bool = r.body.kind == ExecutorResponseBodyKind.result
     proc leasable(run: string): bool =
-      ## what the core offers to a conductor: RUNNING, nobody holds it, and no step of it is still PENDING, STARTING or RUNNING
-      let v = c.query(%*[["SELECT 1 FROM runs WHERE id = ? AND state = 'RUNNING' AND (lease_until = 0 OR lease_until < ?) AND id NOT IN " &
-        "(SELECT run_id FROM steps WHERE state IN ('PENDING', 'STARTING', 'RUNNING'))", run, getTime().toUnix()]])["results"][0]{"values"}
+      ## what the core offers to a conductor: RUNNING, nobody holds it, and a step of it has ended since it was last leased or none is PENDING, STARTING or RUNNING
+      let v = c.query(%*[["SELECT 1 FROM runs WHERE id = ? AND state = 'RUNNING' AND (lease_until = 0 OR lease_until < ?) AND (dirty = 1 OR id NOT IN " &
+        "(SELECT run_id FROM steps WHERE state IN ('PENDING', 'STARTING', 'RUNNING')))", run, getTime().toUnix()]])["results"][0]{"values"}
       v != nil and v.len > 0
 
     test "a run is leased to one executor; the second is told it is taken":
@@ -57,7 +59,10 @@ suite "RUN-008 the lease of a run":
       let r = co.createRun("return 1")
       let tok = c.takeRunLease(master, r, "exec-a")
       let resp = jobSh(r, tok)
-      check resp.answered and resp.body.result.suspended
+      check resp.answered and resp.body.result.suspended         # pending: the executor still holds the lease, it may have other branches to go on with
+      check untilOf(r) > 0
+      check params(r, tok).answered
+      check park(r, tok).answered                          # nothing else can go on: the lease goes back
       check untilOf(r) == 0
       check params(r, tok).refused                         # given back
       check not leasable(r)                    # a step is in flight: not offered again until it is done

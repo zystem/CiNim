@@ -165,6 +165,9 @@ suite "RUN-016 conductors on the push channel":
       let a = cl.nextKind("conductor.reply")
       check a.isSome and decodeExecResponse(a.get.payload).body.result.suspended
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ? AND state = 'PENDING'", r]])["results"][0]["values"][0][0].getInt == 1
+      check c.query(%*[["SELECT lease_until FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getInt > 0        # pending: the lease stays with the executor until it parks
+      check cl.sendFrame(call(ses, o.ns, 3, hostCall(r, lease.lease_token, "park", "")))
+      check cl.nextKind("conductor.reply").isSome
       check c.query(%*[["SELECT lease_until FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getInt == 0
       cl.close()
     test "a conductor cannot call for a run of another organisation, or for one that another conductor holds":

@@ -1,22 +1,26 @@
 ## The table of step numbers (docs/parallel.md section 3): before a run is led, the script is run once against a stub host and the places where steps are made are
 ## recorded; the places are numbered in the order in which they were first met, a place that made one step gets one number and a place that made several gets a
 ## block with room to spare. A step finds its number here when it is made. Pure but for the pass itself, which runs the script in a sandbox like any other.
-import std/[options, strutils, json, tables]
+import std/[options, strutils, json, tables, sequtils]
 import sandbox, journal, replay
 
 const
   maxSteps* = 200
-  overflowBase* = 100_000            ## numbers of the steps the pass did not foresee: 100 000, 100 001 ...
+  overflowBase* = 100_000            ## numbers of the steps of `main` the pass did not foresee: 100 000, 100 001 ...
+  branchOverflowBase* = 1_000_000_000   ## ... and those of a branch, which cannot be counted in the order of asking (that is timing): a number of the place alone, below 2 000 000 000
+
 
 type
   Block* = object
     ## the numbers of one place in the script (one line): `size` numbers from `start`, of which `observed` were used by the pass
     line*, start*, size*, observed*: int
+    slots*: seq[string]       ## a place that branches made steps on: `<ctx>#<nth>` of every step the pass saw there, the slot being the place in this list. Empty: a place of `main` alone, numbered by its instance
 
   StepTable* = object
     blocks*: seq[Block]
     overflowNext*: int
     overflowGiven: seq[(int, int, int)]       ## (line, instance, number) of what was given from the overflow, so that asking again gives the same
+    hashTaken: Table[int, string]             ## the numbers given to places of branches that the pass did not see, and to which place
 
   TableResult* = object
     ok*: bool                  ## false: the run is refused (`code` says why); true: the table is usable, `partial` when the pass did not reach the end of the script
@@ -51,16 +55,69 @@ func assignBlocks*(lines: seq[int]): StepTable =
     next += size
   result.overflowNext = overflowBase
 
-proc numberOf*(t: var StepTable; line, instance: int): int =
-  ## The number of the `instance`-th step (from 0) made on `line`: inside the block of that place if it has room, else the next number of the overflow (and the same
-  ## one again if asked again).
+func assignPlaces*(places: seq[(int, string, int)]): StepTable =
+  ## `places`: (line, ctx, nth) of every step the pass made. A line on which only `main` made steps is a block as `assignBlocks` makes it; a line on which a branch made a step
+  ## has exactly as many numbers as steps were seen there, in the order they were seen: a step of a branch is found by the place (`ctx`, `nth`) and not by the order in which
+  ## the branches happened to ask, and the room a loop of unknown length may need is the overflow (`numberOfAt`).
+  var order: seq[int]
+  var onLine: seq[seq[(string, int)]]
+  for (l, ctx, nth) in places:
+    var found = order.find(l)
+    if found < 0:
+      order.add l
+      onLine.add @[]
+      found = order.high
+    onLine[found].add (ctx, nth)
+  var next = 0
+  for i, l in order:
+    let seen = onLine[i]
+    let inBranch = seen.anyIt(it[0] != "m")
+    if inBranch:
+      result.blocks.add Block(line: l, start: next, size: seen.len, observed: seen.len, slots: seen.mapIt(it[0] & "#" & $it[1]))
+      next += seen.len
+    else:
+      let size = blockSize(seen.len)
+      result.blocks.add Block(line: l, start: next, size: size, observed: seen.len)
+      next += size
+  result.overflowNext = overflowBase
+
+func placeHash(line: int; ctx: string; nth: int): int =
+  ## FNV-1a over the text of the place: the same place gives the same number in every execution
+  var h = 2166136261'u32
+  for c in ctx & "|" & $line & "|" & $nth:
+    h = (h xor uint32(ord(c))) * 16777619'u32
+  int(h mod 1_000_000_000'u32)
+
+proc numberOfAt*(t: var StepTable; line: int; ctx: string; nth: int): int =
+  ## The number of the `nth` step (from 0) that the context `ctx` made on `line`. In a block of the pass: its number. Not in one: `main` takes the next number of the overflow (and the
+  ## same one again if asked again; `main` is one sequence, so the order of asking is the order of the script); a branch takes a number made of the place alone, in
+  ## [`branchOverflowBase`, 2 000 000 000), whichever branch asks first. Two places that fall on one number (chance: a few in a million for 200 steps) are told apart by the order in
+  ## which they ask.
   for b in t.blocks:
-    if b.line == line and instance >= 0 and instance < b.size: return b.start + instance
-  for (l, i, n) in t.overflowGiven:
-    if l == line and i == instance: return n
-  result = t.overflowNext
-  inc t.overflowNext
-  t.overflowGiven.add (line, instance, result)
+    if b.line != line: continue
+    if b.slots.len > 0:
+      let at = b.slots.find(ctx & "#" & $nth)
+      if at >= 0: return b.start + at
+    elif ctx == "m" and nth >= 0 and nth < b.size:
+      return b.start + nth
+  if ctx == "m":
+    for (l, i, n) in t.overflowGiven:
+      if l == line and i == nth: return n
+    result = t.overflowNext
+    inc t.overflowNext
+    t.overflowGiven.add (line, nth, result)
+    return
+  let place = ctx & "|" & $line & "|" & $nth
+  var n = branchOverflowBase + placeHash(line, ctx, nth)
+  while t.hashTaken.getOrDefault(n, place) != place:
+    n = if n + 1 >= 2_000_000_000: branchOverflowBase else: n + 1
+  t.hashTaken[n] = place
+  n
+
+proc numberOf*(t: var StepTable; line, instance: int): int =
+  ## The number of the `instance`-th step (from 0) made on `line` by `main`: inside the block of that place if it has room, else the next number of the overflow (and the same
+  ## one again if asked again).
+  t.numberOfAt(line, "m", instance)
 
 proc stubHost(seq: int; kind, payload: string): Option[string] =
   ## the host of the pass: nothing is done, every step succeeds, time stands still
@@ -76,11 +133,11 @@ proc buildTable*(script: string; params: seq[(string, string)] = @[]; apiVersion
   ## more than 200 steps (`step_limit`) and an id used twice (`duplicate_id`).
   var sb = newSandbox(apiVersion = apiVersion)
   var j: Journal
-  var lines: seq[int]
+  var places: seq[(int, string, int)]
   let r = replay.execute(sb, j, script, stubHost, runId = "table", params = params,
-                         onSite = proc (seq: int; kind: string; line: int) = (if kind == "job_sh": lines.add line))
-  result.table = assignBlocks(lines)
-  result.steps = lines.len
+                         onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = (if kind == "job_sh": places.add (line, ctx, nth)))
+  result.table = assignPlaces(places)
+  result.steps = places.len
   result.ok = true
   if r.status == esFailed:
     result.message = r.message
@@ -98,7 +155,10 @@ const tableRules = 1                 ## the version of the rules that make a tab
 proc encodeTable*(t: StepTable): string =
   ## the text the core keeps with the run (`runs.step_table`): a run that is led again, by whichever executor, uses this table and not a new one
   var b = newJArray()
-  for x in t.blocks: b.add %[x.line, x.start, x.size, x.observed]
+  for x in t.blocks:
+    var row = %[x.line, x.start, x.size, x.observed]
+    if x.slots.len > 0: row.add %x.slots
+    b.add row
   $(%*{"v": tableRules, "b": b})
 
 proc decodeTable*(s: string): Option[StepTable] =
@@ -108,8 +168,12 @@ proc decodeTable*(s: string): Option[StepTable] =
     if j.kind != JObject or j{"v"}.getInt != tableRules or j{"b"}.kind != JArray: return none(StepTable)
     var t = StepTable(overflowNext: overflowBase)
     for x in j["b"]:
-      if x.kind != JArray or x.len != 4: return none(StepTable)
-      t.blocks.add Block(line: x[0].getInt, start: x[1].getInt, size: x[2].getInt, observed: x[3].getInt)
+      if x.kind != JArray or x.len notin 4 .. 5: return none(StepTable)
+      var blk = Block(line: x[0].getInt, start: x[1].getInt, size: x[2].getInt, observed: x[3].getInt)
+      if x.len == 5:
+        if x[4].kind != JArray: return none(StepTable)
+        for sl in x[4]: blk.slots.add sl.getStr
+      t.blocks.add blk
     some(t)
   except CatchableError:
     none(StepTable)
@@ -128,6 +192,11 @@ proc onSite*(n: var Numbering; kind: string; line: int) =
   let k = n.counts.getOrDefault(line, 0)
   n.counts[line] = k + 1
   n.lastNo = n.table.numberOf(line, k)
+
+proc onPlace*(n: var Numbering; kind: string; line: int; ctx: string; nth: int) =
+  ## the same, told where in the tree of branches the call is made (`replay.execute`'s `onPlace`): the number is that of the place, whatever the order in which the branches ask
+  if kind != "job_sh": return
+  n.lastNo = n.table.numberOfAt(line, ctx, nth)
 
 type Prepared* = object
   numbering*: Numbering
@@ -161,7 +230,7 @@ proc preflight*(script: string; params: seq[(string, string)] = @[]; apiVersion 
   var j: Journal
   var calls = 0                                 # host calls other than the one that reports the parameters: while there are none, the script has not yet been told anything by a step
   var paramsJson = ""
-  var lines: seq[int]
+  var steps = 0
   proc host(seq: int; kind, payload: string): Option[string] =
     if kind == "params":
       paramsJson = payload
@@ -169,8 +238,8 @@ proc preflight*(script: string; params: seq[(string, string)] = @[]; apiVersion 
     inc calls
     stubHost(seq, kind, payload)
   let r = replay.execute(sb, j, script, host, runId = "check", params = params,
-                         onSite = proc (seq: int; kind: string; line: int) = (if kind == "job_sh": lines.add line))
-  result.steps = lines.len
+                         onSite = proc (seq: int; kind: string; line: int) = (if kind == "job_sh": inc steps))
+  result.steps = steps
   result.paramsJson = paramsJson
   if r.status == esFailed:
     result.code = r.code

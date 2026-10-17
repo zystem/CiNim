@@ -45,6 +45,7 @@ proc finishHandOver(c: var RqClient; w: Waiter) =
   ## the lock is the waiter's: its record is written (once) and it leaves the list, and its profile is told that the run can be led again
   discard c.appendRow(w.runId, w.key, lockKind, w.payload, "")
   discard c.execute(%*[["DELETE FROM lock_waiters WHERE id = ?", w.id]])
+  discard c.execute(%*[["UPDATE runs SET dirty = 1 WHERE id = ?", w.runId]])
   kickProfile(w.profileId)
 
 proc holderOf*(c: var RqClient; profileId, name: string): string =

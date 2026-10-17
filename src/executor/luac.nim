@@ -8,6 +8,7 @@ const
   glueDir = currentSourcePath().parentDir
 
 {.passC: "-I" & luaDir.}
+{.passC: "-DLUAI_MAXCCALLS=400".}          # the nesting of ci.parallel is 200 levels (docs/parallel.md 3.2); each level is a coroutine resumed from C, so the stock 200 would end it at about 190
 {.compile: glueDir / "lua_glue.c".}
 {.compile: luaDir / "lapi.c".}
 {.compile: luaDir / "lauxlib.c".}
@@ -61,6 +62,7 @@ proc lua_settop*(L: LuaState; idx: cint)
 proc lua_type*(L: LuaState; idx: cint): cint
 proc lua_tolstring*(L: LuaState; idx: cint; len: ptr csize_t): cstring
 proc lua_pushstring*(L: LuaState; s: cstring): cstring
+proc lua_pushnil*(L: LuaState)
 proc lua_error*(L: LuaState): cint
 proc lua_sethook*(L: LuaState; f: LuaHook; mask, count: cint)
 proc lua_rawgeti*(L: LuaState; idx: cint; n: int64): cint

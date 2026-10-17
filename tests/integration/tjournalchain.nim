@@ -33,6 +33,7 @@ suite "T-03 the hash chain of the journal":
       for i in 1 .. n:
         discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: uint64(i), kind: "job_sh", numbered: true, step_no: uint32(i),
           payload: cast[seq[byte]]("job-" & $i & "\talpine\t\t\techo " & $i)), master)
+        discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 99, kind: "park"), master)       # the step is pending: the executor gives the lease back
         discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ? AND ordinal = ?", r, i]])
         finishStep(r, i)
         tok = c.takeRunLease(master, r, "exec-t")

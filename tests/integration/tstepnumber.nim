@@ -44,6 +44,7 @@ suite "PIP-003 the number of a step and its place in the journal":
     test "the result of a numbered step is written under the key s<number>, in the order of appending, and the chain holds":
       let (r, tok) = newRunWithLease()
       discard handleCall(c, co, jobSh(r, tok, 0, true, stepNo = 0, key = "job-1"), "master")
+      discard handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 90, kind: "park"), "master")
       finish(r, 0)
       let tok2 = c.takeRunLease("master", r, "exec")
       discard handleCall(c, co, jobSh(r, tok2, 1, true, stepNo = 10, key = "job-2"), "master")

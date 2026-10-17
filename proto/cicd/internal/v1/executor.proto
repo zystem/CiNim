@@ -60,7 +60,8 @@ message HostCall {
 message HostResult {
   uint64 seq = 1;
   bytes result = 2;                  // empty while suspended
-  bool suspended = 3;                // waiting for a step, approval or timer: the executor releases the run
+  bool suspended = 3;                // pending: the call has no answer yet (a step that waits or runs, a lock not yet the run's): the branch that made it waits and the others go on;
+                                     // when none can, the executor gives the lease back with the call `park` (docs/parallel.md sections 5 and 6)
   Failure failure = 4;               // limit exceeded, script_nondeterminism, ...
 }
 

@@ -101,20 +101,25 @@ proc runMode() =
     let resp = callCore(seq, kind, payload, numbered = kind == "job_sh" and prep.numbering.lastNo >= 0, stepNo = max(prep.numbering.lastNo, 0), key = lastKey)
     if resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "lease_lost":
       lostLease = resp.body.failure.detail
-      return none(string)
+      raise (ref HostSuspend)(msg: "the lease was lost")           # nothing more is done for this run, whatever its branches could still do
     if resp.body.kind == ExecutorResponseBodyKind.failure:
       raise (ref HostRefusal)(code: resp.body.failure.code, msg: resp.body.failure.detail)
     if resp.body.kind != ExecutorResponseBodyKind.result: return none(string)
-    if resp.body.result.suspended: return none(string)
+    if resp.body.result.suspended: return none(string)               # pending: the branch that asked waits, the others go on (docs/parallel.md section 5)
     some(cast[string](resp.body.result.result))
   let r = replay.execute(sb, jj, g.script, host, runId = runId, params = g.params.mapIt((it.key, it.value)),
-                         onSite = proc (seq: int; kind: string; line: int) = prep.numbering.onSite(kind, line),
+                         onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = prep.numbering.onPlace(kind, line, ctx, nth),
                          onCall = proc (seq: int; kind, key: string) = (lastKey = key),
                          stepKey = proc (): string = "s" & $max(prep.numbering.lastNo, 0))
   if lostLease.len > 0:
     send(pkLost, lostLease)
   elif r.status == esSuspended:
-    send(pkSuspended, r.message)
+    # every branch waits for a step: the run gives its lease back (the core leases it again when a step has ended) and this process is over
+    let parked = callCore(0, "park", "")
+    if parked.body.kind == ExecutorResponseBodyKind.failure and parked.body.failure.code == "lease_lost":
+      send(pkLost, parked.body.failure.detail)
+    else:
+      send(pkSuspended, r.message)
   else:
     send(pkFinish, wireString(Protobuf.encode(FinishRun(run_id: runId,
       state: (if r.status == esDone: RUN_STATE_SUCCEEDED else: RUN_STATE_FAILED), message: r.message, code: r.code, lease_token: token))))

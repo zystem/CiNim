@@ -102,21 +102,50 @@ string.format = function(fmt, ...)
   return format_(fmt, table.unpack(args, 1, args.n))
 end
 
--- Host API: each call yields (kind, payload) to the Nim driver, which either
--- replays the journaled result or performs the call (PIP-003).
+-- Host API: each call yields to the Nim driver, which either replays the journaled result or performs the call (PIP-003). Where the call is made matters (docs/parallel.md
+-- sections 3.1 and 5): `main` and every branch of `ci.parallel` is a *context* with a path (`m`, `m.p1[unit]`, `m.p1[unit].p2[x]`) and counters of its own, so that the identity of a
+-- call is a function of the structure of the script and never of the order in which the host happened to answer. A branch is a coroutine; its host calls are not made by it
+-- but handed up to the scheduler of `ci.parallel`, which hands them on, and the answer is `nil` when the call is pending (a step that waits or runs): the branch then parks
+-- and the others go on. When nothing can go on the run is suspended; a parked branch is never asked again in the same execution, because nothing it waits for can change in it.
 local yield_, running = coroutine.yield, coroutine.running
+local cocreate, cresume, cstatus = coroutine.create, coroutine.resume, coroutine.status
 local state = {}
+local branch_co = setmetatable({}, { __mode = "k" })       -- the coroutines that are branches of ci.parallel
+
+local function new_ctx(path, depth) return { path = path, depth = depth, kn = {}, ln = {}, jobs = 0, pars = 0 } end
+local cur = new_ctx("m", 0)                                -- the context the running code belongs to
+
+local function park()
+  if running() == state.main then yield_("__suspend") else yield_({ kind = "__park" }) end
+end
 
 local function call(kind, payload, line)
-  if running() ~= state.main then
+  local co = running()
+  if co ~= state.main and not branch_co[co] then
     error("ci." .. kind .. ": host calls are not supported inside nested coroutines", 3)
   end
-  if line then return yield_(kind, payload, line) end      -- `line`: the place of a step in the script, for the table of step numbers; the driver may ignore it
-  return yield_(kind, payload)
+  local ctx = cur
+  local nth
+  if kind == "job_sh" then                                 -- a step is told apart by the line and the n-th time it is made there, in its own context
+    nth = ctx.ln[line or 0] or 0
+    ctx.ln[line or 0] = nth + 1
+  else
+    nth = ctx.kn[kind] or 0
+    ctx.kn[kind] = nth + 1
+  end
+  if co == state.main then
+    local a = yield_(kind, payload, line or 0, ctx.path, nth)
+    if a == nil then park() end                            -- pending and nothing else to do: the run waits
+    return a
+  end
+  local a = yield_({ kind = kind, payload = payload, line = line or 0, ctx = ctx.path, nth = nth })
+  if a == nil then park() end
+  return a
 end
 
 coroutine.yield = function(...)
-  if running() == state.main then
+  local co = running()
+  if co == state.main or branch_co[co] then
     error("coroutine.yield is reserved for host calls in the main script", 2)
   end
   return yield_(...)
@@ -126,7 +155,6 @@ end
 -- `Job:sh` call is one step (RUN-002); `ci.job` itself is plain Lua control flow, not a host call,
 -- same as `for`/`pcall` are not journaled --- only what a job's steps actually do is (PIP-003).
 -- `matrix`, `parallel`, `use`, `ci.input`, services and secrets are not implemented yet.
-local job_seq = 0
 
 -- The limit of steps in a run and the ids that the author gives to jobs and steps (docs/parallel.md section 3). A run has at most 200 steps: the 201st is an error
 -- returned to the author (`step_limit`). An id is 1 to 8 letters and digits starting with a letter (so that it cannot be taken for a number), unique in the run, and a repeat
@@ -799,6 +827,114 @@ function b58f(fmt, ...)
   return table.concat(out)
 end
 
+-- `ci.parallel(branches, opts)` (docs/parallel.md sections 2 and 5): each branch is a coroutine of this Lua state, in the order of the names. A branch runs until it ends or makes a host
+-- call; the call is handed up (to Nim, or to the scheduler of the ci.parallel the branch is nested in) and, if it is answered, the branch goes on at once; if it is pending the branch
+-- parks and the next one starts or goes on. Nothing a parked branch waits for can change inside this execution, so it is not asked again: when no branch can go on, the run waits
+-- (`park`) and is led again, by replay, when a step has ended. `max_parallel` is the number of branches started and not ended at a time; the next to start is always the first that has
+-- not, in the order of the names, so the set of calls does not depend on timing either. The result is a table name -> { ok = true, value = ... } or { ok = false, error = "..." }.
+local MAX_BRANCHES, MAX_DEPTH = 200, 200
+local PARALLEL_FIELDS = { max_parallel = true, keep_going = true }
+
+local function plain(v, depth)
+  local t = type(v)
+  if v == nil or t == "string" or t == "number" or t == "boolean" then return true end
+  if t ~= "table" or depth > 16 or getmetatable(v) ~= nil then return false end
+  for k, x in rawnext, v do
+    local tk = type(k)
+    if not (tk == "string" or tk == "number" or tk == "boolean") or not plain(x, depth + 1) then return false end
+  end
+  return true
+end
+
+local function parallel(spec, opts)
+  if type(spec) ~= "table" then error("ci.parallel: a table of branches expected (name = function, or a list of functions)", 2) end
+  if opts ~= nil and type(opts) ~= "table" then error("ci.parallel: the options are a table", 2) end
+  opts = opts or {}
+  for k in rawnext, opts do
+    if k == "fail_fast" then error("ci.parallel: fail_fast is not implemented yet", 2) end
+    if not PARALLEL_FIELDS[k] then error("ci.parallel: unknown option '" .. tostring_(k) .. "'", 2) end
+  end
+  if opts.keep_going ~= nil and type(opts.keep_going) ~= "boolean" then error("ci.parallel: keep_going must be a boolean", 2) end
+  if opts.max_parallel ~= nil and not (mtype(opts.max_parallel) == "integer" and opts.max_parallel >= 1) then
+    error("ci.parallel: max_parallel is a whole number of at least 1", 2)
+  end
+  local pctx = cur
+  if pctx.depth >= MAX_DEPTH then error("ci.parallel: nesting is at most " .. MAX_DEPTH .. " levels", 2) end
+  local br, n = {}, 0
+  for k, fn in stable_pairs(spec) do
+    n = n + 1
+    if n > MAX_BRANCHES then error("ci.parallel: at most " .. MAX_BRANCHES .. " branches", 2) end
+    local label
+    if mtype(k) == "integer" then label = tostring_(k)
+    elseif type(k) == "string" then label = check_id(k, "ci.parallel: a branch name"); label = k
+    else error("ci.parallel: a branch is named by a string or is a place in a list", 2) end
+    if type(fn) ~= "function" then error("ci.parallel: branch '" .. label .. "' is not a function", 2) end
+    br[n] = { key = k, label = label, fn = fn, state = "new" }
+  end
+  pctx.pars = pctx.pars + 1
+  local base = pctx.path .. ".p" .. pctx.pars
+  for i = 1, n do br[i].ctx = new_ctx(base .. "[" .. br[i].label .. "]", pctx.depth + 1) end
+  local maxp = opts.max_parallel or n
+  local active, finished = 0, 0
+
+  local function settle(b, ok, r)
+    b.state = "done"
+    active = active - 1
+    finished = finished + 1
+    if ok then
+      if plain(r, 0) then b.ok, b.value = true, r
+      else b.ok, b.error = false, "ci.parallel: branch '" .. b.label .. "' returned a value that is not plain data" end
+      return
+    end
+    local msg = type(r) == "string" and r or safe_tostring(r)
+    -- a limit of the run is the run's error, not a branch's result: the whole run ends with it
+    if msg:find("duplicate_id:", 1, true) or msg:find("step_limit:", 1, true) then error(msg, 0) end
+    b.ok, b.error = false, msg
+  end
+
+  local function drive(b, ans)            -- b runs until it ends or parks
+    while true do
+      local saved = cur
+      cur = b.ctx
+      local ok, r = cresume(b.co, ans)
+      cur = saved
+      if not ok then return settle(b, false, r) end
+      if cstatus(b.co) == "dead" then return settle(b, true, r) end
+      if r.kind == "__park" then b.state = "parked" return end
+      -- a call of the branch (or of a branch of a ci.parallel nested in it): on to Nim or to the scheduler above. The answer is a result, or nil when the call is pending; the
+      -- branch is resumed with either and parks itself on nil (`call`, or the scheduler nested in it), so a nested scheduler goes on with its other branches
+      if running() == state.main then ans = yield_(r.kind, r.payload, r.line, r.ctx, r.nth) else ans = yield_(r) end
+    end
+  end
+
+  for i = 1, n do
+    local b = br[i]
+    if active < maxp then
+      b.state = "ready"
+      active = active + 1
+      b.co = cocreate(b.fn)
+      branch_co[b.co] = true
+      drive(b, nil)
+    end
+  end
+  if finished < n then park() end         -- some branch waits, and nothing can go on: the run waits (never comes back in this execution)
+
+  local results, failed = {}, {}
+  for i = 1, n do
+    local b = br[i]
+    if b.ok then results[b.key] = { ok = true, value = b.value }
+    else results[b.key] = { ok = false, error = b.error }; failed[#failed + 1] = b.label end
+  end
+  if #failed > 0 and not opts.keep_going then
+    local first = results[br[1].key] and br[1] or nil
+    for i = 1, n do if not br[i].ok then first = br[i] break end end
+    local why = first.error
+    if #why > 300 then why = why:sub(1, 300) .. "..." end
+    error("parallel: branches failed: " .. table.concat(failed, ", ") .. " (" .. first.label .. ": " .. why .. ")", 2)
+  end
+  return results
+end
+
 G.ci = {
   now = function() return tonumber(call("now", "")) end,
   random = function() return tonumber(call("random", "")) end,
@@ -811,18 +947,20 @@ G.ci = {
     local code, out = call("sh", cmd):match("^(%-?%d+)\n(.*)$")
     return { exit = tonumber(code), outputs = out }
   end,
+  parallel = parallel,
   pipeline = function(spec) return spec end,  -- metadata phase, pure, not journaled (PIP-002)
   string = param_ctor("string"), number = param_ctor("number"), bool = param_ctor("bool"), choice = param_ctor("choice"),
   job = function(opts, fn)
     if type(opts) ~= "table" then error("ci.job: table expected", 2) end
     if type(fn) ~= "function" then error("ci.job: function expected", 2) end
     if opts.id ~= nil then claim_id(check_id(opts.id, "ci.job"), getline()) end
-    job_seq = job_seq + 1
-    local j = setmetatable({ __key = "job-" .. job_seq, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
+    cur.jobs = cur.jobs + 1
+    local j = setmetatable({ __key = (cur.path == "m" and "" or (cur.path .. "/")) .. "job-" .. cur.jobs, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
       __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
       __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env"), __cache = norm_cache(opts.cache, 3) }, Job_mt)
     j.cache = job_cache_api(j)
     local lock = norm_lock(opts.lock)
+    if lock and cur.path ~= "m" then error("ci.job: a lock inside a branch of ci.parallel is not supported yet", 2) end
     if lock then call("lock", lock .. "\t" .. j.__key) end   -- the run waits here, suspended, until the lock is its turn; the job is named so that the lock can show who holds it
     local ok, err = pcall(fn, j)
     if lock then call("unlock", lock) end           -- also when the job ended with an error
