@@ -181,6 +181,29 @@ suite "RUN-009 the conductor":
       check waitState(r, "SUCCEEDED")
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 7
       stop p
+    test "RUN-006 ci.parallel with fail_fast: the first failed step cancels the steps of the other branches and the run ends with the failure":
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t6f")
+      let script = """
+        return ci.pipeline({ main = function(run)
+          ci.parallel({
+            a = function() ci.job({image = "x"}, function(j) j:sh("a1"); j:sh("a2") end) end,
+            b = function() ci.job({image = "x"}, function(j) j:sh("b1") end) end,
+            c = function() ci.job({image = "x"}, function(j) j:sh("c1") end) end,
+          }, { fail_fast = true })
+        end })"""
+      let r = co.createRun(script, "t1", o.profile)
+      let deadline = epochTime() + 40
+      while epochTime() < deadline and pendingOrdinals(r).len < 3: sleep 200
+      check pendingOrdinals(r).len == 3
+      let b = c.query(%*[["SELECT ordinal FROM steps WHERE run_id = ? AND command = 'b1'", r]])["results"][0]["values"][0][0].getInt
+      discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ? AND ordinal = ?", r, b]])
+      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: uint32(b), attempt: 1), state: STEP_STATE_FAILED, exit_code: 3, termination_reason: "failed"))
+      check waitState(r, "FAILED")
+      check c.query(%*[["SELECT fail_message FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr.contains("parallel: branches failed: b")
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ? AND state = 'CANCELED'", r]])["results"][0]["values"][0][0].getInt == 2
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 3         # a2 was never made
+      stop p
     test "PIP-006 a script with more than 200 steps ends before it makes a single one, with step_limit":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t7")

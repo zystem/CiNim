@@ -1,7 +1,7 @@
 ## PIP-003 / PIP-004 / docs/parallel.md sections 3, 5 and 8: `ci.parallel`, the branch scheduler in the sandbox, first slice (no `fail_fast`, no `ci.matrix`).
 ## Pure: a fake host stands for the core; "a step is done" is a set of commands. The script is run again, in a fresh sandbox with the journal so far, after every
 ## completion, as a run is led again by a conductor each time a step has ended.
-import std/[unittest, strutils, sequtils, sets, options, algorithm, tables]
+import std/[unittest, strutils, sequtils, sets, options, algorithm, tables, json]
 import executor/[steptable, sandbox, journal, replay]
 
 type
@@ -277,8 +277,8 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
       let r = replay.execute(sb, j, "return ci.pipeline({ main = function(run) ci.parallel({ a = function() end }, { max_parallel = " & bad & " }) end })",
                              proc (seq: int; kind, payload: string): Option[string] = some(""))
       check r.status == esFailed and "max_parallel" in r.message
-  test "an unknown option, and fail_fast which is not built yet, are refused":
-    for opt in ["bogus = true", "fail_fast = true"]:
+  test "an unknown option, and a fail_fast that is not a boolean, are refused":
+    for opt in ["bogus = true", "fail_fast = 'yes'"]:
       var sb = newSandbox()
       var j: Journal
       let r = replay.execute(sb, j, "return ci.pipeline({ main = function(run) ci.parallel({ a = function() end }, { " & opt & " }) end })",
@@ -430,3 +430,168 @@ suite "PIP-003 ci.parallel: the table":
       end })"""
     let r = buildTable(script)
     check not r.ok and r.code == "step_limit"
+
+
+type FastRound = object
+  result: ExecResult
+  asked: seq[string]            ## the commands the host was asked about
+  cancels: seq[JsonNode]        ## the decisions the host was asked to take (kind par_cancel), as the core would get them
+
+proc fastRound(script: string; table: StepTable; j: var Journal; failed, done: HashSet[string]): FastRound =
+  ## like runRound, and a host that takes the decision of fail_fast the way the core does: the steps named are cancelled, which is written to the journal as the answer of each
+  ## of them (`~canceled:<path>`), and the decision itself is answered with the branches that were not started
+  var sb = newSandbox()
+  var n = newNumbering(table)
+  var r: FastRound
+  var byKey: Table[string, string]          # step key -> the payload of its call
+  var sentinels: seq[(string, string, string)]
+  let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
+    case kind
+    of "job_sh":
+      let cmd = cmdOf(payload)
+      r.asked.add cmd
+      byKey["s" & $n.lastNo] = payload
+      if cmd in failed: return some("3\n")
+      if cmd in done: return some("0\n")
+      return none(string)
+    of "par_cancel":
+      let d = parseJson(payload)
+      r.cancels.add d
+      for k in d["steps"]: sentinels.add (k.getStr, byKey[k.getStr], "~canceled:" & d["by"].getStr)
+      return some("u:" & d["unstarted"].mapIt(it.getStr).join("\t"))
+    else: return some("")
+  r.result = replay.execute(sb, j, script, host,
+    onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = n.onPlace(kind, line, ctx, nth),
+    stepKey = proc (): string = "s" & $max(n.lastNo, 0))
+  for (k, p, res) in sentinels: discard j.append(k, "job_sh", p, res)
+  r
+
+const fastScript = """
+return ci.pipeline({ main = function(run)
+  local r = ci.parallel({
+    a = function() ci.job({image = "x"}, function(j) j:sh("a1"); j:sh("a2") end); return "A" end,
+    b = function() ci.job({image = "x"}, function(j) j:sh("b1") end); return "B" end,
+    c = function() ci.job({image = "x"}, function(j) j:sh("c1") end); return "C" end,
+  }, { fail_fast = true KEEP })
+  return "survived"
+end })
+"""
+
+suite "RUN-006 fail_fast: the first failure cancels the branches that still run":
+  test "a failed branch cancels the steps of the others, which are told so in the journal; ci.parallel raises, naming the failed branch":
+    let script = fastScript.replace(" KEEP", "")
+    let table = buildTable(script).table
+    var j: Journal
+    var r = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    check r.result.status == esSuspended and r.asked == @["a1", "b1", "c1"] and r.cancels.len == 0
+    r = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    check r.result.status == esFailed and r.result.code == "script_error"
+    check "parallel: branches failed: b" in r.result.message and "canceled: a, c" in r.result.message
+    check r.cancels.len == 1
+    check r.cancels[0]["by"].getStr == "m.p1" and r.cancels[0]["failed"].getStr == "b"
+    check r.cancels[0]["steps"].len == 2 and r.cancels[0]["unstarted"].len == 0
+    check j.entries.anyIt(it.kind == "par_cancel" and it.key == "m.p1/par_cancel#0")
+    check j.entries.countIt(it.result == "~canceled:m.p1") == 2
+    check j.verify()
+  test "the run is replayed from its journal with no new step and no new decision, and ends the same way":
+    let script = fastScript.replace(" KEEP", "")
+    let table = buildTable(script).table
+    var j: Journal
+    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    let first = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    for round in 1 .. 2:
+      let again = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+      check again.asked.len == 0 and again.cancels.len == 0
+      check again.result.status == esFailed and again.result.message == first.result.message
+  test "keep_going returns the table: the failed branch failed, the cancelled ones are marked so":
+    let script = fastScript.replace(" KEEP", ", keep_going = true").replace("return \"survived\"",
+      "return tostring(r.a.canceled) .. tostring(r.a.error) .. tostring(r.b.ok) .. tostring(r.b.canceled) .. tostring(r.c.canceled)")
+    let table = buildTable(script).table
+    var j: Journal
+    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    check r.result.status == esDone and r.result.value == "truecanceledfalseniltrue"
+  test "a branch that finished before the failure keeps its result; only the branches still running are cancelled":
+    let script = fastScript.replace(" KEEP", ", keep_going = true").replace("return \"survived\"", "return tostring(r.a.ok) .. tostring(r.c.ok) .. tostring(r.c.value) .. tostring(r.b.ok)")
+    let table = buildTable(script).table
+    var j: Journal
+    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, table, j, ["b1"].toHashSet, ["c1"].toHashSet)
+    check r.result.status == esDone and r.result.value == "falsetrueCfalse"
+    check r.cancels[0]["steps"].len == 1                      # a1 only: c1 had ended
+  test "no failure, no decision":
+    let script = fastScript.replace(" KEEP", "")
+    let table = buildTable(script).table
+    var j: Journal
+    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    var r = fastRound(script, table, j, initHashSet[string](), ["a1", "b1", "c1"].toHashSet)
+    r = fastRound(script, table, j, initHashSet[string](), ["a1", "b1", "c1", "a2"].toHashSet)
+    check r.result.status == esDone and r.result.value == "survived" and r.cancels.len == 0
+  test "with max_parallel a branch not started is cancelled without a step, and a replay does not start it even when slots are free":
+    let script = """
+      return ci.pipeline({ main = function(run)
+        local r = ci.parallel({
+          a = function() ci.job({image = "x"}, function(j) j:sh("a1") end) end,
+          b = function() ci.job({image = "x"}, function(j) j:sh("b1") end) end,
+          c = function() ci.job({image = "x"}, function(j) j:sh("c1") end) end,
+          d = function() ci.job({image = "x"}, function(j) j:sh("d1") end) end,
+        }, { fail_fast = true, max_parallel = 2 })
+      end })"""
+    let table = buildTable(script).table
+    var j: Journal
+    var r = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    check r.asked == @["a1", "b1"]
+    r = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    check r.asked == @["a1", "b1", "c1"]                       # b's slot goes to c, d has none
+    check r.result.status == esFailed
+    check r.cancels[0]["unstarted"].mapIt(it.getStr) == @["d"] and r.cancels[0]["steps"].len == 2
+    let again = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    check again.asked.len == 0 and again.cancels.len == 0       # a and c are cancelled in the journal, so their slots are free: d is still not started
+    check again.result.status == esFailed
+  test "a failure in a nested ci.parallel cancels the steps of that one only; a failure above cancels everything below":
+    let script = """
+      return ci.pipeline({ main = function(run)
+        local r = ci.parallel({
+          o = function()
+            ci.parallel({
+              p = function() ci.job({image = "x"}, function(j) j:sh("op") end) end,
+              q = function() ci.job({image = "x"}, function(j) j:sh("oq") end) end,
+            })
+            ci.job({image = "x"}, function(j) j:sh("after") end)
+          end,
+          w = function() ci.job({image = "x"}, function(j) j:sh("w1") end) end,
+        }, { fail_fast = true })
+      end })"""
+    let table = buildTable(script).table
+    var j: Journal
+    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, table, j, ["w1"].toHashSet, initHashSet[string]())
+    check r.asked == @["op", "oq", "w1"]
+    check r.result.status == esFailed and r.cancels.len == 1
+    check r.cancels[0]["steps"].len == 2                         # the two steps of the nested branches
+    let again = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    check again.asked.len == 0 and again.cancels.len == 0       # nothing is asked: `after` is not reached, the nested branches are cancelled from above
+    check again.result.status == esFailed
+  test "the decision of a nested ci.parallel does not touch the branches above it":
+    let script = """
+      return ci.pipeline({ main = function(run)
+        local r = ci.parallel({
+          o = function()
+            local inner = ci.parallel({
+              p = function() ci.job({image = "x"}, function(j) j:sh("op") end) end,
+              q = function() ci.job({image = "x"}, function(j) j:sh("oq") end) end,
+            }, { fail_fast = true, keep_going = true })
+            return tostring(inner.p.ok) .. tostring(inner.q.canceled)
+          end,
+          w = function() ci.job({image = "x"}, function(j) j:sh("w1") end); return "W" end,
+        })
+        return r.o.value .. r.w.value
+      end })"""
+    let table = buildTable(script).table
+    var j: Journal
+    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    var r = fastRound(script, table, j, ["op"].toHashSet, ["w1"].toHashSet)
+    check r.cancels.len == 1 and r.cancels[0]["by"].getStr == "m.p1[o].p1" and r.cancels[0]["steps"].len == 1
+    check r.result.status == esDone and r.result.value == "falsetrueW"
+    r = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    check r.asked.len == 0 and r.result.status == esDone and r.result.value == "falsetrueW"

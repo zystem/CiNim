@@ -848,6 +848,21 @@ proc giveBackLease(c: var RqClient; runId: string; attempt: int) =
   ## the executor suspends or ends the run: the next one may take it at once
   discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ? AND lease_attempt = ?", runId, attempt]])
 
+proc cancelStepByDecision*(c: var RqClient; runId: string; ordinal: int; by: string): bool =
+  ## fail_fast: the step is CANCELED (a step that waits is never handed out, one that runs is told to stop) and its record in the journal, `~canceled:<by>`, is the answer the script
+  ## gets. One transaction with the record: if the step has a record already (it ended) nothing is done and false is returned.
+  let pl = c.query(%*[["SELECT j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command " &
+    "FROM steps s JOIN jobs j ON j.id = s.job_id WHERE s.run_id = ? AND s.ordinal = ?", runId, ordinal]])["results"][0]{"values"}
+  if pl == nil or pl.len == 0: return false
+  let now = $getTime().toUnix()
+  try:
+    c.appendRow(runId, stepJournalKey(c, runId, ordinal), "job_sh", pl[0][0].getStr, "~canceled:" & by, alongside = %*[
+      ["UPDATE steps SET state = ?, finished_at = ?, version = version + 1 WHERE run_id = ? AND ordinal = ? AND state IN (?, ?, ?)",
+       protoName(ssCanceled), now, runId, ordinal, protoName(ssPending), protoName(ssStarting), protoName(ssRunning)]])
+  except RqError as e:
+    stderr.writeLine "core: could not cancel step " & runId & "/" & $ordinal & ": " & e.msg
+    false
+
 proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): ExecutorResponse =
   ## Every host call becomes a step and the run suspends: the step's result (from a job-controller's
   ## PodTransition) lands in run_journal asynchronously, and the executor re-leases the run to continue.
@@ -869,6 +884,40 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     discard c.appendRow(req.run_id, req.key, "params", json, "")
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
+  if req.kind == "par_cancel":
+    # The decision of `fail_fast` (docs/parallel.md section 6): a branch of a ci.parallel failed, the steps of the branches still running are cancelled. Each cancelled step is answered in the
+    # journal at once (`~canceled:<path of the ci.parallel>`), so the answer is the same in every replay whatever the Pod does meanwhile; a step that has ended already has its record and is
+    # left as it is. The decision itself is written under its key; its result is the branches that were not started, which a replay must not start. The Pods are removed by the
+    # controllers (a step that is CANCELED is not wanted, as in `cancelRun`).
+    if req.key.len == 0:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a host call without its key in the journal")))
+    let text = cast[string](req.payload)
+    var by = ""
+    var unstarted: seq[string]
+    var keys: seq[string]
+    try:
+      let d = parseJson(text)
+      by = d{"by"}.getStr
+      if d{"unstarted"} != nil and d{"unstarted"}.kind == JArray:
+        for u in d{"unstarted"}.elems: unstarted.add u.getStr
+      if d{"steps"} != nil and d{"steps"}.kind == JArray:
+        for k in d{"steps"}.elems: keys.add k.getStr
+    except CatchableError:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "the decision of fail_fast is not understood")))
+    for k in keys:
+      if k.len < 2 or k[0] != 's' or by.len == 0: continue
+      var digits = ""
+      for ch in k[1 .. ^1]:
+        if ch notin {'0' .. '9'}: break
+        digits.add ch
+      if digits.len > 0: discard c.cancelStepByDecision(req.run_id, parseInt(digits), by)
+    let outcome = "u:" & unstarted.join("\t")
+    discard c.appendRow(req.run_id, req.key, "par_cancel", text, outcome)
+    kickProfile(profileOfRun(c, req.run_id, co.profileId))        # the controllers hear of the cancelled steps now
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]](outcome), suspended: false)))
   if req.kind == "park":
     # every branch of the run waits for something: the lease goes back, and the run is leased again when a step of it has ended (`dirty`) or none is in flight
     giveBackLease(c, req.run_id, caller.attempt)

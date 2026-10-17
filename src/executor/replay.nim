@@ -29,7 +29,20 @@ type
     message*: string
     value*: string
 
-const hostKinds = ["now", "random", "sh", "sleep", "job_sh", "params", "lock", "unlock"]
+const hostKinds = ["now", "random", "sh", "sleep", "job_sh", "params", "lock", "unlock", "par_cancel", "par_peek"]
+
+proc cancelPayload(text: string; placeKeys: Table[string, string]): string =
+  ## The decision of `fail_fast` as the script's scheduler writes it (bootstrap.lua): the path of the `ci.parallel`, the branch that failed, the branches not started (commas), and
+  ## then the place of each step to cancel (`ctx<TAB>line<TAB>nth`), one to a line. The journal and the core get it as JSON with the places turned into the keys of the steps.
+  let lines = text.split('\n')
+  var d = %*{"by": (if lines.len > 0: lines[0] else: ""), "failed": (if lines.len > 1: lines[1] else: ""), "unstarted": [], "steps": []}
+  if lines.len > 2:
+    for u in lines[2].split(','):
+      if u.len > 0: d["unstarted"].add %u
+  for i in 3 ..< lines.len:
+    let key = placeKeys.getOrDefault(lines[i], "")
+    if key.len > 0: d["steps"].add %key
+  $d
 
 proc failed(code, msg: string): ExecResult =
   ExecResult(status: esFailed, code: code, message: msg)
@@ -78,6 +91,7 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
   var seq = 0
   var stepsMade = 0                              # the n-th step, the key of a step when the caller gives no numbers (`stepKey`)
   var firstPending = ""                          # what the run waits for, for the message of a suspension
+  var placeKeys = initTable[string, string]()    # `ctx<TAB>line<TAB>nth` of a step -> its key, for the decision of fail_fast
   var index = initTable[string, int]()           # key -> place in j.entries, so that a long journal is not searched at every call
   for i, e in j.entries: index[e.key] = i
   # A run that was run again (docs/parallel.md section 11): the journal holds records of kind `retry`, each naming the keys it supersedes. The record of a step that failed stays in
@@ -106,25 +120,35 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
       if kind == "__suspend":                    # every branch waits for something (bootstrap.lua `park`)
         return ExecResult(status: esSuspended, code: "suspended", message: firstPending)
       if nres != 5: return failed("script_error", "malformed host call")
-      let payload = fetchString(co, base + 1)
+      var payload = fetchString(co, base + 1)
       let line = int(lua_tointegerx(co, base + 2, nil))
       let ctx = fetchString(co, base + 3)
       let nth = int(lua_tointegerx(co, base + 4, nil))
       lua_settop(co, 0)
       if kind notin hostKinds:
         return failed("script_error", "unknown host call '" & kind & "'")
+      if kind == "par_peek":
+        # not a call: has the decision of the ci.parallel at path `payload` been taken in an earlier execution? The answer is its journaled result, "" if not. Nothing is asked, nothing written.
+        let at = index.getOrDefault(payload & "/par_cancel#0", -1)
+        let known = if at >= 0: j.entries[at].result else: ""
+        discard lua_pushlstring(co, known.cstring, csize_t(known.len))
+        nargs = 1
+        continue
       if onSite != nil: onSite(seq, kind, line)          # line 0: the host call has none (a step without one is numbered from the overflow)
       if onPlace != nil: onPlace(seq, kind, line, ctx, nth)
       var res: string
       let base0 = if kind == "job_sh": (if stepKey != nil: stepKey() else: "s" & $stepsMade) else: kind & "#" & $nth
       let key = effectiveKey(if kind != "job_sh" and ctx != "m": ctx & "/" & base0 else: base0)
-      if kind == "job_sh": inc stepsMade
+      if kind == "job_sh":
+        inc stepsMade
+        placeKeys[ctx & "\t" & $line & "\t" & $nth] = key
+      if kind == "par_cancel": payload = cancelPayload(payload, placeKeys)
       if onCall != nil: onCall(seq, kind, key)
       let at = index.getOrDefault(key, -1)
       var pending = false
       if at >= 0:
         let e = j.entries[at]
-        if e.kind != kind or e.payload != payload:
+        if e.kind != kind or (kind != "par_cancel" and e.payload != payload):        # a decision is replayed as it was taken: what the script computes now may differ
           return failed("script_nondeterminism",
             "seq " & $seq & " (key " & key & "): journal has " & e.kind & "(" & e.payload &
             "), script called " & kind & "(" & payload & ")")

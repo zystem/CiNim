@@ -112,6 +112,8 @@ local cocreate, cresume, cstatus = coroutine.create, coroutine.resume, coroutine
 local state = {}
 local branch_co = setmetatable({}, { __mode = "k" })       -- the coroutines that are branches of ci.parallel
 
+local CANCELED = "~canceled:"     -- the journaled answer of a step that a ci.parallel cancelled; followed by the path of that ci.parallel
+
 local function new_ctx(path, depth) return { path = path, depth = depth, kn = {}, ln = {}, jobs = 0, pars = 0 } end
 local cur = new_ctx("m", 0)                                -- the context the running code belongs to
 
@@ -136,11 +138,21 @@ local function call(kind, payload, line)
   if co == state.main then
     local a = yield_(kind, payload, line or 0, ctx.path, nth)
     if a == nil then park() end                            -- pending and nothing else to do: the run waits
+    if a:sub(1, #CANCELED) == CANCELED then error("step canceled", 3) end
     return a
   end
   local a = yield_({ kind = kind, payload = payload, line = line or 0, ctx = ctx.path, nth = nth })
   if a == nil then park() end
+  if a:sub(1, #CANCELED) == CANCELED then            -- the step was cancelled by the decision of a ci.parallel (fail_fast): this branch is over, and is never resumed
+    yield_({ kind = "__canceled", by = a:sub(#CANCELED + 1) })
+  end
   return a
+end
+
+-- a call that is not made by the script and has no place in its counters: the decision of fail_fast and the look for it in the journal (replay.nim `par_cancel`, `par_peek`)
+local function raw_call(kind, payload, ctx)
+  if running() == state.main then return yield_(kind, payload, 0, ctx, 0) end
+  return yield_({ kind = kind, payload = payload, line = 0, ctx = ctx, nth = 0 })
 end
 
 coroutine.yield = function(...)
@@ -833,7 +845,7 @@ end
 -- (`park`) and is led again, by replay, when a step has ended. `max_parallel` is the number of branches started and not ended at a time; the next to start is always the first that has
 -- not, in the order of the names, so the set of calls does not depend on timing either. The result is a table name -> { ok = true, value = ... } or { ok = false, error = "..." }.
 local MAX_BRANCHES, MAX_DEPTH = 200, 200
-local PARALLEL_FIELDS = { max_parallel = true, keep_going = true }
+local PARALLEL_FIELDS = { max_parallel = true, keep_going = true, fail_fast = true }
 
 local function plain(v, depth)
   local t = type(v)
@@ -851,10 +863,11 @@ local function parallel(spec, opts)
   if opts ~= nil and type(opts) ~= "table" then error("ci.parallel: the options are a table", 2) end
   opts = opts or {}
   for k in rawnext, opts do
-    if k == "fail_fast" then error("ci.parallel: fail_fast is not implemented yet", 2) end
     if not PARALLEL_FIELDS[k] then error("ci.parallel: unknown option '" .. tostring_(k) .. "'", 2) end
   end
-  if opts.keep_going ~= nil and type(opts.keep_going) ~= "boolean" then error("ci.parallel: keep_going must be a boolean", 2) end
+  for _, f in ipairs({ "keep_going", "fail_fast" }) do
+    if opts[f] ~= nil and type(opts[f]) ~= "boolean" then error("ci.parallel: " .. f .. " must be a boolean", 2) end
+  end
   if opts.max_parallel ~= nil and not (mtype(opts.max_parallel) == "integer" and opts.max_parallel >= 1) then
     error("ci.parallel: max_parallel is a whole number of at least 1", 2)
   end
@@ -876,6 +889,7 @@ local function parallel(spec, opts)
   for i = 1, n do br[i].ctx = new_ctx(base .. "[" .. br[i].label .. "]", pctx.depth + 1) end
   local maxp = opts.max_parallel or n
   local active, finished = 0, 0
+  pctx.live = br                          -- for the decision of a ci.parallel above this one: which steps of these branches are in flight
 
   local function settle(b, ok, r)
     b.state = "done"
@@ -892,6 +906,12 @@ local function parallel(spec, opts)
     b.ok, b.error = false, msg
   end
 
+  local function cancel(b)                -- the branch is over, cancelled: it is never resumed (a started one holds a place until now)
+    if b.state ~= "new" then active = active - 1 end
+    b.state, b.ok, b.error, b.canceled, b.co = "done", false, "canceled", true, nil
+    finished = finished + 1
+  end
+
   local function drive(b, ans)            -- b runs until it ends or parks
     while true do
       local saved = cur
@@ -901,15 +921,31 @@ local function parallel(spec, opts)
       if not ok then return settle(b, false, r) end
       if cstatus(b.co) == "dead" then return settle(b, true, r) end
       if r.kind == "__park" then b.state = "parked" return end
+      if r.kind == "__canceled" then
+        -- a step of this branch (or of one nested in it) was cancelled by the decision of the ci.parallel at path r.by. If that is this one the branch is cancelled; if it is above,
+        -- the whole branch that holds this ci.parallel is over, and this coroutine ends here by telling the scheduler above
+        if r.by == base or running() == state.main then return cancel(b) end
+        yield_({ kind = "__canceled", by = r.by })
+      end
+      if r.ctx == b.ctx.path then b.req = r end
       -- a call of the branch (or of a branch of a ci.parallel nested in it): on to Nim or to the scheduler above. The answer is a result, or nil when the call is pending; the
       -- branch is resumed with either and parks itself on nil (`call`, or the scheduler nested in it), so a nested scheduler goes on with its other branches
       if running() == state.main then ans = yield_(r.kind, r.payload, r.line, r.ctx, r.nth) else ans = yield_(r) end
     end
   end
 
+  -- fail_fast (docs/parallel.md section 6): the decision, once taken, is in the journal (`par_cancel`), and a replay follows it: the branches it left unstarted are not started, whatever
+  -- the slots would allow now that more of the journal is known
+  local notStarted = {}
+  if opts.fail_fast then
+    local decided = raw_call("par_peek", base, base)
+    if decided ~= "" then for label in decided:sub(3):gmatch("[^\t]+") do notStarted[label] = true end end
+  end
   for i = 1, n do
     local b = br[i]
-    if active < maxp then
+    if notStarted[b.label] then
+      cancel(b)
+    elseif active < maxp then
       b.state = "ready"
       active = active + 1
       b.co = cocreate(b.fn)
@@ -917,20 +953,49 @@ local function parallel(spec, opts)
       drive(b, nil)
     end
   end
-  if finished < n then park() end         -- some branch waits, and nothing can go on: the run waits (never comes back in this execution)
 
-  local results, failed = {}, {}
+  if opts.fail_fast and finished < n then
+    local first
+    for i = 1, n do if br[i].state == "done" and not br[i].ok and not br[i].canceled then first = br[i] break end end
+    if first then
+      local steps, unstarted = {}, {}
+      local function collect(b)
+        if b.ctx.live then
+          for k = 1, #b.ctx.live do if b.ctx.live[k].state == "parked" then collect(b.ctx.live[k]) end end
+        elseif b.req and b.req.kind == "job_sh" then
+          steps[#steps + 1] = b.req.ctx .. "\t" .. b.req.line .. "\t" .. b.req.nth
+        end
+      end
+      for i = 1, n do
+        if br[i].state == "new" then unstarted[#unstarted + 1] = br[i].label
+        elseif br[i].state == "parked" then collect(br[i]) end
+      end
+      raw_call("par_cancel", base .. "\n" .. first.label .. "\n" .. table.concat(unstarted, ",") .. (#steps > 0 and ("\n" .. table.concat(steps, "\n")) or ""), base)
+      for i = 1, n do if br[i].state ~= "done" then cancel(br[i]) end end
+    end
+  end
+  if finished < n then park() end         -- some branch waits, and nothing can go on: the run waits (never comes back in this execution)
+  pctx.live = nil
+
+  local results, failed, canceled = {}, {}, {}
   for i = 1, n do
     local b = br[i]
     if b.ok then results[b.key] = { ok = true, value = b.value }
+    elseif b.canceled then results[b.key] = { ok = false, error = "canceled", canceled = true }; canceled[#canceled + 1] = b.label
     else results[b.key] = { ok = false, error = b.error }; failed[#failed + 1] = b.label end
   end
-  if #failed > 0 and not opts.keep_going then
-    local first = results[br[1].key] and br[1] or nil
-    for i = 1, n do if not br[i].ok then first = br[i] break end end
-    local why = first.error
-    if #why > 300 then why = why:sub(1, 300) .. "..." end
-    error("parallel: branches failed: " .. table.concat(failed, ", ") .. " (" .. first.label .. ": " .. why .. ")", 2)
+  if (#failed > 0 or #canceled > 0) and not opts.keep_going then
+    local text = "parallel: branches failed: " .. table.concat(failed, ", ")
+    for i = 1, n do
+      if br[i].state == "done" and not br[i].ok and not br[i].canceled then
+        local why = br[i].error
+        if #why > 300 then why = why:sub(1, 300) .. "..." end
+        text = text .. " (" .. br[i].label .. ": " .. why .. ")"
+        break
+      end
+    end
+    if #canceled > 0 then text = text .. "; canceled: " .. table.concat(canceled, ", ") end
+    error(text, 2)
   end
   return results
 end
