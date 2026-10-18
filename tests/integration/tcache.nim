@@ -277,37 +277,32 @@ suite "DAT-004 the requests of the cache on the channel":
     let decls = @[CacheDecl(key: "deps-1", paths: @["node_modules"], restoreKeys: @["deps-"])]
     proc req(op, path: string; cache = true): ArtifactRequest = ArtifactRequest(op: op, path: path, cache: cache)
 
-    test "a step saves the key it declared (one block), and a second saver of the key gives way with cache_exists":
-      let t = tenant()
-      let be = store()
-      var r = req("put_object", "deps-1")
-      let data = "archive bytes"
-      r.size = uint64(data.len)
-      r.sha256 = shaOf(data)
-      r.data = cast[seq[byte]](data)
-      check handleCache(c, r, t, "", decls, fixedStoreSet(be), now).accepted
-      check be.objects[objectKeyOf(t, "", "deps-1")] == data
-      let again = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
-      check not again.accepted and again.failure.code == "cache_exists"
-    test "a bigger entry goes by put_begin, put_part, put_end, and is stored only when the store has it with the size announced":
-      let t = tenant()
-      let be = store()
-      let data = "a".repeat(20) & "b".repeat(20)
-      var b = req("put_begin", "deps-1")
-      b.size = uint64(data.len)
-      b.sha256 = shaOf(data)
-      let began = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
-      check began.accepted and began.upload_id.len > 0
-      check not c.storedEntry(t, "", "deps-1").found                          # not stored until it is complete
-      var p1 = req("put_part", "deps-1"); p1.upload_id = began.upload_id; p1.part = 1; p1.data = cast[seq[byte]](data[0 ..< 20])
-      var p2 = req("put_part", "deps-1"); p2.upload_id = began.upload_id; p2.part = 2; p2.data = cast[seq[byte]](data[20 .. ^1])
-      let a1 = handleCache(c, p1, t, "", decls, fixedStoreSet(be), now)
-      let a2 = handleCache(c, p2, t, "", decls, fixedStoreSet(be), now)
-      check a1.accepted and a2.accepted
-      var e = req("put_end", "deps-1"); e.upload_id = began.upload_id
-      e.parts = @[ArtifactPart(part: 1, etag: a1.etag), ArtifactPart(part: 2, etag: a2.etag)]
-      check handleCache(c, e, t, "", decls, fixedStoreSet(be), now).accepted
-      check c.storedEntry(t, "", "deps-1").found and be.objects[objectKeyOf(t, "", "deps-1")] == data
+    proc withDirect(body: proc ()) =
+      configureStorage("http://module.test:18090", "a-secret-of-the-shard-for-grants", "001", "http://module.test:18091")
+      try: body()
+      finally: configureStorage("", "", "001")
+    proc direct(op, path: string): ArtifactRequest =
+      result = req(op, path)
+      result.direct = true
+
+    test "a step saves the key it declared, and a second saver of the key gives way with cache_exists":
+      withDirect(proc () =
+        let t = tenant()
+        let be = store()
+        var r = direct("put_begin", "deps-1")
+        let data = "archive bytes"
+        r.size = uint64(data.len)
+        r.sha256 = shaOf(data)
+        let began = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
+        check began.accepted and began.upload_id.len > 0
+        check not c.storedEntry(t, "", "deps-1").found                          # not stored until it is complete
+        let again = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
+        check not again.accepted and again.failure.code == "cache_exists"
+        # an empty entry, and the ways that carried bytes through the core, are not
+        var empty = direct("put_begin", "deps-1"); empty.size = 0; empty.sha256 = shaOf("")
+        check handleCache(c, empty, t, "", decls, fixedStoreSet(be), now).failure.code in ["cache_exists", "bad_request"]
+        for op in ["put_object", "put_part", "get_block"]:
+          check handleCache(c, req(op, "deps-1"), t, "", decls, fixedStoreSet(be), now).failure.code == "bad_request")
     test "D-61 a shim that can send its bytes straight to the module is given a grant, and the upload is completed only when the digests it reported are those the module made":
       configureStorage("http://module.test:18090", "a-secret-of-the-shard-for-grants", "001", "http://module.test:18091")
       defer: configureStorage("", "", "001")
@@ -318,11 +313,14 @@ suite "DAT-004 the requests of the cache on the channel":
       var b = req("put_begin", "deps-1")
       b.size = uint64(data.len)
       b.sha256 = shaOf(data)
-      let plain = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)                       # a shim that cannot: no grant, the bytes come through the core
-      check plain.accepted and plain.grant.len == 0 and plain.direct_url.len == 0
-      var gone = req("put_abort", "deps-1"); gone.upload_id = plain.upload_id
-      check handleCache(c, gone, t, "", decls, fixedStoreSet(be), now).accepted
+      let plain = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)                       # a shim that cannot use a grant: refused, nothing is started
+      check not plain.accepted and plain.failure.code == "direct_required"
+      check not c.uploadingEntry(t, "", "deps-1").found
       b.direct = true
+      configureStorage("http://module.test:18090", "a-secret-of-the-shard-for-grants", "001", "")      # a shard with no port for shims
+      check handleCache(c, b, t, "", decls, fixedStoreSet(be), now).failure.code == "direct_required"
+      check not c.uploadingEntry(t, "", "deps-1").found
+      configureStorage("http://module.test:18090", "a-secret-of-the-shard-for-grants", "001", "http://module.test:18091")
       let began = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
       check began.accepted and began.grant.startsWith("g1.001.") and began.direct_url == "http://module.test:18091"
       check began.direct_path == "/s/mem/" & objectKeyOf(t, "", "deps-1")
@@ -353,46 +351,45 @@ suite "DAT-004 the requests of the cache on the channel":
       check found.files.len == 1 and found.files[0].grant.startsWith("g1.001.") and found.files[0].direct_path == "/s/mem/" & objectKeyOf(t, "", "deps-1") and found.direct_url == "http://module.test:18091"
       check verifyGrant("a-secret-of-the-shard-for-grants", "001", "mem", objectKeyOf(t, "", "deps-1"), "", "r", found.files[0].grant, now)
       find.direct = false
-      check handleCache(c, find, t, "", decls, fixedStoreSet(be), now).files[0].grant.len == 0   # a shim that cannot is not offered one
+      check handleCache(c, find, t, "", decls, fixedStoreSet(be), now).failure.code == "direct_required"   # a shim that cannot use a grant is not given the entry
 
     test "a size that is not the one announced is refused and nothing stays":
-      let t = tenant()
-      let be = store()
-      var b = req("put_begin", "deps-1")
-      b.size = 99
-      b.sha256 = shaOf("x")
-      let began = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
-      var p1 = req("put_part", "deps-1"); p1.upload_id = began.upload_id; p1.part = 1; p1.data = cast[seq[byte]]("short")
-      let a1 = handleCache(c, p1, t, "", decls, fixedStoreSet(be), now)
-      var e = req("put_end", "deps-1"); e.upload_id = began.upload_id; e.parts = @[ArtifactPart(part: 1, etag: a1.etag)]
-      let ended = handleCache(c, e, t, "", decls, fixedStoreSet(be), now)
-      check not ended.accepted and ended.failure.code == "size_mismatch"
-      check not c.storedEntry(t, "", "deps-1").found and not c.uploadingEntry(t, "", "deps-1").found
+      withDirect(proc () =
+        let t = tenant()
+        let be = store()
+        var b = direct("put_begin", "deps-1")
+        b.size = 99
+        b.sha256 = shaOf("x")
+        let began = handleCache(c, b, t, "", decls, fixedStoreSet(be), now)
+        be.objects[objectKeyOf(t, "", "deps-1")] = "short"                       # what the store holds after the complete
+        be.direct = @[(1, shaOf("short"), 5'i64)]
+        var e = req("put_end", "deps-1"); e.upload_id = began.upload_id; e.parts = @[ArtifactPart(part: 1, etag: "e1", sha256: shaOf("short"))]
+        let ended = handleCache(c, e, t, "", decls, fixedStoreSet(be), now)
+        check not ended.accepted and ended.failure.code == "size_mismatch"
+        check not c.storedEntry(t, "", "deps-1").found and not c.uploadingEntry(t, "", "deps-1").found)
     test "a step finds and reads what it declared (the key, or what a restore key names) and nothing else; saves its own key only":
       let t = tenant()
       let be = store()
       be.objects[objectKeyOf(t, "", "deps-0")] = "older archive"
-      check c.beginEntry(newId(), t, "", "deps-0", objectKeyOf(t, "", "deps-0"), 13, shaOf("older archive"), "stored", "", now - 100)
+      check c.beginEntry(newId(), t, "", "deps-0", objectKeyOf(t, "", "deps-0"), 13, shaOf("older archive"), "stored", "", now - 100, "mem")
       be.objects[objectKeyOf(t, "", "secret-x")] = "not yours"
-      check c.beginEntry(newId(), t, "", "secret-x", objectKeyOf(t, "", "secret-x"), 9, shaOf("not yours"), "stored", "", now)
-      let found = handleCache(c, req("cache_find", "deps-1"), t, "", decls, fixedStoreSet(be), now)
-      check found.accepted and found.files.len == 1 and found.files[0].path == "deps-0" and found.files[0].size == 13 and found.files[0].sha256 == shaOf("older archive")
-      var g = req("get_block", "deps-0"); g.offset = 0; g.length = 5
-      let blk = handleCache(c, g, t, "", decls, fixedStoreSet(be), now)
-      check blk.accepted and cast[string](blk.data) == "older"
-      check handleCache(c, req("cache_find", "secret-x"), t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"
-      var g2 = req("get_block", "secret-x"); g2.offset = 0; g2.length = 5
-      check handleCache(c, g2, t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"
-      var w = req("put_object", "deps-0"); w.size = 1; w.sha256 = shaOf("x"); w.data = cast[seq[byte]]("x")
-      check handleCache(c, w, t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"           # a restore key lets a step read, not save
-      check handleCache(c, req("cache_find", "deps-nothing"), t, "", @[CacheDecl(key: "deps-nothing", paths: @["x"])], fixedStoreSet(be), now).files.len == 0
+      check c.beginEntry(newId(), t, "", "secret-x", objectKeyOf(t, "", "secret-x"), 9, shaOf("not yours"), "stored", "", now, "mem")
+      withDirect(proc () =
+        let found = handleCache(c, direct("cache_find", "deps-1"), t, "", decls, fixedStoreSet(be), now)
+        check found.accepted and found.files.len == 1 and found.files[0].path == "deps-0" and found.files[0].size == 13 and found.files[0].sha256 == shaOf("older archive")
+        check found.files[0].grant.len > 0
+        check handleCache(c, direct("cache_find", "secret-x"), t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"
+        var w = direct("put_begin", "deps-0"); w.size = 1; w.sha256 = shaOf("x")
+        check handleCache(c, w, t, "", decls, fixedStoreSet(be), now).failure.code == "not_declared"           # a restore key lets a step read, not save
+        check handleCache(c, direct("cache_find", "deps-nothing"), t, "", @[CacheDecl(key: "deps-nothing", paths: @["x"])], fixedStoreSet(be), now).files.len == 0)
     test "an entry that does not fit the organisation's quota is refused with quota_exceeded":
       let t = tenant()
       let be = store()
       putEnv("CINIM_CACHE_QUOTA", "10")
-      var r = req("put_object", "deps-1")
-      r.size = 20; r.sha256 = shaOf("y".repeat(20)); r.data = cast[seq[byte]]("y".repeat(20))
-      let refused = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
+      var r = direct("put_begin", "deps-1")
+      r.size = 20; r.sha256 = shaOf("y".repeat(20))
+      var refused: ArtifactAck
+      withDirect(proc () = refused = handleCache(c, r, t, "", decls, fixedStoreSet(be), now))
       delEnv("CINIM_CACHE_QUOTA")
       check not refused.accepted and refused.failure.code == "quota_exceeded"
       check not c.uploadingEntry(t, "", "deps-1").found

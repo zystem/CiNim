@@ -45,9 +45,7 @@ spec:
             {{- if .Values.storage.url }}
             # the storage module (D-60, chart cinim-storage): the stores of the shard are its; the core holds its address and the secret its calls are signed with
             - {name: CINIM_STORAGE_URL, value: {{ .Values.storage.url | quote }}}
-            {{- if .Values.storage.directUrl }}
-            - {name: CINIM_STORAGE_DIRECT_URL, value: {{ .Values.storage.directUrl | quote }}}
-            {{- end }}
+            - {name: CINIM_STORAGE_DIRECT_URL, value: {{ required "storage.directUrl is required when storage.url is set: the shims send the bytes of artifacts and caches straight to the module (D-61), http://cinim-storage.<namespace>.svc:18091" .Values.storage.directUrl | quote }}}
             - name: CINIM_STORAGE_TOKEN
               valueFrom:
                 secretKeyRef:

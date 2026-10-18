@@ -1,6 +1,6 @@
 ## D-61, end to end: a shim's client (shim/logclient.nim `putFile`, `fetchTo`) against the core's real ArtifactIngest (ZeroMQ with CURVE, on a thread), the storage module as a process (build/storage)
-## and two real Caddy nodes. With the direct transfer the bytes of a file go from the client to the module and never to the core, and the core completes the upload because the digests the
-## client reported over ZeroMQ are those the module made; a shim that cannot reach the module is served through the core; a part changed on its way is refused. Needs CINIM_RQLITE_URL,
+## and two real Caddy nodes. The bytes of a file go from the client to the module and never to the core, and the core completes the upload because the digests the client reported over
+## ZeroMQ are those the module made; there is no other way: a module that cannot be reached fails the upload, and a shard without the port for shims refuses it; a part changed on its way is refused. Needs CINIM_RQLITE_URL,
 ## build/caddy-store (made by tools/store/build-caddy.sh when Docker is there), tests/certs, and makes build/storage.
 import std/[unittest, json, os, osproc, strutils, strtabs, times, net, httpclient, tables, sequtils, atomics]
 import checksums/sha2
@@ -133,12 +133,12 @@ suite "D-61 the shim sends its bytes straight to the storage module":
       result = newString(n)
       for i in 0 ..< n: result[i] = char((i * 31 + seed * 7 + i div 251) mod 256)
     proc client(): ArtifactClient = newArtifactClient("tcp://127.0.0.1:" & $ingestPort, certs)
-    proc put(path, data: string; cache = false): ArtifactReply =
+    proc put(path, data: string; cache = false; patience = 30): ArtifactReply =
       let f = work / path.replace('/', '_')
       writeFile(f, data)
       let cl = client()
       defer: cl.close()
-      cl.putFile(step, token, path, f, int64(data.len), shaOf(data), 30, cache)
+      cl.putFile(step, token, path, f, int64(data.len), shaOf(data), patience, cache)
     proc fetch(path: string; size: int): tuple[err, sha: string] =
       let cl = client()
       defer: cl.close()
@@ -181,7 +181,7 @@ suite "D-61 the shim sends its bytes straight to the storage module":
       let d = newDirectClient(began.ack.direct_url)
       # the bytes are not the ones whose digest was sent: the module's own check
       let wrong = d.putPart(began.ack.direct_path, began.ack.grant, began.ack.upload_id, 1, data, shaOf("another"), 5)
-      check not wrong.ok and not wrong.fallback and "sha256_mismatch" in wrong.detail
+      check not wrong.ok and "sha256_mismatch" in wrong.detail
       # the right part, and a shim that reports another digest at the end
       let ok = d.putPart(began.ack.direct_path, began.ack.grant, began.ack.upload_id, 1, data, shaOf(data), 5)
       check ok.ok
@@ -190,19 +190,30 @@ suite "D-61 the shim sends its bytes straight to the storage module":
       check c.query(%*[["SELECT count(*) FROM artifacts WHERE run_id = ? AND path = 'bad/x.bin'", runId]])["results"][0]{"values"}[0][0].getInt == 0
       # a grant for another key opens nothing
       let other = d.putPart("/s/caddy-main/" & "elsewhere%2Fx.bin", began.ack.grant, began.ack.upload_id, 1, data, shaOf(data), 5)
-      check other.fallback
-    test "D-61 a module that cannot be reached from the Pod is given up for the core's channel, and a shard without the port for shims is served through the core":
-      configureStorage("http://127.0.0.1:" & $modulePort, secret1, "001", "http://127.0.0.1:1")        # nothing listens there
+      check not other.ok and other.code in [401, 403, 404]
+    test "D-61 there is no other way: a module that cannot be reached from the Pod fails the upload after the patience, a shard without the port for shims refuses it, and the bytes never come to the core":
       let a = blob(70_000, 5)
-      let r = put("dist/fallback.bin", a)
-      check r.ok and not r.viaDirect
-      check fetch("dist/fallback.bin", a.len) == ("", shaOf(a))                                           # the read is offered a grant too, and falls back
+      let stored = put("dist/there.bin", a)
+      check stored.ok and stored.viaDirect
+      configureStorage("http://127.0.0.1:" & $modulePort, secret1, "001", "http://127.0.0.1:1")        # nothing listens there
+      let t0 = epochTime()
+      let r = put("dist/fallback.bin", a, patience = 4)
+      check not r.ok and r.retry
+      check epochTime() - t0 >= 3.0                                                                      # it waited for the module, as for a core that is away, and then gave up
+      check c.query(%*[["SELECT count(*) FROM artifacts WHERE run_id = ? AND path = 'dist/fallback.bin' AND state = 'stored'", runId]])["results"][0]{"values"}[0][0].getInt == 0
+      let got = fetch("dist/there.bin", a.len)                                                           # the read is offered a grant too, and fails the same way
+      check got.err.len > 0
       configureStorage("http://127.0.0.1:" & $modulePort, secret1, "001", "")                              # the shard has no port for shims
-      let b = blob(2 * artifacts.partSize + 5, 6)
-      let r2 = put("big/b.bin", b)
-      check r2.ok and not r2.viaDirect
-      check fetch("big/b.bin", b.len) == ("", shaOf(b))
+      let r2 = put("big/b.bin", blob(2 * artifacts.partSize + 5, 6))
+      check not r2.ok and r2.code == "direct_required"
+      let r3 = put("dist/empty.txt", "")                                                                   # a file of no bytes needs none to be sent
+      check r3.ok and not r3.viaDirect
+      check fetch("dist/there.bin", a.len).err.len > 0
       configureStorage("http://127.0.0.1:" & $modulePort, secret1, "001", "http://127.0.0.1:" & $shimPort)
+      check fetch("dist/there.bin", a.len) == ("", shaOf(a))
+      check fetch("dist/empty.txt", 0) == ("", shaOf(""))                                                 # a file of no bytes is read with no bytes asked of the module
+      # the sweep deletes the object of every artifact; there is none for a file of no bytes, and the module takes the delete of what it never had
+      check newStoreSet().resolve("caddy-main").be.deleteObject(objectKey(org, runId, "dist/empty.txt")).ok
 
     stopServers.store(true)
     joinThread(ingest)

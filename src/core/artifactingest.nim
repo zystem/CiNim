@@ -6,10 +6,11 @@
 ## with its own credential (the same HMAC as for its secrets). The sender is the shim, or the job controller on its behalf when it drains the Pod through
 ## `exec` after the shim could not reach the core (the spool fallback of D-33): the requests are the same, the token is the one core gave in StartStep.
 ##
-## A file of at most one block goes in one request (`put_object`); a bigger one is a multipart upload of the store: `put_begin` answers with the store's upload id,
-## `put_part` sends a block and gets its ETag, `put_end` lists the ETags in order. Nothing is kept in the core between the requests but the row of the artifact
-## (state `uploading`, the upload id), so a core that restarts in the middle loses nothing; the sender sends the block again. An artifact is `stored` only when
-## the store itself says that the object is there with the size announced.
+## The bytes never come to the core (D-61): a file is put to the storage module by the shim itself, `put_begin` answers with the store's upload id, a grant and the path, the shim puts
+## the parts to the module's port for shims and `put_end` lists them with their digests, which the core compares with what the module received before it completes the upload. A file of
+## no bytes is one request, `put_object`, without data. Nothing is kept in the core between the requests but the row of the artifact (state `uploading`, the upload id), so a core that restarts
+## in the middle loses nothing; the shim sends the part again. An artifact is `stored` only when the store itself says that the object is there with the size announced. A shard without the
+## module's port for shims (`storage.directUrl`) stores no artifact and no cache: the request is refused (`direct_required`).
 import std/[json, strutils, times, tables, sequtils, atomics]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
@@ -54,21 +55,25 @@ proc backendFor(ss: StoreSet; name: string): tuple[be: ObjectBackend, refusal: A
 
 # ------------------------------------------------------------------ the direct transfer of a shim (D-61, docs/storage-module.md)
 
-proc offerDirect(a: var ArtifactAck; req: ArtifactRequest; store, key, upload: string) =
-  ## the shim said it can put the bytes straight to the storage module, and the shard has the module's port for shims: it gets a grant for this upload and the path to put the parts to
-  if not req.direct: return
+proc offerDirect(a: var ArtifactAck; store, key, upload: string) =
+  ## a grant for this upload and the path to put the parts to
   let g = grantFor(store, key, upload, "w")
   if g.len == 0: return
   a.grant = g
   a.direct_url = directUrl()
   a.direct_path = directPath(store, key)
 
-proc offerRead(f: var ArtifactFile; req: ArtifactRequest; store, key: string) =
-  if not req.direct: return
+proc offerRead(f: var ArtifactFile; store, key: string) =
   let g = grantFor(store, key, "", "r")
   if g.len == 0: return
   f.grant = g
   f.direct_path = directPath(store, key)
+
+proc directRefusal(req: ArtifactRequest): ArtifactAck =
+  ## The bytes go straight between the shim and the storage module (D-61); this request cannot be served otherwise. An accepted ack when it can.
+  if not req.direct: return refuse("direct_required", "the bytes go straight between the shim and the storage module; this shim does not say it can (an old shim: build it again)")
+  if directUrl().len == 0: return refuse("direct_required", "this shard has no port for shims on the storage module (storage.directUrl), so it stores no artifacts and no caches")
+  ack()
 
 type DirectCheck = enum dcNotDirect, dcAgree, dcDiffer, dcLater, dcBad
 
@@ -100,25 +105,20 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
     let found = c.findEntry(tenant, scope, key, d[0].restoreKeys, now)
     result = ack()
     if found.found:
+      let need = directRefusal(req)
+      if not need.accepted: return need
       var f = ArtifactFile(path: found.key, size: uint64(found.size), sha256: found.sha256)
-      f.offerRead(req, found.store, found.s3Key)
+      f.offerRead(found.store, found.s3Key)
+      if f.grant.len == 0: return refuse("direct_required", "no grant can be made to read " & key & " (the store of the entry has no name)")
       result.files.add f
-      if f.grant.len > 0: result.direct_url = directUrl()
-  of "get_block":
-    if not ds.mayFind(key): return refuse("not_declared", key & " is not a cache this step may read")
-    let e = c.storedEntry(tenant, scope, key)
-    if not e.found: return refuse("cache_missing", "no such cache entry")
-    if req.length == 0 or int(req.length) > readSize or int64(req.offset) >= e.size: return refuse("bad_request", "a block is 1.." & $readSize & " bytes inside the entry")
-    let rb = ss.backendFor(e.store)
-    if rb.be == nil: return rb.refusal
-    let got = rb.be.readRange(e.s3Key, int64(req.offset), min(int64(req.length), e.size - int64(req.offset)))
-    if not got.res.ok: return fromOutcome(got.res)
-    result = ack()
-    result.data = cast[seq[byte]](got.data)
-  of "put_object", "put_begin", "put_part", "put_end", "put_abort":
+      result.direct_url = directUrl()
+  of "put_begin", "put_end", "put_abort":
     if not ds.maySave(key): return refuse("not_declared", key & " is not a cache key this step declared")
     case req.op
-    of "put_object", "put_begin":
+    of "put_begin":
+      let need = directRefusal(req)
+      if not need.accepted: return need
+      if req.size == 0: return refuse("bad_request", "a cache entry has bytes")
       if req.size > uint64(maxEntryBytes): return refuse("too_big", "a cache entry is at most " & $maxEntryBytes & " bytes")
       if req.sha256.len != 64 or req.sha256.anyIt(it notin HexDigits): return refuse("bad_request", "sha256 is not 64 hex digits")
       let sha = req.sha256.toLowerAscii
@@ -131,36 +131,14 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
       let room = c.makeRoom(ss, tenant, scope, int64(req.size), cacheQuotaFromEnv())
       if not room.ok: return refuse("quota_exceeded", room.why)
       if not c.beginEntry(schema.newId(), tenant, scope, key, s3, int64(req.size), sha, "uploading", "", now, sname): return refuse("cache_exists", "the cache key " & key & " is being saved by another step")
-      if req.op == "put_object":
-        let data = toStr(req.data)
-        if uint64(data.len) != req.size or data.len > partSize or hexOf(sha256(data)) != sha:
-          c.forgetEntry(tenant, scope, key)
-          return refuse("bad_request", "put_object holds the whole entry, at most " & $partSize & " bytes, and its SHA-256")
-        let put = be.putObject(s3, data)
-        if not put.ok:
-          c.forgetEntry(tenant, scope, key)
-          return fromOutcome(put)
-        discard c.markEntryStored(tenant, scope, key)
-        result = ack()
-      else:
-        let mp = be.createMultipart(s3)
-        if not mp.res.ok:
-          c.forgetEntry(tenant, scope, key)
-          return fromOutcome(mp.res)
-        c.setEntryUpload(tenant, scope, key, mp.uploadId)
-        result = ack()
-        result.upload_id = mp.uploadId
-        result.offerDirect(req, sname, s3, mp.uploadId)
-    of "put_part":
-      let row = c.uploadingEntry(tenant, scope, key)
-      if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
-      if req.part == 0 or int(req.part) > maxParts or req.data.len == 0 or req.data.len > partSize: return refuse("bad_request", "a part is 1.." & $maxParts & ", 1.." & $partSize & " bytes")
-      let rb = ss.backendFor(row.store)
-      if rb.be == nil: return rb.refusal
-      let up = rb.be.uploadPart(row.s3Key, row.uploadId, int(req.part), toStr(req.data))
-      if not up.res.ok: return fromOutcome(up.res)
+      let mp = be.createMultipart(s3)
+      if not mp.res.ok:
+        c.forgetEntry(tenant, scope, key)
+        return fromOutcome(mp.res)
+      c.setEntryUpload(tenant, scope, key, mp.uploadId)
       result = ack()
-      result.etag = up.etag
+      result.upload_id = mp.uploadId
+      result.offerDirect(sname, s3, mp.uploadId)
     of "put_end":
       let row = c.uploadingEntry(tenant, scope, key)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", key & " has no upload under way with this id")
@@ -170,11 +148,12 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
       case dg.verdict
       of dcLater: return fromOutcome(dg.outcome)
       of dcBad: return refuse("bad_request", dg.detail)
+      of dcNotDirect: return refuse("bad_request", "put_end names the digest of no part: the parts go to the storage module and their digests to the core")
       of dcDiffer:
         discard rb.be.abortMultipart(row.s3Key, row.uploadId)
         c.forgetEntry(tenant, scope, key)
         return refuse("digest_mismatch", key & ": " & dg.detail)
-      else: discard
+      of dcAgree: discard
       let fin = rb.be.completeMultipart(row.s3Key, row.uploadId, req.parts.mapIt((int(it.part), it.etag)))
       if not fin.ok: return fromOutcome(fin)
       let sz = rb.be.objectSize(row.s3Key)
@@ -192,7 +171,7 @@ proc handleCache*(c: var RqClient; req: ArtifactRequest; tenant, scope: string; 
         c.forgetEntry(tenant, scope, key)
       result = ack()
   else:
-    return refuse("bad_request", "the op of a cache request is cache_find, get_block, put_object, put_begin, put_part, put_end or put_abort")
+    return refuse("bad_request", "the op of a cache request is cache_find, put_begin, put_end or put_abort")
 
 proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: StoreSet): ArtifactAck =
   if req.job_token.len == 0 or not constantTimeEqual(req.job_token, stepToken(master, req.step.run_id, int(req.step.seq), int(req.step.attempt))):
@@ -219,26 +198,25 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
       if found.len == 0: return refuse("artifact_missing", "this run has no artifact " & name)
       for f in found:
         var af = ArtifactFile(path: f.path, size: uint64(f.size), sha256: f.sha256)
-        af.offerRead(req, f.store, f.key)
+        if f.size > 0:               # a file of no bytes is nowhere in the store and needs no grant
+          let need = directRefusal(req)
+          if not need.accepted: return need
+          af.offerRead(f.store, f.key)
+          if af.grant.len == 0: return refuse("direct_required", "no grant can be made to read " & f.path & " (the store of the artifact has no name)")
+          result.direct_url = directUrl()
         result.files.add af
-        if af.grant.len > 0: result.direct_url = directUrl()
-  of "get_block":
-    let art = c.storedArtifact(runId, req.path)
-    if not art.found or not decl.download.coveredBy(req.path): return refuse("not_declared", req.path & " is not an artifact this step may read")
-    if req.length == 0 or int(req.length) > readSize or int64(req.offset) >= art.size: return refuse("bad_request", "a block is 1.." & $readSize & " bytes inside the file")
-    let rb = ss.backendFor(art.store)
-    if rb.be == nil: return rb.refusal
-    let got = rb.be.readRange(art.key, int64(req.offset), min(int64(req.length), art.size - int64(req.offset)))
-    if not got.res.ok: return fromOutcome(got.res)
-    result = ack()
-    result.data = cast[seq[byte]](got.data)
-  of "put_object", "put_begin", "put_part", "put_end", "put_abort":
+  of "put_object", "put_begin", "put_end", "put_abort":
     if decl.upload.len == 0: return refuse("not_declared", "the step declared no artifacts to upload")
     let path = cleanPath(req.path)
     if path.len == 0: return refuse("bad_path", "the path " & req.path & " is not a path inside the workspace")
     let key = objectKey(tenant, runId, path)
     case req.op
     of "put_object", "put_begin":
+      if req.op == "put_object" and (req.size != 0 or req.data.len != 0): return refuse("bad_request", "put_object is for a file of no bytes; the bytes of any other go straight to the storage module")
+      if req.op == "put_begin":
+        let need = directRefusal(req)
+        if not need.accepted: return need
+        if req.size == 0: return refuse("bad_request", "a file of no bytes is put with put_object")
       if req.size > uint64(maxObjectBytes): return refuse("too_big", path & " is bigger than " & $maxObjectBytes & " bytes")
       if c.runBytes(runId, path) + int64(req.size) > maxRunBytes: return refuse("too_big", "the artifacts of this run would pass " & $maxRunBytes & " bytes")
       # DAT-006: the quota of the organisation (a setting of its profile; 0 is no limit): what it holds already, without the file this one replaces
@@ -252,11 +230,8 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
       if rb.be == nil: return rb.refusal
       let be = rb.be
       if req.op == "put_object":
-        let data = toStr(req.data)
-        if uint64(data.len) != req.size or data.len > partSize: return refuse("bad_request", "put_object holds the whole file, at most " & $partSize & " bytes")
-        if hexOf(sha256(data)) != sha: return refuse("bad_request", "the content of " & path & " is not the SHA-256 that was announced")
-        let put = be.putObject(key, data)
-        if not put.ok: return fromOutcome(put)
+        if hexOf(sha256("")) != sha: return refuse("bad_request", "the content of " & path & " is not the SHA-256 that was announced")
+        # nothing is put in the store: the module keeps no object of no bytes, and the row says all there is to say of it
         c.recordArtifact(schema.newId(), tenant, runId, int(req.step.seq), path, key, int64(req.size), sha, "stored", "", now, sname)
         result = ack()
       else:
@@ -265,17 +240,7 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
         c.recordArtifact(schema.newId(), tenant, runId, int(req.step.seq), path, key, int64(req.size), sha, "uploading", mp.uploadId, now, sname)
         result = ack()
         result.upload_id = mp.uploadId
-        result.offerDirect(req, sname, key, mp.uploadId)
-    of "put_part":
-      let row = c.uploadingRow(runId, path)
-      if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", path & " has no upload under way with this id")
-      if req.part == 0 or int(req.part) > maxParts or req.data.len == 0 or req.data.len > partSize: return refuse("bad_request", "a part is 1.." & $maxParts & ", 1.." & $partSize & " bytes")
-      let rb = ss.backendFor(row.store)
-      if rb.be == nil: return rb.refusal
-      let up = rb.be.uploadPart(row.key, row.uploadId, int(req.part), toStr(req.data))
-      if not up.res.ok: return fromOutcome(up.res)
-      result = ack()
-      result.etag = up.etag
+        result.offerDirect(sname, key, mp.uploadId)
     of "put_end":
       let row = c.uploadingRow(runId, path)
       if not row.found or row.uploadId != req.upload_id: return refuse("not_uploading", path & " has no upload under way with this id")
@@ -290,7 +255,8 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
         discard rb.be.abortMultipart(row.key, row.uploadId)
         c.forgetArtifact(runId, path)
         return refuse("digest_mismatch", path & ": " & dg.detail)
-      else: discard
+      of dcNotDirect: return refuse("bad_request", "put_end names the digest of no part: the parts go to the storage module and their digests to the core")
+      of dcAgree: discard
       let fin = rb.be.completeMultipart(row.key, row.uploadId, parts)
       if not fin.ok: return fromOutcome(fin)
       # the store says that the object is there, with the size that was announced; only then it is the run's artifact
@@ -309,7 +275,7 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
         c.forgetArtifact(runId, path)
       result = ack()
   else:
-    return refuse("bad_request", "the op is put_object, put_begin, put_part, put_end, put_abort, get_list or get_block")
+    return refuse("bad_request", "the op is put_object (a file of no bytes), put_begin, put_end, put_abort or get_list")
 
 proc serveArtifactIngest*(rqliteUrl, certs: string; port: int) {.thread.} =
   {.cast(gcsafe).}:

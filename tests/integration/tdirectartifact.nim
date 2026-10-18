@@ -1,7 +1,7 @@
 ## D-61 (docs/storage-module.md, "Direct transfer from the shim"): the artifacts of a step on the core's channel when the shim can send its bytes straight to the storage module. The core
 ## starts the upload and hands the shim a grant and the path; the shim reports the digest of every part over this channel at put_end, and the core completes the upload only when the module
-## has received parts with those digests; a read is offered with a grant as well. Against a real rqlite and a store that is a double in memory. Needs CINIM_RQLITE_URL.
-import std/[unittest, json, os, times, tables, strutils]
+## has received parts with those digests; a read is offered with a grant as well, and there is no other way (no op carries bytes through the core). Against a real rqlite and a store that is a double in memory. Needs CINIM_RQLITE_URL.
+import std/[unittest, json, os, times, tables, strutils, sequtils]
 import checksums/sha2
 import common/[rqlite, ctrlauth, storagebackend, storagetoken]
 import core/[schema, scheduler, loggate, logcircuit, objectstore, artifactingest, storageclient]
@@ -24,6 +24,9 @@ method abortMultipart(b: Mem; key, uploadId: string): Outcome =
   done()
 method objectSize(b: Mem; key: string): tuple[res: Outcome, size: int64] =
   if key in b.objects: (done(), int64(b.objects[key].len)) else: (fail("no such object"), -1'i64)
+method putObject(b: Mem; key, data: string): Outcome =
+  b.objects[key] = data
+  done()
 method deleteObject(b: Mem; key: string): Outcome =
   b.objects.del key
   done()
@@ -59,7 +62,7 @@ suite "D-61 the artifacts of a step, sent straight to the storage module":
       artifactingest.ArtifactRequest(step: artifactingest.StepRef(run_id: runId, seq: 0, attempt: 1), job_token: stepToken(master, runId, 0, 1), op: op, path: path, direct: direct)
     let data = "x".repeat(30) & "y".repeat(10)
 
-    test "D-61 put_begin of a shim that can answers with a grant for this upload; one that cannot is answered as before":
+    test "D-61 put_begin answers with a grant for this upload; a shim that cannot use one, or a shard with no port for shims, is refused (direct_required)":
       let be = Mem(objects: initTable[string, string]())
       var b = req("put_begin", "dist/a.bin")
       b.size = uint64(data.len)
@@ -74,9 +77,29 @@ suite "D-61 the artifacts of a step, sent straight to the storage module":
       check handleArtifact(c, gone, master, fixedStoreSet(be)).accepted
       b.direct = false
       let plain = handleArtifact(c, b, master, fixedStoreSet(be))
-      check plain.accepted and plain.grant.len == 0 and plain.direct_url.len == 0
-      gone.upload_id = plain.upload_id
+      check not plain.accepted and plain.failure.code == "direct_required"
+      b.direct = true
+      configureStorage("http://module.test:18090", secret, "001", "")                                  # a shard that has not the port for shims
+      check handleArtifact(c, b, master, fixedStoreSet(be)).failure.code == "direct_required"
+      configureStorage("http://module.test:18090", secret, "001", "http://module.test:18091")
+      check c.query(%*[["SELECT count(*) FROM artifacts WHERE run_id = ? AND path = 'dist/a.bin'", runId]])["results"][0]["values"][0][0].getInt == 0     # nothing was started
+      # the ways that carried bytes are gone
+      var part = req("put_part", "dist/a.bin"); part.part = 1; part.data = cast[seq[byte]]("x")
+      check handleArtifact(c, part, master, fixedStoreSet(be)).failure.code == "bad_request"
+      var blk = req("get_block", "dist/b.bin"); blk.length = 1
+      check handleArtifact(c, blk, master, fixedStoreSet(be)).failure.code == "bad_request"
+      # a put_end that names no digests is refused too
+      let began2 = handleArtifact(c, b, master, fixedStoreSet(be))
+      var nodig = req("put_end", "dist/a.bin"); nodig.upload_id = began2.upload_id; nodig.parts = @[artifactingest.ArtifactPart(part: 1, etag: "e1")]
+      check handleArtifact(c, nodig, master, fixedStoreSet(be)).failure.code == "bad_request"
+      gone.upload_id = began2.upload_id
       check handleArtifact(c, gone, master, fixedStoreSet(be)).accepted
+      # an empty file is one request with no bytes
+      var empty = req("put_object", "dist/empty.txt"); empty.size = 0; empty.sha256 = shaOf("")
+      check handleArtifact(c, empty, master, fixedStoreSet(be)).accepted
+      check c.storedArtifact(runId, "dist/empty.txt").found and objectKey(org, runId, "dist/empty.txt") notin be.objects      # the row says all there is; the store has no object of no bytes
+      var notEmpty = req("put_object", "dist/x.txt"); notEmpty.size = 1; notEmpty.sha256 = shaOf("x"); notEmpty.data = cast[seq[byte]]("x")
+      check handleArtifact(c, notEmpty, master, fixedStoreSet(be)).failure.code == "bad_request"
 
     test "D-61 put_end completes the upload when the digests of the shim are those of the module, and drops it when one is not":
       let be = Mem(objects: initTable[string, string]())
@@ -120,10 +143,13 @@ suite "D-61 the artifacts of a step, sent straight to the storage module":
       var l = req("get_list", "")
       l.names = @["dist"]
       let offered = handleArtifact(c, l, master, fixedStoreSet(be))
-      check offered.accepted and offered.files.len == 1 and offered.files[0].path == "dist/b.bin" and offered.direct_url == "http://module.test:18091"
-      check offered.files[0].direct_path == "/s/mem/" & key and verifyGrant(secret, "001", "mem", key, "", "r", offered.files[0].grant, now)
-      check offered.files[0].sha256 == shaOf(data)
+      check offered.accepted and offered.files.len == 2 and offered.direct_url == "http://module.test:18091"      # dist/b.bin and the file of no bytes of the first test
+      let bin = offered.files.filterIt(it.path == "dist/b.bin")[0]
+      check bin.direct_path == "/s/mem/" & key and verifyGrant(secret, "001", "mem", key, "", "r", bin.grant, now)
+      check bin.sha256 == shaOf(data)
+      let none = offered.files.filterIt(it.path == "dist/empty.txt")[0]
+      check none.size == 0 and none.grant.len == 0
       l.direct = false
       let plain = handleArtifact(c, l, master, fixedStoreSet(be))
-      check plain.files.len == 1 and plain.files[0].grant.len == 0 and plain.direct_url.len == 0
+      check not plain.accepted and plain.failure.code == "direct_required"
     configureStorage("", "", "001")

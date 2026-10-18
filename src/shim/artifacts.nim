@@ -12,7 +12,6 @@ const
   blockSize = 64 * 1024
   maxFiles* = 1000
   partSize* = 8 * 1024 * 1024         ## a block of an upload: the same as core/storagebackend.nim's
-  readSize* = 4 * 1024 * 1024         ## a block of a download
 
 # ------------------------------------------------------------------ patterns
 

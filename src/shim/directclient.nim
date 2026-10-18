@@ -8,7 +8,6 @@ type
   DirectReply* = object
     ok*: bool
     retry*: bool                ## not ok and retry: the module or its store did not answer now
-    fallback*: bool             ## the module cannot be reached from here, or does not take the grant: the bytes go through the core instead
     code*: int
     etag*: string               ## a part that was put
     data*: string               ## a range that was read
@@ -17,9 +16,6 @@ type
   DirectClient* = ref object
     base: string
     http: HttpClient
-
-const
-  connectTries = 2              ## a module that cannot be reached at all is given up (for the core's channel) after this many tries, a second apart
 
 proc newDirectClient*(base: string): DirectClient = DirectClient(base: base.strip(chars = {'/'}))
 
@@ -35,9 +31,8 @@ proc errorText(body: string): string =
   except CatchableError: body[0 ..< min(body.len, 160)]
 
 proc request(d: DirectClient; meth: HttpMethod; path, grant: string; headers: openArray[(string, string)]; body: string; patience: int): DirectReply =
-  ## One request, again while the module does not answer or says to wait, for up to `patience` seconds (a connection that fails twice running is `fallback`).
+  ## One request, again while the module does not answer or says to wait, for up to `patience` seconds (a module that cannot be reached is tried again too, a second apart).
   let until = epochTime() + patience.float
-  var failures = 0
   while true:
     try:
       if d.http == nil: d.http = newHttpClient(timeout = 60000)
@@ -45,10 +40,9 @@ proc request(d: DirectClient; meth: HttpMethod; path, grant: string; headers: op
       for (k, v) in headers: h[k] = v
       let r = d.http.request(d.base & path, httpMethod = meth, body = body, headers = h)
       let code = r.code.int
-      failures = 0
       if code in 200 .. 299: return DirectReply(ok: true, code: code, etag: (try: parseJson(r.body){"etag"}.getStr except CatchableError: ""), data: r.body)
       let why = errorText(r.body)
-      if code in [401, 403, 404, 409]: return DirectReply(fallback: true, code: code, detail: "the storage module answered " & $code & " " & why)
+      if code in [401, 403, 404, 409]: return DirectReply(code: code, detail: "the storage module answered " & $code & " " & why)       # the grant is not good: no use to wait
       if code >= 500 and ("answered 422" in why or "another content" in why):
         # a node of the mirror refused the part because its bytes are not the digest it was told: not a reason to wait, the part is sent again (putPart) and then given up
         return DirectReply(code: code, detail: "sha256_mismatch: the storage module answered " & $code & " " & why)
@@ -60,8 +54,6 @@ proc request(d: DirectClient; meth: HttpMethod; path, grant: string; headers: op
       return DirectReply(code: code, detail: "the storage module answered " & $code & " " & why)
     except CatchableError as e:
       d.close()
-      inc failures
-      if failures >= connectTries: return DirectReply(fallback: true, retry: true, detail: "the storage module could not be reached: " & e.msg)
       if epochTime() >= until: return DirectReply(retry: true, detail: "the storage module did not answer: " & e.msg)
       sleep 1000
 
@@ -69,7 +61,7 @@ proc putPart*(d: DirectClient; directPath, grant, upload: string; part: int; dat
   ## One part of an upload; `etag` is what the store answered for it. A part whose digest the module found to be another (a body changed on the way) is sent again, twice, before it is given up.
   for attempt in 1 .. 3:
     result = d.request(HttpPut, directPath & "?upload=" & upload & "&part=" & $part, grant, [("X-Content-SHA256", sha256)], data, patience)
-    if result.ok or result.retry or result.fallback or "sha256_mismatch" notin result.detail: return
+    if result.ok or result.retry or "sha256_mismatch" notin result.detail: return
   result.detail = result.detail & " (three times)"
 
 proc getRange*(d: DirectClient; directPath, grant: string; offset, length: int64; patience: int): DirectReply =
