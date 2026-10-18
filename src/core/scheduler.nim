@@ -600,14 +600,16 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   # Who is asking (IAM-003, T-46): a namespace that has a controller identity is served only against its credential, or against the
   # bootstrap token once, in which case the credential is handed out and nothing else happens in this poll. A namespace without
   # an identity is refused, unless the core runs with CINIM_UNENROLLED_CONTROLLERS=on (development and tests).
-  let decision = decide(c.credentialRow(req.namespace), master, req.namespace, req.credential, req.bootstrap_token, getTime().toUnix(), unenrolledControllers)
+  let identity = c.credentialRow(req.namespace)
+  let decision = decide(identity, master, req.namespace, req.credential, req.bootstrap_token, getTime().toUnix(), unenrolledControllers)
   case decision.verdict
   of vRefused:
+    let why = refusal(identity, master, req.namespace, req.credential, req.bootstrap_token, getTime().toUnix())
     let now = epochTime()
     if now - refusedLoggedAt.getOrDefault(req.namespace, 0.0) > 60:
       refusedLoggedAt[req.namespace] = now
-      stderr.writeLine "core: a controller for the namespace '" & req.namespace & "' (session " & req.session_id & ") did not prove its identity, or the namespace has none: refused"
-    return PollResponse(header: Header(protocol: 1), unauthorized: true, poll_after_ms: 5000)
+      stderr.writeLine "core: a controller for the namespace '" & req.namespace & "' (session " & req.session_id & ") is refused (" & why.code & "): " & why.detail
+    return PollResponse(header: Header(protocol: 1), unauthorized: true, refusal: why.code, poll_after_ms: 5000)
   of vIssue:
     let row = c.credentialRow(req.namespace)
     echo "core: the controller of ", req.namespace, " enrolled with its bootstrap token"

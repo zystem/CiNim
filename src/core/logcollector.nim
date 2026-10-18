@@ -231,6 +231,39 @@ proc handleStepReport(c: var RqClient; req: StepReport; profileId: string): Step
     StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: false, disposition: "retry_later",
                   failure: Failure(code: "retry_later"))
 
+proc wireString(b: seq[byte]): string =
+  result = newString(b.len)
+  if b.len > 0: copyMem(addr result[0], unsafeAddr b[0], b.len)
+
+proc encodeLogBatch*(r: LogBatch): string = wireString(Protobuf.encode(r))
+proc decodeLogAck*(s: string): LogAck = Protobuf.decode(cast[seq[byte]](s), LogAck)
+proc encodeStepReport*(r: StepReport): string = wireString(Protobuf.encode(r))
+proc decodeStepReportAck*(s: string): StepReportAck = Protobuf.decode(cast[seq[byte]](s), StepReportAck)
+
+proc answerLogBatch*(c: var RqClient; co: Collector; body: string): string =
+  ## The answer to one request of LogIngest, encoded. An error in one request is the answer to that request and never the end of the thread, which would be the end of the core: the
+  ## database that does not answer in time (a call that timed out) is `logs_unavailable`, the shim keeps its buffer and sends the batch again; a message that is not a batch is `rejected`.
+  let ack =
+    try:
+      let req = try: some(Protobuf.decode(cast[seq[byte]](body), LogBatch)) except CatchableError: none(LogBatch)
+      if req.isNone: LogAck(header: Header(protocol: 1), failure: Failure(code: "rejected", detail: "not a batch of the log"))
+      else: handleBatch(c, co, req.get)
+    except CatchableError as e:
+      stderr.writeLine "core: log ingest: " & e.msg
+      LogAck(header: Header(protocol: 1), failure: Failure(code: "logs_unavailable", detail: e.msg))
+  wireString(Protobuf.encode(ack))
+
+proc answerStepReport*(c: var RqClient; master, profileId, body: string): string =
+  ## The same for StepReport: a report that cannot be recorded now is `retry_later`, the shim does not exit and asks again.
+  let ack =
+    try:
+      let rep = Protobuf.decode(cast[seq[byte]](body), StepReport)
+      if rep.request == "secrets": handleSecretsRequest(c, rep, master) else: handleStepReport(c, rep, profileId)
+    except CatchableError as e:
+      stderr.writeLine "core: step report: " & e.msg
+      StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: false, disposition: "retry_later", failure: Failure(code: "unavailable", detail: e.msg))
+  wireString(Protobuf.encode(ack))
+
 proc serveLogIngest*(co: Collector; certs: string; port: int) {.thread.} =
   {.cast(gcsafe).}:
     var c = newRq(co.rqliteUrl)
@@ -239,11 +272,7 @@ proc serveLogIngest*(co: Collector; certs: string; port: int) {.thread.} =
     while not stopServers.load:
       let body = conn.receive()
       if body.len == 0: continue
-      let resp = handleBatch(c, co, Protobuf.decode(cast[seq[byte]](body), LogBatch))
-      let outb = Protobuf.encode(resp)
-      var s = newString(outb.len)
-      if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)
-      conn.send(s)
+      conn.send(answerLogBatch(c, co, body))
     conn.close()
 
 proc serveStepReport*(rqliteUrl, certs: string; port: int; profileId: string) {.thread.} =
@@ -255,10 +284,5 @@ proc serveStepReport*(rqliteUrl, certs: string; port: int; profileId: string) {.
     while not stopServers.load:
       let body = conn.receive()
       if body.len == 0: continue
-      let rep = Protobuf.decode(cast[seq[byte]](body), StepReport)
-      let resp = if rep.request == "secrets": handleSecretsRequest(c, rep, master) else: handleStepReport(c, rep, profileId)
-      let outb = Protobuf.encode(resp)
-      var s = newString(outb.len)
-      if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)
-      conn.send(s)
+      conn.send(answerStepReport(c, master, profileId, body))
     conn.close()

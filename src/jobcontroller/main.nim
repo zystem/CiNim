@@ -10,6 +10,7 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import std/options
 import common/[zmqcurve, stream, streamstate]
+from common/ctrlauth import credentialMismatch
 import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors, drain
 
 import_proto3 "../../build/nimproto/all.proto"
@@ -232,10 +233,14 @@ proc main() =
       sleep int(max(resp.poll_after_ms, 100'u32))
       continue
     if resp.unauthorized:
-      # core does not accept the credential (rotated, or the state was lost): drop it and enrol again with the bootstrap token
-      stderr.writeLine "jobcontroller: core does not accept this controller's identity for " & ns &
-        (if credential.len > 0: "; dropping the credential, enrolling again" else: "; no valid bootstrap token (CINIM_BOOTSTRAP_FILE) yet")
-      if credential.len > 0:
+      # The core says why. The credential is given up only when the core says that it is wrong (credential_mismatch: rotated, or made for another generation); a credential cannot be had again
+      # (a bootstrap token is used once), so a refusal for any other reason - the namespace has no identity yet, the core read nothing - leaves it alone, and the controller asks again.
+      let wrong = resp.refusal == credentialMismatch
+      stderr.writeLine "jobcontroller: core does not accept this controller's identity for " & ns & " (" & (if resp.refusal.len > 0: resp.refusal else: "no reason given") & ")" &
+        (if credential.len > 0 and wrong: "; the credential is wrong: dropping it, enrolling again"
+         elif credential.len > 0: "; the credential is kept"
+         else: "; no valid bootstrap token (CINIM_BOOTSTRAP_FILE) yet")
+      if credential.len > 0 and wrong:
         credential = ""
         try: removeFile(credentialPath()) except OSError: discard
       sleep int(max(resp.poll_after_ms, 1000'u32))

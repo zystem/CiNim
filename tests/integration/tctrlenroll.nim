@@ -33,6 +33,17 @@ suite "T-46 controllers without an identity":
       check not issued.unauthorized and issued.issued_credential == controllerCredential(master, ns, 1)
       check not poll(ns, credential = controllerCredential(master, ns, 1)).unauthorized
       check poll(ns, credential = controllerCredential(master, "other", 1)).unauthorized
+    test "IAM-003 a refusal says why, and only a wrong credential is called wrong":
+      unenrolledControllers = false
+      let ns = "why-" & sfx
+      check poll("never-" & sfx).refusal == "no_identity" and poll("").refusal == "no_namespace"
+      c.ensureCredentialRow(ns, getTime().toUnix() + 3600)
+      check poll(ns).refusal == "no_credential"
+      check poll(ns, bootstrap = "wrong").refusal == "bootstrap_rejected"
+      check poll(ns, bootstrap = bootstrapToken(master, ns, 1)).issued_credential.len > 0
+      check poll(ns, credential = controllerCredential(master, ns, 1)).refusal == ""                    # accepted (and now the row is confirmed): nothing to say
+      check poll(ns, bootstrap = bootstrapToken(master, ns, 1)).refusal == "bootstrap_used"
+      check poll(ns, credential = controllerCredential(master, "other", 1)).refusal == "credential_mismatch"
     test "with the switch on (development) a namespace without an identity is served, and an enrolled one is still held to its credential":
       unenrolledControllers = true
       check not poll("dev-" & sfx).unauthorized

@@ -197,6 +197,8 @@ message PollResponse {
   Failure failure = 5;
   string issued_credential = 6;      // answer to a valid bootstrap_token: the credential to keep and to send in every later poll
   bool unauthorized = 7;             // the namespace has a controller identity and the poll did not prove it: nothing was done
+  string refusal = 12;               // with `unauthorized`: why (no_namespace, no_identity, credential_mismatch, no_credential, bootstrap_used, bootstrap_expired, bootstrap_rejected). The controller gives up its
+                                     // credential only for credential_mismatch; for any other reason, or none, it keeps it (a credential cannot be had again)
   ControllerConfig config = 9;       // the settings of the shard, in every answer (see ControllerConfig)
   ConductorPlan conductors = 10;     // the conductors to keep (see ConductorPlan)
   repeated DrainStep drain_steps = 11;  // DAT-003: steps whose artifacts or log the shim could not deliver (see DrainStep); a few at a time, in every answer until the controller says it is done

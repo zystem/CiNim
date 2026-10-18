@@ -73,3 +73,20 @@ proc decide*(row: CredentialRow; master, namespace, credential, bootstrap: strin
      constantTimeEqual(bootstrap, bootstrapToken(master, namespace, row.generation)):
     return Decision(verdict: vIssue)
   Decision(verdict: vRefused)
+
+type Refusal* = object
+  code*, detail*: string
+
+const credentialMismatch* = "credential_mismatch"   ## the only refusal that is about the controller's credential: the controller has to give it up and enrol again
+
+proc refusal*(row: CredentialRow; master, namespace, credential, bootstrap: string; now: int64): Refusal =
+  ## Why `decide` refused, for the controller and for the log of the core. The code says what the controller may conclude: only `credential_mismatch` means that the credential it holds is
+  ## not good (a credential is a function of the master key, the namespace and the generation, so it does not become good again by waiting); every other refusal is about something
+  ## else (the namespace has no identity yet, the poll names none, the bootstrap token is wrong, used or expired) and leaves the credential the controller has alone.
+  if namespace.len == 0: return Refusal(code: "no_namespace", detail: "the poll names no namespace")
+  if not row.found: return Refusal(code: "no_identity", detail: "the namespace has no identity (no row)")
+  if credential.len > 0: return Refusal(code: credentialMismatch, detail: "the credential does not match generation " & $row.generation & " of the namespace")
+  if bootstrap.len == 0: return Refusal(code: "no_credential", detail: "the controller sent no credential and no bootstrap token")
+  if row.confirmed: return Refusal(code: "bootstrap_used", detail: "the bootstrap token was used already (the controller is enrolled) and the controller sent no credential")
+  if now >= row.bootstrapExpiresAt: return Refusal(code: "bootstrap_expired", detail: "the bootstrap token has expired")
+  Refusal(code: "bootstrap_rejected", detail: "the bootstrap token is not the one of generation " & $row.generation)

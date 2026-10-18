@@ -1,5 +1,5 @@
 ## IAM-003, T-46: the identity of a job controller, decided from a row of the credential table and what the poll carries.
-import std/unittest
+import std/[unittest, strutils]
 import ../../src/common/ctrlauth
 
 const master = "core-secret-key"
@@ -63,3 +63,24 @@ suite "IAM-003 the credential of a conductor":
     check conductorCredential("another master", "ns", "c-1") != conductorCredential(master, "ns", "c-1")
   test "the boundary between the namespace and the id cannot be shifted":
     check conductorCredential(master, "a", "b|c") != conductorCredential(master, "a|b", "c")
+
+suite "IAM-003 why a controller was refused":
+  test "the reason is a code the controller can act on, and a text for the log of the core":
+    check refusal(row(), master, "", "c", "", t0).code == "no_namespace"
+    check refusal(CredentialRow(), master, "ns", "c", "", t0).code == "no_identity"
+    check refusal(row(confirmed = true), master, "ns", "", "", t0).code == "no_credential"
+    let wrong = refusal(row(gen = 2, confirmed = true), master, "ns", controllerCredential(master, "ns", 1), "", t0)
+    check wrong.code == credentialMismatch and "generation 2" in wrong.detail
+    check refusal(row(), master, "ns", "", "wrong", t0).code == "bootstrap_rejected"
+    check refusal(row(expires = t0 - 1), master, "ns", "", bootstrapToken(master, "ns", 1), t0).code == "bootstrap_expired"
+    check refusal(row(confirmed = true), master, "ns", "", bootstrapToken(master, "ns", 1), t0).code == "bootstrap_used"
+  test "every refusal that decide makes has a reason, and a poll decide accepts has none worth acting on":
+    # the same inputs as decide's own tests: whatever decide refuses, refusal names
+    for (r, cred, boot) in [(CredentialRow(), "", ""), (row(), "", ""), (row(confirmed = true), "", ""), (row(), controllerCredential(master, "other", 1), ""),
+                            (row(), "", "wrong"), (row(confirmed = true), "", bootstrapToken(master, "ns", 1)), (row(expires = t0 - 1), "", bootstrapToken(master, "ns", 1))]:
+      check decide(r, master, "ns", cred, boot, t0).verdict == vRefused
+      check refusal(r, master, "ns", cred, boot, t0).code.len > 0
+  test "only the refusal that says the credential is wrong is about the credential":
+    for code in ["no_namespace", "no_identity", "no_credential", "bootstrap_used", "bootstrap_expired", "bootstrap_rejected", "", "something_new"]:
+      check code != credentialMismatch
+    check credentialMismatch == "credential_mismatch"
