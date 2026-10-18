@@ -552,13 +552,13 @@ proc runWorker(a: WorkerArgs) {.thread.} =
           of msgKickAll: h.onKick("", 0.0, true)
           of msgCheck: h.onCheck(x, y)
           else: discard
-        except CatchableError as e: stderr.writeLine "core: stream: " & e.msg
+        except Exception as e: stderr.writeLine "core: stream: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()          # a Defect included: one frame must not end the program
         count(mBusyMicros, n = int((epochTime() - t0) * 1e6))
       let now = epochTime()
       if now - lastTick >= 1.0:
         lastTick = now
         try: h.housekeeping()
-        except CatchableError as e: stderr.writeLine "core: stream: " & e.msg
+        except Exception as e: stderr.writeLine "core: stream: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
         count(mBusyMicros, n = int((epochTime() - now) * 1e6))
         var unacked = 0
         for _, p in h.peers: unacked += p.outbox.unacked.len

@@ -200,7 +200,7 @@ suite "D-29: timeout, SIGTERM, exit codes, the Pod-log events":
     let d = getTempDir() / "shim-x6"; removeDir(d); createDir(d)
     discard runShimLines(d, "cat /proc/self/oom_score_adj" & note & "; ps -o ni=,pgid=,pid= -p $$" & note, @[])
     let lines = obs(d).splitLines.filterIt(it.strip.len > 0)
-    check lines[0].strip == "500"
+    check parseInt(lines[0].strip) >= 500                 # the shim raises it to 500; a Pod of Kubernetes (Burstable) starts above that
     let f = lines[1].splitWhitespace
     check f[0] == "10" and f[1] == f[2]                 # nice 10; pgid == pid: the build leads its own group
 

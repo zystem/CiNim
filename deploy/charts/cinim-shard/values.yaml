@@ -218,9 +218,12 @@ rqlite:
   enabled: true
   fullnameOverride: rqlite
   replicaCount: 3
+  # A database that is starved is the core's trouble too: with a build or a test run on the same node (Kaniko compiles and unpacks for minutes) a node of rqlite with a request of 100m got too
+  # little CPU to answer, every writer of the core waited ("timed out enqueuing operation") and the core was restarted (measured 2026-10-18). The CPU request is a share under contention, so
+  # it is what keeps the database ahead of the builds; the memory has room for a VACUUM and a snapshot.
   resources:
-    requests: {cpu: 100m, memory: 128Mi}
-    limits: {memory: 128Mi}
+    requests: {cpu: "1", memory: 512Mi}
+    limits: {memory: 1Gi}
   persistence:
     enabled: true
     size: 10Gi

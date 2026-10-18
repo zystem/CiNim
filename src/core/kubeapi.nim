@@ -3,6 +3,7 @@
 ## in-cluster client in the user's k8s-image-availability-exporter) instead of the C client of the job controller, which would pull
 ## libcurl and a second TLS stack into the static core. The transport is a parameter so the tests run without a cluster.
 import std/[json, httpclient, net, os, strutils, uri]
+import ../common/httpguard
 
 const
   saDir = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -112,7 +113,7 @@ when defined(ssl):
         of "DELETE": HttpDelete
         of "GET": HttpGet
         else: raise newException(ValueError, "unsupported method " & meth)
-      let r = client.request("https://" & host & ":" & port & path, httpMethod = m, body = body)
+      let r = guardedHttp("the Kubernetes API"): client.request("https://" & host & ":" & port & path, httpMethod = m, body = body)
       (r.code.int, r.body)
 
 proc inCluster*(): KubeApi =

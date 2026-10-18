@@ -249,8 +249,8 @@ proc answerLogBatch*(c: var RqClient; co: Collector; body: string): string =
       let req = try: some(Protobuf.decode(cast[seq[byte]](body), LogBatch)) except CatchableError: none(LogBatch)
       if req.isNone: LogAck(header: Header(protocol: 1), failure: Failure(code: "rejected", detail: "not a batch of the log"))
       else: handleBatch(c, co, req.get)
-    except CatchableError as e:
-      stderr.writeLine "core: log ingest: " & e.msg
+    except Exception as e:
+      stderr.writeLine "core: log ingest: " & $e.name & ": " & e.msg
       LogAck(header: Header(protocol: 1), failure: Failure(code: "logs_unavailable", detail: e.msg))
   wireString(Protobuf.encode(ack))
 
@@ -260,8 +260,8 @@ proc answerStepReport*(c: var RqClient; master, profileId, body: string): string
     try:
       let rep = Protobuf.decode(cast[seq[byte]](body), StepReport)
       if rep.request == "secrets": handleSecretsRequest(c, rep, master) else: handleStepReport(c, rep, profileId)
-    except CatchableError as e:
-      stderr.writeLine "core: step report: " & e.msg
+    except Exception as e:
+      stderr.writeLine "core: step report: " & $e.name & ": " & e.msg
       StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: false, disposition: "retry_later", failure: Failure(code: "unavailable", detail: e.msg))
   wireString(Protobuf.encode(ack))
 

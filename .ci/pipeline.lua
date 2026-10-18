@@ -74,9 +74,18 @@ end
 local TESTS = [[
 set -eu
 cd src
-export XDG_CACHE_HOME=/cicd/workspace/nimcache; mkdir -p "$XDG_CACHE_HOME"
+# The root file system of a Pod is a slow disk for what fsyncs (a write took 76 ms there, 1.4 ms on the volume of the job: the databases of the tests took 43 s to answer once), so the
+# compiler's cache and every temporary file, the databases' among them, are on the volume of the job.
+export XDG_CACHE_HOME=/cicd/workspace/nimcache TMPDIR=/cicd/workspace/tmp; mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
 tools/proto/nim_flatten.sh build/nimproto
-CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}"
+tools/zmq/gen_curve_keys.sh                 # the secret halves of the test keys are not in the repository
+for v in $(env | grep -o '^CICD_[A-Z_]*'); do unset "$v"; done         # this is a step of a run, and the tests are about shims that make their own
+rc=0
+# the compilers and the tests are niced: on a busy node the databases of the tests starve otherwise (a query waited 15 s)
+CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" || rc=$?
+# the tail of the log of every file that failed, so that the log of the step says why
+for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(.*\))$/\1/'); do echo "=== $log"; tail -n 30 "$log"; done
+exit $rc
 ]]
 
 -- Rolling the core out is helm's: both releases at the new tag, atomic and waiting for the readiness probes of the Pods (/readyz of the core and of the module); if either fails both are
@@ -125,6 +134,7 @@ return ci.pipeline({
     BUILD = ci.bool{default = true},
     TEST = ci.bool{default = true},
     TEST_JOBS = ci.number{default = 2, min = 1, max = 16, integer = true},            -- workers of tools/test/run.sh in the Pod (a compile takes a gigabyte or two)
+    BUILD_JOBS = ci.number{default = 2, min = 1, max = 4, integer = true},            -- images built at a time (each is a Kaniko Pod with its own volume; a small cluster cannot take four and a test run)
     DEPLOY = ci.bool{default = false},
   },
   main = function(run)
@@ -162,7 +172,7 @@ return ci.pipeline({
       local branches = {}
       if p.BUILD then
         branches.images = function()
-          ci.parallel(ci.matrix{axes = {component = names}, fail_fast = true}, function(c)
+          ci.parallel(ci.matrix{axes = {component = names}, fail_fast = true, max_parallel = p.BUILD_JOBS}, function(c)
             local comp = by[c.component]
             checked_out(env, function(j)
               j:sh(kaniko(comp.target, comp.image, "$IMAGE_TAG", "--build-arg DEPS_IMAGE=$REGISTRY/cinim-deps:$DEPS"), {image = KANIKO})

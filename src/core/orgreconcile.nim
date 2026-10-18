@@ -331,15 +331,15 @@ proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.
             if o.policiesReplaced.len > 0: echo "core: the network policies of ", o.slug, " differed from what the core makes and were made again: ", o.policiesReplaced.join(", ")
             if o.error.len > 0: stderr.writeLine "core: reconciliation of " & o.slug & ": " & o.error
           for s in r.purged: echo "core: the retention of the organisation ", s, " is over, deleted"
-        except CatchableError as e:
-          stderr.writeLine "core: reconciliation failed: " & e.msg
+        except Exception as e:
+          stderr.writeLine "core: reconciliation failed: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       elif waited mod (superviseEvery * 10) == 0 and kube.available:
         try:
           for o in runSupervision(args.env, kube):
             if o.created.len > 0: echo "core: the controller of ", o.slug, ": made again"
             for g in o.controllerRemoved: echo "core: the controller of ", o.slug, ": deleted ", g
             if o.error.len > 0: stderr.writeLine "core: supervision of the controller of " & o.slug & ": " & o.error
-        except CatchableError as e:
-          stderr.writeLine "core: supervision of the controllers failed: " & e.msg
+        except Exception as e:
+          stderr.writeLine "core: supervision of the controllers failed: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       sleep 100
       inc waited

@@ -85,7 +85,7 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
             let cr = c.sweepCaches(ss, getTime().toUnix(), cacheRetentionFromEnv())      # DAT-004: caches not used for the retention, and abandoned uploads
             if cr.expired + cr.abandoned + cr.failed > 0:
               echo "core: caches swept: ", cr.expired, " not used for long, ", cr.abandoned, " abandoned uploads, ", cr.failed, " left for the next pass"
-      except CatchableError as e: stderr.writeLine "core: watchdog: " & e.msg
+      except Exception as e: stderr.writeLine "core: watchdog: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       for _ in 0 ..< 50:
         if stopServers.load: break
         sleep 100

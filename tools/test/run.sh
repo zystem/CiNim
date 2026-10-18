@@ -4,6 +4,7 @@
 #   -u|-i  only the unit tests / only the integration tests (default: both)
 # The integration tests need a scratch rqlite each. With Docker they are containers (cinim-rqlite-N, ports 24600+N), made new at every run and left running afterwards; remove them with
 #   docker rm -f $(docker ps -aq --filter name=cinim-rqlite-)
+# CINIM_TEST_NICE=<n> runs the compilers and the tests at that nice value, so that the databases (not niced) answer first on a busy machine.
 # Without Docker, or with CINIM_RQLITE_BIN=<path of rqlited>, they are rqlited processes of this script (ports 24600+N and 24700+N, data in /dev/shm when it has room, else in the temporary directory), stopped when it ends:
 # this is how the pipeline of the repository runs the tests in a Pod (.ci/pipeline.lua; tools/image/Dockerfile.test has rqlited).
 # The log of a file that failed is build/test-logs/<name>.log. Exit code: the number of failed files (capped at 100).
@@ -64,7 +65,7 @@ one() {   # file slot
   mkdir -p build/tests/$kind     # unit and integration files may share a name: their binaries and logs must not
   case $f in tests/integration/*) export CINIM_RQLITE_URL=http://127.0.0.1:$((24600 + slot));; *) unset CINIM_RQLITE_URL;; esac
   start=$(date +%s)
-  nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
+  ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
   rc=$?
   ok=$(grep -c '\[OK\]' "$log"); bad=$(grep -c '\[FAILED\]' "$log")
   if [ $rc -eq 0 ] && [ "$bad" = 0 ]; then printf 'ok    %-34s %3d tests %4ds\n' "$kind/$name" "$ok" $(( $(date +%s) - start )); rm -f "$log"

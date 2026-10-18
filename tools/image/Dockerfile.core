@@ -3,7 +3,7 @@ ARG DEPS_IMAGE
 FROM ${DEPS_IMAGE} AS build
 COPY . /src
 WORKDIR /src
-RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/core-static src/core/main.nim -d:ssl -d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm"; \
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/core-static src/core/main.nim --stackTrace:on -d:ssl -d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm"; \
     strip /out/*; cp /etc/ssl/certs/ca-certificates.crt /out/
 
 FROM scratch

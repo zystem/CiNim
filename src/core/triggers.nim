@@ -275,7 +275,7 @@ proc runTriggerLoop*(a: tuple[co: Core, stop: ptr Atomic[bool]]) {.thread.} =
     while not a.stop[].load:
       beat(bTriggers)
       try: discard fireSchedules(a.co, getTime().toUnix())
-      except CatchableError as e: stderr.writeLine "core: triggers: " & e.msg
+      except Exception as e: stderr.writeLine "core: triggers: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       for _ in 0 ..< loopEverySeconds * 10:
         if a.stop[].load: break
         sleep 100

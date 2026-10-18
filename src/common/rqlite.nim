@@ -2,6 +2,7 @@
 ## parsed JSON out. One client per thread.
 
 import std/[httpclient, json, strutils]
+import httpguard
 
 type
   RqClient* = object
@@ -15,7 +16,14 @@ proc newRq*(base: string; timeoutMs = 15000): RqClient =
 
 proc post(c: var RqClient; path: string; body: JsonNode): JsonNode =
   c.http.headers = newHttpHeaders({"Content-Type": "application/json"})
-  let r = c.http.request(c.base & path, httpMethod = HttpPost, body = $body)
+  # A request that failed in the middle (a timeout above all: the database was slow) leaves its connection with an answer still to come, and std/httpclient reuses the connection for
+  # the next request, which then reads THAT answer: a query that wanted three columns got the one of an earlier count, "no row" was read for a row that was there (measured 2026-10-18,
+  # a core under a slow database misjudged controllers and ended). After any failure the connection is closed, and the next request makes a new one.
+  let r =
+    try: guardedHttp("rqlite"): c.http.request(c.base & path, httpMethod = HttpPost, body = $body)
+    except Exception:
+      c.http.close()
+      raise
   if not r.code.is2xx:
     raise newException(RqError, "HTTP " & $r.code & ": " & r.body[0 ..< min(200, r.body.len)])
   result = parseJson(r.body)
