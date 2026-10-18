@@ -392,6 +392,19 @@ suite "cancel, retention, orphans":
     check sweep(be, st, cfg, 1000 + 14 * 86400).expired == @["ci-s1-run-0-1"]
     check sweep(be, st, cfg, 2000 + 14 * 86400).expired == @["ci-s1-run-1-1"]
     check st.unread().len == 0                                                           # a removed Pod is no longer an alert
+  test "DAT-003 a Pod whose leavings a drain delivered has nothing left to show: it goes with the next sweep, and is no longer an alert":
+    let st = openState(":memory:")
+    let f = newFake()
+    let be = backendOf(f)
+    discard startPod(be, st, cfg, req(0), 100)
+    st.markReported("ci-s1-run-0-1", ok = true, fullyRead = false, now = 1000, reason = "artifacts_undelivered")
+    f.pods["ci-s1-run-0-1"] = succeeded()
+    check st.unread().len == 1
+    check sweep(be, st, cfg, 1001).expired.len == 0                  # not drained yet: kept
+    st.markDrained("ci-s1-run-0-1")
+    check st.unread().len == 0
+    check sweep(be, st, cfg, 1001).expired == @["ci-s1-run-0-1"]
+    st.markDrained("ci-s1-run-nothing-1")                            # a name that is not tracked changes nothing
   test "the time a fully read Pod is kept can be set, to look at it":
     var c = cfg
     c.retentionRead = 300

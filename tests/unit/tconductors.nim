@@ -122,6 +122,15 @@ suite "RUN-009 what a conductor Pod is":
     check pod["metadata"]["name"].getStr == "cinim-conductor-2"
     check pod["metadata"]["labels"]["app.kubernetes.io/name"].getStr == "cinim-conductor"
     check pod["metadata"]["labels"]["cinim.io/conductor"].getStr == "cond-2"
+  test "RUN-013 alive means the core accepted a hello lately: the conductor's own `--healthcheck` reads the heartbeat in a writable /tmp":
+    let probe = c["livenessProbe"]
+    check probe["exec"]["command"].elems.mapIt(it.getStr) == @["/conductor", "--healthcheck"]
+    check probe["failureThreshold"].getInt >= 3 and probe["periodSeconds"].getInt >= 10
+    var env = initTable[string, string]()
+    for e in c["env"]: env[e["name"].getStr] = e{"value"}.getStr
+    check env["CINIM_STATE_DIR"] == "/tmp"
+    check c["volumeMounts"].elems.anyIt(it["mountPath"].getStr == "/tmp")                  # the root file system is read-only
+    check pod["spec"]["volumes"].elems.anyIt(it["name"].getStr == "tmp" and it.hasKey("emptyDir"))
   test "the restricted class: non-root, no privilege escalation, no capabilities, the default seccomp profile, a read-only file system, no service account token":
     check pod["spec"]["securityContext"]["runAsNonRoot"].getBool
     check pod["spec"]["securityContext"]["seccompProfile"]["type"].getStr == "RuntimeDefault"
@@ -140,9 +149,10 @@ suite "RUN-009 what a conductor Pod is":
     check not env["CINIM_CONDUCTOR_CREDENTIAL"].hasKey("value")
     check env["CINIM_CONDUCTOR_CREDENTIAL"]["valueFrom"]["secretKeyRef"]["name"].getStr == "cinim-conductor-2"
     check env["CINIM_CONDUCTOR_CREDENTIAL"]["valueFrom"]["secretKeyRef"]["key"].getStr == "credential"
-  test "the keys of the transport are the organisation's, mounted read-only, and nothing else is mounted":
-    check pod["spec"]["volumes"].len == 1 and pod["spec"]["volumes"][0]["secret"]["secretName"].getStr == "cinim-controller-curve"
-    check c["volumeMounts"].len == 1 and c["volumeMounts"][0]["readOnly"].getBool
+  test "the keys of the transport are the organisation's, mounted read-only; the only other volume is an empty /tmp for the heartbeat":
+    check pod["spec"]["volumes"].len == 2 and pod["spec"]["volumes"][0]["secret"]["secretName"].getStr == "cinim-controller-curve"
+    check pod["spec"]["volumes"][1]["name"].getStr == "tmp" and pod["spec"]["volumes"][1].hasKey("emptyDir")
+    check c["volumeMounts"].len == 2 and c["volumeMounts"][0]["readOnly"].getBool and c["volumeMounts"][1]["mountPath"].getStr == "/tmp" and not c["volumeMounts"][1].hasKey("readOnly")
   test "memory grows with the runs it leads; the grace period covers the drain":
     check c["resources"]["limits"]["memory"].getStr == "896Mi"
     check pod["spec"]["terminationGracePeriodSeconds"].getInt >= 30 + 5

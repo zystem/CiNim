@@ -88,8 +88,7 @@ suite "IAM-001 what rw may do":
   test "everything that is written: runs, settings, organisations, triggers, secrets, the store - delete and edit":
     for (m, p) in [("POST", "/api/v1/runs"), ("POST", "/api/v1/runs/s1_x:cancel"), ("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
                    ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/acme"), ("POST", "/api/v1/organizations/acme/triggers"),
-                   ("PUT", "/api/v1/organizations/acme/secrets/TOKEN"), ("POST", "/api/v1/organizations:reconcile"),
-                   ("POST", "/api/v1/organizations/acme:rotate-controller-credential")]:
+                   ("PUT", "/api/v1/organizations/acme/secrets/TOKEN"), ("POST", "/api/v1/organizations:reconcile")]:
       check roleMay("rw", m, p)
   test "but not what is the shard's own: who may do what (the users, the roles, the API tokens) and the object store":
     for (m, p) in [("GET", "/api/v1/stores"), ("PUT", "/api/v1/stores"), ("POST", "/api/v1/stores:check"), ("GET", "/api/v1/users"), ("POST", "/api/v1/users"), ("DELETE", "/api/v1/users/ann"), ("PUT", "/api/v1/users/ann/password"),

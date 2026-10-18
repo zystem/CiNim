@@ -21,7 +21,6 @@ const ddl = [
        created_at TEXT NOT NULL,
        network_egress TEXT NOT NULL DEFAULT '',
        network_ingress TEXT NOT NULL DEFAULT '',
-       controller_spec TEXT NOT NULL DEFAULT '',
        disabled_at INTEGER NOT NULL DEFAULT 0)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
   # the step secrets of an organisation (VAR-002, 6.7), each sealed with the organisation's data key (core/secretvault.nim); the data key is
@@ -304,21 +303,17 @@ type OrganizationFull* = object
   ## `held`: how many of its runs are under a legal hold (DAT-006); an organisation with any is not deleted for good
   slug*, name*, state*, egress*, ingress*: string   ## egress and ingress: the network mode asked for at creation, "" = the shard's default
   disabledAt*: int64
-  controllerSpec*: string      ## the fingerprint of the controller's Deployment as the core last made it; "" = not recorded yet
   held*: int
-
-proc setControllerSpec*(c: var RqClient; slug, spec: string) =
-  discard c.execute(%*[["UPDATE organizations SET controller_spec = ? WHERE slug = ?", spec, slug]])
 
 proc listOrganizationsFull*(c: var RqClient): seq[OrganizationFull] =
   ## everything the reconciliation (SHD-008) needs to make an organisation's objects again
-  let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at, controller_spec, " &
+  let r = c.query(%*[["SELECT slug, name, state, network_egress, network_ingress, disabled_at, " &
     "(SELECT count(*) FROM run_holds h WHERE h.tenant_id = organizations.id) + (SELECT count(*) FROM scope_holds s WHERE s.tenant_id = organizations.id) FROM organizations ORDER BY slug"]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for v in vals:
       result.add OrganizationFull(slug: v[0].getStr, name: v[1].getStr, state: v[2].getStr, egress: v[3].getStr, ingress: v[4].getStr,
-                                  disabledAt: v[5].getBiggestInt, controllerSpec: v[6].getStr, held: v[7].getInt)
+                                  disabledAt: v[5].getBiggestInt, held: v[6].getInt)
 
 proc organizationRow*(c: var RqClient; slug: string): tuple[id, state: string] =
   ## ("", "") if the shard has no such organisation

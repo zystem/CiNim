@@ -15,7 +15,7 @@
 ##
 ## `dispatch` is the whole of it without a socket, so that the tests call it directly; `serveStorage` puts it behind GuildenStern.
 import std/[json, strutils, uri, times, tables, locks, os, atomics, sequtils]
-import ../common/[rqlite, storagebackend, httpsrv, storagetoken]
+import ../common/[rqlite, storagebackend, httpsrv, storagetoken, dbready]
 import schema, seal, registry, repair, replicas, storeauth, httpstore, sha
 
 type
@@ -305,6 +305,11 @@ proc dispatch*(meth, uri, raw: string; src: BodySource; bodyLen: int64; now: int
   let rawQuery = if qpos >= 0: uri[qpos + 1 .. ^1] else: ""
   let target = path & (if qpos >= 0: "?" & rawQuery else: "")
   if path == "/healthz": return jsonReply(200, %*{"status": "ok"})
+  if path == "/readyz":
+    # ready: the database that holds the stores, the inventory and the tokens answers; the module is alive when it does not, and is left out of the Service until it does
+    let db = readyCached(cfg.rqliteUrl, 2000, epochTime())
+    return if db.ok: jsonReply(200, %*{"status": "ready", "checks": {"database": "ok"}})
+           else: jsonReply(503, %*{"status": "not_ready", "checks": {"database": db.why}})
   var c = newRq(cfg.rqliteUrl)
   try:
     if path == "/v1/internal/node-auth":

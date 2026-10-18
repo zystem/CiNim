@@ -18,6 +18,7 @@
 ##
 ## SEC-010 (job_token) is deferred: accepted but not checked.
 import std/[json, tables, strutils, httpclient, locks, atomics, times, options, sequtils]
+import health
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, shimstate, states]
@@ -270,6 +271,7 @@ proc serveLogIngest*(co: Collector; certs: string; port: int) {.thread.} =
     let (_, secretKey) = loadKeypair(certs, "core")
     let conn = listenRep(port, secretKey)
     while not stopServers.load:
+      beat(bLogIngest)
       let body = conn.receive()
       if body.len == 0: continue
       conn.send(answerLogBatch(c, co, body))
@@ -282,6 +284,7 @@ proc serveStepReport*(rqliteUrl, certs: string; port: int; profileId: string) {.
     let (_, secretKey) = loadKeypair(certs, "core")
     let conn = listenRep(port, secretKey)
     while not stopServers.load:
+      beat(bStepReport)
       let body = conn.receive()
       if body.len == 0: continue
       conn.send(answerStepReport(c, master, profileId, body))

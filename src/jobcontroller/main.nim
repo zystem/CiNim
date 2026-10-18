@@ -10,7 +10,6 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import std/options
 import common/[zmqcurve, stream, streamstate]
-from common/ctrlauth import credentialMismatch
 import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors, drain
 
 import_proto3 "../../build/nimproto/all.proto"
@@ -27,9 +26,9 @@ let
   # under other unrelated work in this environment. CINIM_KUBECONFIG pins a specific file/context so this
   # service does not depend on the ambient current-context.
   kubeconfig = getEnv("CINIM_KUBECONFIG", "")
-  # IAM-003: the one-time token with which this controller enrols at core (a Secret that core made with the namespace); the credential
-  # that core gives in exchange is kept next to the state and sent in every poll
-  bootstrapFile = getEnv("CINIM_BOOTSTRAP_FILE", "")
+  # IAM-003, D-62: the one-time token with which this controller enrols at core; core started the Pod with it. The credential that core gives in exchange is kept in memory
+  # and sent in every poll. The controller does not look after its own identity: core watches that it enrolls and is heard, and deletes it and starts another when it is not.
+  bootstrapToken = getEnv("CINIM_BOOTSTRAP_TOKEN", "")
   # the push channel (docs/conductors.md section 12): the controller keeps a connection to the core, which pushes work to it at once
   streamAddr = getEnv("CINIM_CORE_STREAM_ADDR", "")
 const pollIntervalMs = 1000
@@ -140,20 +139,6 @@ func toProto(p: PodSeen): PodInfo =
           command_started: p.started, node: p.node, shim_state_json: p.shimJson,
           pod_reason: p.podReason, pod_message: p.podMessage)
 
-proc credentialPath(): string = stateDir / "credential"
-
-proc readTrimmed(path: string): string =
-  try: (if path.len > 0 and fileExists(path): readFile(path).strip else: "")
-  except IOError: ""
-
-proc saveCredential(value: string) =
-  ## written before it is used and moved into place, so that a restart in between finds either all of it or nothing
-  createDir(stateDir)
-  let tmp = credentialPath() & ".tmp"
-  writeFile(tmp, value)
-  setFilePermissions(tmp, {fpUserRead, fpUserWrite})
-  moveFile(tmp, credentialPath())
-
 proc keptPods(st: CtrlState; cfg: Config; limit: int): seq[KeptPod] =
   ## the Pods kept because core could not read them, for the alert (newest first, at most `limit`; kept_total is the whole number)
   for p in st.unread():
@@ -184,7 +169,7 @@ proc main() =
     quit 2
   var push = Push(conn: connectPush(), inbox: initInbox(), session: sessionId)
   var cadence = Cadence()
-  var credential = readTrimmed(credentialPath())
+  var credential = ""
   var handBack: seq[PodTransition]       # steps assigned to us while the launch gate was closed: no Pod exists, they go back
   var ackSeq = 0'u64
   var lastSweep = 0.0
@@ -203,7 +188,7 @@ proc main() =
       quota = be.readStorageQuota()
     let round = pollRound(be, st, cfg, now)
     let req = PollRequest(header: Header(protocol: 1), session_id: sessionId, ack_command_seq: ackSeq, namespace: ns,
-      credential: credential, bootstrap_token: (if credential.len == 0: readTrimmed(bootstrapFile) else: ""),
+      credential: credential, bootstrap_token: (if credential.len == 0: bootstrapToken else: ""),
       transitions: round.transitions.map(toProto) & handBack, free_pod_slots: 20,
       inventory: round.inventory.map(toProto), inventory_complete: true,    # every Pod this controller tracks is listed
       kept: keptPods(st, cfg, 100), kept_total: uint32(st.unread().len), kept_complete: true,
@@ -226,23 +211,16 @@ proc main() =
     else:
       resp = push.quiet()
     if resp.issued_credential.len > 0:
-      # enrolled: keep the credential, and from the next poll on it is the proof (the poll got nothing else, so nothing is lost)
-      saveCredential(resp.issued_credential)
+      # enrolled: from the next poll on the credential is the proof (the poll got nothing else, so nothing is lost)
       credential = resp.issued_credential
       echo "jobcontroller: enrolled at core for ", ns
       sleep int(max(resp.poll_after_ms, 100'u32))
       continue
     if resp.unauthorized:
-      # The core says why. The credential is given up only when the core says that it is wrong (credential_mismatch: rotated, or made for another generation); a credential cannot be had again
-      # (a bootstrap token is used once), so a refusal for any other reason - the namespace has no identity yet, the core read nothing - leaves it alone, and the controller asks again.
-      let wrong = resp.refusal == credentialMismatch
+      # The core says why. Nothing is to be done about it here: a controller whose identity is not good is deleted by the core, which starts another with a token of its own
+      # (D-62); until then it asks again. The reason is in the log of the Pod.
       stderr.writeLine "jobcontroller: core does not accept this controller's identity for " & ns & " (" & (if resp.refusal.len > 0: resp.refusal else: "no reason given") & ")" &
-        (if credential.len > 0 and wrong: "; the credential is wrong: dropping it, enrolling again"
-         elif credential.len > 0: "; the credential is kept"
-         else: "; no valid bootstrap token (CINIM_BOOTSTRAP_FILE) yet")
-      if credential.len > 0 and wrong:
-        credential = ""
-        try: removeFile(credentialPath()) except OSError: discard
+        (if credential.len > 0: "" elif bootstrapToken.len == 0: "; it was started with no token (CINIM_BOOTSTRAP_TOKEN)" else: "")
       sleep int(max(resp.poll_after_ms, 1000'u32))
       continue
     if resp.config.present:
@@ -300,6 +278,7 @@ proc main() =
         of dsDone:
           echo "jobcontroller: drained what step ", o.runId, "/", o.seq, " left on the volume"
           drained.add StepDrained(step: step, ok: true)
+          st.markDrained(podName(o.runId, o.seq, o.attempt))
           drainWork.del key
         of dsFailed:
           stderr.writeLine "jobcontroller: the drain of " & o.runId & "/" & $o.seq & " cannot be done: " & out0.detail

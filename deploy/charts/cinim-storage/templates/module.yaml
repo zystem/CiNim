@@ -45,7 +45,7 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ include "cinim-storage.secret" . }}, key: sealKey}}
             - name: HOSTNAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
-          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5, timeoutSeconds: 4}
           livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 10, periodSeconds: 20, failureThreshold: 6}
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           resources: {{- toYaml .Values.module.resources | nindent 12 }}

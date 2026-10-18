@@ -12,6 +12,7 @@
 ## or `cancel_previous` (the earlier runs of the trigger that have not ended are cancelled, RUN-006, and the new one is started: the usual answer to a push storm, where
 ## only the newest commit matters). A run started by a trigger carries `trigger_id`.
 import std/[json, strutils, times, atomics, os, tables]
+import health
 import ../common/[rqlite, states, cron, ctrlauth]
 import schema, scheduler, runparams, orgrules, apiauth, groups
 
@@ -221,6 +222,7 @@ proc fireSchedules*(co: Core; now: int64): int =
 proc runTriggerLoop*(a: tuple[co: Core, stop: ptr Atomic[bool]]) {.thread.} =
   {.cast(gcsafe).}:
     while not a.stop[].load:
+      beat(bTriggers)
       try: discard fireSchedules(a.co, getTime().toUnix())
       except CatchableError as e: stderr.writeLine "core: triggers: " & e.msg
       for _ in 0 ..< loopEverySeconds * 10:

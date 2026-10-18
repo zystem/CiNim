@@ -11,6 +11,8 @@ import ../common/httpsrv
 import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
+import ../common/dbready
+import health
 
 const base = "/api/v1/runs"
 const maxDownloadBytes = 64 * 1024 * 1024
@@ -218,8 +220,16 @@ proc onRequest() {.raises: [], gcsafe.} =
         reply(Http200, coreRef.renderCoreMetrics(), ["Content-Type: text/plain; version=0.0.4; charset=utf-8"])
         return
       if path == "/healthz":
-        # the probes of the Pod: alive, and says nothing else, so that it needs no token
-        jsonOk(Http200, %*{"status": "ok"})
+        # the liveness probe of the Pod, which needs no token: alive, and none of the threads that take the log, the reports and the artifacts is stuck (core/health.nim)
+        let live = livenessJson(epochTime())
+        if live.ok: jsonOk(Http200, live.body)
+        else: reply(Http503, $live.body, ["Content-Type: application/json"])
+        return
+      if path == "/readyz":
+        # the readiness probe: the database answers (common/dbready.nim). Not ready is alive: the Pod is left out of the Service until the database is back, and not restarted
+        let db = readyCached(coreRef.rqliteUrl, 2000, epochTime())
+        if db.ok: jsonOk(Http200, %*{"status": "ready", "checks": {"database": "ok"}})
+        else: reply(Http503, $(%*{"status": "not_ready", "checks": {"database": db.why}}), ["Content-Type: application/json"])
         return
       if path.startsWith("/api/v1/hooks/"):
         # a webhook is called with the secret of its own trigger, which is no API token (core/triggers.nim): it starts that trigger's run and nothing else
@@ -614,14 +624,10 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           var provisioned = newJObject()
           if provisionOn:
-            # the identity of the namespace's controller (IAM-003): a generation in the database, the token made from it; asking
-            # again after a failure finds the same row and makes the same token
+            # the namespace and what the controller needs; the controller itself is a Pod that the core makes in its next pass, with the one-time token of the identity
+            # (IAM-003, orgreconcile.nim), which is asked for right after the organisation is recorded
             let pc = provisionConfig(cfg, netEgress, netIngress)
-            let ns = orgNamespace(pc, slug)
-            c.ensureCredentialRow(ns, getTime().toUnix() + bootstrapTtl)
-            let master = coreSecret(coreRef.certs)
-            let token = bootstrapToken(master, ns, c.credentialRow(ns).generation)
-            let r = provision(kube, pc, slug, loadCurve(coreRef.certs), token)
+            let r = provision(kube, pc, slug, loadCurve(coreRef.certs))
             if not r.ok:
               # what was made stays; asking again makes the rest (every create is idempotent)
               reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "provision_failed", "step": r.failedStep,
@@ -635,41 +641,13 @@ proc onRequest() {.raises: [], gcsafe.} =
                    except RqError:
                      problem(Http409, "slug_exists", "this shard already has an organisation with that slug")
                      return
-          if provisionOn: c.setControllerSpec(slug, controllerSpecHash(netNow, slug))       # the reconciliation then leaves this controller alone until the settings change
+          if provisionOn: requestPass()                                                      # the supervision makes the controller's Pod
           jsonOk(Http201, %*{"id": id, "slug": slug, "name": j{"name"}.getStr, "namespace": namespaceName(orgPrefix, orgShard, slug),
                              "url": orgUrl(cfg.publicBase, slug), "provisioned": provisionOn,
                              "network": {"egress": (if egressNow: "open" else: "restricted"), "ingress": (if ingressNow: "open" else: "closed")}, "kubernetes": provisioned,
                              "checked_against_router": view.configured and view.fetchedAt > 0})
         else:
           problem(Http405, "method_not_allowed", "GET or POST")
-        return
-      if path.startsWith("/api/v1/organizations/") and path.endsWith(":rotate-controller-credential"):
-        # IAM-003: a new generation of the identity of the organisation's controller, for the case that its state volume is lost or
-        # its credential leaked; the old credential stops working at once and the controller enrols again with a new bootstrap token
-        if getMethod() != "POST":
-          problem(Http405, "method_not_allowed", "POST")
-          return
-        let slug = path["/api/v1/organizations/".len ..< path.len - ":rotate-controller-credential".len]
-        var c = newRq(coreRef.rqliteUrl)
-        if c.organizationState(slug).len == 0:
-          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
-          return
-        let pc = provisionConfig(currentConfig())
-        let ns = orgNamespace(pc, slug)
-        if not c.credentialRow(ns).found:
-          problem(Http409, "no_controller_identity", "this organisation has no controller identity (it was made without a cluster)")
-          return
-        var kubernetes = newJObject()
-        c.rotateCredential(ns, getTime().toUnix() + bootstrapTtl)
-        let rotated = %*[{"namespace": ns, "generation": c.credentialRow(ns).generation}]
-        if provisionOn:
-          let r = renewBootstrapSecret(kube, pc, slug, bootstrapToken(coreSecret(coreRef.certs), ns, c.credentialRow(ns).generation))
-          if not r.ok:
-            reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "rotate_failed", "step": r.failedStep, "detail": r.error}),
-                  ["Content-Type: application/problem+json"])
-            return
-          kubernetes[ns] = stepsJson(r)
-        jsonOk(Http200, %*{"slug": slug, "namespace": ns, "generation": c.credentialRow(ns).generation, "rotated": rotated, "kubernetes": kubernetes})
         return
       if path == "/api/v1/stores":
         # D-60: the stores are the storage module's (docs/storage-module.md); the operator makes and changes them there, with the module's admin token. The core shows what the module has,

@@ -79,19 +79,16 @@ ingress:
     enabled: false
     secretName: ""
 
-# The job controller of every organisation (SHD-007): the core makes its Deployment in the namespace of the organisation from this image
-# (the controller and the shim, deploy/controller/Dockerfile). Empty: <image.repository>-controller:<image.tag>.
+# The job controller of every organisation (SHD-007, D-62): the core makes its Pod in the namespace of the organisation from the image next to the shard's own,
+# <image.repository>-controller:<image.tag> (the controller and the shim, tools/image/Dockerfile.controller); there is no value for it, a new `image.tag` is all an upgrade takes.
 controller:
-  image: ""
   # StorageClass of the controller's state volume (1 Gi per organisation); empty is the cluster's default class
   stateStorageClass: ""
 
-# The conductors of every organisation (docs/conductors.md): Pods that lead the runs of the organisation, made by its job controller; nothing else leads a run. The core
-# tells each controller how many to keep and with which image (empty: <image.repository>-conductor:<image.tag>), and the namespace of each organisation gets the policy
-# that lets them reach the core's push channel. A conductor that runs another image than this one is drained when it is idle and made again with this one.
-# How many: the organisation's runs_per_conductor and conductor_min (GET/PUT /api/v1/profile).
-conductor:
-  image: ""
+# The conductors of every organisation (docs/conductors.md) are Pods that lead the runs of the organisation, made by its job controller; nothing else leads a run. They have no
+# values here: the core tells each controller how many to keep and with which image (<image.repository>-conductor:<image.tag>), and the namespace of each organisation gets the
+# policy that lets them reach the core's push channel. A conductor that runs another image is drained when it is idle and made again with the new one. How many: the
+# organisation's runs_per_conductor and conductor_min (GET/PUT /api/v1/profile).
 
 # The build profile (D-42, A.13, Q-17): with `enabled` the namespace of every organisation is Pod Security `baseline` by label (a build needs
 # root in its container) and the ValidatingAdmissionPolicy of this chart gives every Pod but a build Pod what `restricted` has over `baseline`.
@@ -220,6 +217,14 @@ rqlite:
     enabled: true
     size: 10Gi
     # storageClassName: the cluster's default class when empty/unset (the same key exists below for the other subcharts)
+  # Alive: the node's HTTP API answers (a node without a leader still does: /readyz?noleader). The chart of rqlite warns against liveness probes, and rightly: this one gives up after five minutes
+  # and asks nothing of the cluster, so that a restart is only for a node that does not answer at all.
+  livenessProbe:
+    httpGet: {path: '/readyz?noleader', port: http}
+    initialDelaySeconds: 60
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 15
 
 # Two independent nodes on persistent volumes (DAT-010); a single node is not supported in production.
 victorialogs-0:

@@ -5,6 +5,7 @@
 ## One shard, one execution profile, no directory.
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
+import health
 import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
@@ -69,6 +70,7 @@ proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thr
     var c = newRq(a.rqliteUrl)
     var lastSweep = 0.0
     while not stopServers.load:
+      beat(bWatchdog)
       try:
         probeAndAge(c, a.startedAt)
         watchdogPass(c, a.profileId, a.startedAt)

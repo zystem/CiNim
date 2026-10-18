@@ -15,6 +15,7 @@
 ## session, the credit, the pushes - is done by one worker, in order, and the workers share nothing but the database. Every worker has its own
 ## database client and its own table of controllers. Messages cross threads in shared memory (common/shmq.nim), never as Nim strings.
 import std/[tables, options, times, os, atomics, sequtils, json, hashes]
+import health
 import std/strutils
 import common/[stream, streamstate, rqlite, zmqcurve, states, shmq, podcpu, ctrlauth, conductorplan]
 import scheduler, schema, workkick, hubmetrics, components, retrypolicy, checkmail
@@ -578,6 +579,7 @@ proc serveStream*(co: Core; port: int; workers = 0) {.thread.} =
     var kind: int
     var x, y: string
     while not stopServers.load:
+      beat(bStream)
       # what the workers have to say first; then kicks, so that work just made goes out before the next report is read
       var sent = 0
       while sent < 256 and outq[].pop(0, kind, x, y):

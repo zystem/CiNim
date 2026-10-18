@@ -79,11 +79,14 @@ func conductorPodBody*(spec: ConductorSpec; n: int): JsonNode =
            {"name": "CINIM_CERTS", "value": "/etc/cinim"},
            {"name": "CINIM_CONDUCTOR_IMAGE", "value": spec.image},
            {"name": "CINIM_RUNS_PER_CONDUCTOR", "value": $spec.runsPerConductor},
-           {"name": "CINIM_DRAIN_SECONDS", "value": $spec.drainSeconds}],
-         "volumeMounts": [{"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true}],
+           {"name": "CINIM_DRAIN_SECONDS", "value": $spec.drainSeconds},
+           {"name": "CINIM_STATE_DIR", "value": "/tmp"}],                      # where the heartbeat for the probe is written
+         "volumeMounts": [{"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true}, {"name": "tmp", "mountPath": "/tmp"}],
+         # alive: the core has accepted a hello of the conductor lately (it says one every five seconds). A conductor the probe fails is ended by the kubelet and made again by the controller.
+         "livenessProbe": {"exec": {"command": ["/conductor", "--healthcheck"]}, "initialDelaySeconds": 30, "periodSeconds": 20, "timeoutSeconds": 5, "failureThreshold": 3},
          "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
          "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": $memoryMi & "Mi"}}}],
-       "volumes": [{"name": "curve", "secret": {"secretName": spec.curveSecret, "defaultMode": 288}}]}}     # 0440
+       "volumes": [{"name": "curve", "secret": {"secretName": spec.curveSecret, "defaultMode": 288}}, {"name": "tmp", "emptyDir": {}}]}}     # 0440
 
 proc reconcile*(be: Backend; spec: ConductorSpec; wanted: int; credentials: seq[(string, string)]; now: float;
                 tried: var Table[int, float]): tuple[created, deleted: seq[string]] =

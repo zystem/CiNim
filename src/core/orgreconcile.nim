@@ -9,30 +9,35 @@
 ## labels carry the policy, Pod Security and the build-pod policy) and the state volume of a controller; it may not read Secrets, so a
 ## Secret that was changed by hand is not noticed.
 ##
-## An organisation whose namespace is missing (the database was restored into a new cluster) or whose controller lost its state volume has
-## lost the identity of its controller (IAM-003, the credential lived on that volume): its generation is rotated and the bootstrap token
-## replaced, and the controller enrols again.
+## The controller of an organisation is a Pod that the core itself makes, with the one-time token of the current generation of its identity in the environment (IAM-003, D-62);
+## Kubernetes neither restarts it nor probes it. Every pass the core looks at the controller Pods of the namespace (`superviseController`): one that it does not know (another
+## generation, another image or settings, ended, terminating, or the organisation is switched off) is deleted; one that did not enrol in time, or that was enrolled and has not
+## been heard from for a while, is deleted too, and a new one is made with a new generation and its token. This is the whole of the controller's health.
 ##
 ## The decisions are a function of what the database and the cluster say (`reconcilePass`), with the database behind closures, so that
 ## `tests/unit/torgreconcile.nim` runs them against a fake cluster. `runPass` and `runReconciler` are the glue.
-import std/[json, locks, atomics, os, strutils, times]
-import kubeapi, orgprovision, schema, keptpods
+import std/[json, locks, atomics, os, strutils, times, algorithm]
+import health
+import kubeapi, orgprovision, schema, keptpods, ctrlpresence
 import ../common/[rqlite, ctrlauth]
 
 type
   ConfigMaker* = proc (egress, ingress: string): ProvisionConfig {.gcsafe.}   ## the objects of an organisation from the shard's settings and its own choice
 
   Hooks* = object
-    token*: proc (namespace: string; rotate: bool): string {.gcsafe.}           ## the bootstrap token of a namespace's controller; a new generation first when `rotate`
+    identity*: proc (namespace: string): CredentialRow {.gcsafe.}               ## the identity of a namespace's controller (made if there is none)
+    rotate*: proc (namespace: string) {.gcsafe.}                                ## a new generation: the old credential and token stop working
+    token*: proc (namespace: string; generation: int): string {.gcsafe.}        ## the one-time token of a generation
+    lastPoll*: proc (namespace: string): int64 {.gcsafe.}                       ## when the core last took in a report of that controller (0: not since the core started)
     startRetention*: proc (slug: string; at: int64) {.gcsafe.}
     forget*: proc (slug, namespace: string) {.gcsafe.}                          ## the rows of a deleted organisation
-    setControllerSpec*: proc (slug, spec: string) {.gcsafe.}                    ## record the fingerprint of the controller's Deployment as it is now; nil: not kept
 
   OrgReport* = object
     slug*, state*: string
     created*: seq[string]          ## what was missing and has been made
-    controllerReplaced*: bool      ## the controller's Deployment was another one than the core makes now (a new image, new settings) and has been made again
-    identityRenewed*: bool
+    controllerReplaced*: bool      ## the controller's Pod was not the one the core makes now (a new image, new settings) and has been made again
+    identityRenewed*: bool         ## a new generation of the controller's identity was made in this pass (the controller was not enrolled, was silent, or ended)
+    controllerRemoved*: seq[string] ## "<Pod>: <why>" for every controller Pod the core deleted
     error*: string
 
   Alert* = object
@@ -50,7 +55,87 @@ const
   policyLabels = ["pod-security.kubernetes.io/enforce", "pod-security.kubernetes.io/audit", "pod-security.kubernetes.io/warn",
                   "cinim.io/build-pod-policy"]       ## the labels of a namespace that carry policy: a difference in these is an alert
 
-proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: CurveKeys; hooks: Hooks): OrgReport =
+const
+  superviseEvery = 15      ## seconds between two looks at the controllers alone, between the full passes
+  enrollGrace = 180        ## seconds a Running controller has to enrol with its token
+  pendingGrace = 900       ## seconds a Pod that has not started (the image is pulled, the volume attached) is left alone
+  silenceGrace = 120       ## seconds an enrolled controller may go without a report before the core calls it dead (it reports at least every 5 s)
+
+proc createdAt(pod: JsonNode): int64 =
+  ## the API server's time of the Pod's creation; 0 when it is not there (a clean 0 only makes the Pod look old: it is then judged by the reports alone)
+  let ts = pod{"metadata", "creationTimestamp"}.getStr
+  if ts.len == 0: return 0
+  try: parse(ts, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc()).toTime.toUnix
+  except CatchableError: 0
+
+proc controllerVerdict*(pod: JsonNode; id: CredentialRow; want: string; active: bool; now, coreStarted, lastPoll: int64): string =
+  ## "" when this Pod is the controller the core wants, else why it is not. The core knows a controller by the generation of its identity and the fingerprint of what it makes:
+  ## anything else it deleted (IAM-003, D-62).
+  let phase = pod{"status", "phase"}.getStr("Pending")
+  if pod{"metadata", "deletionTimestamp"} != nil: return "terminating"
+  if not active: return "the organisation is switched off"
+  if phase in ["Succeeded", "Failed"]: return "ended (" & phase & ")"
+  let ann = pod{"metadata", "annotations"}
+  if ann == nil or ann{generationAnnotation}.getStr != $id.generation: return "not the current generation of the identity (" & $id.generation & ")"
+  if ann{specAnnotation}.getStr != want: return "replaced"          # another image or other settings than the core makes now
+  let born = createdAt(pod)
+  if not id.confirmed:
+    let limit = if phase == "Pending": pendingGrace else: enrollGrace
+    if born > 0 and now - born > limit: return "did not enrol with its token within " & $limit & " s"
+  else:
+    let heard = max(lastPoll, max(coreStarted, born))
+    if now - heard > silenceGrace: return "not heard from for " & $(now - heard) & " s"
+  ""
+
+proc superviseController(k: KubeApi; cfg: ProvisionConfig; slug: string; active: bool; hooks: Hooks; now, coreStarted: int64; report: var OrgReport) =
+  ## The controller is a Pod of the core (orgprovision.nim `newControllerPod`), and the core is its supervisor: it deletes the controller Pods it does not know, and when none is
+  ## good, makes one with the one-time token of the identity; a new generation first when the identity has been used, has expired, or a Pod of this generation has just been
+  ## deleted (its name is the generation's; the same token could not be given twice anyway).
+  let ns = orgNamespace(cfg, slug)
+  # a Deployment of the time before the controller became a Pod of the core (docs/compat.md): deleting it takes its Pods
+  let old = k.remove("Deployment", ns, controllerName)
+  if old.outcome == oFailed:
+    report.error = "removing the Deployment of the controller: " & old.detail
+    return
+  if old.outcome == oDeleted: report.controllerRemoved.add "Deployment " & controllerName & ": replaced by a Pod of the core"
+  let listed = k.listObjects("Pod", ns, "app.kubernetes.io/name=" & controllerName)
+  if listed.error.len > 0:
+    report.error = "listing the controller: " & listed.error
+    return
+  var id = hooks.identity(ns)
+  let want = controllerSpecHash(cfg, slug)
+  let poll = hooks.lastPoll(ns)
+  var pods = listed.items
+  pods.sort(proc (a, b: JsonNode): int = cmp(createdAt(b), createdAt(a)))       # the newest first: if two are good the older goes
+  var haveGood, sawCurrent = false
+  for pod in pods:
+    let name = pod{"metadata", "name"}.getStr
+    let current = pod{"metadata", "annotations", generationAnnotation}.getStr == $id.generation
+    var why = controllerVerdict(pod, id, want, active, now, coreStarted, poll)
+    if why.len == 0 and haveGood: why = "a second controller"
+    if why.len == 0:
+      haveGood = true
+      continue
+    if current: sawCurrent = true
+    if why == "terminating": continue                                              # on its way out already
+    let r = k.remove("Pod", ns, name)
+    if r.outcome == oFailed:
+      report.error = "deleting the controller " & name & ": " & r.detail
+      return
+    report.controllerRemoved.add name & ": " & why
+    if why == "replaced": report.controllerReplaced = true
+  if haveGood or not active: return
+  if id.confirmed or id.bootstrapExpiresAt <= now or sawCurrent:
+    hooks.rotate(ns)
+    id = hooks.identity(ns)
+    report.identityRenewed = true
+  let made = k.create("Pod", ns, newControllerPod(cfg, slug, id.generation, hooks.token(ns, id.generation)))
+  case made.outcome
+  of oCreated: report.created.add "controller"
+  of oFailed: report.error = "making the controller: " & made.detail
+  else: discard
+
+proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: CurveKeys; hooks: Hooks; now, coreStarted: int64): OrgReport =
   result = OrgReport(slug: o.slug, state: o.state)
   let ns = orgNamespace(cfg, o.slug)
   let active = o.state == "active"
@@ -58,41 +143,13 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: 
   if nsGot.error.len > 0:
     result.error = "reading the namespace: " & nsGot.error
     return
-  var identityLost = not nsGot.found
-  if nsGot.found and cfg.controllerImage.len > 0:
-    let pvc = k.getObject("PersistentVolumeClaim", ns, stateClaimName)
-    if pvc.error.len > 0:
-      result.error = "reading the state volume: " & pvc.error
-      return
-    identityLost = not pvc.found
-  var token = ""
-  if cfg.controllerImage.len > 0:
-    token = hooks.token(ns, identityLost)
-    result.identityRenewed = identityLost
-    if identityLost and nsGot.found:
-      # the Secret of the old bootstrap token is still there; the core may create and delete Secrets, not change them
-      let r = renewBootstrapSecret(k, cfg, o.slug, token)
-      if not r.ok:
-        result.error = r.failedStep & ": " & r.error
-        return
-  # The controller follows the core's settings (SHD-008): the core never changes an object, but it may delete the Deployment of the controller and make it again from what it
-  # holds now, which is what an upgrade of the shard needs (a new controller image, new build or storage settings reach only the controllers made after it). The state of a
-  # controller is on its volume and the Pods of its steps are adopted by the new one (D-29), so a step that is running does not notice. An organisation without a fingerprint
-  # (made before it was kept) is given the current one as it stands; its controller is then replaced when the fingerprint changes.
-  let want = if active: controllerSpecHash(cfg, o.slug) else: ""
-  if want.len > 0 and nsGot.found and o.controllerSpec.len > 0 and o.controllerSpec != want:
-    let gone = k.remove("Deployment", ns, controllerName)
-    if gone.outcome == oFailed:
-      result.error = "replacing the controller: " & gone.detail
-      return
-    result.controllerReplaced = gone.outcome == oDeleted
-  let r = provision(k, cfg, o.slug, curve, token, active)
+  let r = provision(k, cfg, o.slug, curve, active)
   for s in r.steps:
     if s.outcome == oCreated: result.created.add s.name
   if not r.ok:
     result.error = r.failedStep & ": " & r.error
-  elif want.len > 0 and want != o.controllerSpec and hooks.setControllerSpec != nil:
-    hooks.setControllerSpec(o.slug, want)
+    return
+  if cfg.controllerImage.len > 0: superviseController(k, cfg, o.slug, active, hooks, now, coreStarted, result)
 
 proc namespaceAlerts(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; shard: string): tuple[alerts: seq[Alert], error: string] =
   let l = k.listNamespaces("cinim.io/shard=" & shard)
@@ -148,16 +205,29 @@ proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[Org
         result.orgs.add OrgReport(slug: o.slug, state: o.state, error: "deleting at the end of the retention, " & p.failedStep & ": " & p.error)
     left.add o
   for o in left:
-    result.orgs.add reconcileOne(k, mk(o.egress, o.ingress), o, curve, hooks)
+    result.orgs.add reconcileOne(k, mk(o.egress, o.ingress), o, curve, hooks, now, coreStarted)
   let a = namespaceAlerts(k, mk, left, mk("", "").shard)
   result.alerts = a.alerts
   if a.error.len > 0: result.error = a.error
+
+proc superviseControllers*(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; hooks: Hooks; now: int64; coreStarted = 0'i64): seq[OrgReport] =
+  ## The part of a pass that the health of the controllers needs, run often (every 15 s, `runReconciler`) between the full passes: the controller Pods of every organisation
+  ## that has a namespace, and nothing else. A silent controller is then noticed within minutes, not within the interval of the reconciliation.
+  if not k.available: return
+  for o in orgs:
+    let cfg = mk(o.egress, o.ingress)
+    if cfg.controllerImage.len == 0: continue
+    let found = k.getObject("Namespace", "", orgNamespace(cfg, o.slug))
+    if not found.found: continue                                  # nothing to supervise yet: the full pass makes the namespace
+    var r = OrgReport(slug: o.slug, state: o.state)
+    superviseController(k, cfg, o.slug, o.state == "active", hooks, now, coreStarted, r)
+    if r.created.len > 0 or r.controllerRemoved.len > 0 or r.error.len > 0: result.add r
 
 func toJson*(p: PassResult): JsonNode =
   var orgs = newJArray()
   for o in p.orgs:
     orgs.add %*{"slug": o.slug, "state": o.state, "created": o.created, "controller_replaced": o.controllerReplaced,
-                "identity_renewed": o.identityRenewed, "error": o.error}
+                "identity_renewed": o.identityRenewed, "controller_removed": o.controllerRemoved, "error": o.error}
   var alerts = newJArray()
   for a in p.alerts:
     alerts.add %*{"code": a.code, "namespace": a.namespace, "organization": a.organization, "detail": a.detail}
@@ -188,31 +258,43 @@ proc lastPassJson*(): string =
 proc requestPass*() =
   runNow.store(true)
 
+proc makeHooks(e: PassEnv; master: string): Hooks =
+  {.cast(gcsafe).}:
+    result = Hooks(
+        identity: proc (namespace: string): CredentialRow =
+          var db = newRq(e.rqliteUrl)
+          db.ensureCredentialRow(namespace, getTime().toUnix() + e.bootstrapTtl)
+          db.credentialRow(namespace),
+        rotate: proc (namespace: string) =
+          var db = newRq(e.rqliteUrl)
+          db.rotateCredential(namespace, getTime().toUnix() + e.bootstrapTtl),
+        token: proc (namespace: string; generation: int): string = bootstrapToken(master, namespace, generation),
+        lastPoll: proc (namespace: string): int64 = ctrlpresence.lastPoll(namespace),
+        startRetention: proc (slug: string; at: int64) =
+          var db = newRq(e.rqliteUrl)
+          db.startRetention(slug, at),
+        forget: proc (slug, namespace: string) =
+          var db = newRq(e.rqliteUrl)
+          db.deleteCredentialRow(namespace)
+          forgetPolls(namespace)
+          forgetKept(namespace)
+          db.deleteOrganization(slug))
+
+
 proc runPass*(e: PassEnv; kube: KubeApi): PassResult =
   {.cast(gcsafe).}:
     withLock passLock:
       var c = newRq(e.rqliteUrl)
-      let master = coreSecret(e.certs)
-      let hooks = Hooks(
-        token: proc (namespace: string; rotate: bool): string =
-          var db = newRq(e.rqliteUrl)
-          let expires = getTime().toUnix() + e.bootstrapTtl
-          db.ensureCredentialRow(namespace, expires)
-          if rotate: db.rotateCredential(namespace, expires)
-          bootstrapToken(master, namespace, db.credentialRow(namespace).generation),
-        startRetention: proc (slug: string; at: int64) =
-          var db = newRq(e.rqliteUrl)
-          db.startRetention(slug, at),
-        setControllerSpec: proc (slug, spec: string) =
-          var db = newRq(e.rqliteUrl)
-          db.setControllerSpec(slug, spec),
-        forget: proc (slug, namespace: string) =
-          var db = newRq(e.rqliteUrl)
-          db.deleteCredentialRow(namespace)
-          forgetKept(namespace)
-          db.deleteOrganization(slug))
+      let hooks = makeHooks(e, coreSecret(e.certs))
       result = reconcilePass(kube, e.mk, loadCurve(e.certs), c.listOrganizationsFull(), hooks, getTime().toUnix(), e.retention, e.coreStarted, e.purgeGrace)
       withLock lock: lastJson = $result.toJson
+
+proc runSupervision*(e: PassEnv; kube: KubeApi): seq[OrgReport] =
+  ## the health of the controllers alone (`superviseControllers`)
+  {.cast(gcsafe).}:
+    withLock passLock:
+      var c = newRq(e.rqliteUrl)
+      result = superviseControllers(kube, e.mk, c.listOrganizationsFull(), makeHooks(e, coreSecret(e.certs)), getTime().toUnix(), e.coreStarted)
 
 proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.} =
   ## SHD-008: a pass at start and then every `interval` seconds, or when asked (`requestPass`); the thread has a client of its own
@@ -220,6 +302,7 @@ proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.
     let kube = inCluster()
     var waited = args.env.interval * 10        # the first pass at once
     while not args.stop[].load:
+      beat(bReconciler)
       if runNow.exchange(false) or waited >= args.env.interval * 10:
         waited = 0
         try:
@@ -227,10 +310,18 @@ proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.
           if r.error.len > 0: stderr.writeLine "core: reconciliation: " & r.error
           for o in r.orgs:
             if o.created.len > 0: echo "core: reconciliation made again for ", o.slug, ": ", o.created.join(", ")
-            if o.controllerReplaced: echo "core: the controller of ", o.slug, " was made again: its Deployment was not what the core makes now"
+            for g in o.controllerRemoved: echo "core: the controller of ", o.slug, ": deleted ", g
             if o.error.len > 0: stderr.writeLine "core: reconciliation of " & o.slug & ": " & o.error
           for s in r.purged: echo "core: the retention of the organisation ", s, " is over, deleted"
         except CatchableError as e:
           stderr.writeLine "core: reconciliation failed: " & e.msg
+      elif waited mod (superviseEvery * 10) == 0 and kube.available:
+        try:
+          for o in runSupervision(args.env, kube):
+            if o.created.len > 0: echo "core: the controller of ", o.slug, ": made again"
+            for g in o.controllerRemoved: echo "core: the controller of ", o.slug, ": deleted ", g
+            if o.error.len > 0: stderr.writeLine "core: supervision of the controller of " & o.slug & ": " & o.error
+        except CatchableError as e:
+          stderr.writeLine "core: supervision of the controllers failed: " & e.msg
       sleep 100
       inc waited

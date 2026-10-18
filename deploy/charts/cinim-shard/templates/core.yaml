@@ -147,15 +147,21 @@ spec:
             - {name: kekd-tls, mountPath: /etc/cinim-kekd, readOnly: true}
             {{- end }}
             - {name: tmp, mountPath: /tmp}
+          # ready: the database answers (/readyz; not ready leaves the Pod out of the Service and does not restart it). Alive: none of the threads that take the log, the reports and the
+          # artifacts is stuck (/healthz, core/health.nim); a core that is alive and not moving is restarted after two minutes.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
+            periodSeconds: 10
+            timeoutSeconds: 4
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
             periodSeconds: 20
+            timeoutSeconds: 3
             failureThreshold: 6
           securityContext:
             allowPrivilegeEscalation: false

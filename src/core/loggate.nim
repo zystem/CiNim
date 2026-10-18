@@ -3,6 +3,7 @@
 ## result; scheduler.nim reads it with `currentGate()` on every ControllerAttach poll. Poll results are not written to
 ## rqlite (DAT-010): the gate lives in memory and is fail-closed after a restart until the first round has finished.
 import std/[atomics, httpclient, locks, tables, times, strutils, os]
+import health
 import logcircuit
 
 type
@@ -87,6 +88,7 @@ proc serveLogGate*(w: Watch; stop: ptr Atomic[bool]) {.thread.} =
     var g = newGate()
     var seenFailure = 0.0
     while not stop[].load:
+      beat(bLogGate)
       pollRound(w, nodes, agent)
       let now = epochTime()
       var pf = 0.0

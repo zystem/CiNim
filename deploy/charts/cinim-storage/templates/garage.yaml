@@ -107,6 +107,8 @@ spec:
           command: ["/garage", "-c", "/etc/garage/garage.toml", "server"]
           ports: [{name: s3, containerPort: 3900}, {name: rpc, containerPort: 3901}, {name: admin, containerPort: 3903}]
           readinessProbe: {tcpSocket: {port: 3900}, periodSeconds: 5}
+          # alive: the admin API's /health answers 200 when the node is healthy (it needs no token). Slow to give up: a restart of a store is not cheap.
+          livenessProbe: {httpGet: {path: /health, port: 3903}, initialDelaySeconds: 30, periodSeconds: 20, timeoutSeconds: 5, failureThreshold: 9}
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           resources: {{- toYaml $g.resources | nindent 12 }}
           volumeMounts:

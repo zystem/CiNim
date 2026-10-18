@@ -29,4 +29,6 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 * An empty `api_versions` as version 1, and `api_version` 0 as 1: a lease request that names no versions is refused (`executor_too_old`).
 * `ExecutorRequest.finish_run_id`: removed, number 4 reserved; the baseline of the protocol check (`proto/compat/baseline.binpb`) was made again, because it dated from the first commit and the check had been failing already on the rename of `secret_handles`.
 
+* The Deployment `cinim-job-controller` of an organisation (before D-62 the controller was one): the core deletes it with its Pods at every pass (`superviseController`, a `DELETE` that answers 404 once none is left), and its ClusterRole keeps `delete` on `deployments` for it. Strike this line, the call and the right when no shard has one any more.
+
 Not compatibility but interim, and to be replaced: the script of a run kept as a journal row with `seq = -1` (no store for pipeline bundles yet).

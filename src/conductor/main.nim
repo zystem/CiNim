@@ -7,10 +7,12 @@ import std/[os, options, strutils, times, tables, sequtils, random]
 import posix
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, stream, streamstate, runpipe]
+import common/[zmqcurve, stream, streamstate, runpipe, heartbeat]
 import executor/[sandbox, journal, replay, steptable]
 
 import_proto3 "../../build/nimproto/all.proto"
+
+const healthMaxAgeSeconds = 90         ## the liveness probe fails when the core has not accepted a hello for this long
 
 # ------------------------------------------------------------------ what both modes share
 
@@ -271,6 +273,7 @@ proc main() =
       if f.payload == "unauthorized":
         stderr.writeLine "conductor: the core does not accept this conductor's credential"
         quit 3
+      touchHeartbeat(heartbeatPath(getEnv("CINIM_STATE_DIR", "/tmp")), int64(epochTime()))        # the core answered the hello and accepted it: the probe of the Pod sees it
     of "resync":
       # the core does not know this session (it was restarted, or dropped us): its numbering starts again, so ours must too
       inbox = initInbox()
@@ -362,5 +365,14 @@ proc main() =
   conn.close()
   echo "conductor: stopped"
 
+proc healthcheckMode() =
+  ## the probe of the Pod (exec): exit 0 when the core has accepted a hello of this conductor within the last `healthMaxAgeSeconds` (it says hello every five seconds), else 1
+  let age = heartbeatAge(heartbeatPath(getEnv("CINIM_STATE_DIR", "/tmp")), int64(epochTime()))
+  if age >= 0 and age <= healthMaxAgeSeconds:
+    quit 0
+  stderr.writeLine "conductor: not healthy: " & (if age < 0: "no heartbeat" else: "the core has not answered for " & $age & " s")
+  quit 1
+
 if paramCount() >= 1 and paramStr(1) == "--run": runMode()
+elif paramCount() >= 1 and paramStr(1) == "--healthcheck": healthcheckMode()
 else: main()

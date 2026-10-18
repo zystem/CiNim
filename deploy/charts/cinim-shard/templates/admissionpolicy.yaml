@@ -14,7 +14,7 @@ spec:
       - apiGroups: [""]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE, DELETE]
-        resources: [namespaces, serviceaccounts, secrets, resourcequotas, limitranges, persistentvolumeclaims]
+        resources: [namespaces, serviceaccounts, secrets, resourcequotas, limitranges, persistentvolumeclaims, pods]
       - apiGroups: [apps]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE, DELETE]
@@ -40,6 +40,9 @@ spec:
     - expression: >-
         (request.resource.resource == "namespaces" ? request.name : request.namespace).startsWith({{ printf "%s-" (include "cinim-shard.ns" .) | quote }})
       message: 'the core of shard {{ .Values.shard }} may only touch namespaces named {{ include "cinim-shard.ns" . }}-*'
+    - expression: >-
+        request.resource.resource != "pods" || (request.operation == "DELETE" ? oldObject : object).metadata.labels["app.kubernetes.io/name"] == "cinim-job-controller"
+      message: 'the core may only make and delete the Pod of a controller (RBAC cannot narrow a right on Pods by label; the Pods of steps and of conductors are the controller''s)'
     - expression: >-
         request.resource.resource != "rolebindings" || request.operation == "DELETE" || object.roleRef.name == {{ include "cinim-shard.stepRunner" . | quote }}
       message: 'the core may only bind the role {{ include "cinim-shard.stepRunner" . }}'

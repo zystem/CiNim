@@ -48,13 +48,13 @@ http://victorialogs-0:9428,http://victorialogs-1:9428
 {{- printf "%s:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag -}}
 {{- end -}}
 
-{{/* the image of the job controllers: `controller.image`, by default the controller image next to the shard image (<repository>-controller:<tag>) */}}
+{{/* the image of the job controllers and of the conductors: the one next to the shard image, <repository>-controller:<tag> and <repository>-conductor:<tag>; the core makes their Pods */}}
 {{- define "cinim-shard.controllerImage" -}}
-{{- default (printf "%s-controller:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag) .Values.controller.image -}}
+{{- printf "%s-controller:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag -}}
 {{- end -}}
 
 {{- define "cinim-shard.conductorImage" -}}
-{{- default (printf "%s-conductor:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag) .Values.conductor.image -}}
+{{- printf "%s-conductor:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag -}}
 {{- end -}}
 
 {{- define "cinim-shard.labels" -}}

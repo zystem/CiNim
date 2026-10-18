@@ -8,9 +8,10 @@ import kubeapi, orgrules
 
 const
   conductorName* = "cinim-conductor"            ## the label of the organisation's conductor Pods (the controller makes them, jobcontroller/conductors.nim)
-  controllerName* = "cinim-job-controller"      ## the ServiceAccount, the Deployment and the label of the organisation's controller
+  controllerName* = "cinim-job-controller"      ## the ServiceAccount and the label of the organisation's controller; its Pod is `<name>-<generation>`
   curveSecretName* = "cinim-controller-curve"
-  bootstrapSecretName* = "cinim-controller-bootstrap"   ## the one-time token with which the controller enrols (IAM-003, common/ctrlauth.nim)
+  generationAnnotation* = "cinim.io/generation" ## on the controller's Pod: the generation of the identity whose one-time token it was started with (IAM-003, common/ctrlauth.nim)
+  specAnnotation* = "cinim.io/controller-spec"  ## on the controller's Pod: the fingerprint of what the core makes (`controllerSpecHash`)
   stateClaimName* = "cinim-job-controller-state"
   coreServiceName* = "cinim-core"               ## the Service of the core in the namespace of the shard (chart cinim-shard)
 
@@ -93,42 +94,42 @@ func namespaceLabels*(cfg: ProvisionConfig; slug: string): JsonNode =
 func namespaceObject(cfg: ProvisionConfig; slug: string): JsonNode =
   %*{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": orgNamespace(cfg, slug), "labels": namespaceLabels(cfg, slug)}}
 
-func controllerDeployment(cfg: ProvisionConfig; slug: string): JsonNode =
+func controllerPodName*(generation: int): string = controllerName & "-" & $generation
+
+func controllerPodBase(cfg: ProvisionConfig; slug: string; generation: int; token: string): JsonNode =
+  ## The controller of an organisation is a Pod of the core's own, not a Deployment (IAM-003): the core starts it with the one-time token of the generation in its environment,
+  ## watches that it enrols and keeps being heard, and kills and makes it again with a new token when it does not (`orgreconcile.nim`). Kubernetes does not restart it
+  ## (`restartPolicy: Never`) and has no probe of it. Its state (the sqlite file of the Pods it tracks) is on the volume; the credential it is given for the token stays in its memory.
   let ns = orgNamespace(cfg, slug)
-  var env = @[
+  let env = @[
     %*{"name": "CINIM_NAMESPACE", "value": ns},
     %*{"name": "CINIM_CORE_STREAM_ADDR", "value": coreAddress(cfg, 19745)},    # the push channel (docs/conductors.md section 12): the controller's only way to the core
     %*{"name": "CINIM_CERTS", "value": "/etc/cinim"},
     %*{"name": "CINIM_STATE_DIR", "value": "/state"},
-    %*{"name": "CINIM_BOOTSTRAP_FILE", "value": "/etc/cinim/bootstrap/token"}]
+    %*{"name": "CINIM_BOOTSTRAP_TOKEN", "value": token}]
   # The settings of the shard (the build profile, the volume of a run) are not here: the controller gets them with every answer to its poll (ctrlconfig.nim), so that
   # a change of one does not make a new Pod of the controller.
-  %*{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta(cfg, slug, controllerName, ns, controllerName),
+  var m = meta(cfg, slug, controllerPodName(generation), ns, controllerName)
+  m["annotations"] = %*{generationAnnotation: $generation}
+  %*{"apiVersion": "v1", "kind": "Pod", "metadata": m,
      "spec": {
-       "replicas": 1,
-       "strategy": {"type": "Recreate"},       # one state volume, one writer
-       "selector": {"matchLabels": {"app.kubernetes.io/name": controllerName, "cinim.io/organization": slug}},
-       "template": {
-         "metadata": {"labels": labels(cfg, slug, controllerName)},
-         "spec": {
-           "serviceAccountName": controllerName,
-           "securityContext": {"runAsNonRoot": true, "runAsUser": 65532, "fsGroup": 65532, "seccompProfile": {"type": "RuntimeDefault"}},
-           "containers": [{
-             "name": "controller",
-             "image": cfg.controllerImage,
-             "env": env,
-             "volumeMounts": [
-               {"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true},
-               {"name": "bootstrap", "mountPath": "/etc/cinim/bootstrap", "readOnly": true},
-               {"name": "state", "mountPath": "/state"},
-               {"name": "tmp", "mountPath": "/tmp"}],
-             "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
-             "resources": {"requests": {"cpu": "20m", "memory": "64Mi"}, "limits": {"memory": "256Mi"}}}],
-           "volumes": [
-             {"name": "curve", "secret": {"secretName": curveSecretName, "defaultMode": 288}},   # 0440
-             {"name": "bootstrap", "secret": {"secretName": bootstrapSecretName, "defaultMode": 288}},
-             {"name": "state", "persistentVolumeClaim": {"claimName": stateClaimName}},
-             {"name": "tmp", "emptyDir": {}}]}}}}
+       "restartPolicy": "Never",
+       "serviceAccountName": controllerName,
+       "securityContext": {"runAsNonRoot": true, "runAsUser": 65532, "fsGroup": 65532, "seccompProfile": {"type": "RuntimeDefault"}},
+       "containers": [{
+         "name": "controller",
+         "image": cfg.controllerImage,
+         "env": env,
+         "volumeMounts": [
+           {"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true},
+           {"name": "state", "mountPath": "/state"},
+           {"name": "tmp", "mountPath": "/tmp"}],
+         "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
+         "resources": {"requests": {"cpu": "20m", "memory": "64Mi"}, "limits": {"memory": "256Mi"}}}],
+       "volumes": [
+         {"name": "curve", "secret": {"secretName": curveSecretName, "defaultMode": 288}},   # 0440
+         {"name": "state", "persistentVolumeClaim": {"claimName": stateClaimName}},
+         {"name": "tmp", "emptyDir": {}}]}}
 
 proc fingerprint(text: string): string =
   ## the first 24 hexadecimal digits of the SHA-256 of a text
@@ -139,11 +140,18 @@ proc fingerprint(text: string): string =
   result.setLen 24
 
 proc controllerSpecHash*(cfg: ProvisionConfig; slug: string): string =
-  ## What the controller's Deployment should be, as a short fingerprint (the SHA-256 of the object): its image, its settings (the core's settings that reach it as environment),
-  ## its resources. The core keeps the fingerprint of the Deployment it last made for an organisation, and the reconciliation (SHD-008) makes the Deployment again when the
-  ## fingerprint it would make now is another one, e.g. after `helm upgrade` has given the core a new controller image.
+  ## What the controller's Pod should be, as a short fingerprint (the SHA-256 of the object made with no generation and no token): its image, its settings (the core's settings that
+  ## reach it as environment), its resources. The Pod carries it (`specAnnotation`), and the supervision of the controller (SHD-008) replaces a Pod that carries another one, e.g. after
+  ## `helm upgrade` has given the core a new controller image.
   if cfg.controllerImage.len == 0: return ""
-  fingerprint($controllerDeployment(cfg, slug))
+  var pod = controllerPodBase(cfg, slug, 0, "")
+  pod["metadata"]["annotations"].delete(generationAnnotation)
+  fingerprint($pod)
+
+proc newControllerPod*(cfg: ProvisionConfig; slug: string; generation: int; token: string): JsonNode =
+  ## the Pod the core starts for the generation of the identity with its one-time token
+  result = controllerPodBase(cfg, slug, generation, token)
+  result["metadata"]["annotations"][specAnnotation] = %controllerSpecHash(cfg, slug)
 
 func stateClaim(cfg: ProvisionConfig; slug: string): JsonNode =
   result = %*{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": meta(cfg, slug, stateClaimName, orgNamespace(cfg, slug)),
@@ -252,11 +260,11 @@ func ingressObject(cfg: ProvisionConfig; slug: string): JsonNode =
   if cfg.tlsSecret.len > 0 and cfg.host.len > 0:
     result["spec"]["tls"] = %*[{"hosts": [cfg.host], "secretName": cfg.tlsSecret}]
 
-func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string;
-                        active = true): tuple[steps: seq[Step], skipped: seq[string]] =
+func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; active = true): tuple[steps: seq[Step], skipped: seq[string]] =
   ## SHD-007 (2)..(5): the objects of the namespace of the organisation, in the order of the specification, and its Ingress in the `multi` mode.
   ## Builds (D-42) need none of their own: a build Pod is made by the same controller, in the same namespace. A switched-off organisation
-  ## (`active` false) is expected without its Deployment and its Ingress (SHD-008); everything else of it stays.
+  ## (`active` false) is expected without its Ingress (SHD-008); everything else of it stays. The controller's Pod is not here: the core starts it with a token of its own
+  ## and watches it (`orgreconcile.nim`).
   let ns = orgNamespace(cfg, slug)
   func step(name, kind, namespace, objName: string; obj: JsonNode): Step =
     Step(name: name, kind: kind, namespace: namespace, objectName: objName, obj: obj)
@@ -271,11 +279,7 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bo
     result.steps.add step("controller keys", "Secret", ns, curveSecretName,
       %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, curveSecretName, ns), "type": "Opaque",
          "stringData": {"core.pub": curve.corePub, "client.pub": curve.clientPub, "client.key": curve.clientKey}})
-    result.steps.add step("controller bootstrap token", "Secret", ns, bootstrapSecretName,
-      %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, bootstrapSecretName, ns), "type": "Opaque",
-         "stringData": {"token": bootstrapToken}})
     result.steps.add step("controller state volume", "PersistentVolumeClaim", ns, stateClaimName, stateClaim(cfg, slug))
-    if active: result.steps.add step("controller", "Deployment", ns, controllerName, controllerDeployment(cfg, slug))
   else:
     result.skipped.add "job controller: CINIM_CONTROLLER_IMAGE is not set"
   result.steps.add step("resource quota", "ResourceQuota", ns, "cinim-default",
@@ -293,9 +297,9 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; bo
   if cfg.multi and active:
     result.steps.add Step(name: "ingress", kind: "Ingress", namespace: cfg.shardNamespace, objectName: ingressName(slug), obj: ingressObject(cfg, slug))
 
-proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys; bootstrapToken: string; active = true): ProvisionResult =
+proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys; active = true): ProvisionResult =
   ## stops at the first failure and says which step it was; what was created stays (a retry creates the rest)
-  let (steps, skipped) = organizationSteps(cfg, slug, curve, bootstrapToken, active)
+  let (steps, skipped) = organizationSteps(cfg, slug, curve, active)
   result.skipped = skipped
   for s in steps:
     let r = k.create(s.kind, s.namespace, s.obj)
@@ -307,7 +311,7 @@ proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys
   result.ok = true
 
 proc disable*(k: KubeApi; cfg: ProvisionConfig; slug: string): ProvisionResult =
-  ## switching an organisation off: its Ingress and its controller go, the namespace and its data stay
+  ## switching an organisation off: its Ingress and its controller (the Pods of it) go, the namespace and its data stay
   let ns = orgNamespace(cfg, slug)
   result.ok = true
   proc drop(name, kind, namespace, objName: string; res: var ProvisionResult) =
@@ -320,7 +324,15 @@ proc disable*(k: KubeApi; cfg: ProvisionConfig; slug: string): ProvisionResult =
     else:
       res.steps.add StepResult(name: name, outcome: r.outcome)
   if cfg.multi: drop("ingress", "Ingress", cfg.shardNamespace, ingressName(slug), result)
-  drop("controller", "Deployment", ns, controllerName, result)
+  drop("controller", "Deployment", ns, controllerName, result)           # made so before the controller became a Pod of the core
+  if result.ok:
+    let l = k.listObjects("Pod", ns, "app.kubernetes.io/name=" & controllerName)
+    if l.error.len > 0:
+      result.ok = false
+      result.failedStep = "controller"
+      result.error = l.error
+    else:
+      for p in l.items: drop("controller", "Pod", ns, p{"metadata", "name"}.getStr, result)
 
 proc purge*(k: KubeApi; cfg: ProvisionConfig; slug: string): ProvisionResult =
   ## deleting for good: the Ingress, then the namespace, which takes the controller, the volumes and the rest with it
@@ -343,16 +355,3 @@ proc loadCurve*(certs: string): CurveKeys =
   let d = certs / "curve"
   CurveKeys(corePub: readFile(d / "core.pub").strip, clientPub: readFile(d / "client.pub").strip,
             clientKey: readFile(d / "client.key").strip)
-
-proc renewBootstrapSecret*(k: KubeApi; cfg: ProvisionConfig; slug, bootstrapToken: string): ProvisionResult =
-  ## after a rotation of the controller's identity: the Secret with the new bootstrap token replaces the old one (the core may
-  ## create and delete Secrets, not read or change them)
-  let ns = orgNamespace(cfg, slug)
-  let gone = k.remove("Secret", ns, bootstrapSecretName)
-  if gone.outcome == oFailed:
-    return ProvisionResult(ok: false, failedStep: "remove the old bootstrap token", error: gone.detail)
-  let made = k.create("Secret", ns, %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, bootstrapSecretName, ns),
-                                       "type": "Opaque", "stringData": {"token": bootstrapToken}})
-  if made.outcome == oFailed:
-    return ProvisionResult(ok: false, failedStep: "create the new bootstrap token", error: made.detail)
-  ProvisionResult(ok: true, steps: @[StepResult(name: "controller bootstrap token", outcome: made.outcome)])

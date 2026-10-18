@@ -41,6 +41,8 @@ spec:
           image: registry.example.com/cinim-kekd-emu:dev
           args: ["--key-secret", "kekd-emu-key"]
           ports: [{containerPort: 8443}]
+          readinessProbe: {tcpSocket: {port: 8443}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: 8443}, initialDelaySeconds: 10, periodSeconds: 20, failureThreshold: 6}
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
           resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 64Mi}}
 ---

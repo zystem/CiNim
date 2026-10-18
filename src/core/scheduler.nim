@@ -10,7 +10,7 @@ import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, table
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv]
-import logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
+import ctrlpresence, logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
@@ -616,6 +616,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     return PollResponse(header: Header(protocol: 1), issued_credential: controllerCredential(master, req.namespace, row.generation), poll_after_ms: 200)
   of vOk:
     if decision.confirm: c.confirmCredential(req.namespace)
+    if not push: notePoll(req.namespace, getTime().toUnix())       # the controller is heard: the supervisor of the organisation (orgreconcile.nim) leaves it alone
   of vUnenrolled: discard
   # every poll is the controller's heartbeat (D-29)
   if not push: discard registryTouch("controller", req.session_id, epochTime(), @[("pods", $req.inventory.len)])

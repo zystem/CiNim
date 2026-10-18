@@ -1,8 +1,11 @@
 ## SHD-008: the reconciliation of the organisations with their Kubernetes objects, and the retention of a switched-off organisation,
 ## against a fake cluster that keeps objects in memory (no cluster, no database).
-import std/[unittest, json, strutils, tables, sequtils, uri]
+import std/[unittest, json, strutils, tables, sequtils, uri, times]
 import ../../src/core/[kubeapi, orgprovision, orgreconcile, schema]
 import ../../src/common/ctrlauth
+
+const t0 = 1_700_000_000'i64          ## the "now" of the supervision tests
+proc iso(t: int64): string = fromUnix(t).utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
 
 type Cluster = ref object
   objects: Table[string, JsonNode]      ## path of the object -> the object
@@ -41,19 +44,38 @@ proc api(f: Cluster): KubeApi =
         for p, o in f.objects:
           if p.startsWith("/api/v1/namespaces/") and p.count('/') == 4 and o["metadata"]["labels"]{sel[0]}.getStr == sel[1]: items.add o
         return (200, $(%*{"items": items}))
+      if "/pods?labelSelector=" in path:
+        let prefix = path.split('?')[0]
+        let sel = decodeUrl(path.split("labelSelector=")[1]).split('=')
+        var items = newJArray()
+        for p, o in f.objects:
+          if p.startsWith(prefix & "/") and o["metadata"]["labels"]{sel[0]}.getStr == sel[1]: items.add o
+        return (200, $(%*{"items": items}))
       if path in f.objects: (200, $f.objects[path]) else: (404, "{}")
     else: (500, "{}"))
 
 type Rec = ref object
-  tokens, started, forgotten, specs: seq[string]     ## specs: "slug=fingerprint" for every recorded fingerprint of a controller
+  started, forgotten: seq[string]
+  generation: int                  ## the identity of the controller as the database has it
+  confirmed: bool
+  expires: int64
+  poll: int64                      ## when the controller was last heard
+  rotations: int
+
+proc newRec(): Rec = Rec(generation: 1, expires: t0 + 86400)
 
 proc hooksFor(r: Rec): Hooks =
-  result.token = proc (namespace: string; rotate: bool): string =
-    r.tokens.add namespace & (if rotate: ":rotated" else: ":kept")
-    "TOKEN"
+  result.identity = proc (namespace: string): CredentialRow =
+    CredentialRow(found: true, generation: r.generation, confirmed: r.confirmed, bootstrapExpiresAt: r.expires)
+  result.rotate = proc (namespace: string) =
+    inc r.generation
+    inc r.rotations
+    r.confirmed = false
+    r.expires = t0 + 86400
+  result.token = proc (namespace: string; generation: int): string = "TOKEN-" & $generation
+  result.lastPoll = proc (namespace: string): int64 = r.poll
   result.startRetention = proc (slug: string; at: int64) = r.started.add slug
   result.forget = proc (slug, namespace: string) = r.forgotten.add slug & "@" & namespace
-  result.setControllerSpec = proc (slug, spec: string) = r.specs.add slug & "=" & spec
 
 let curve = CurveKeys(corePub: "CP", clientPub: "LP", clientKey: "LK")
 
@@ -65,96 +87,226 @@ proc maker(build = false; multi = false; image = "reg/ctl:1"): ConfigMaker =
 proc org(slug: string; state = "active"; disabledAt = 0'i64; egress = ""; ingress = ""): OrganizationFull =
   OrganizationFull(slug: slug, name: slug, state: state, egress: egress, ingress: ingress, disabledAt: disabledAt)
 
-proc made(f: Cluster; mk: ConfigMaker; slug: string; active = true) =
-  ## the objects of an organisation, as SHD-007 makes them, in the fake cluster
-  discard provision(api(f), mk("", ""), slug, curve, "TOKEN", active)
+proc podAt(f: Cluster; slug: string; name: string): string = "/api/v1/namespaces/cinim-001-" & slug & "/pods/" & name
+
+proc controllerPod(f: Cluster; mk: ConfigMaker; slug: string; generation = 1; born = 990'i64; phase = "Running"; image = ""): string =
+  ## a controller Pod as the core made it and the cluster has aged it; returns its path
+  var c = mk("", "")
+  let own = c.controllerImage
+  if image.len > 0: c.controllerImage = image
+  var pod = newControllerPod(c, slug, generation, "TOKEN-" & $generation)
+  if image.len > 0: pod["metadata"]["annotations"]["cinim.io/controller-spec"] = %controllerSpecHash(c, slug)
+  discard own
+  pod["metadata"]["creationTimestamp"] = %iso(born)
+  pod["status"] = %*{"phase": phase}
+  result = f.podAt(slug, pod["metadata"]["name"].getStr)
+  f.objects[result] = pod
+
+proc made(f: Cluster; mk: ConfigMaker; slug: string; active = true; controller = true) =
+  ## the objects of an organisation, as SHD-007 makes them, in the fake cluster, and a controller that has just been started (generation 1, not yet enrolled)
+  discard provision(api(f), mk("", ""), slug, curve, active)
+  if active and controller and mk("", "").controllerImage.len > 0: discard f.controllerPod(mk, slug)
   f.calls.setLen 0
 
 proc ns(slug: string): string = "/api/v1/namespaces/cinim-001-" & slug
 
+proc deletes(f: Cluster): seq[string] = f.calls.filterIt(it.startsWith("DELETE") and "/deployments/" notin it)      # the Deployment of the time before is asked for every pass
+
 proc specOf(mk: ConfigMaker; slug: string): string = controllerSpecHash(mk("", ""), slug)
 
-suite "SHD-008 the controller follows the settings of the core":
-  let dep = "/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller"
-  test "an organisation without a fingerprint is given the current one, and its controller is left as it is":
+suite "IAM-003, D-62 the core supervises the controller: a Pod of its own, with the one-time token of the generation in its environment":
+  let ctl = "/api/v1/namespaces/cinim-001-acme/pods/cinim-job-controller-"
+  proc pods(f: Cluster): seq[string] = toSeq(f.objects.keys).filterIt("/pods/" in it)
+  proc tokenOf(f: Cluster; path: string): string =
+    for e in f.objects[path]["spec"]["containers"][0]["env"]:
+      if e["name"].getStr == "CINIM_BOOTSTRAP_TOKEN": return e["value"].getStr
+  proc pass(f: Cluster; mk: ConfigMaker; rec: Rec; state = "active"; coreStarted = 0'i64; slug = "acme"): PassResult =
+    reconcilePass(api(f), mk, curve, @[org(slug, state, (if state == "disabled": 900 else: 0))], hooksFor(rec), t0, -1, coreStarted)
+
+  test "an organisation with no controller gets a Pod named by the generation, with the token of that generation; the identity is not rotated for a token that has not been used":
     let f = Cluster()
     let mk = maker()
-    f.made(mk, "acme")
-    let rec = Rec()
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
-    check r.orgs[0].error == "" and not r.orgs[0].controllerReplaced
-    check "DELETE " & dep notin f.calls
-    check rec.specs == @["acme=" & specOf(mk, "acme")]
-  test "the same fingerprint: nothing is replaced and nothing is recorded again":
+    f.made(mk, "acme", controller = false)
+    let rec = newRec()
+    let r = f.pass(mk, rec)
+    check r.orgs[0].error == "" and r.orgs[0].created == @["controller"] and not r.orgs[0].identityRenewed and rec.rotations == 0
+    check (ctl & "1") in f.objects and f.tokenOf(ctl & "1") == "TOKEN-1"
+    check f.objects[ctl & "1"]["metadata"]["annotations"]["cinim.io/generation"].getStr == "1"
+  test "a controller that has just started and is not enrolled yet is left alone, and so is a Pod that is still being scheduled for a while":
     let f = Cluster()
     let mk = maker()
-    f.made(mk, "acme")
-    let rec = Rec()
-    var o = org("acme")
-    o.controllerSpec = specOf(mk, "acme")
-    let r = reconcilePass(api(f), mk, curve, @[o], hooksFor(rec), 1000, 100)
-    check not r.orgs[0].controllerReplaced and "DELETE " & dep notin f.calls and rec.specs.len == 0
-  test "another fingerprint (a new controller image): the Deployment is deleted and made again with the new image, and the new fingerprint is recorded":
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme", born = t0 - 100)
+    let rec = newRec()
+    let r = f.pass(mk, rec)
+    check r.orgs[0].created.len == 0 and r.orgs[0].controllerRemoved.len == 0 and f.deletes.len == 0
+    f.objects[ctl & "1"]["metadata"]["creationTimestamp"] = %iso(t0 - 600)
+    f.objects[ctl & "1"]["status"]["phase"] = %"Pending"                      # the image is being pulled: not the controller's fault
+    check f.pass(mk, rec).orgs[0].controllerRemoved.len == 0
+  test "a controller that did not enrol with its token in time is deleted and another is started with a new generation and its token":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme", born = t0 - 300)
+    let rec = newRec()
+    let r = f.pass(mk, rec)
+    check r.orgs[0].controllerRemoved.len == 1 and "did not enrol" in r.orgs[0].controllerRemoved[0]
+    check (ctl & "1") notin f.objects and (ctl & "2") in f.objects and f.tokenOf(ctl & "2") == "TOKEN-2"
+    check rec.rotations == 1 and r.orgs[0].identityRenewed and r.orgs[0].created == @["controller"]
+  test "an enrolled controller that is heard from is left alone; one that has been silent is killed and replaced, and the new one gets a new generation":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme", born = t0 - 3600)
+    let rec = newRec()
+    rec.confirmed = true
+    rec.poll = t0 - 5
+    check f.pass(mk, rec).orgs[0].controllerRemoved.len == 0 and f.deletes.len == 0
+    rec.poll = t0 - 500
+    let r = f.pass(mk, rec)
+    check r.orgs[0].controllerRemoved.len == 1 and "not heard from" in r.orgs[0].controllerRemoved[0]
+    check (ctl & "1") notin f.objects and f.tokenOf(ctl & "2") == "TOKEN-2" and rec.rotations == 1
+  test "a core that has just started has heard nobody: the controllers get the time to report before they are called silent":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme", born = t0 - 3600)
+    let rec = newRec()
+    rec.confirmed = true                              # no report heard since the core started (poll 0)
+    check f.pass(mk, rec, coreStarted = t0 - 30).orgs[0].controllerRemoved.len == 0
+    check f.pass(mk, rec, coreStarted = t0 - 300).orgs[0].controllerRemoved.len == 1
+  test "a Pod of another generation is not the controller the core knows: it is deleted, and the Pod of the current generation is made (a rotation by the administrator)":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme", generation = 1, born = t0 - 3600)
+    let rec = newRec()
+    rec.generation = 2                                # rotated: the token of generation 2 is unspent
+    let r = f.pass(mk, rec)
+    check r.orgs[0].controllerRemoved.len == 1 and "not the current generation" in r.orgs[0].controllerRemoved[0]
+    check (ctl & "1") notin f.objects and f.tokenOf(ctl & "2") == "TOKEN-2" and rec.rotations == 0
+  test "a Pod that has ended, a controller the core did not make, and a second good one are deleted":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme", generation = 1, phase = "Failed")
+    let rec = newRec()
+    var r = f.pass(mk, rec)
+    check "ended" in r.orgs[0].controllerRemoved[0] and (ctl & "2") in f.objects and rec.rotations == 1       # a Pod of this generation was seen: not the same token twice
+    let stranger = ctl & "stranger"
+    f.objects[stranger] = %*{"metadata": {"name": "cinim-job-controller-stranger", "labels": {"app.kubernetes.io/name": "cinim-job-controller"}}, "status": {"phase": "Running"}}
+    r = f.pass(mk, rec)
+    check r.orgs[0].controllerRemoved.anyIt("cinim-job-controller-stranger" in it) and stranger notin f.objects and (ctl & "2") in f.objects
+    discard f.controllerPod(mk, "acme", generation = 2, born = t0 - 50)           # two Pods of the one generation cannot both be: the newer stays
+    f.objects[ctl & "2"]["metadata"]["name"] = %"cinim-job-controller-2"
+    f.objects[ctl & "2b"] = f.objects[ctl & "2"].copy
+    f.objects[ctl & "2b"]["metadata"]["name"] = %"cinim-job-controller-2b"
+    f.objects[ctl & "2b"]["metadata"]["creationTimestamp"] = %iso(t0 - 100)
+    r = f.pass(mk, rec)
+    check r.orgs[0].controllerRemoved == @["cinim-job-controller-2b: a second controller"]
+  test "a Pod being deleted is not deleted again, and does not keep the core from starting the one that replaces it":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme")
+    f.objects[ctl & "1"]["metadata"]["deletionTimestamp"] = %iso(t0 - 5)
+    let rec = newRec()
+    let r = f.pass(mk, rec)
+    check f.deletes.len == 0
+    check (ctl & "2") in f.objects and rec.rotations == 1
+  test "a new image: the Pod made with the old one is deleted and the controller is made again with the new one; the state is on its volume":
     let f = Cluster()
     let old = maker()
-    f.made(old, "acme")
-    check f.objects[dep]["spec"]["template"]["spec"]["containers"][0]["image"].getStr == "reg/ctl:1"
+    f.made(old, "acme", controller = false)
+    discard f.controllerPod(old, "acme", born = t0 - 3600)
     let fresh = maker(image = "reg/ctl:2")
-    let rec = Rec()
-    var o = org("acme")
-    o.controllerSpec = specOf(old, "acme")
-    let r = reconcilePass(api(f), fresh, curve, @[o], hooksFor(rec), 1000, 100)
-    check r.orgs[0].error == "" and r.orgs[0].controllerReplaced and r.orgs[0].created == @["controller"]
-    check f.calls.find("DELETE " & dep) < f.calls.find("POST /apis/apps/v1/namespaces/cinim-001-acme/deployments")
-    check f.objects[dep]["spec"]["template"]["spec"]["containers"][0]["image"].getStr == "reg/ctl:2"
-    check rec.specs == @["acme=" & specOf(fresh, "acme")] and specOf(fresh, "acme") != specOf(old, "acme")
-  test "the fingerprint is that of the image and of the shape of the Deployment: not of the settings of the shard, which come in the answers to the poll":
-    let a = maker(build = false)
-    let b = maker(build = true)
-    check specOf(a, "acme") == specOf(b, "acme")              # a build profile or not: the controller is not made again
-    check specOf(a, "acme") == specOf(a, "acme") and specOf(a, "acme") != specOf(a, "other")
-    check specOf(a, "acme") != specOf(maker(image = "reg/ctl:2"), "acme")
-  test "a controller that is not there is made, not counted as replaced":
+    let rec = newRec()
+    rec.confirmed = true
+    rec.poll = t0 - 1
+    let r = f.pass(fresh, rec)
+    check r.orgs[0].controllerReplaced and r.orgs[0].controllerRemoved == @["cinim-job-controller-1: replaced"]
+    check f.objects[ctl & "2"]["spec"]["containers"][0]["image"].getStr == "reg/ctl:2"
+    check f.pass(fresh, rec).orgs[0].controllerRemoved.len == 0            # the new one is the one wanted
+  test "the settings of the shard are not part of the Pod: a build profile does not replace the controller":
+    let f = Cluster()
+    f.made(maker(build = false), "acme", controller = false)
+    discard f.controllerPod(maker(build = false), "acme", born = t0 - 3600)
+    let rec = newRec()
+    rec.confirmed = true
+    rec.poll = t0 - 1
+    check not f.pass(maker(build = true), rec).orgs[0].controllerReplaced
+  test "an unspent token that has expired is not used: the identity is rotated first":
     let f = Cluster()
     let mk = maker()
-    f.made(mk, "acme")
-    f.objects.del dep
-    let rec = Rec()
-    var o = org("acme")
-    o.controllerSpec = "00000000000000000000dead"
-    let r = reconcilePass(api(f), mk, curve, @[o], hooksFor(rec), 1000, 100)
-    check not r.orgs[0].controllerReplaced and r.orgs[0].created == @["controller"] and rec.specs == @["acme=" & specOf(mk, "acme")]
-  test "a switched-off organisation has no controller to replace":
+    f.made(mk, "acme", controller = false)
+    let rec = newRec()
+    rec.expires = t0 - 1
+    let r = f.pass(mk, rec)
+    check rec.rotations == 1 and f.tokenOf(ctl & "2") == "TOKEN-2" and r.orgs[0].identityRenewed
+  test "a used identity is rotated for the next controller (the old credential and token stop working)":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    let rec = newRec()
+    rec.confirmed = true
+    discard f.pass(mk, rec)
+    check rec.rotations == 1 and f.tokenOf(ctl & "2") == "TOKEN-2" and not rec.confirmed
+  test "a switched-off organisation keeps no controller: its Pods are deleted and none is made":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "acme", active = false)
-    var o = org("acme", state = "disabled", disabledAt = 900)
-    o.controllerSpec = "00000000000000000000dead"
-    let r = reconcilePass(api(f), mk, curve, @[o], hooksFor(Rec()), 1000, -1)
-    check not r.orgs[0].controllerReplaced and "DELETE " & dep notin f.calls
-  test "a refusal to delete the Deployment is told and nothing else is done to that organisation":
+    discard f.controllerPod(mk, "acme", born = t0 - 10)
+    let rec = newRec()
+    let r = f.pass(mk, rec, state = "disabled")
+    check r.orgs[0].controllerRemoved.len == 1 and "switched off" in r.orgs[0].controllerRemoved[0] and f.pods.len == 0 and r.orgs[0].created.len == 0
+  test "the Deployment of the time before the controller was a Pod is deleted, with its Pods":
     let f = Cluster()
     let mk = maker()
-    f.made(mk, "acme")
-    let denying = KubeApi(transport: proc (meth, path, body: string): tuple[code: int, body: string] =
-      if meth == "DELETE" and path == dep: return (403, $(%*{"message": "forbidden: delete"}))
+    f.made(mk, "acme", controller = false)
+    f.objects["/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller"] = %*{"metadata": {"name": "cinim-job-controller"}}
+    let rec = newRec()
+    let r = f.pass(mk, rec)
+    check "/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller" notin f.objects
+    check r.orgs[0].controllerRemoved.anyIt(it.startsWith("Deployment cinim-job-controller"))
+  test "a Pod that cannot be listed or deleted is told, and nothing is made then":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    let blind = KubeApi(transport: proc (meth, path, body: string): tuple[code: int, body: string] =
+      if meth == "GET" and "/pods?" in path: return (403, $(%*{"message": "pods is forbidden"}))
       api(f).transport(meth, path, body))
-    var o = org("acme")
-    o.controllerSpec = "00000000000000000000dead"
-    let rec = Rec()
-    let r = reconcilePass(denying, mk, curve, @[o], hooksFor(rec), 1000, 100)
-    check r.orgs[0].error.contains("replacing the controller") and rec.specs.len == 0
+    let r = reconcilePass(blind, mk, curve, @[org("acme")], hooksFor(newRec()), t0, 100)
+    check "listing the controller" in r.orgs[0].error and f.pods.len == 0
+  test "the supervision alone (between the full passes) replaces a silent controller, touches nothing else, and skips an organisation that has no namespace yet":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme", controller = false)
+    discard f.controllerPod(mk, "acme", born = t0 - 3600)
+    f.objects.del ns("acme") & "/resourcequotas/cinim-default"                   # a full pass would make it again; this one must not
+    let rec = newRec()
+    rec.confirmed = true
+    rec.poll = t0 - 500
+    let r = superviseControllers(api(f), mk, @[org("acme"), org("new")], hooksFor(rec), t0)
+    check r.len == 1 and r[0].slug == "acme" and r[0].created == @["controller"] and r[0].controllerRemoved.len == 1
+    check (ctl & "2") in f.objects and (ns("acme") & "/resourcequotas/cinim-default") notin f.objects
+    check superviseControllers(api(f), mk, @[org("acme")], hooksFor(rec), t0).len == 0          # healthy now: nothing to report
+  test "without a controller image the core supervises nothing":
+    let f = Cluster()
+    let mk = maker(image = "")
+    f.made(mk, "acme")
+    let r = f.pass(mk, newRec())
+    check r.orgs[0].error == "" and f.pods.len == 0 and f.calls.filterIt("/pods" in it).len == 0
 
 suite "SHD-008 reconciliation":
   test "an organisation whose objects are all there: nothing is made, nothing is deleted":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "acme")
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.error == "" and r.orgs.len == 1 and r.orgs[0].created.len == 0 and r.orgs[0].error == ""
-    check rec.tokens == @["cinim-001-acme:kept"] and not r.orgs[0].identityRenewed
-    check f.calls.filterIt(it.startsWith("DELETE")).len == 0
+    check not r.orgs[0].identityRenewed and r.orgs[0].controllerRemoved.len == 0
+    check f.deletes.len == 0
 
   test "what is missing is made again with the same content, the rest is left alone":
     let f = Cluster()
@@ -162,26 +314,23 @@ suite "SHD-008 reconciliation":
     f.made(mk, "acme")
     let before = f.objects[ns("acme") & "/resourcequotas/cinim-default"]
     f.objects.del ns("acme") & "/resourcequotas/cinim-default"
-    f.objects.del "/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller"
     f.objects.del "/apis/networking.k8s.io/v1/namespaces/cinim-001-acme/networkpolicies/default-deny"
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
-    check r.orgs[0].created.len == 3 and "resource quota" in r.orgs[0].created and "controller" in r.orgs[0].created
+    check r.orgs[0].created.len == 2 and "resource quota" in r.orgs[0].created
     check "network policy default-deny" in r.orgs[0].created
     check f.objects[ns("acme") & "/resourcequotas/cinim-default"] == before
-    check "/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller" in f.objects
 
   test "a switched-off organisation is expected without its controller and its Ingress, and keeps the rest":
     let f = Cluster()
     let mkMulti = maker(multi = true)
     f.made(mkMulti, "old", active = false)
-    check "/apis/apps/v1/namespaces/cinim-001-old/deployments/cinim-job-controller" notin f.objects
     check "/apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-old" notin f.objects
     f.objects.del ns("old") & "/limitranges/cinim-default"
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mkMulti, curve, @[org("old", "disabled", 900)], hooksFor(rec), 1000, 100000)
     check r.orgs[0].created == @["limit range"]
-    check "/apis/apps/v1/namespaces/cinim-001-old/deployments/cinim-job-controller" notin f.objects
+    check toSeq(f.objects.keys).filterIt("/pods/" in it).len == 0
     check "/apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-old" notin f.objects
 
   test "an active organisation in the multi mode gets its Ingress back":
@@ -189,38 +338,33 @@ suite "SHD-008 reconciliation":
     let mkMulti = maker(multi = true)
     f.made(mkMulti, "acme")
     f.objects.del "/apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-acme"
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mkMulti, curve, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.orgs[0].created == @["ingress"]
 
-  test "a new cluster (the database was restored): every object is made, and the identity of the controller is renewed":
+  test "a new cluster (the database was restored): every object is made, and a controller is started with a token of the generation the database has":
     let f = Cluster()
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), maker(), curve, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.orgs[0].error == "" and "namespace" in r.orgs[0].created and "controller" in r.orgs[0].created
-    check ns("acme") in f.objects
-    check rec.tokens == @["cinim-001-acme:rotated"] and r.orgs[0].identityRenewed
-    # the namespace was not there, so there was no old bootstrap Secret to replace
-    check f.calls.filterIt(it.startsWith("DELETE")).len == 0
-
-  test "the state volume of a controller is gone but the namespace is not: the identity is renewed and the bootstrap Secret replaced":
+    check ns("acme") in f.objects and ns("acme") & "/pods/cinim-job-controller-1" in f.objects
+    check f.deletes.len == 0
+  test "the state volume of a controller is gone: it is made again, and the controller, which keeps no credential on it, is not touched":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "acme")
     f.objects.del ns("acme") & "/persistentvolumeclaims/cinim-job-controller-state"
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
-    check rec.tokens == @["cinim-001-acme:rotated"] and r.orgs[0].identityRenewed
-    check "controller state volume" in r.orgs[0].created
-    check "DELETE " & ns("acme") & "/secrets/cinim-controller-bootstrap" in f.calls        # replaced: the core may create and delete Secrets, not change them
-    check ns("acme") & "/secrets/cinim-controller-bootstrap" in f.objects
+    check r.orgs[0].created == @["controller state volume"] and rec.rotations == 0
 
   test "the network mode asked for at creation is kept: an organisation with open egress gets its policy back":
     let f = Cluster()
     let mk = maker()
-    discard provision(api(f), mk("open", "open"), "easy", curve, "TOKEN")
+    discard provision(api(f), mk("open", "open"), "easy", curve)
+    discard f.controllerPod(mk, "easy")
     f.objects.del "/apis/networking.k8s.io/v1/namespaces/cinim-001-easy/networkpolicies/allow-all-egress"
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("easy", egress = "open", ingress = "open")], hooksFor(rec), 1000, 100)
     check r.orgs[0].created == @["network policy allow-all-egress"]
 
@@ -229,11 +373,11 @@ suite "SHD-008 reconciliation":
     let mk = maker()
     f.made(mk, "acme")
     f.made(mk, "ghost")
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.alerts.len == 1 and r.alerts[0].code == "orphan_namespace" and r.alerts[0].organization == "ghost" and r.alerts[0].namespace == "cinim-001-ghost"
     check ns("ghost") in f.objects
-    check f.calls.filterIt(it.startsWith("DELETE")).len == 0
+    check f.deletes.len == 0
     # the namespace of another shard is not this shard's business
     f.objects["/api/v1/namespaces/cinim-002-x"] = %*{"metadata": {"name": "cinim-002-x", "labels": {"cinim.io/shard": "002", "cinim.io/organization": "x"}}}
     check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 1
@@ -246,7 +390,7 @@ suite "SHD-008 reconciliation":
     f.objects[ns("going")]["metadata"]["deletionTimestamp"] = %"2026-10-06T17:12:00Z"
     f.objects[ns("acme")]["metadata"]["deletionTimestamp"] = %"2026-10-06T17:12:00Z"
     f.objects[ns("acme")]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = %"privileged"
-    let rec = Rec()
+    let rec = newRec()
     check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 0
 
   test "a namespace whose policy labels differ from the expected ones is an alert, and is left as it is":
@@ -255,7 +399,7 @@ suite "SHD-008 reconciliation":
     f.made(mk, "acme")
     f.objects[ns("acme")]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = %"privileged"
     f.objects[ns("acme")]["metadata"]["labels"].delete "cinim.io/build-pod-policy"
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.alerts.len == 2
     for a in r.alerts: check a.code == "namespace_drift" and a.organization == "acme"
@@ -264,13 +408,13 @@ suite "SHD-008 reconciliation":
 
   test "an object the cluster refuses is reported for that organisation, the others are still reconciled":
     let f = Cluster(failPath: "/api/v1/namespaces/cinim-001-bad/secrets")
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), maker(), curve, @[org("bad"), org("good")], hooksFor(rec), 1000, 100)
     check "forbidden: nope" in r.orgs[0].error and "controller keys" in r.orgs[0].error
     check r.orgs[1].error == "" and ns("good") in f.objects
 
   test "outside a cluster the pass says so and does nothing":
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(KubeApi(), maker(), curve, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.error.len > 0 and r.orgs.len == 0
 
@@ -280,7 +424,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let mk = maker()
     f.made(mk, "gone", active = false)
     f.made(mk, "kept", active = false)
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("gone", "disabled", 100), org("kept", "disabled", 900)],
                           hooksFor(rec), 1000, 500)
     check r.purged == @["gone"] and rec.forgotten == @["gone@cinim-001-gone"]
@@ -293,7 +437,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let mk = maker()
     f.made(mk, "held", active = false)
     f.made(mk, "free", active = false)
-    let rec = Rec()
+    let rec = newRec()
     var heldOrg = org("held", "disabled", 100)
     heldOrg.held = 2
     let r = reconcilePass(api(f), mk, curve, @[heldOrg, org("free", "disabled", 100)], hooksFor(rec), 1000, 500)
@@ -306,7 +450,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "now", active = false)
-    let rec = Rec()
+    let rec = newRec()
     check reconcilePass(api(f), mk, curve, @[org("now", "disabled", 999)], hooksFor(rec), 1000, -1).purged.len == 0
     check ns("now") in f.objects
     check reconcilePass(api(f), mk, curve, @[org("now", "disabled", 999)], hooksFor(rec), 1000, 0).purged == @["now"]
@@ -316,7 +460,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "old", active = false)
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("old", "disabled", 0)], hooksFor(rec), 1000, 500)
     check rec.started == @["old"] and r.purged.len == 0 and ns("old") in f.objects
 
@@ -324,7 +468,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "acme")
-    let rec = Rec()
+    let rec = newRec()
     check reconcilePass(api(f), mk, curve, @[org("acme", "active", 1)], hooksFor(rec), 10_000_000, 0).purged.len == 0
     check ns("acme") in f.objects
 
@@ -336,7 +480,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let broken = KubeApi(transport: proc (meth, path, body: string): tuple[code: int, body: string] =
       if meth == "DELETE" and path == ns("gone"): return (403, $(%*{"message": "namespaces is forbidden"}))
       api(f).transport(meth, path, body))
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(broken, mk, curve, @[org("gone", "disabled", 1)], hooksFor(rec), 1000, 10)
     check r.purged.len == 0 and rec.forgotten.len == 0
     check r.orgs.len >= 1 and "forbidden" in r.orgs[0].error
@@ -346,7 +490,7 @@ suite "SHD-008 a core that has just started deletes no organisation for good":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "late", active = false)
-    let rec = Rec()
+    let rec = newRec()
     # the retention ended long ago (500 s from 100), the core started at 990 and the grace is 3600 s
     let early = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
     check early.purged.len == 0 and ns("late") in f.objects
@@ -356,6 +500,6 @@ suite "SHD-008 a core that has just started deletes no organisation for good":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "late", active = false)
-    let rec = Rec()
+    let rec = newRec()
     let r = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
     check r.orgs.len == 1 and r.orgs[0].slug == "late"

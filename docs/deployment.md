@@ -94,7 +94,7 @@ on one (k3s 1.36, containerd 2.3, kernel 6.17, one node of 8 CPUs and 32 GiB):
 2. **A registry.** `deploy/registry/values-single-node.yaml`: a NodePort, no Ingress. Build Pods push to `registry-docker-registry.registry.svc:5000`; the
    node pulls `localhost:30500/<image>` over plain HTTP, which containerd allows for `localhost` without any change to the node.
 3. **The images**, built in the cluster: `REGISTRY=registry-docker-registry.registry.svc:5000 TAG=<tag> tools/image/kaniko-build.sh` (about 6 minutes cold).
-4. **The shard**: the chart with `image.repository=localhost:30500/cinim`, `controller.image=localhost:30500/cinim-controller:<tag>`, `build.enabled=true`,
+4. **The shard**: the chart with `image.repository=localhost:30500/cinim`, `build.enabled=true`,
    a `build.egress` rule for the namespace `registry` port 5000 and `rqlite.replicaCount=1`; the default StorageClass (`local-path`) is enough.
 
 Checked end to end there: an organisation, an ordinary step, a step of the build profile (Kaniko built an image and pushed it), the log API. User namespaces
@@ -141,7 +141,7 @@ OpenSSL, libzmq, libsodium and SQLite linked in, and the static shim that it han
 `POST /api/v1/runs` takes the slug of an organisation (`organization`): the run belongs to it, and its steps run in the namespace of the
 organisation, through the controller that the core made for it. A controller says which namespace it serves in every poll, and the core
 gives it the steps of that namespace only; a controller proves the namespace it serves with the credential below (IAM-003, T-46); the transport key itself is still shared (T-08).
-An organisation that does not exist is a 404 and a switched-off one a 409. The controller proves which namespace it serves: the core makes a one-time bootstrap token with the namespace (a Secret), the controller exchanges it for a credential that it keeps on its state volume and sends in every poll, and a poll without it is refused. If the state volume is lost or the credential leaks, `POST /api/v1/organizations/<slug>:rotate-controller-credential` locks the old one out and the controller enrols again. A refusal says why (`PollResponse.refusal`, also in the log of the core): `credential_mismatch` is the only one that makes the controller forget its credential; `no_identity`, `no_credential`, `bootstrap_used`, `bootstrap_expired`, `bootstrap_rejected` and `no_namespace` leave it alone, because a credential cannot be had again (a bootstrap token is used once) and these say nothing against it. A controller that was refused and has no credential waits for a new bootstrap token (`rotate-controller-credential`). Without `organization` a run belongs to the shard's default
+An organisation that does not exist is a 404 and a switched-off one a 409. The controller proves which namespace it serves: the core starts its Pod with a one-time token in its environment (`CINIM_BOOTSTRAP_TOKEN`, no Secret), the controller exchanges it for a credential that it keeps in memory and sends in every poll, and a poll without it is refused. A refusal says why (`PollResponse.refusal`, also in the log of the core). The core looks after the rest (D-62): a controller that has not enrolled, or has not been heard from, or has an identity that is not the current one, is deleted and another is started with a new token, so nothing is done by hand; To lock out a credential that leaked, delete the controller's Pod: the core makes another, with a new generation of the identity, and the old credential stops working. Without `organization` a run belongs to the shard's default
 tenant and profile (single-tenant setups). The settings of docs/settings.md are per organisation: `GET/PUT /api/v1/profile?organization=<slug>`.
 
 ## Image builds (the build profile)
@@ -219,7 +219,7 @@ other profiles stay closed: the policy selects the label.
 
 The example is `deploy/examples/self-build`: `deployer.yaml` is a ServiceAccount that may only patch the Deployment `cinim-core` of the shard, and the fourth step of
 `self-build.lua` (`DEPLOY=true`) uses its token, kept as the step secrets `DEPLOY_TOKEN` and `DEPLOY_CA`, to give both the new image and the core the new controller image. The controllers of the organisations that
-exist are not changed by that (the core never changes an object it has made): delete the Deployment `cinim-job-controller` of an organisation and the next pass of the reconciliation makes it again from the new image.
+exist are changed by the core itself: the next pass of the reconciliation sees that the controller Pod carries another fingerprint and replaces it (D-62).
 
 Checked on the TESTING cluster, through the API alone: with `deploy.enabled` and `deploy.kubeApiServer` the core made `allow-deploy-kube-apiserver` in the namespace of a new organisation; the run of `self-build.lua` with `BUILD=false`,
 `DEPLOY=true` and the tag of the previous build ran the fourth step as an ordinary Pod (non-root), the step fetched `DEPLOY_TOKEN` and `DEPLOY_CA`, patched the core, and the cluster ran the other image a few seconds
@@ -393,6 +393,25 @@ helm install cinim-storage deploy/charts/cinim-storage -n cinim-001 \
 
 Then the shard's chart is pointed at it: `storage.url=http://cinim-storage:18090`, `storage.tokenSecret.name=cinim-storage`, `storage.tokenSecret.key=shard-001`, and `storage.directUrl=http://cinim-storage.<namespace of the shard>.svc:18091` (required with `storage.url`: the shims send their bytes straight to the module, D-61, and there is no other way); the namespaces of organisations that exist already need the new rule of the network policy: delete their `allow-dns-and-collector` and the core makes it again. Garage is one node on one volume (`replication_factor = 1`: the volume is the only copy, so back it up; a production store needs three nodes in three zones, which the chart does not make); its secrets are made on the volume at the first start. Keep `secrets.sealKey` apart from the database and its backups: a database restored without it holds stores whose secrets cannot be opened. A step Pod never reaches a store; only the module does, and the chart's network policies let only the core and the chart's own Pods reach the module. Tried on the TESTING cluster on 2026-10-17 (docs/storage-module.md, "Phase 4 as done"); give the module at least 1 GiB of memory (the default).
 
+## Health of the components
+
+Every long-running component has a probe of the kind that can tell its trouble, and the probe of a component that depends on a database does not restart it for the database's sake.
+
+| Component | Alive (a failure restarts it) | Ready (a failure takes it out of the Service) |
+|---|---|---|
+| core | `/healthz`: none of the threads that take the log, the reports and the artifacts, or the push channel, the watchdog, the triggers, the reconciler and the log gate has missed its round by more than its limit (`core/health.nim`: 60 s for the push channel, 120-180 s for the ingest servers, 300-900 s for the slow loops); 20 s x 6 | `/readyz`: the database answers a read through the leader in 2 s (`common/dbready.nim`, kept for 2 s); 10 s x 3 |
+| job controller | none in Kubernetes: the core is its supervisor (D-62) and deletes it when it has not enrolled within 3 minutes or has not been heard from for 2 minutes; the Pod is `restartPolicy: Never` | none (it has no Service) |
+| conductor | `conductor --healthcheck`: the core answered a hello within 90 s (the hello goes every 5 s; the file is in `/tmp`, an `emptyDir`); 20 s x 3 after 30 s | none |
+| storage module | `/healthz` | `/readyz`: its database answers |
+| Caddy node of the store | `/__health` | `/__health` |
+| Garage | admin API `/health` on 3903, 20 s x 9 | TCP 3900 |
+| rqlite | `/readyz?noleader` (the node's API answers; a node without a leader is not restarted), 20 s x 15 after 60 s | `/readyz` |
+| VictoriaLogs nodes | the chart's | the chart's |
+| vlagent | none (the chart of the agent has no probe) | none |
+| key service emulator | TCP 8443 (the example) | TCP 8443 |
+
+A conductor that is cut off from the core is **alive** to Kubernetes in the ordinary sense and useless; the heartbeat makes that visible, and the restart that follows loses nothing (a conductor's runs are replayed from the journal). A controller is not left to Kubernetes at all: the core judges it by the reports it receives and kills it when they stop, and the Pod it makes next carries a new token. A core that is not ready is still alive and still takes what reaches it.
+
 ## The volume the steps of a run share
 
 The steps of a run see one `/cicd/workspace` (STO-001, STO-002): the controller of an organisation makes a PersistentVolumeClaim `cicd-run-<run id>` before the first
@@ -445,10 +464,10 @@ A step's command starts in `/cicd/workspace` (the shim changes to it before the 
 
 At start and every `organizations.reconcileInterval` seconds (300) the core compares the organisations in its database with their Kubernetes objects
 and makes again what is missing, with the same content: a deleted NetworkPolicy, a lost Deployment, the whole namespace after a restore into a new
-cluster. A switched-off organisation is expected without its controller and its Ingress. When the namespace is new or the state volume of a controller is
-gone, the identity of that controller is renewed (a new generation, a new bootstrap token) and the controller enrols again. The reconciliation
+cluster. A switched-off organisation is expected without its controller and its Ingress. The controller of an organisation is a Pod that the core makes and supervises (D-62): it lists the controller Pods of the namespace and deletes the ones it does not know or that are not healthy, and when none is good it
+makes one with the token of the current generation of the identity (a new generation first when the identity was used). Apart from the controller's Pod, the reconciliation
 deletes nothing: a namespace of this shard that no organisation owns, or whose policy labels differ from what the core would make (Pod Security,
-the build-pod policy), is an alert. The core reads only namespaces and the state volume of a controller, so a Secret or a Deployment that was
+the build-pod policy), is an alert. The core reads only namespaces and the controller Pods, so a Secret or a NetworkPolicy that was
 changed by hand is not noticed, only one that is missing.
 
 ```bash
@@ -456,12 +475,7 @@ GET  /api/v1/organizations:reconcile      # the last pass: what was made again, 
 POST /api/v1/organizations:reconcile      # run a pass now
 ```
 
-**Upgrading the controller of an existing organisation.** The core keeps, for every active organisation, a fingerprint of the controller's Deployment as it made it last (the SHA-256 of
-the object: the image, its environment, its resources; the settings of the shard are not in it, they reach a controller in the answers to its poll). At every pass of the reconciliation it makes the object it would make now, and when the fingerprint is
-another one (after `helm upgrade` gave the core a new controller image or changed the shape of the Deployment) it **deletes the Deployment and makes it again**, which needs no
-right that the core does not have. The state of a controller is on its volume and the Pods of the steps that are running are adopted by the new one (D-29), so a running step does not notice. An organisation
-made before the fingerprint was kept is given the current one as it stands at the first pass (its controller is not touched then); delete the Deployment by hand once if that one is out of date. `GET /api/v1/organizations:reconcile` says
-which controllers were replaced (`controller_replaced`). The controller replaces the ConfigMap that carries the shim at every start, so the new image brings its shim to the Pods of the steps that start after that.
+**Upgrading the controller of an existing organisation.** The Pod of the controller carries the fingerprint of what the core makes (`cinim.io/controller-spec`: the SHA-256 of the Pod made with no generation and no token: the image, its environment, its resources; the settings of the shard are not in it, they reach a controller in the answers to its poll). At every pass the core compares it with what it would make now, and a Pod with another one (after `helm upgrade` gave the core a new controller image) is **deleted and made again** with a new token. The state of a controller is on its volume and the Pods of the steps that are running are adopted by the new one (D-29), so a running step does not notice. `GET /api/v1/organizations:reconcile` says which controllers were replaced (`controller_replaced`) and why each Pod was deleted (`controller_removed`). The controller replaces the ConfigMap that carries the shim at every start, so the new image brings its shim to the Pods of the steps that start after that.
 
 A switched-off organisation is kept `organizations.retention` seconds (14 days) from the moment it was switched off, then deleted for good: its namespace
 with the volumes and its record. `0` deletes it at once and a negative value never; `DELETE ?purge=true&force=true` deletes it earlier.
@@ -470,6 +484,6 @@ with the volumes and its record. `0` deletes it at once and a negative value nev
 
 `POST /api/v1/organizations` makes the namespace, the controller (its ServiceAccount, RoleBinding, Secret with the transport keys, state
 volume and Deployment), the quota, the limit range, the network policies and, in the `multi` mode, the Ingress of the organisation (SHD-007);
-`DELETE` switches an organisation off and `DELETE ?purge=true` deletes it. The job controller runs from its own image, `<image.repository>-controller:<image.tag>` unless `controller.image` says otherwise.
+`DELETE` switches an organisation off and `DELETE ?purge=true` deletes it. The job controller runs from its own image, `<image.repository>-controller:<image.tag>`, and a conductor from `<image.repository>-conductor:<image.tag>`; neither has a value of its own in the chart.
 The chart expects `/core` in `image.repository`, the controller's and the conductor's images next to it; no pipeline publishes the images by itself yet (`tools/image` builds them, see above).
 A volume of the controller needs a StorageClass: set `controller.stateStorageClass` when the cluster has no default one.

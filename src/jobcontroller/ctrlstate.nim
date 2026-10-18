@@ -57,6 +57,10 @@ proc markReported*(s: CtrlState; name: string; ok: bool; fullyRead: bool; now: i
   s.db.exec(sql"UPDATE pods SET reported_at = ?, ok = ?, fully_read = ?, end_reason = ?, pod_reason = ?, pod_message = ? WHERE name = ?",
             now, (if ok: 1 else: 0), (if fullyRead: 1 else: 0), reason, podReason, podMessage, name)
 
+proc markDrained*(s: CtrlState; name: string) =
+  ## a drain delivered what the Pod could not (DAT-003): the Pod has nothing left to show, so it is kept no longer than a fully read one
+  s.db.exec(sql"UPDATE pods SET fully_read = 1 WHERE name = ? AND reported_at > 0", name)
+
 proc forget*(s: CtrlState; name: string) = s.db.exec(sql"DELETE FROM pods WHERE name = ?", name)
 
 proc active*(s: CtrlState): seq[TrackedPod] =

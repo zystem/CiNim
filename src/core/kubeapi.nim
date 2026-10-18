@@ -34,6 +34,7 @@ func collectionPath*(kind, namespace: string): string =
   of "ResourceQuota": "/api/v1" & ns & "/resourcequotas"
   of "LimitRange": "/api/v1" & ns & "/limitranges"
   of "Deployment": "/apis/apps/v1" & ns & "/deployments"
+  of "Pod": "/api/v1" & ns & "/pods"
   of "RoleBinding": "/apis/rbac.authorization.k8s.io/v1" & ns & "/rolebindings"
   of "NetworkPolicy": "/apis/networking.k8s.io/v1" & ns & "/networkpolicies"
   of "Ingress": "/apis/networking.k8s.io/v1" & ns & "/ingresses"
@@ -77,6 +78,16 @@ proc listNamespaces*(k: KubeApi; labelSelector: string): tuple[items: seq[JsonNo
   if r.code != 200: return (@[], message(r.body, r.code))
   try:
     for it in parseJson(r.body){"items"}: result.items.add it
+  except CatchableError:
+    result.error = "the answer was not JSON"
+
+proc listObjects*(k: KubeApi; kind, namespace, labelSelector: string): tuple[items: seq[JsonNode], error: string] =
+  ## the objects of one kind in a namespace with a label (the core lists the controller Pods of an organisation, SHD-008)
+  let r = k.transport("GET", collectionPath(kind, namespace) & "?labelSelector=" & encodeUrl(labelSelector), "")
+  if r.code != 200: return (@[], message(r.body, r.code))
+  try:
+    let items = parseJson(r.body){"items"}
+    if items != nil and items.kind == JArray: result.items = items.elems
   except CatchableError:
     result.error = "the answer was not JSON"
 

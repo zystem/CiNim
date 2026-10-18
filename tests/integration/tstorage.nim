@@ -190,6 +190,17 @@ suite "D-60 the storage module's API":
       check c2.saveStore(key, garage, StoreConfig(kind: "s3", endpoint: "http://garage.test:3900", region: "garage", bucket: "cinim-artifacts", keyId: "GKabc"), "s3cret-of-garage", false, 1) == ""
       check c2.defaultStoreName() == garage
 
+    test "RUN-013 the module is alive without a token, and ready when its database answers: not ready (503) is not dead":
+      let at = getTime().toUnix()
+      check dispatch("GET", "/healthz", raw("GET", "/healthz", @[]), "", at).code == 200
+      check dispatch("GET", "/readyz", raw("GET", "/readyz", @[]), "", at).code == 200
+      let was = cfg.rqliteUrl
+      cfg.rqliteUrl = "http://127.0.0.1:1"
+      defer: cfg.rqliteUrl = was
+      sleep 2100                                                    # the answer of a moment ago is kept for two seconds
+      let down = dispatch("GET", "/readyz", raw("GET", "/readyz", @[]), "", at)
+      check down.code == 503 and "not_ready" in down.body
+      check dispatch("GET", "/healthz", raw("GET", "/healthz", @[]), "", at).code == 200
     test "D-60 a call of the core needs a token made for its shard, method and target":
       check coreCall("GET", "/v1/stores").code == 200
       let list = coreCall("GET", "/v1/stores").js
