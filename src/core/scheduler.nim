@@ -557,7 +557,7 @@ var refusedLoggedAt {.threadvar.}: Table[string, float]    ## a controller that 
 proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
   ## the settings of the shard as the wire carries them to a controller
   ControllerConfig(present: true, build_enabled: s.buildEnabled, build_seccomp: s.buildSeccomp, build_caps: s.buildCaps,
-                   build_memory_limit: s.buildMemoryLimit, build_ephemeral_limit: s.buildEphemeralLimit,
+                   build_memory_limit: s.buildMemoryLimit, build_ephemeral_limit: s.buildEphemeralLimit, build_cpu_request: s.buildCpuRequest, build_cpu_limit: s.buildCpuLimit,
                    run_storage_size: s.runStorageSize,
                    run_storage_class: s.runStorageClass, run_storage_access: s.runStorageAccess,
                    collector_addr: s.collectorAddr, step_report_addr: s.stepReportAddr, artifact_addr: s.artifactAddr,

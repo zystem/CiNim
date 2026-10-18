@@ -56,7 +56,7 @@ end
 -- a job in a volume of its own with the source of the commit in it
 local function checked_out(env, fn, opts)
   opts = opts or {}
-  ci.job({image = opts.image or GIT, profile = opts.profile or "build", workspace = "isolated", env = env, timeout = opts.timeout, secrets = opts.secrets}, function(j)
+  ci.job({image = opts.image or GIT, profile = opts.profile or "build", workspace = "isolated", env = env, timeout = opts.timeout, secrets = opts.secrets, shm = opts.shm}, function(j)
     j.cache.restore({"git-" .. env.SHA})
     j:sh(CLONE)
     fn(j)
@@ -74,8 +74,9 @@ end
 local TESTS = [[
 set -eu
 cd src
-# The root file system of a Pod is a slow disk for what fsyncs (a write took 76 ms there, 1.4 ms on the volume of the job: the databases of the tests took 43 s to answer once), so the
-# compiler's cache and every temporary file, the databases' among them, are on the volume of the job.
+# What fsyncs is slow on the disks of a node (76 ms on the root file system, 1.4 to 160 ms on the volume of the job, measured: the databases of the tests took 43 s to answer once), so
+# the databases of the tests are in /dev/shm, which the job asked to be in memory (`shm`; tools/test/run.sh uses it when it has the room); the compiler's cache and the other
+# temporary files are on the volume of the job.
 export XDG_CACHE_HOME=/cicd/workspace/nimcache TMPDIR=/cicd/workspace/tmp; mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
 tools/proto/nim_flatten.sh build/nimproto
 tools/zmq/gen_curve_keys.sh                 # the secret halves of the test keys are not in the repository
@@ -185,9 +186,10 @@ return ci.pipeline({
           local key = "nim-" .. info.TESTDEPS .. "-"
           checked_out(env, function(j)
             j.cache.restore({key})                     -- the C the tests were compiled to by an earlier run: the next run compiles what changed
-            j:sh(TESTS)
-            j.cache.save(key .. info.SHA, {"nimcache"})
-          end, {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "120m"})
+            local ok, err = pcall(function() j:sh(TESTS) end)
+            j.cache.save(key .. info.SHA, {"nimcache"})          -- also after a failed run: the compiling is what took the time, and it was done
+            if not ok then error(err, 0) end
+          end, {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "120m", shm = "1Gi"})      -- the databases of the tests are in memory: the disks of a node fsync in 1 ms or in 160
         end
       end
       ci.parallel(branches, {fail_fast = true})

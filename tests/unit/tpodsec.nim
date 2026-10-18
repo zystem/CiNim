@@ -38,6 +38,12 @@ suite "D-42 the Pod of a step":
     let s = podSecurity(kaniko, true)
     check s.resources["requests"]["ephemeral-storage"].getStr == "1Gi" and s.resources["limits"]["ephemeral-storage"].getStr == "10Gi"
     check podSecurity(buildSettings("on", "", "", "", "20Gi"), true).resources["limits"]["ephemeral-storage"].getStr == "20Gi"
+  test "a build Pod has a CPU limit (4 cores) and a request (500m), or what the operator set; an ordinary step has none of the build's":
+    let s = podSecurity(kaniko, true)
+    check s.resources["requests"]["cpu"].getStr == "500m" and s.resources["limits"]["cpu"].getStr == "4"
+    let o = podSecurity(buildSettings("on", "", "", "", "", "1", "2"), true)
+    check o.resources["requests"]["cpu"].getStr == "1" and o.resources["limits"]["cpu"].getStr == "2"
+    check not podSecurity(kaniko, false).resources["limits"].hasKey("cpu")
   test "the operator's capabilities and memory limit are used by the Kaniko class":
     let s = podSecurity(buildSettings("on", "CHOWN,SETUID", "2Gi", "RuntimeDefault"), true)
     check $s.containerCtx["capabilities"]["add"] == """["CHOWN","SETUID"]""" and s.resources["limits"]["memory"].getStr == "2Gi"

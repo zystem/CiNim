@@ -227,7 +227,7 @@ proc main() =
       # the settings of the shard, in every answer: what the next Pod and claim are made by (a step is never started before the first answer)
       let c = resp.config
       let s = shardSettings(c.build_enabled, c.build_seccomp, c.build_caps, c.build_memory_limit, c.build_ephemeral_limit,
-                            c.run_storage_size, c.run_storage_class, c.run_storage_access)
+                            c.run_storage_size, c.run_storage_class, c.run_storage_access, c.build_cpu_request, c.build_cpu_limit)
       applyShardSettings(s)
       cfg.collectorAddr = c.collector_addr
       cfg.stepReportAddr = c.step_report_addr

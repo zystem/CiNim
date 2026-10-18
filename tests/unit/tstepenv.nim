@@ -20,3 +20,9 @@ suite "VAR-004 the env in a step's options":
     check checkEnv("""{"env":{"lower":"x"}}""").len > 0
     check checkEnv("{\"env\":{\"A\":\"" & repeat('x', 9000) & "\"}}").len > 0
     check checkEnv("""{"env":{"A":1}}""").len > 0
+
+suite "D-63 the shm of a job in a step's options":
+  test "the size the job asked for, or nothing; a damaged or odd value is nothing":
+    check shmSize("""{"shm":"2Gi","timeout":5}""") == "2Gi" and shmSize("""{"shm":"512Mi"}""") == "512Mi"
+    check shmSize("") == "" and shmSize("{broken") == "" and shmSize("""{"timeout":5}""") == "" and shmSize("""{"shm":2}""") == ""
+    for bad in ["2G", "Gi", "x2Gi", "2Gi ", "123456Gi", "-2Gi"]: check shmSize("""{"shm":"""" & bad & """"}""") == ""

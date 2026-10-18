@@ -20,6 +20,15 @@ suite "STO-001 the claim of a run":
     check c["spec"]["resources"]["requests"]["storage"].getStr == "20Gi" and c["spec"]["storageClassName"].getStr == "fast"
     check c["spec"]["accessModes"][0].getStr == "ReadWriteMany"
 
+suite "D-63 the /dev/shm of a job":
+  test "a Pod has the default shm unless the job asked: then a volume in memory of that size is mounted at /dev/shm":
+    let plain = podVolume(rwo, "s1_r", "img", shimMount, ctx, res)
+    check plain.volumes.allIt(it["name"].getStr != "shm") and plain.mounts.allIt(it["mountPath"].getStr != "/dev/shm")
+    let v = podVolume(rwo, "s1_r", "img", shimMount, ctx, res, "", "2Gi")
+    let shm = v.volumes.filterIt(it["name"].getStr == "shm")[0]
+    check shm["emptyDir"]["medium"].getStr == "Memory" and shm["emptyDir"]["sizeLimit"].getStr == "2Gi"
+    check v.mounts.anyIt(it["name"].getStr == "shm" and it["mountPath"].getStr == "/dev/shm")
+
 suite "STO-002 what a step Pod gets of it":
   test "D-55 the claim's workspace/ and state/ are mounted, the step's own files are in an emptyDir at /cicd/run":
     let v = podVolume(rwo, "s1_r", "img", shimMount, ctx, res)

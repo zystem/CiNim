@@ -34,8 +34,8 @@ native=${CINIM_RQLITE_BIN:-}
 [ -z "$native" ] && ! command -v docker >/dev/null && native=$(command -v rqlited || true)
 rqpids=()
 if [ $need_db = 1 ] && [ -n "$native" ]; then
-  # RAM (faster) when /dev/shm has room for the biggest test (a container has 64 MiB of it by default), else the temporary directory
-  shm=""; [ -d /dev/shm ] && [ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -gt 1500000 ] && shm=/dev/shm
+  # RAM (faster, and no fsync to wait for) when /dev/shm has 150 MB for every worker (a container has 64 MiB of it by default; a job of the pipeline asks for more with `shm`), else the temporary directory
+  shm=""; [ -d /dev/shm ] && [ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -gt $((jobs * 150000)) ] && shm=/dev/shm
   rqdir=$(mktemp -d "${shm:-${TMPDIR:-/tmp}}/cinim-rqlite.XXXXXX")
   trap 'for p in "${rqpids[@]}"; do kill "$p" 2>/dev/null; done; wait; rm -rf "$rqdir"' EXIT
   for ((i = 0; i < jobs; i++)); do

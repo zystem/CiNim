@@ -14,6 +14,8 @@ const
   deployProfile* = "deploy"
   userNsProfile* = "profiles/cinim-userns.json"       ## relative to the kubelet's seccomp directory, as `localhostProfile` wants it
   defaultBuildEphemeral* = "10Gi"
+  defaultBuildCpuRequest* = "500m"
+  defaultBuildCpuLimit* = "4"
   defaultBuildCaps* = "CHOWN,DAC_OVERRIDE,FOWNER,SETUID,SETGID,SETFCAP"
 
 type
@@ -22,6 +24,7 @@ type
     caps*: seq[string]
     memoryLimit*: string
     ephemeralLimit*: string        ## the ephemeral-storage limit of a build Pod (images are built in it): 10Gi; an ordinary step gets the LimitRange's
+    cpuRequest*, cpuLimit*: string ## the CPU of a build Pod: what it asks for (500m) and the most it may use (4 cores): without a limit a build takes the node and starves the database of the platform
     localhost*: bool               ## the Localhost seccomp class (rootless builders); false: RuntimeDefault (Kaniko)
 
   PodSecurity* = object
@@ -29,12 +32,14 @@ type
     hostUsers*: bool
     labels*: JsonNode              ## added to the Pod's labels
 
-func buildSettings*(enabled: string; caps, memoryLimit, seccomp: string; ephemeralLimit = ""): BuildSettings =
+func buildSettings*(enabled: string; caps, memoryLimit, seccomp: string; ephemeralLimit = ""; cpuRequest = ""; cpuLimit = ""): BuildSettings =
   ## from the environment (CINIM_BUILD, CINIM_BUILD_CAPS, CINIM_BUILD_MEMORY_LIMIT, CINIM_BUILD_SECCOMP); "" is the default of each
   BuildSettings(enabled: enabled == "on",
                 caps: (if caps.len > 0: caps else: defaultBuildCaps).split(',').filterIt(it.len > 0),
                 memoryLimit: (if memoryLimit.len > 0: memoryLimit else: "4Gi"),
                 ephemeralLimit: (if ephemeralLimit.len > 0: ephemeralLimit else: defaultBuildEphemeral),
+                cpuRequest: (if cpuRequest.len > 0: cpuRequest else: defaultBuildCpuRequest),
+                cpuLimit: (if cpuLimit.len > 0: cpuLimit else: defaultBuildCpuLimit),
                 localhost: seccomp == "Localhost")
 
 func podSecurity*(b: BuildSettings; build: bool; deploy = false): PodSecurity =
@@ -47,8 +52,8 @@ func podSecurity*(b: BuildSettings; build: bool; deploy = false): PodSecurity =
       containerCtx: %*{"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}},
       resources: %*{"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"memory": "128Mi"}},
       hostUsers: true, labels: (if deploy and not build: %*{buildLabel: deployProfile} else: newJObject()))
-  let resources = %*{"requests": {"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "1Gi"},
-                     "limits": {"memory": b.memoryLimit, "ephemeral-storage": b.ephemeralLimit}}
+  let resources = %*{"requests": {"cpu": b.cpuRequest, "memory": "512Mi", "ephemeral-storage": "1Gi"},
+                     "limits": {"cpu": b.cpuLimit, "memory": b.memoryLimit, "ephemeral-storage": b.ephemeralLimit}}
   let labels = %*{buildLabel: buildProfile}
   if b.localhost:
     PodSecurity(

@@ -63,6 +63,9 @@ suite "creating Pods":
     let dd = r.cmd.find("--")
     check r.cmd[dd + 1 .. ^1] == @["sh", "-c", "true"]
     check "--opts-json" in r.cmd and "--log-max-bytes" in r.cmd and "--collector-addr" in r.cmd
+  test "D-63 the shm the job asked for reaches the Pod request, from the step's options":
+    check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", optsJson: """{"shm":"2Gi"}""")).shm == "2Gi"
+    check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x")).shm == ""
   test "the profile's spool size and hold timeout override the controller's defaults, per step":
     let r = buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", logSpoolBytes: 2097152, logHoldTimeout: 45))
     check r.cmd[r.cmd.find("--log-spool-bytes") + 1] == "2097152" and r.cmd[r.cmd.find("--log-hold-timeout") + 1] == "45"

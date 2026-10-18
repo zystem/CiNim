@@ -2,7 +2,7 @@
 ## `env` of one step (`step_env`, above what the steps write to $CICD_ENV). The script says it in the options of the step (bootstrap.lua: `norm_env`); the core checks the
 ## names against the deny-list of STO-004 when it takes the step, puts the job's into the environment of the Pod, and the shim applies the step's after the env file.
 ## Pure, shared by the core and the shim.
-import std/[json, strutils, algorithm]
+import std/[json, strutils, algorithm, sets]
 import envname
 
 const
@@ -29,6 +29,16 @@ proc isolatedWorkspace*(optsJson: string): bool =
     let j = parseJson(optsJson)
     j.kind == JObject and j{"workspace"} != nil and j{"workspace"}.kind == JString and j{"workspace"}.getStr == "isolated"
   except CatchableError: false
+
+proc shmSize*(optsJson: string): string =
+  ## the size of the /dev/shm the job asked for (`shm = "2Gi"`), or "" (the 64Mi of a Pod); the Lua sandbox has checked it, and it is looked at again before it goes into a Pod
+  if optsJson.len == 0: return
+  try:
+    let j = parseJson(optsJson)
+    if j.kind != JObject or j{"shm"} == nil or j{"shm"}.kind != JString: return
+    let v = j{"shm"}.getStr
+    if v.len >= 3 and v.len <= 6 and v[^2 .. ^1] in ["Mi", "Gi"] and v[0 ..< v.len - 2].allCharsInSet({'0' .. '9'}): v else: ""
+  except CatchableError: ""
 
 proc checkEnv*(optsJson: string): string =
   ## "" if the options' environments may be given to a step, else why not (the core's answer to the script)

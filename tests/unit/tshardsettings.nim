@@ -10,7 +10,7 @@ suite "the settings of the shard in a controller":
   test "a build profile with the settings of the shard: Kaniko's class by default, the rootless class on request":
     let kaniko = shardSettings(true, "", "", "", "", "", "", "")
     check kaniko.build.enabled and not kaniko.build.localhost and kaniko.build.memoryLimit == "4Gi"
-    let rootless = shardSettings(true, "Localhost", "CHOWN,SETUID", "8Gi", "20Gi", "", "", "")
+    let rootless = shardSettings(true, "Localhost", "CHOWN,SETUID", "8Gi", "20Gi", "", "", "", "1", "2")
     check rootless.build.localhost and rootless.build.caps == @["CHOWN", "SETUID"] and rootless.build.memoryLimit == "8Gi" and rootless.build.ephemeralLimit == "20Gi"
     check podSecurity(rootless.build, true).podCtx["seccompProfile"]["type"].getStr == "Localhost"
   test "a run volume with a size, a class and an access mode":

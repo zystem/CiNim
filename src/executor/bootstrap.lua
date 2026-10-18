@@ -310,6 +310,18 @@ local function norm_workspace(v)
   return v
 end
 
+-- `shm`: a /dev/shm of this size, backed by memory (a Pod has 64Mi of it unless asked): for what keeps its working data in memory, a database for tests above all, whose fsyncs
+-- on a slow disk made the tests time out. It counts against the memory limit of the Pod. "64Mi" to "8Gi".
+local function norm_shm(v)
+  if v == nil then return nil end
+  local n, unit = (type(v) == "string" and v or ""):match("^(%d+)(%a+)$")
+  n = tonumber(n)
+  if not n or (unit ~= "Mi" and unit ~= "Gi") then error("ci.job: shm is a size such as \"512Mi\" or \"2Gi\"", 3) end
+  local mi = unit == "Gi" and n * 1024 or n
+  if mi < 64 or mi > 8192 then error("ci.job: shm is from 64Mi to 8Gi", 3) end
+  return v
+end
+
 local function norm_timeout(v)
   if v == nil or v == false then return nil end
   local s = parse_duration(v, "timeout")
@@ -586,6 +598,7 @@ local function step_opts(job, opts)
   if mask ~= "" then parts[#parts + 1] = '"mask":' .. mask end
   if metrics ~= "" then parts[#parts + 1] = '"metrics":' .. metrics end
   if secrets and #secrets > 0 then parts[#parts + 1] = '"secrets":' .. secrets_json(secrets) end
+  if job.__shm then parts[#parts + 1] = '"shm":' .. jstr(job.__shm) end
   if step_env then parts[#parts + 1] = '"step_env":' .. env_json(step_env) end
   if timeout then parts[#parts + 1] = '"timeout":' .. timeout end
   if job.__workspace then parts[#parts + 1] = '"workspace":' .. jstr(job.__workspace) end
@@ -1196,7 +1209,7 @@ G.ci = {
     if opts.id ~= nil then claim_id(check_id(opts.id, "ci.job"), getline()) end
     cur.jobs = cur.jobs + 1
     local j = setmetatable({ __key = (cur.path == "m" and "" or (cur.path .. "/")) .. "job-" .. cur.jobs, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
-      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __workspace = norm_workspace(opts.workspace), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
+      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __workspace = norm_workspace(opts.workspace), __shm = norm_shm(opts.shm), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
       __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env"), __cache = norm_cache(opts.cache, 3) }, Job_mt)
     j.cache = job_cache_api(j)
     local lock = norm_lock(opts.lock)

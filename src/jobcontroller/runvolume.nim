@@ -41,7 +41,7 @@ type PodVolume* = object
   affinity*: JsonNode                  ## nil when the Pods of the run may run anywhere
   runDir*: string                      ## where the shim keeps the step's own files (CICD_OUTPUT, CICD_MASK)
 
-func podVolume*(v: VolumeSettings; runId, image: string; shimMount, containerCtx, resources: JsonNode; volume = ""): PodVolume =
+func podVolume*(v: VolumeSettings; runId, image: string; shimMount, containerCtx, resources: JsonNode; volume = ""; shm = ""): PodVolume =
   ## The claim's `workspace/` at `/cicd/workspace`, its `state/` at `/cicd/state`, and an emptyDir at `/cicd/run` for the step's own files. The two subdirectories are made by an init container, because the kubelet would make
   ## a missing `subPath` as root and a step that is not root could not write there; the init container runs as the step does (the same security context)
   ## and opens the two for everyone of the run, since the steps of one run are not all the same user (a build Pod is root of its user namespace).
@@ -55,6 +55,10 @@ func podVolume*(v: VolumeSettings; runId, image: string; shimMount, containerCtx
     "volumeMounts": [shimMount, {"name": "data", "mountPath": "/cicd/volume"}],
     "securityContext": containerCtx, "resources": resources}]
   result.runDir = "/cicd/run"
+  if shm.len > 0:
+    # `shm = "2Gi"` of the job: /dev/shm backed by memory instead of the 64Mi a Pod has
+    result.mounts.add %*{"name": "shm", "mountPath": "/dev/shm"}
+    result.volumes.add %*{"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": shm}}
   if not v.readWriteMany:
     # one node for the Pods that share the volume: with ReadWriteOnce it can be attached to one node. The first Pod matches its own term, which Kubernetes allows. The term names the
     # volume, not the run: a job with a volume of its own does not tie the run's other Pods to its node, and they do not tie it to theirs (STO-002)

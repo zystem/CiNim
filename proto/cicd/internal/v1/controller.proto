@@ -171,6 +171,8 @@ message ControllerConfig {
   uint32 log_hold_timeout_seconds = 16;  // the default wait for log delivery (a profile's own setting wins)
   uint32 pod_retention_read_seconds = 17;    // how long a finished Pod is kept when the core has its result and its log (0: removed at once)
   uint32 pod_retention_unread_seconds = 18;  // ... when the core could not read it (the log not delivered, the end unknown)
+  string build_cpu_request = 19;         // the CPU a build Pod asks for: its share on a node that is busy, and what the scheduler counts ("" = 500m)
+  string build_cpu_limit = 20;           // the CPU a build Pod may use: a build or a test run that is not stopped takes every core of its node and starves what shares it ("" = 4)
 }
 
 message ConductorCredential {

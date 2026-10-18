@@ -120,6 +120,10 @@ build:
   seccompProfile: RuntimeDefault      # RuntimeDefault (Kaniko) or Localhost (rootless BuildKit and Buildah)
   capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, SETFCAP]    # of the RuntimeDefault class; the policy allows no others
   memoryLimit: 4Gi
+  # The CPU of a build Pod (and so of a test run in one). Without a limit a Kaniko build or a compile takes every core of its node and starves what shares it: the database of the platform
+  # answered in minutes and the core was restarted (measured 2026-10-18). The request is the share it has when the node is busy.
+  cpuRequest: 500m
+  cpuLimit: "4"
   ephemeralStorageLimit: 10Gi         # the ephemeral-storage limit of a build Pod (the request is 1Gi)
 
 # The deploy profile (D-48): a job asks for it with `profile = "deploy"`. Its steps are ordinary Pods in every respect of security (non-root, restricted), but

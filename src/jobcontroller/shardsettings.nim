@@ -8,8 +8,8 @@ type ShardSettings* = object
   volume*: VolumeSettings
 
 func shardSettings*(buildEnabled: bool; buildSeccomp, buildCaps, buildMemoryLimit, buildEphemeralLimit: string;
-                    storageSize, storageClass, storageAccess: string): ShardSettings =
+                    storageSize, storageClass, storageAccess: string; buildCpuRequest = ""; buildCpuLimit = ""): ShardSettings =
   ## an empty string is the default of that setting
   ShardSettings(
-    build: buildSettings(if buildEnabled: "on" else: "off", buildCaps, buildMemoryLimit, buildSeccomp, buildEphemeralLimit),
+    build: buildSettings(if buildEnabled: "on" else: "off", buildCaps, buildMemoryLimit, buildSeccomp, buildEphemeralLimit, buildCpuRequest, buildCpuLimit),
     volume: volumeSettings(storageSize, storageClass, storageAccess))

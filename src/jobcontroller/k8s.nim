@@ -102,7 +102,7 @@ proc applyShardSettings*(s: ShardSettings) = shard = s
 proc podBody(r: PodRequest): JsonNode =
   let sec = podsec.podSecurity(shard.build, r.build, r.deploy)
   let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
-  let vol = runvolume.podVolume(shard.volume, r.runId, r.image, shimMount, sec.containerCtx, sec.resources, r.volume)
+  let vol = runvolume.podVolume(shard.volume, r.runId, r.image, shimMount, sec.containerCtx, sec.resources, r.volume, r.shm)
   result = %*{
     "apiVersion": "v1", "kind": "Pod",
     "metadata": {"name": r.name, "labels": {runvolume.runLabel: r.runId, runvolume.volumeLabel: runvolume.volumeId(r.runId, r.volume)}},

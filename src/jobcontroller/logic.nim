@@ -4,7 +4,7 @@
 ## the shim's state from its log), cancelling Pods core no longer wants, keeping finished Pods for a while and then removing them,
 ## and sweeping orphans out of the (dedicated) step namespace.
 import std/[json, options, strutils, tables, times, sequtils]
-import ../common/shimstate
+import ../common/[shimstate, stepenv]
 import backend, ctrlstate, podverdict
 
 type
@@ -58,7 +58,7 @@ func drainDir*(seq, attempt: int): string =
   ## spool. On the run's volume, so it outlives the Pod; the path is the same in the step's Pod and in the reader's.
   "/cicd/state/drain/" & $seq & "-" & $attempt
 
-func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
+proc buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   let logging = cfg.collectorAddr.len > 0 and cfg.stepReportAddr.len > 0
   let spool = if r.logSpoolBytes > 0: int(r.logSpoolBytes) else: cfg.logSpoolBytes
   let hold = if r.logHoldTimeout > 0: r.logHoldTimeout else: cfg.logHoldTimeout
@@ -81,7 +81,7 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, volume: r.volume, cmd: cmd, logging: logging,
-             spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
+             spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", shm: shmSize(r.optsJson), env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds

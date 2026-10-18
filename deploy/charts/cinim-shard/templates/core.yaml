@@ -93,6 +93,8 @@ spec:
             - {name: CINIM_BUILD_INTERNET, value: {{ if .Values.build.internet.enabled }}{{ dict "ports" .Values.build.internet.ports "except" .Values.build.internet.except | toJson | quote }}{{ else }}"off"{{ end }}}
             - {name: CINIM_BUILD_CAPS, value: {{ join "," .Values.build.capabilities | quote }}}
             - {name: CINIM_BUILD_MEMORY_LIMIT, value: {{ .Values.build.memoryLimit | quote }}}
+            - {name: CINIM_BUILD_CPU_REQUEST, value: {{ .Values.build.cpuRequest | quote }}}
+            - {name: CINIM_BUILD_CPU_LIMIT, value: {{ .Values.build.cpuLimit | quote }}}
             - {name: CINIM_BUILD_EPHEMERAL_LIMIT, value: {{ .Values.build.ephemeralStorageLimit | quote }}}
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
             - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"

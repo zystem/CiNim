@@ -11,7 +11,7 @@ const
 
 type ShardSettings* = object
   buildEnabled*: bool
-  buildSeccomp*, buildCaps*, buildMemoryLimit*, buildEphemeralLimit*: string     ## "" = the controller's default
+  buildSeccomp*, buildCaps*, buildMemoryLimit*, buildEphemeralLimit*, buildCpuRequest*, buildCpuLimit*: string     ## "" = the controller's default
   runStorageSize*, runStorageClass*, runStorageAccess*: string
   collectorAddr*, stepReportAddr*, artifactAddr*: string          ## the core's addresses for the shim; "" = none
   logSpoolBytes*: int64
@@ -34,6 +34,7 @@ proc shardSettings*(get: proc (name: string): string {.gcsafe.}; shardNamespace 
   ShardSettings(
     buildEnabled: get("CINIM_BUILD") == "on", buildSeccomp: get("CINIM_BUILD_SECCOMP"), buildCaps: get("CINIM_BUILD_CAPS"),
     buildMemoryLimit: get("CINIM_BUILD_MEMORY_LIMIT"), buildEphemeralLimit: get("CINIM_BUILD_EPHEMERAL_LIMIT"),
+    buildCpuRequest: get("CINIM_BUILD_CPU_REQUEST"), buildCpuLimit: get("CINIM_BUILD_CPU_LIMIT"),
     runStorageSize: get("CINIM_RUN_STORAGE_SIZE"),
     runStorageClass: get("CINIM_RUN_STORAGE_CLASS"), runStorageAccess: get("CINIM_RUN_STORAGE_ACCESS"),
     collectorAddr: collector, stepReportAddr: addr("CINIM_STEPREPORT_ADDR", 19742), artifactAddr: addr("CINIM_ARTIFACTINGEST_ADDR", 19744),

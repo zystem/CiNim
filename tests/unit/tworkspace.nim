@@ -22,6 +22,16 @@ proc run(body: string): Seen =
   r.message = e.message
   r
 
+suite "D-63 shm: a /dev/shm of the job's own":
+  test "shm is in the options of every step of the job, between the secrets and the timeout in the canonical order":
+    let r = run("""ci.job({image = "a", shm = "2Gi", timeout = 90}, function(j) j:sh("one") end)""")
+    check r.calls[0].opts == """{"shm":"2Gi","timeout":90}"""
+  test "a size is Mi or Gi, from 64Mi to 8Gi; anything else is refused before any step":
+    for bad in ["16Mi", "9Gi", "2G", "lots", "-1Gi", "2.5Gi"]:
+      let r = run("ci.job({image = \"a\", shm = \"" & bad & "\"}, function(j) j:sh(\"x\") end)")
+      check r.status == esFailed and "shm" in r.message and r.calls.len == 0
+    check run("""ci.job({image = "a", shm = 2048}, function(j) j:sh("x") end)""").status == esFailed
+
 suite "STO-002 the volume of a job":
   test "a job is shared by default: its steps carry no workspace option":
     let r = run("""ci.job({image = "a"}, function(j) j:sh("x") end)""")

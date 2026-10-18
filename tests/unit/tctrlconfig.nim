@@ -11,10 +11,11 @@ suite "the settings of the shard in the core":
     check not s.buildEnabled and s.buildSeccomp == "" and s.runStorageSize == ""
   test "the values of the chart reach the settings":
     let s = fromTable({"CINIM_BUILD": "on", "CINIM_BUILD_SECCOMP": "Localhost", "CINIM_BUILD_CAPS": "CHOWN,SETUID", "CINIM_BUILD_MEMORY_LIMIT": "8Gi",
-                       "CINIM_BUILD_EPHEMERAL_LIMIT": "20Gi", "CINIM_RUN_STORAGE_SIZE": "2Gi", "CINIM_RUN_STORAGE_CLASS": "fast",
+                       "CINIM_BUILD_EPHEMERAL_LIMIT": "20Gi", "CINIM_BUILD_CPU_REQUEST": "1", "CINIM_BUILD_CPU_LIMIT": "6", "CINIM_RUN_STORAGE_SIZE": "2Gi", "CINIM_RUN_STORAGE_CLASS": "fast",
                        "CINIM_RUN_STORAGE_ACCESS": "ReadWriteMany"}.toTable)
     check s.buildEnabled and s.buildSeccomp == "Localhost" and s.buildCaps == "CHOWN,SETUID" and s.buildMemoryLimit == "8Gi" and s.buildEphemeralLimit == "20Gi"
     check s.runStorageSize == "2Gi" and s.runStorageClass == "fast" and s.runStorageAccess == "ReadWriteMany"
+    check s.buildCpuRequest == "1" and s.buildCpuLimit == "6"
   test "`off` and anything but `on` is off for the build profile":
     check not fromTable({"CINIM_BUILD": "off", "CINIM_RUN_STORAGE": "true"}.toTable).buildEnabled
 
