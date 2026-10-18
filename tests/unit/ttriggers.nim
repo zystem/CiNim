@@ -56,3 +56,48 @@ suite "TRG-002 trigger definitions":
     check v["hook"].getStr == "/api/v1/hooks/s1_x" and v["params"]["A"].getStr == "1" and v["script_bytes"].getInt == 13
     check not v.hasKey("schedule")
     check view(TriggerRow(kind: "schedule", schedule: "@daily"))["schedule"].getStr == "@daily"
+
+suite "D-63 a trigger whose script is in a repository":
+  proc repoSpec(extra: JsonNode = nil): JsonNode =
+    result = %*{"name": "main-push", "kind": "webhook", "repository": "https://example.test/org/repo.git", "ref": "main"}
+    if extra != nil:
+      for k, v in extra: result[k] = v
+  test "D-63 a repository takes the place of the script; the ref and the path are optional":
+    let r = parseTriggerSpec(repoSpec())
+    check r.error == "" and r.spec.repository == "https://example.test/org/repo.git" and r.spec.ref0 == "main" and r.spec.script == ""
+    check parseTriggerSpec(repoSpec(%*{"path": "ci/p.lua"})).spec.scriptPath == "ci/p.lua"
+    check parseTriggerSpec(repoSpec(%*{"ref": ""})).error == ""
+  test "D-63 the script or the repository, not both and not neither; ref and path belong to a repository":
+    check parseTriggerSpec(repoSpec(%*{"script": "return 1"})).error.contains("not both")
+    check parseTriggerSpec(spec(%*{"script": ""})).error.contains("script")
+    check parseTriggerSpec(spec(%*{"ref": "main"})).error.contains("repository")
+    check parseTriggerSpec(spec(%*{"path": "x.lua"})).error.contains("repository")
+  test "D-63 only https and http repositories, names git cannot take for an option, and paths inside the repository":
+    for bad in ["ssh://git@example.test/r.git", "file:///etc", "git://example.test/r", "https://exa mple.test/r", "https://"]:
+      check parseTriggerSpec(repoSpec(%*{"repository": bad})).error.contains("repository")
+    check parseTriggerSpec(repoSpec(%*{"ref": "--upload-pack=x"})).error.contains("ref")
+    check parseTriggerSpec(repoSpec(%*{"ref": "a..b"})).error.contains("ref")
+    check parseTriggerSpec(repoSpec(%*{"path": "../x"})).error.contains("path")
+    check parseTriggerSpec(repoSpec(%*{"path": "/etc/x"})).error.contains("path")
+    check parseTriggerSpec(repoSpec(%*{"repository": 5})).error.contains("string")
+  test "D-63 the view shows where the script is read from":
+    let t = TriggerRow(id: "s1_x", slug: "acme", name: "hook", kind: "webhook", repository: "https://example.test/r.git", ref0: "main", concurrency: "parallel", enabled: true)
+    let v = view(t)
+    check v["source"]["repository"].getStr == "https://example.test/r.git" and v["source"]["ref"].getStr == "main" and v["source"]["path"].getStr == ".ci/pipeline.lua"
+
+suite "D-63 what a webhook may say":
+  let repoTrigger = TriggerRow(repository: "https://example.test/r.git", ref0: "main")
+  let plainTrigger = TriggerRow()
+  test "D-63 the commit, the trigger's own repository, or nothing":
+    check hookCommit(%*{"commit": "3f2c1a9"}, repoTrigger) == (error: "", commit: "3f2c1a9")
+    check hookCommit(%*{"commit": "v1.2", "repository": "https://example.test/r.git"}, repoTrigger).commit == "v1.2"
+    check hookCommit(newJObject(), repoTrigger) == (error: "", commit: "")
+    check hookCommit(newJObject(), plainTrigger) == (error: "", commit: "")
+  test "D-63 no params, no other repository, no commit for a script of its own, no name git would take for an option":
+    check hookCommit(%*{"params": {"A": "1"}}, repoTrigger).error.contains("no params")
+    check hookCommit(%*{"repository": "https://evil.test/x.git"}, repoTrigger).error.contains("cannot point")
+    check hookCommit(%*{"commit": "main"}, plainTrigger).error.contains("script of its own")
+    check hookCommit(%*{"commit": "--upload-pack=x"}, repoTrigger).error.contains("SHA")
+    check hookCommit(%*{"commit": 5}, repoTrigger).error.contains("text")
+    check hookCommit(newJArray(), repoTrigger).error.len > 0
+    check hookCommit(nil, repoTrigger).error.len > 0

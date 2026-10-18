@@ -1215,6 +1215,14 @@ local function run_main(fn, run)
   state.main = running()
   local given = rawget(run, "__given") or {}
   rawset(run, "__given", nil)
+  -- D-63: where the script was read from, if it came from a repository. The core hands it over among the launch parameters under names that no parameter can have; it is not a
+  -- parameter, so it leaves `given` here, and `run.source` always exists (empty strings for a script that came in the request).
+  local source = { repository = "", commit = "", path = "" }
+  for _, k in ipairs({ "repository", "commit", "path" }) do
+    local v = given["@source." .. k]
+    if v ~= nil then source[k] = v; given["@source." .. k] = nil end
+  end
+  run.source = source
   local v = fn()
   if type(v) == "table" and type(rawget(v, "main")) == "function" then
     pipeline_env = norm_env(rawget(v, "env"), "ci.pipeline env", 0)

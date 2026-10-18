@@ -38,6 +38,8 @@ type
                                                 ## the default is closed both ways, with the openings of the build profile
     deploy*: bool                               ## the shard has the deploy profile (D-48): a step with `profile = "deploy"` is an ordinary Pod that may reach what `deployEgress` lists
     deployEgress*: JsonNode                     ## NetworkPolicy egress rules of the deploy Pods (an array, like buildEgress), or the string "all"; nil: closed
+    conductorEgress*: JsonNode                  ## D-63: NetworkPolicy egress rules of the conductors (a git server inside the cluster or the LAN), an array, or the string "all"; nil: none
+    conductorInternet*: JsonNode                ## D-63: {"ports": [...], "except": [...]}: a conductor reads a script from a repository on the public internet on these ports (the private ranges stay closed); nil: no
     conductors*: bool                           ## the shard has a conductor image (CINIM_CONDUCTOR_IMAGE): the namespace gets the policy that lets a conductor Pod reach the core's push channel
     storageDirectPort*: int                     ## D-61: the shard's storage module takes the bytes of the shims on this port (0: it does not); a step Pod may reach it, and nothing else of the module
     deployKubeApiServer*: bool                  ## also a CiliumNetworkPolicy that lets the deploy Pods reach the Kubernetes API server (the entity `kube-apiserver`): a NetworkPolicy cannot name it under Cilium
@@ -64,6 +66,15 @@ func orgNamespace*(cfg: ProvisionConfig; slug: string): string = namespaceName(c
 func stepRunnerRole*(cfg: ProvisionConfig): string =
   ## the ClusterRole that the chart creates once per shard, the only role the core may bind (SHD-007, T-45)
   cfg.prefix & "-" & cfg.shard & "-step-runner"
+
+func internetRule(internet: JsonNode): JsonNode =
+  ## a rule that lets a Pod reach the public internet on some ports and nothing inside (the private ranges, the cluster's pods and services, the LAN, the link-local metadata address are excepted)
+  var ports = newJArray()
+  if internet.hasKey("ports"):
+    for p in internet["ports"]: ports.add %*{"protocol": "TCP", "port": p}
+  var peer = %*{"ipBlock": {"cidr": "0.0.0.0/0", "except": (if internet.hasKey("except"): internet["except"] else: newJArray())}}
+  result = %*{"to": [peer]}
+  if ports.len > 0: result["ports"] = ports
 
 func ingressName*(slug: string): string = "org-" & slug
 
@@ -188,12 +199,19 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
         p["spec"]["egress"].add %*{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": cfg.shardNamespace}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": "cinim-storage"}}}],
                                    "ports": [{"protocol": "TCP", "port": cfg.storageDirectPort}]}
   if cfg.conductors:
+    var rules = @[
+         %*{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+                    "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+            "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+         %*{"to": [core], "ports": [{"protocol": "TCP", "port": 19745}]}]
+    # D-63: a conductor reads the script of a run from a repository (git over https): the public internet on the ports given, and what the operator lists (a git server of the cluster or the LAN)
+    if cfg.conductorEgress != nil and cfg.conductorEgress.kind == JString and cfg.conductorEgress.getStr == "all": rules.add %*{}
+    else:
+      if cfg.conductorEgress != nil and cfg.conductorEgress.kind == JArray:
+        for r in cfg.conductorEgress: rules.add r
+      if cfg.conductorInternet != nil and cfg.conductorInternet.kind == JObject: rules.add internetRule(cfg.conductorInternet)
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-conductor", ns),
-       "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": conductorName}}, "policyTypes": ["Egress"], "egress": [
-         {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
-                  "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
-          "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
-         {"to": [core], "ports": [{"protocol": "TCP", "port": 19745}]}]}}
+       "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": conductorName}}, "policyTypes": ["Egress"], "egress": rules}}
   # the simple mode: one more policy each, which adds to the default-deny (policies are only ever added together), for every step Pod. The
   # controller is not among them: it keeps its own closed ingress.
   if cfg.egressOpen:
@@ -216,14 +234,8 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
   if cfg.build and not cfg.egressOpen and not buildAll and cfg.buildInternet != nil and cfg.buildInternet.kind == JObject:
     # a build downloads packages all the time (npm, deb, maven, go modules, git): it may reach the public internet, on the ports given,
     # and nothing inside: the private ranges (the cluster's pods and services, the LAN, the link-local metadata address) are excepted
-    var ports = newJArray()
-    if cfg.buildInternet.hasKey("ports"):
-      for p in cfg.buildInternet["ports"]: ports.add %*{"protocol": "TCP", "port": p}
-    var peer = %*{"ipBlock": {"cidr": "0.0.0.0/0", "except": (if cfg.buildInternet.hasKey("except"): cfg.buildInternet["except"] else: newJArray())}}
-    var rule = %*{"to": [peer]}
-    if ports.len > 0: rule["ports"] = ports
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-internet", ns),
-                  "spec": {"podSelector": builds, "policyTypes": ["Egress"], "egress": [rule]}}
+                  "spec": {"podSelector": builds, "policyTypes": ["Egress"], "egress": [internetRule(cfg.buildInternet)]}}
   if cfg.build and not cfg.egressOpen and buildAll:
     result.add %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "allow-build-egress", ns),
                   "spec": {"podSelector": builds, "policyTypes": ["Egress"], "egress": [{}]}}

@@ -81,6 +81,9 @@ const ddl = [
        params TEXT NOT NULL DEFAULT '',
        profile_id TEXT NOT NULL DEFAULT '',
        api_version INTEGER NOT NULL DEFAULT 1,
+       source_repository TEXT NOT NULL DEFAULT '',
+       source_commit TEXT NOT NULL DEFAULT '',
+       source_path TEXT NOT NULL DEFAULT '',
        journal_tip TEXT NOT NULL DEFAULT '',
        step_table TEXT NOT NULL DEFAULT '',
        lease_attempt INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +95,7 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS triggers (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, schedule TEXT NOT NULL DEFAULT '',
        secret_hash TEXT NOT NULL DEFAULT '', group_id TEXT NOT NULL DEFAULT '', script TEXT NOT NULL, params TEXT NOT NULL DEFAULT '',
+       repository TEXT NOT NULL DEFAULT '', ref TEXT NOT NULL DEFAULT '', script_path TEXT NOT NULL DEFAULT '',
        concurrency TEXT NOT NULL DEFAULT 'parallel', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
        last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '')""",
   # the artifacts of runs (DAT-003, core/objectstore.nim): the object is in the store, this is what the platform knows about it; a path is one artifact of a run
@@ -213,7 +217,13 @@ proc hasColumn(c: var RqClient; table, column: string): bool =
   r["results"][0]{"values"}[0][0].getInt > 0
 
 const columnsAdded: seq[(string, string, string)] = @[
-  ("step_drains", "volume", "TEXT NOT NULL DEFAULT ''")]      # STO-002: the id of the job whose volume the step used (2026-10-18)
+  ("step_drains", "volume", "TEXT NOT NULL DEFAULT ''"),      # STO-002: the id of the job whose volume the step used (2026-10-18)
+  ("runs", "source_repository", "TEXT NOT NULL DEFAULT ''"),  # D-63: the repository, the commit and the path the run's script was read from (2026-10-18)
+  ("runs", "source_commit", "TEXT NOT NULL DEFAULT ''"),
+  ("runs", "source_path", "TEXT NOT NULL DEFAULT ''"),
+  ("triggers", "repository", "TEXT NOT NULL DEFAULT ''"),     # D-63: a trigger whose script is read from a repository
+  ("triggers", "ref", "TEXT NOT NULL DEFAULT ''"),
+  ("triggers", "script_path", "TEXT NOT NULL DEFAULT ''")]
   ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
   ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
   ## next fold, here too.

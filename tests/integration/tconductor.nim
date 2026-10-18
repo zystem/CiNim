@@ -2,7 +2,7 @@
 ## a run process per leased run, the run's host calls carried to the core, a run that waits for a step suspended and taken again, a refused
 ## credential, and a drain that leaves nothing behind. Needs CINIM_RQLITE_URL (a scratch rqlite); builds `build/conductor` if it is not there.
 import std/[unittest, json, os, osproc, atomics, strutils, times, strtabs]
-import common/[rqlite, ctrlauth]
+import common/[rqlite, ctrlauth, scriptsource]
 import core/[schema, scheduler, loggate, logcircuit, streamhub, retrypolicy, preflight]
 
 let url = getEnv("CINIM_RQLITE_URL")
@@ -46,6 +46,8 @@ suite "RUN-009 the conductor":
       env["CINIM_CONDUCTOR_ID"] = id
       env["CINIM_CONDUCTOR_CREDENTIAL"] = if credential.len > 0: credential else: conductorCredential(master, ns, id)
       env["CINIM_RUNS_PER_CONDUCTOR"] = $places
+      env["CINIM_GIT_TRANSPORTS"] = "file"                # the repository of the tests is on this machine; a conductor allows https and http unless told
+      env["CINIM_GIT_SCHEMES"] = "file://"
       startProcess(binary, env = env, options = {poStdErrToStdOut})
 
     proc stateOf(runId: string): string =
@@ -265,6 +267,39 @@ suite "RUN-009 the conductor":
       check loop.ran and loop.code == "instruction_limit"
       check c.query(%*[["SELECT COUNT(*) FROM runs WHERE profile_id = ?", o.profile]])["results"][0]["values"][0][0].getInt == 0     # nothing was made
       stop p
+    test "D-63 a conductor reads the script of a run from a repository, checks it, and the run it leads sees where it came from (run.source)":
+      let root = getTempDir() / ("tconductor-git-" & sfx)
+      createDir(root / ".ci")
+      discard execCmd("git -C " & root & " init -q -b main && git -C " & root & " config user.email t@example.test && git -C " & root & " config user.name t")
+      writeFile(root / ".ci" / "pipeline.lua", "return ci.pipeline({ params = { JOBS = ci.number{ default = 4, min = 1, max = 64, integer = true } }, main = function(run)\n" &
+        "  if run.source.repository ~= 'file://" & root & "' or #run.source.commit ~= 40 or run.source.path ~= '.ci/pipeline.lua' then error('no source: ' .. run.source.commit) end\n" &
+        "end })\n")
+      discard execCmd("git -C " & root & " add -A && git -C " & root & " commit -q -m one")
+      let sha = execProcess("git -C " & root & " rev-parse HEAD").strip
+      let o = newOrg()
+      let p = startConductor(o.ns, "c-t11")
+      let src = Source(repository: "file://" & root, commit: "main")
+      var got = checkSource(o.ns, src, @[], 1)
+      let deadline = epochTime() + 15
+      while not got.ran and got.skipped == "no_conductor" and epochTime() < deadline:
+        sleep 200
+        got = checkSource(o.ns, src, @[], 1)
+      check got.ran and got.code == "" and got.commit == sha and "ci.pipeline" in got.script and "\"JOBS\"" in got.paramsJson
+      check got.fetchProblem.status == 0
+      # what is wrong with the source is told, and nothing is made
+      let missing = checkSource(o.ns, Source(repository: "file://" & root, commit: "main", path: "nothing.lua"), @[], 1)
+      check missing.ran and missing.fetchProblem.status == 400 and missing.fetchProblem.code == "script_missing"
+      let nobranch = checkSource(o.ns, Source(repository: "file://" & root, commit: "no-such-branch"), @[], 1)
+      check nobranch.fetchProblem.status == 502 and nobranch.fetchProblem.code == "fetch_failed"
+      let badParam = checkSource(o.ns, src, @[("JOBS", "0")], 1)
+      check badParam.problemOf.len > 0 and badParam.script.len > 0              # read, and the check found something certain in it
+      # the run keeps where it came from and its script sees it
+      let r = co.createRun(got.script, "t1", o.profile, @[], source = Source(repository: src.repository, commit: got.commit, path: defaultPath))
+      check waitState(r, "SUCCEEDED")
+      check co.getRun(r)["source"]["commit"].getStr == sha
+      check c.query(%*[["SELECT COUNT(*) FROM runs WHERE profile_id = ?", o.profile]])["results"][0]["values"][0][0].getInt == 1
+      stop p
+      removeDir root
     test "PIP-016 an organisation without a conductor is told so at once, and is not made to wait; so is one whose conductor is gone":
       let o = newOrg()
       let t0 = epochTime()

@@ -337,7 +337,7 @@ proc onCall(h: var Hub; routingId: string; f: StreamFrame) =
   h.conds[f.session] = c
   observe(hReport, epochTime() - t0)
 
-const checkWaitSeconds = 25.0       ## a conductor that has not answered a check by then is given up (the API has stopped waiting long before)
+const checkWaitSeconds = 80.0       ## a conductor that has not answered a check by then is given up (the API has stopped waiting long before: 8 s for a check, 75 s for a script read from a repository)
 
 proc answerCheck(id: string; code, message: string) =
   checkmail.put(id, encodeCheckResult(CheckResult(check_id: id, code: code, message: message)))
@@ -346,9 +346,18 @@ proc onCheck(h: var Hub; ns, payload: string) =
   ## the API asks for a script to be checked (PIP-016): the request goes to a conductor of the organisation that is not draining; with none, the API is told at once
   let req = try: decodeCheckScript(payload) except CatchableError: return
   if req.check_id.len == 0: return
+  # An organisation may have several conductors: the check goes to the one with the fewest checks under way (a conductor takes two at once and answers `busy` to a third; a script read from a
+  # repository holds one for up to a minute), the most recently heard of among equals
   var target = ""
+  var targetLoad = high(int)
+  var load = initTable[string, int]()
+  for _, chk in h.checks: load[chk.session] = load.getOrDefault(chk.session, 0) + 1
   for session, c in h.conds:
-    if c.namespace == ns and not c.draining and (target.len == 0 or c.lastSeen > h.conds[target].lastSeen): target = session
+    if c.namespace != ns or c.draining: continue
+    let n = load.getOrDefault(session, 0)
+    if target.len == 0 or n < targetLoad or (n == targetLoad and c.lastSeen > h.conds[target].lastSeen):
+      target = session
+      targetLoad = n
   if target.len == 0:
     answerCheck(req.check_id, "no_conductor", "the organisation has no conductor connected to this core")
     return

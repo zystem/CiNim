@@ -353,6 +353,23 @@ suite "RUN-009 the namespace of an organisation with conductors (docs/conductors
     var names: seq[string]
     for st in organizationSteps(cfg(), "acme", curve).steps: names.add st.objectName
     check "allow-conductor" notin names
+  test "D-63 a conductor reaches a git server only where the operator says: the public internet on some ports with the private ranges closed, and rules of its own, or everything":
+    proc egressOf(c: ProvisionConfig): JsonNode =
+      for st in organizationSteps(c, "acme", curve).steps:
+        if st.objectName == "allow-conductor": return st.obj["spec"]["egress"]
+    var c = cfg()
+    c.conductors = true
+    check egressOf(c).len == 2                                   # DNS and the core, as before
+    c.conductorInternet = %*{"ports": [80, 443], "except": ["10.0.0.0/8", "192.168.0.0/16"]}
+    var e = egressOf(c)
+    check e.len == 3 and e[2]["to"][0]["ipBlock"]["cidr"].getStr == "0.0.0.0/0" and e[2]["to"][0]["ipBlock"]["except"].len == 2
+    check e[2]["ports"].len == 2 and e[2]["ports"][1]["port"].getInt == 443
+    c.conductorEgress = %*[{"to": [{"ipBlock": {"cidr": "192.168.10.30/32"}}], "ports": [{"protocol": "TCP", "port": 3000}]}]
+    e = egressOf(c)
+    check e.len == 4 and e[2]["to"][0]["ipBlock"]["cidr"].getStr == "192.168.10.30/32"
+    c.conductorEgress = %"all"
+    e = egressOf(c)
+    check e.len == 3 and e[2].len == 0                           # `{}`: every address (the internet rule says nothing more)
   test "a conductor Pod is denied everything but DNS and the core's push channel, and a step's policies do not select it":
     var c = cfg()
     c.conductors = true

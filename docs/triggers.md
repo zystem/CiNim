@@ -67,6 +67,17 @@ POST /api/v1/organizations/acme/triggers
 
 Five fields, **UTC**: minute hour day-of-month month day-of-week. `*`, lists `1,15`, ranges `9-17`, steps `*/15` and `10-50/10`, names (`jan`, `mon`), and `@hourly @daily @weekly @monthly @yearly`. If both day fields are restricted a day matches when either does (as in Vixie cron). Core looks every 20 seconds. A core that was down fires a schedule **once** when it is back. Switching a schedule off and on again starts its clock from that moment.
 
+### The script in a repository (D-63)
+
+A trigger, like a run, may name a repository instead of carrying a script: `"repository": "https://git.example/org/repo.git"`, `"ref": "main"` (a branch, a tag or a SHA; the commit a firing runs when the call names none) and `"path": ".ci/pipeline.lua"` (the default). At every firing a conductor of the organisation reads that one file at that commit (`git fetch --depth 1`, then the one blob; https and http only, no credentials, so a public repository or one the cluster can reach without a login), checks it like any script, and the run keeps the text, the repository, the SHA of the commit and the path (PIP-001, `GET /api/v1/runs/{id}` shows `source`). The script sees them as `run.source.repository`, `run.source.commit`, `run.source.path` (empty strings for a script that came in the request). A change of the pipeline is a commit; a run that was made keeps the script it was made with. The conductors reach the repository where the namespace's NetworkPolicy lets them: `conductor.internet` (the public internet on ports 80 and 443, the private ranges closed) and `conductor.egress` (a git server of the cluster or the LAN) in the chart. A repository that cannot be read starts no run: a webhook answers 502 `fetch_failed`, 400 `script_missing` (no such file at that commit) or `script_too_large` (over 1 MiB), 409 `no_conductor`, 429 `busy` (too many readings at once), and `last_result` of the trigger says why.
+
+```
+POST /api/v1/organizations/acme/triggers
+{"name": "main-push", "kind": "webhook", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "cancel_previous"}
+POST /api/v1/runs   {"organization": "acme", "repository": "https://…/r.git", "commit": "v1.2", "path": ".ci/pipeline.lua", "params": {…}}      # by hand, no trigger
+POST /api/v1/pipelines:check   {"organization": "acme", "repository": "https://…/r.git", "commit": "main"}        # reads and checks it; the answer names the commit
+```
+
 ### Webhook
 
 ```
@@ -76,16 +87,18 @@ POST /api/v1/organizations/acme/triggers
 
 POST /api/v1/hooks/s1_…
 Authorization: Bearer <the secret>
-{"params": {"BRANCH": "feature-x"}}
+{"commit": "3f2c1a9…"}                 # only for a trigger with a repository; the commit, branch or tag to run (the trigger's `ref` when left out)
 → 201 {"id": "<run id>", "trigger_id": "s1_…", "state": "RUNNING"}
 ```
+
+A webhook carries **no launch parameters** (`params` in its body is a 400): the parameters are the trigger's own, fixed when it was made. What a call may say is the commit, and, if it likes, the repository, which must be the trigger's (anything else is a 400: a call cannot point the trigger at another server). A manual `:fire` may still give `params`, and `commit`.
 
 The secret is only for this hook and starts only this trigger's script; it is not an API token. Lost or leaked: `POST …/triggers/{id}:rotate-secret` gives a new one and the old one stops at once. Only the bearer form is supported; a forge that signs the body (GitHub's `X-Hub-Signature-256`) needs a recoverable secret and is not built, so put the hook behind a small relay or use a forge that can send an `Authorization` header.
 
 ### Manual, switching, deleting
 
 ```
-POST /api/v1/organizations/acme/triggers/{id}:fire      {"params": {…}}   # a run now, also of a switched-off trigger
+POST /api/v1/organizations/acme/triggers/{id}:fire      {"params": {…}, "commit": "…"}   # a run now, also of a switched-off trigger
 POST /api/v1/organizations/acme/triggers/{id}:disable   (or :enable)
 GET  /api/v1/organizations/acme/triggers                                   # the list; last_fired_at, last_run_id, last_result
 DELETE /api/v1/organizations/acme/triggers/{id}

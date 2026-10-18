@@ -42,10 +42,10 @@ suite "RUN-016 conductors on the push channel":
       co.setProfileSettings(s, prof)
       (prof, ns)
 
-    proc hello(session, id, ns: string; places: int; ack = 0'u64; fid = 1'u64; held: seq[string] = @[]; credential = ""; image = ""): StreamFrame =
+    proc hello(session, id, ns: string; places: int; ack = 0'u64; fid = 1'u64; held: seq[string] = @[]; credential = ""; image = ""; key = ""): StreamFrame =
       let cred = if credential.len > 0: credential else: conductorCredential(master, ns, id)
       frame(session, "conductor.hello", encodeHello(ConductorHello(conductor_id: id, namespace: ns, credential: cred, api_versions: @[1'u32],
-        free_places: uint32(places), held_runs: held, image: image)), id = fid, ack = ack, key = ns)
+        free_places: uint32(places), held_runs: held, image: image)), id = fid, ack = ack, key = (if key.len > 0: key else: ns))
 
     proc call(session, ns: string; fid: uint64; req: ExecutorRequest; ack = 0'u64): StreamFrame =
       frame(session, "conductor.call", encodeExecRequest(req), id = fid, ack = ack, key = ns)
@@ -127,6 +127,24 @@ suite "RUN-016 conductors on the push channel":
       let l = cl.nextKind("conductor.lease")
       check l.isSome and decodeLeaseGranted(l.get.payload).run_id == r
       cl.close()
+    test "D-63 an organisation with several conductors: a check (or the reading of a script) goes to the one with the fewest under way, and to a free one when the first is busy":
+      let o = newOrg()
+      var c1 = connectStream(serverAddr, corePub, clientKeys)
+      var c2 = connectStream(serverAddr, corePub, clientKeys)
+      check c1.sendFrame(hello("cd-k1-" & sfx, "c-k1", o.ns, 2, key = o.ns & "#conductors"))
+      check c1.nextKind("conductor.welcome").isSome
+      check c2.sendFrame(hello("cd-k2-" & sfx, "c-k2", o.ns, 2, key = o.ns & "#conductors"))
+      check c2.nextKind("conductor.welcome").isSome
+      var seen1, seen2 = 0
+      for i in 0 ..< 4:                                         # none is answered: each one is a check under way
+        check requestCheck(o.ns, encodeCheckScript(CheckScript(check_id: "k" & $i & "-" & sfx, repository: "https://example.test/r.git")))
+        sleep 150
+      for _ in 0 ..< 4:
+        if c1.nextKind("conductor.check", 300).isSome: inc seen1
+        if c2.nextKind("conductor.check", 300).isSome: inc seen2
+      check seen1 == 2 and seen2 == 2                           # shared evenly, not all to the one heard of last
+      c1.close()
+      c2.close()
     test "a conductor gets the runs of its own organisation only":
       let a = newOrg()
       let b = newOrg()

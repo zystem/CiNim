@@ -77,3 +77,14 @@ suite "TRG-004 concurrency of a trigger":
       let q = co.fire(t, @[], getTime().toUnix())                # cancels the waiting one
       check stateOf(a.runId) == "CANCELED" and stateOf(done.runId) == "SUCCEEDED" and stateOf(w.runId) == "CANCELED" and stateOf(q.runId) == "RUNNING"
       check stateOf(o.runId) == "RUNNING"
+
+    test "D-63 a trigger with a repository starts no run when the script cannot be had, and says why in its last result":
+      inc n
+      let made = c.createTrigger(orgId, TriggerSpec(name: "repo" & $n, kind: "webhook", repository: "https://example.test/r.git", ref0: "main", concurrency: "parallel", enabled: true), getTime().toUnix())
+      let t = c.getTriggerById(made.id).row
+      check t.repository == "https://example.test/r.git" and t.ref0 == "main" and t.script == ""
+      let before = c.query(%*[["SELECT COUNT(*) FROM runs WHERE trigger_id = ?", t.id]])["results"][0]["values"][0][0].getInt
+      let f = co.fire(t, @[], getTime().toUnix(), commit = "abc123")       # there is no hub in this process: nobody can read the script
+      check not f.started and f.status == 503 and f.reason == "script_unavailable"
+      check resultOf(t).startsWith("not started: ")
+      check c.query(%*[["SELECT COUNT(*) FROM runs WHERE trigger_id = ?", t.id]])["results"][0]["values"][0][0].getInt == before

@@ -13,8 +13,9 @@
 ## only the newest commit matters). A run started by a trigger carries `trigger_id`.
 import std/[json, strutils, times, atomics, os, tables]
 import health
-import ../common/[rqlite, states, cron, ctrlauth]
-import schema, scheduler, runparams, orgrules, apiauth, groups
+import ../common/[rqlite, states, cron, ctrlauth, luaapi]
+import schema, scheduler, runparams, orgrules, apiauth, groups, preflight
+from ../common/scriptsource import Source, defaultPath, validRepository, validRef, validPath
 
 const
   maxScriptBytes* = 256 * 1024
@@ -24,18 +25,22 @@ const
 type
   TriggerSpec* = object
     name*, kind*, schedule*, groupPath*, script*, concurrency*: string        ## groupPath: the group the runs belong to ("" = the organisation)
+    repository*, ref0*, scriptPath*: string   ## D-63: instead of `script`, a repository (https), the commit / branch / tag a firing runs when the call names none ("" = HEAD), and the path of the script in it
     params*: seq[(string, string)]
     enabled*: bool
 
   TriggerRow* = object
     id*, tenantId*, slug*, name*, kind*, schedule*, secretHash*, groupId*, groupPath*, script*, concurrency*, lastRunId*, lastResult*: string
+    repository*, ref0*, scriptPath*: string
     params*: seq[(string, string)]
     enabled*: bool
     createdAt*, lastFiredAt*: int64
 
   Fired* = object
     started*: bool
-    runId*, reason*: string      ## when not started: why (`disabled`, `organization_disabled`, `still_running`)
+    runId*, reason*: string      ## when not started: why (`disabled`, `organization_disabled`, `still_running`, or a code of the script that could not be read from the repository)
+    status*: int                 ## the HTTP status to answer with when it is not 409 (0 = the usual)
+    detail*: string
 
 func validTriggerName*(n: string): bool =
   if n.len < 1 or n.len > 64: return false
@@ -54,7 +59,10 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
   str("name", result.spec.name)
   str("kind", result.spec.kind)
   str("group", result.spec.groupPath, required = false)
-  str("script", result.spec.script)
+  str("script", result.spec.script, required = false)
+  str("repository", result.spec.repository, required = false)
+  str("ref", result.spec.ref0, required = false)
+  str("path", result.spec.scriptPath, required = false)
   str("schedule", result.spec.schedule, required = false)
   result.spec.concurrency = "parallel"
   str("concurrency", result.spec.concurrency, required = false)
@@ -68,8 +76,16 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
   if result.spec.concurrency notin ["parallel", "cancel_newest", "cancel_previous"]: return ("concurrency is parallel, cancel_newest or cancel_previous", result.spec)
   result.spec.groupPath = normalPath(result.spec.groupPath)
   if result.spec.groupPath.len > 400: return ("group is too long", result.spec)
-  if result.spec.script.len == 0: return ("script is empty", result.spec)
-  if result.spec.script.len > maxScriptBytes: return ("script is longer than " & $maxScriptBytes & " bytes", result.spec)
+  if result.spec.repository.len > 0:
+    # D-63: the script is read from the repository at every firing
+    if result.spec.script.len > 0: return ("give the script or the repository it is read from, not both", result.spec)
+    if not validRepository(result.spec.repository): return ("repository must be an https:// or http:// URL", result.spec)
+    if result.spec.ref0.len > 0 and not validRef(result.spec.ref0): return ("ref is a branch or a tag name (or a SHA)", result.spec)
+    if result.spec.scriptPath.len > 0 and not validPath(result.spec.scriptPath): return ("path is a relative path inside the repository", result.spec)
+  else:
+    if result.spec.ref0.len > 0 or result.spec.scriptPath.len > 0: return ("ref and path belong to a trigger with a repository", result.spec)
+    if result.spec.script.len == 0: return ("script (or repository) is required", result.spec)
+    if result.spec.script.len > maxScriptBytes: return ("script is longer than " & $maxScriptBytes & " bytes", result.spec)
   if result.spec.kind == "schedule":
     let c = parseCron(result.spec.schedule)
     if not c.ok: return ("schedule: " & c.error, result.spec)
@@ -81,18 +97,20 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
 # ------------------------------------------------------------------ the rows
 
 const columns = "t.id, t.tenant_id, o.slug, t.name, t.kind, t.schedule, t.secret_hash, t.group_id, t.script, t.concurrency, t.last_run_id, " &
-                "t.last_result, t.params, t.enabled, t.created_at, t.last_fired_at, COALESCE((SELECT g.path FROM groups g WHERE g.id = t.group_id), '')"
+                "t.last_result, t.params, t.enabled, t.created_at, t.last_fired_at, COALESCE((SELECT g.path FROM groups g WHERE g.id = t.group_id), ''), " &
+                "t.repository, t.ref, t.script_path"
 
 proc rowOf(v: JsonNode): TriggerRow =
   TriggerRow(id: v[0].getStr, tenantId: v[1].getStr, slug: v[2].getStr, name: v[3].getStr, kind: v[4].getStr, schedule: v[5].getStr,
              secretHash: v[6].getStr, groupId: v[7].getStr, groupPath: v[16].getStr, script: v[8].getStr, concurrency: v[9].getStr, lastRunId: v[10].getStr,
              lastResult: v[11].getStr, params: fromJson(v[12].getStr), enabled: v[13].getInt > 0, createdAt: v[14].getBiggestInt,
-             lastFiredAt: v[15].getBiggestInt)
+             lastFiredAt: v[15].getBiggestInt, repository: v[17].getStr, ref0: v[18].getStr, scriptPath: v[19].getStr)
 
 proc view*(t: TriggerRow): JsonNode =
   ## what the API shows; never the secret or its hash
   result = %*{"id": t.id, "organization": t.slug, "name": t.name, "kind": t.kind, "group": t.groupPath, "concurrency": t.concurrency,
               "enabled": t.enabled, "created_at": t.createdAt, "last_fired_at": t.lastFiredAt, "script_bytes": t.script.len}
+  if t.repository.len > 0: result["source"] = %*{"repository": t.repository, "ref": t.ref0, "path": (if t.scriptPath.len > 0: t.scriptPath else: defaultPath)}
   if t.kind == "schedule": result["schedule"] = %t.schedule
   if t.kind == "webhook": result["hook"] = %("/api/v1/hooks/" & t.id)
   if t.params.len > 0: result["params"] = parseJson(toJson(t.params))
@@ -121,6 +139,21 @@ proc getTriggerById*(c: var RqClient; id: string): tuple[found: bool, row: Trigg
 proc countTriggers*(c: var RqClient; tenantId: string): int =
   c.query(%*[["SELECT count(*) FROM triggers WHERE tenant_id = ?", tenantId]])["results"][0]{"values"}[0][0].getInt
 
+proc hookCommit*(body: JsonNode; t: TriggerRow): tuple[error, commit: string] =
+  ## What a webhook call may say (D-63): the commit to run, and the repository only if it is the trigger's own. It carries no launch parameters, and a commit means something only to a trigger that
+  ## has a repository. `error` is the 400's words.
+  if body == nil or body.kind != JObject: return ("the body is empty or {\"commit\": \"...\"}", "")
+  if body.hasKey("params"):
+    return ("a webhook carries no params; the parameters of the trigger are used. Name the commit: {\"commit\": \"...\"}", "")
+  for k in ["commit", "repository"]:
+    if body.hasKey(k) and body[k].kind != JString: return (k & " must be text", "")
+  if body.hasKey("repository") and body["repository"].getStr != t.repository:
+    return ("repository is not this trigger's repository: a webhook cannot point the trigger elsewhere", "")
+  let wanted = body{"commit"}.getStr
+  if wanted.len > 0 and t.repository.len == 0: return ("this trigger has a script of its own, not a repository: there is no commit to name", "")
+  if wanted.len > 0 and not validRef(wanted): return ("commit is a SHA, a branch or a tag name", "")
+  ("", wanted)
+
 proc nameTaken*(c: var RqClient; tenantId, name: string): bool =
   c.query(%*[["SELECT count(*) FROM triggers WHERE tenant_id = ? AND name = ?", tenantId, name]])["results"][0]{"values"}[0][0].getInt > 0
 
@@ -131,9 +164,9 @@ proc createTrigger*(c: var RqClient; tenantId: string; s: TriggerSpec; now: int6
   if s.kind == "webhook":
     result.secret = mintToken().secret
     hash = secretHash(result.secret)
-  discard c.execute(%*[["INSERT INTO triggers (id, tenant_id, name, kind, schedule, secret_hash, group_id, script, params, concurrency, enabled, created_at, last_fired_at) " &
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result.id, tenantId, s.name, s.kind, s.schedule, hash, groupId, s.script,
-    (if s.params.len > 0: toJson(s.params) else: ""), s.concurrency, (if s.enabled: 1 else: 0), now, now]])
+  discard c.execute(%*[["INSERT INTO triggers (id, tenant_id, name, kind, schedule, secret_hash, group_id, script, params, concurrency, enabled, created_at, last_fired_at, repository, ref, script_path) " &
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result.id, tenantId, s.name, s.kind, s.schedule, hash, groupId, s.script,
+    (if s.params.len > 0: toJson(s.params) else: ""), s.concurrency, (if s.enabled: 1 else: 0), now, now, s.repository, s.ref0, s.scriptPath]])
 
 proc deleteTrigger*(c: var RqClient; tenantId, id: string): bool =
   c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ? AND id = ?", tenantId, id]])["results"][0]{"rows_affected"}.getInt > 0
@@ -170,8 +203,9 @@ proc unfinishedRuns(c: var RqClient; triggerId: string): seq[string] =
 
 proc stillRunning(c: var RqClient; triggerId: string): bool = c.unfinishedRuns(triggerId).len > 0
 
-proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; byClock = false): Fired =
-  ## Starts the trigger's run (or says why not). `extra` are launch parameters of this call; they replace the trigger's own of the same name.
+proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; byClock = false; commit = ""): Fired =
+  ## Starts the trigger's run (or says why not). `extra` are launch parameters of this call; they replace the trigger's own of the same name. `commit` (a webhook's, D-63) is the commit of a trigger
+  ## that reads its script from a repository; without one the trigger's `ref` is run.
   var c = newRq(co.rqliteUrl)
   let org = c.query(%*[["SELECT state FROM organizations WHERE id = ?", t.tenantId]])["results"][0]{"values"}
   if org == nil or org.len == 0 or org[0][0].getStr != "active":
@@ -182,21 +216,37 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
   if t.concurrency == "cancel_newest" and c.stillRunning(t.id):
     discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "cancelled the new firing: the previous run has not ended", t.id]])
     return Fired(reason: "still_running")
-  var cancelled: seq[string]
-  if t.concurrency == "cancel_previous":
-    # the newest commit is the one that matters: the runs of this trigger that have not ended are stopped first (their Pods are removed by the controllers)
-    for old in c.unfinishedRuns(t.id):
-      if c.cancelRun(old, now).outcome == coCanceled: cancelled.add old
   var params = initOrderedTable[string, string]()
   for (k, v) in t.params: params[k] = v
   for (k, v) in extra: params[k] = v
   var pairs: seq[(string, string)]
   for k, v in params: pairs.add (k, v)
+  # the script is had before anything is cancelled: a firing that cannot read its repository must not stop the runs that are going
+  var script = t.script
+  var source = Source()
+  if t.repository.len > 0:
+    # D-63: a conductor of the organisation reads the script at the commit; a run that cannot be had is told in the trigger's last result
+    let ask = Source(repository: t.repository, commit: (if commit.len > 0: commit else: t.ref0), path: t.scriptPath)
+    let ans = checkSource(namespaceName(co.orgPrefix, co.orgShard, t.slug), ask, pairs, currentApiVersion)
+    let fp = ans.fetchProblem
+    if fp.status != 0 and ans.script.len == 0:
+      discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: " & fp.message, t.id]])
+      return Fired(reason: fp.code, status: fp.status, detail: fp.message)
+    if ans.problemOf.len > 0:
+      discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: " & ans.message, t.id]])
+      return Fired(reason: ans.code, status: 400, detail: ans.message)
+    script = ans.script
+    source = Source(repository: t.repository, commit: ans.commit, path: (if t.scriptPath.len > 0: t.scriptPath else: defaultPath))
+  var cancelled: seq[string]
+  if t.concurrency == "cancel_previous":
+    # the newest commit is the one that matters: the runs of this trigger that have not ended are stopped first (their Pods are removed by the controllers)
+    for old in c.unfinishedRuns(t.id):
+      if c.cancelRun(old, now).outcome == coCanceled: cancelled.add old
   let profile = c.ensureOrganizationProfile(t.tenantId, namespaceName(co.orgPrefix, co.orgShard, t.slug))
   if c.queueIsFull(profile):
     discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: the organisation has " & $maxUnfinishedRuns & " runs that have not ended", t.id]])
     return Fired(reason: "queue_full")
-  let id = co.createRun(t.script, t.tenantId, profile, pairs, t.id, t.groupId)
+  let id = co.createRun(script, t.tenantId, profile, pairs, t.id, t.groupId, source)
   let result = if cancelled.len == 0: "started" else: "started; cancelled the earlier run" & (if cancelled.len > 1: "s " else: " ") & cancelled.join(", ")
   discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_run_id = ?, last_result = ? WHERE id = ?", clock, id, result, t.id]])
   Fired(started: true, runId: id)
@@ -214,6 +264,7 @@ proc fireSchedules*(co: Core; now: int64): int =
     if claim["results"][0]{"rows_affected"}.getInt == 0: continue
     var again = t
     again.lastFiredAt = due
+    beat(bTriggers)                              # a firing that reads its script from a repository can take a minute
     let f = co.fire(again, @[], due, byClock = true)
     if f.started:
       inc result

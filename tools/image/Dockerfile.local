@@ -14,7 +14,7 @@ USER 65532:65532
 EXPOSE 18090
 ENTRYPOINT ["/cinim-storage"]
 
-FROM scratch AS conductor
+FROM alpine/git:v2.47.2 AS conductor
 COPY conductor-static /conductor
 USER 65532:65532
 ENTRYPOINT ["/conductor"]

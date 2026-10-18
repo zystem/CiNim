@@ -170,3 +170,20 @@ suite "DAT-003 the artifacts of a step in the script":
   test "DAT-003 absolute paths, .. and wildcards in a download name are refused":
     for bad in ["upload = { '/etc/passwd' }", "upload = { '../x' }", "download = { 'dist/*' }", "upload = 'x'", "colour = 1"]:
       check optsOf(", artifacts = { " & bad & " }", "").startsWith("ERROR")
+
+suite "D-63 where the script was read from: run.source":
+  const sourceScript = """
+return ci.pipeline({
+  params = { TICKET = ci.string{ default = "none" } },
+  main = function(run)
+    return table.concat({ run.source.repository, run.source.commit, run.source.path, run.params.TICKET }, "|")
+  end,
+})
+"""
+  test "the core hands it over among the launch parameters under names no parameter can have; it is not a parameter, and run.params does not show it":
+    let x = run1(sourceScript, @[("@source.repository", "https://example.test/r.git"), ("@source.commit", "abc123"), ("@source.path", ".ci/pipeline.lua"), ("TICKET", "CI-7")])
+    check x.r.status == esDone and x.r.value == "https://example.test/r.git|abc123|.ci/pipeline.lua|CI-7"
+    check x.seen.params.len == 1 and "@source" notin x.seen.params[0] and "TICKET" in x.seen.params[0]
+  test "a script that came in the request has empty strings, not nil":
+    let x = run1(sourceScript)
+    check x.r.status == esDone and x.r.value == "|||none"

@@ -6,7 +6,8 @@ COPY . /src
 WORKDIR /src
 RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/conductor-static src/conductor/main.nim --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm"; strip /out/*
 
-FROM scratch
+# git and the certificates of the authorities (D-63: the conductor reads the script of a run from a repository, `scriptsource.nim`); the conductor is a static program that needs nothing else
+FROM alpine/git:v2.47.2
 COPY --from=build /out/conductor-static /conductor
 USER 65532:65532
 ENTRYPOINT ["/conductor"]

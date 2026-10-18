@@ -217,9 +217,7 @@ With `deploy.kubeApiServer: true` the core makes that policy in the namespace of
 (the chart adds it to the core's ClusterRole and to its admission policy only then, T-45). On a cluster without Cilium leave the flag off and list the API server's address in `deploy.egress`. The Pods of the
 other profiles stay closed: the policy selects the label.
 
-The example is `deploy/examples/self-build`: `deployer.yaml` is a ServiceAccount that may only patch the Deployment `cinim-core` of the shard, and the fourth step of
-`self-build.lua` (`DEPLOY=true`) uses its token, kept as the step secrets `DEPLOY_TOKEN` and `DEPLOY_CA`, to give both the new image and the core the new controller image. The controllers of the organisations that
-exist are changed by the core itself: the next pass of the reconciliation sees that the controller Pod carries another fingerprint and replaces it (D-62).
+The pipeline of the repository is `.ci/pipeline.lua` and its credential is `deploy/examples/self-build/deployer.yaml`: a ServiceAccount with **extended rights**, which is what this profile is for. It may change everything the shard chart and the storage chart own in the namespace of the shard (the Deployments, the StatefulSet of rqlite, the Services, the Secrets that hold the Helm releases) and the cluster-wide objects of the shard chart (its ClusterRoles and the admission policy), `escalate` and `bind` included: keep its token a step secret of the one organisation that builds the platform. The last step of the pipeline (`DEPLOY=true`) uses it, kept as the step secrets `DEPLOY_TOKEN` and `DEPLOY_CA`, to run `helm upgrade --atomic --wait` of the storage module and of the shard at the new tag (`--reset-then-reuse-values --set image.tag`: the values the release was made with, over the defaults of the chart as it is at that commit), then looks at the Deployments (the image and a ready replica) and, if anything failed, brings **both** releases back to the revisions they had (`helm rollback`). The controllers and the conductors follow the core by themselves: the next pass of the reconciliation sees that a controller Pod carries another fingerprint and replaces it (D-62), and a conductor of another image is drained when it is idle and made again.
 
 Checked on the TESTING cluster, through the API alone: with `deploy.enabled` and `deploy.kubeApiServer` the core made `allow-deploy-kube-apiserver` in the namespace of a new organisation; the run of `self-build.lua` with `BUILD=false`,
 `DEPLOY=true` and the tag of the previous build ran the fourth step as an ordinary Pod (non-root), the step fetched `DEPLOY_TOKEN` and `DEPLOY_CA`, patched the core, and the cluster ran the other image a few seconds
@@ -228,7 +226,7 @@ rolls out its own platform should not be replayed by an older executor. The whol
 
 ## CiNim builds itself
 
-`deploy/examples/self-build/self-build.lua` builds the images of the platform side by side (it is described in its header): a job `prep` keeps a bare mirror of the repository as a cache of the
+The pipeline of the repository, `.ci/pipeline.lua`, builds the images of the platform side by side, runs the tests, and rolls the result out (it is described in its header; before D-63 it was `deploy/examples/self-build/self-build.lua` and was kept as text in a trigger): a job `prep` keeps a bare mirror of the repository as a cache of the
 organisation (`git-<commit>`) and finds the commit, a job makes the image of the libraries once (`cinim-deps:<hash>`, `tools/image/Dockerfile.deps`, pushed to the registry
 and found there by the next run), and the images of the components are built by `ci.matrix` with `fail_fast`, each build in a volume of its own (`workspace = "isolated"`) that it clones the commit
 into from the mirror, and each from `DEPS_IMAGE` so that none makes the libraries. (This replaces the three build steps in a row that shared the run's volume; the text that follows is of the first form.)
@@ -240,18 +238,36 @@ in-cluster one of `deploy/registry`: its address is the one the Pods reach it at
 
 ### By the clock, every night
 
-The same script as a **schedule trigger** of the organisation (docs/triggers.md): the platform then builds its own images every night without anyone starting it. The trigger holds the
-script and its parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (UTC) and `"concurrency": "cancel_newest"`, so that a night is skipped while the last one is still running:
+The same script as a **schedule trigger** of the organisation (docs/triggers.md): the platform then builds its own images every night without anyone starting it. The trigger names the
+repository (the conductor reads `.ci/pipeline.lua` at the `ref` at every firing) and holds the parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (UTC) and `"concurrency": "cancel_newest"`, so that a night is skipped while the last one is still running:
 
 ```bash
 curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "self-build-nightly", "kind": "schedule", "schedule": "0 2 * * *",
-  "concurrency": "cancel_newest", "script": "<self-build.lua>", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
+  "concurrency": "cancel_newest", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
 ```
 
 With no `TAG` the images are tagged `<date>-<commit>` (`20261009-eefb939`): the clone step writes `IMAGE_TAG` to `$CICD_ENV` and the later steps of the run read it, so a night's images are not the last night's.
-`DEPLOY` stays false: the images are built and pushed, and rolling the shard out to them is a decision (set `DEPLOY` true and give the organisation the secrets of the deploy step to roll out every night). Checked on the
+`DEPLOY` stays false for a nightly build: the images are built and pushed, and rolling the shard out to them is a decision (set `DEPLOY` true and give the organisation the secrets of the deploy step to roll out every night). Checked on the
 TESTING cluster: a trigger set for two minutes ahead fired by itself (`last_result: started`, the run carries `trigger_id`), the run took about five minutes with warm caches, all three steps succeeded and both images appeared under the
 tag of that day and the head of `main`; the trigger was then replaced by the nightly one.
+
+### On every push: the tests, the rollout, the webhook
+
+A **webhook trigger** with a repository (D-63) is the push: the git server calls `POST /api/v1/hooks/<id>` with the secret of the trigger as the bearer token and `{"commit": "<sha>"}` (a call made by hand, or by a few lines of the server's own hook; GitHub's signature header is not supported, TRG-002). A conductor of the organisation reads `.ci/pipeline.lua` at that commit, and the run:
+
+1. mirrors the repository (a cache of the organisation) and finds the commit, the tag of the images and the hashes of the two images below,
+2. makes `cinim-deps:<hash>` (the libraries) and `cinim-test:<hash>` (`tools/image/Dockerfile.test`: those and `rqlited`) once, and finds them in the registry afterwards,
+3. side by side, the first failure stopping the other: the four images, and **the tests** (`TEST=true`): `tools/test/run.sh -j $TEST_JOBS` in a Pod of the test image (a build-profile Pod, so root of a user namespace: the nimble packages are in the home of root). The integration tests need a scratch rqlite each; with no Docker, or with `CINIM_RQLITE_BIN=<rqlited>`, `run.sh` starts its own `rqlited` processes (ports 24600+N, data in `/dev/shm`) and stops them at the end, so the Pod needs nothing but the image. The same works on a workstation without Docker,
+4. when `DEPLOY=true`: `helm upgrade --atomic --wait` of both charts at the new tag, a look at what runs, and a rollback of both releases if anything failed (above).
+
+```bash
+curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "main-push", "kind": "webhook", "concurrency": "cancel_previous",
+  "repository": "https://github.com/zystem/CiNim.git", "ref": "main",
+  "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>", "DEPLOY": true}}'
+curl -X POST .../api/v1/hooks/<id> -H "Authorization: Bearer <the secret>" -d '{"commit": "<sha>"}'
+```
+
+`cancel_previous` makes the newest commit the one that is built when pushes come quickly. The conductors of the organisation must reach the git server: the chart's `conductor.internet` (default: the public internet on ports 80 and 443, the private ranges closed) and `conductor.egress` (a list of NetworkPolicy rules for a git server inside the cluster or the LAN, or `all`). The registry has no TLS and no login here (the plain in-cluster registry above), and a private repository cannot be read (the conductor has no credentials).
 
 ## Examples of build Pods
 

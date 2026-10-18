@@ -1,6 +1,9 @@
-# The credential that the deploy step of self-build.lua (profile = "deploy", D-48) works with: a ServiceAccount that may do one thing, change the image
-# of the core and the executor of this shard. Nothing is given to the platform: the step gets the token as a step secret, and what it may do is
-# what this Role says. Apply it in the namespace of the shard (cinim-<shard>), then make the secrets of the organisation that runs the pipeline:
+# The credential that the deploy step of .ci/pipeline.lua (profile = "deploy", D-48) works with: a ServiceAccount that may roll the platform out with Helm (`helm upgrade --atomic --wait` of
+# the shard and of the storage module). Nothing is given to the platform: the step gets the token as a step secret, and what it may do is what the Role and the ClusterRole below say.
+# These are **extended rights**, which is what the deploy profile is for: the token can change everything the two charts own in the namespace of the shard (the Deployments, the StatefulSet of
+# rqlite, the Services, the Secrets that hold the Helm releases, the ConfigMaps, the Roles) and the cluster-wide objects of the shard chart (its ClusterRoles and the admission policy);
+# because it may write ClusterRoles it can give itself more than it has (`escalate`, `bind`), so keep the token a step secret of the organisation that builds the platform and no other.
+# Apply it in the namespace of the shard (cinim-<shard>), then make the secrets of the organisation that runs the pipeline:
 #
 #   kubectl -n cinim-001 create token cinim-deployer --duration=8760h         # the token; PUT it as the step secret DEPLOY_TOKEN
 #   kubectl -n cinim-001 get configmap kube-root-ca.crt -o jsonpath='{.data.ca\.crt}'        # the CA of the API server; PUT it as DEPLOY_CA
@@ -15,10 +18,28 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: cinim-deployer}
 rules:
+  # the objects of the two charts, and the Secrets that Helm keeps its releases in
+  - apiGroups: [""]
+    resources: [configmaps, secrets, services, serviceaccounts, persistentvolumeclaims, resourcequotas, limitranges, endpoints]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log, events]
+    verbs: [get, list, watch]
   - apiGroups: [apps]
-    resources: [deployments]
-    resourceNames: [cinim-core]
-    verbs: [get, patch]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [roles, rolebindings]
+    verbs: [get, list, watch, create, update, patch, delete, escalate, bind]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -26,3 +47,25 @@ metadata: {name: cinim-deployer}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: cinim-deployer}
 subjects:
   - {kind: ServiceAccount, name: cinim-deployer}
+---
+# the cluster-wide objects of the shard chart: its ClusterRoles (the core's, the step role) and their bindings, and the admission policy that keeps the core inside its namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: cinim-001-deployer}
+rules:
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles, clusterrolebindings]
+    verbs: [get, list, watch, create, update, patch, delete, escalate, bind]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: cinim-001-deployer}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cinim-001-deployer}
+subjects:
+  - {kind: ServiceAccount, name: cinim-deployer, namespace: cinim-001}

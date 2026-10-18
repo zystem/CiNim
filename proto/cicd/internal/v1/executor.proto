@@ -35,15 +35,22 @@ message CheckScript {
   string script = 2;
   map<string, string> given = 3;      // the launch parameters as given (PIP-012); not named `params` because the generated type of a map is named by its field
   uint32 api_version = 4;             // the version of the Lua host API a run made now would have
+  // D-63: a script that is not in the request but in a repository. With `repository` set, `script` is empty: the conductor reads `path` (`.ci/pipeline.lua` when empty) at `commit` (a SHA, a
+  // branch or a tag; HEAD when empty) from the repository, then checks that text as it checks any other, and answers with the text and the SHA of the commit.
+  string repository = 5;
+  string commit = 6;
+  string path = 7;
 }
 
 message CheckResult {
   string check_id = 1;
-  string code = 2;                    // "" when the pass found nothing; else script_error, step_limit, duplicate_id, memory_limit, instruction_limit, busy, timeout
+  string code = 2;                    // "" when the pass found nothing; else script_error, step_limit, duplicate_id, memory_limit, instruction_limit, busy, timeout, and for a script read from a repository invalid_source, fetch_failed, script_missing, script_too_large, git_unavailable
   string message = 3;                 // what the pass found, in the script's own words (the parameter that was refused, the line that failed)
   bool certain = 4;                   // the finding does not depend on what the steps will answer: it came before the first step, or it is a limit the pass proves
   uint32 steps = 5;                   // how many steps the pass saw
   string params = 6;                  // the parameters a run would have (a JSON object of text), defaults completed, when the pass got that far
+  string script = 7;                  // D-63: the text read from the repository (only when the check was asked for one)
+  string resolved_commit = 8;         // D-63: the SHA of the commit that `commit` named
 }
 
 message HostCall {

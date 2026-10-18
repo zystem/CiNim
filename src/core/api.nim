@@ -8,6 +8,7 @@
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
+import ../common/scriptsource
 import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
@@ -168,8 +169,16 @@ proc provisionConfig(cfg: RouterConfig; egress = ""; ingress = ""): ProvisionCon
     if raw.len > 0 and raw != "off": buildInternet = parseJson(raw)
   except JsonParsingError:
     discard
+  var conductorEgress, conductorInternet: JsonNode
+  try:
+    let raw = getEnv("CINIM_CONDUCTOR_EGRESS")
+    if raw.len > 0: conductorEgress = parseJson(raw)
+    let net = getEnv("CINIM_CONDUCTOR_INTERNET")
+    if net.len > 0 and net != "off": conductorInternet = parseJson(net)
+  except JsonParsingError:
+    discard
   let nd = networkDefaults()
-  ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet,
+  ProvisionConfig(prefix: orgPrefix, shard: orgShard, shardNamespace: ownNamespace(), buildInternet: buildInternet, conductorEgress: conductorEgress, conductorInternet: conductorInternet,
                   egressOpen: (if egress.len > 0: egress else: nd.egress) == "open", ingressOpen: (if ingress.len > 0: ingress else: nd.ingress) == "open",
                   storageDirectPort: directPort(), build: buildOn, buildEgress: buildEgress, stepEphemeralLimit: getEnv("CINIM_STEP_EPHEMERAL_LIMIT"), buildIngress: buildIngress,
                   deploy: deployOn, deployEgress: deployEgress, conductors: conductorImage.len > 0, deployKubeApiServer: getEnv("CINIM_DEPLOY_KUBE_APISERVER") == "true",
@@ -247,15 +256,19 @@ proc onRequest() {.raises: [], gcsafe.} =
         let body = getBody()
         let bj = if body.strip.len == 0: newJObject() else: (try: parseJson(body) except JsonParsingError: nil)
         if bj == nil or bj.kind != JObject:
-          problem(Http400, "invalid_request", "the body is empty or {\"params\": {...}}")
+          problem(Http400, "invalid_request", "the body is empty or {\"commit\": \"...\"}")
           return
-        let given = checkParams(bj{"params"})
-        if given.error.len > 0:
-          problem(Http400, "invalid_params", given.error)
+        # D-63: a webhook carries no launch parameters; it names the commit to run (core/triggers.nim hookCommit)
+        let said = hookCommit(bj, hook.row)
+        if said.error.len > 0:
+          problem(Http400, "invalid_request", said.error)
           return
-        let fired = coreRef.fire(hook.row, given.pairs, getTime().toUnix())
+        let wanted = said.commit
+        let fired = coreRef.fire(hook.row, @[], getTime().toUnix(), commit = wanted)
         if fired.started:
           jsonOk(Http201, %*{"id": fired.runId, "organization": hook.row.slug, "trigger_id": hook.row.id, "state": "RUNNING"})
+        elif fired.status != 0:
+          problem(HttpCode(fired.status), fired.reason, fired.detail)
         else:
           problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         return
@@ -1018,9 +1031,15 @@ proc onRequest() {.raises: [], gcsafe.} =
           if given.error.len > 0:
             problem(Http400, "invalid_params", given.error)
             return
-          let fired = coreRef.fire(found.row, given.pairs, getTime().toUnix())
+          let wanted = bj{"commit"}.getStr
+          if wanted.len > 0 and not scriptsource.validRef(wanted):
+            problem(Http400, "invalid_source", "commit is a SHA, a branch or a tag name")
+            return
+          let fired = coreRef.fire(found.row, given.pairs, getTime().toUnix(), commit = wanted)
           if fired.started:
             jsonOk(Http201, %*{"id": fired.runId, "organization": slug, "trigger_id": tid, "state": "RUNNING"})
+          elif fired.status != 0:
+            problem(HttpCode(fired.status), fired.reason, fired.detail)
           else:
             problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         else:
@@ -1155,8 +1174,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http405, "method_not_allowed", "POST")
           return
         let pj = try: parseJson(getBody()) except JsonParsingError: nil
-        if pj == nil or pj.kind != JObject or not pj.isString("script") or not pj.isString("organization"):
-          problem(Http400, "invalid_request", "{\"organization\": \"...\", \"script\": \"...\", \"params\": {...}} is required")
+        if pj == nil or pj.kind != JObject or not (pj.isString("script") or pj.isString("repository")) or not pj.isString("organization"):
+          problem(Http400, "invalid_request", "{\"organization\": \"...\", \"script\": \"...\" or \"repository\": \"https://...\", \"commit\": \"...\", \"params\": {...}} is required")
           return
         let slugP = pj["organization"].getStr
         if not who.mayUseOrg(slugP):
@@ -1171,6 +1190,19 @@ proc onRequest() {.raises: [], gcsafe.} =
         if givenP.error.len > 0:
           problem(Http400, "invalid_params", givenP.error)
           return
+        if pj.isString("repository"):
+          # D-63: the script is read from the repository by a conductor of the organisation, then checked; the answer says which commit it was
+          let src = sourceOf(pj)
+          if not src.ok:
+            problem(Http400, "invalid_source", src.error)
+            return
+          let ans = checkSource(namespaceName(orgPrefix, orgShard, slugP), src.source, givenP.pairs, currentApiVersion)
+          let fp = ans.fetchProblem
+          if fp.status != 0 and ans.script.len == 0:
+            problem(HttpCode(fp.status), fp.code, fp.message)
+            return
+          jsonOk(Http200, ans.view)
+          return
         jsonOk(Http200, checkScript(namespaceName(orgPrefix, orgShard, slugP), pj["script"].getStr, givenP.pairs, currentApiVersion).view)
         return
       if not path.startsWith(base):
@@ -1180,9 +1212,23 @@ proc onRequest() {.raises: [], gcsafe.} =
       let meth = getMethod()
       if meth == "POST" and rest == "":
         let j = try: parseJson(getBody()) except JsonParsingError: nil
-        if j == nil or not j.hasKey("script"):
-          problem(Http400, "invalid_request", "script is required")
+        if j == nil or j.kind != JObject or not (j.hasKey("script") or j.hasKey("repository")):
+          problem(Http400, "invalid_request", "script, or repository (with commit and path), is required")
           return
+        if j.hasKey("script") and j.hasKey("repository"):
+          problem(Http400, "invalid_request", "give the script or the repository it is read from, not both")
+          return
+        if j.hasKey("script") and j["script"].kind != JString:
+          problem(Http400, "invalid_request", "script must be text")
+          return
+        var fromRepo = Source()
+        if j.hasKey("repository"):
+          # D-63: the script is read from a repository by a conductor of the organisation (below)
+          let src = sourceOf(j)
+          if not src.ok:
+            problem(Http400, "invalid_source", src.error)
+            return
+          fromRepo = src.source
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
         if not who.acrossOrgs and (not j.hasKey("organization") or j["organization"].getStr != who.org):
@@ -1231,14 +1277,33 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # PIP-016: a conductor of the organisation tries the script and the parameters first, if there is one to ask; a certain finding is the author's to fix, anything else the run decides
         var checked = false
-        if orgSlug.len > 0:
-          let chk = checkScript(namespaceName(orgPrefix, orgShard, orgSlug), j["script"].getStr, given.pairs, currentApiVersion)
+        var script = j{"script"}.getStr
+        var source = Source()
+        if fromRepo.repository.len > 0:
+          if orgSlug.len == 0:
+            problem(Http400, "invalid_request", "a script read from a repository belongs to an organisation: give organization")
+            return
+          let ans = checkSource(namespaceName(orgPrefix, orgShard, orgSlug), fromRepo, given.pairs, currentApiVersion)
+          let fp = ans.fetchProblem
+          if fp.status != 0 and ans.script.len == 0:
+            problem(HttpCode(fp.status), fp.code, fp.message)
+            return
+          checked = ans.ran
+          if ans.problemOf.len > 0:
+            problem(Http400, ans.code, ans.message)
+            return
+          script = ans.script
+          source = Source(repository: fromRepo.repository, commit: ans.commit, path: (if fromRepo.path.len == 0: defaultPath else: fromRepo.path))
+        elif orgSlug.len > 0:
+          let chk = checkScript(namespaceName(orgPrefix, orgShard, orgSlug), script, given.pairs, currentApiVersion)
           checked = chk.ran
           if chk.problemOf.len > 0:
             problem(Http400, chk.code, chk.message)
             return
-        let id = coreRef.createRun(j["script"].getStr, tenant, profile, given.pairs, groupId = groupId)
-        jsonOk(Http201, %*{"id": id, "organization": orgSlug, "state": "RUNNING", "checked": checked})
+        let id = coreRef.createRun(script, tenant, profile, given.pairs, groupId = groupId, source = source)
+        var made = %*{"id": id, "organization": orgSlug, "state": "RUNNING", "checked": checked}
+        if source.repository.len > 0: made["source"] = %*{"repository": source.repository, "commit": source.commit, "path": source.path}
+        jsonOk(Http201, made)
       elif meth == "GET" and "/steps/" in rest and rest.endsWith("/log"):
         let parts = rest.split("/steps/", maxsplit = 1)
         let seq = try: parseInt(parts[1][0 ..< parts[1].len - "/log".len]) except ValueError: -1

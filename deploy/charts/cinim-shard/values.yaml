@@ -89,6 +89,14 @@ controller:
 # values here: the core tells each controller how many to keep and with which image (<image.repository>-conductor:<image.tag>), and the namespace of each organisation gets the
 # policy that lets them reach the core's push channel. A conductor that runs another image is drained when it is idle and made again with the new one. How many: the
 # organisation's runs_per_conductor and conductor_min (GET/PUT /api/v1/profile).
+conductor:
+  # D-63: a conductor reads the script of a run from a repository (`.ci/pipeline.lua` at a commit, git over https). It may reach the public internet on `internet.ports` (the private
+  # ranges in `except` stay closed) and what `egress` lists (a list of NetworkPolicy egress rules: a git server of the cluster or the LAN), or the string `all`.
+  internet:
+    enabled: true
+    ports: [80, 443]
+    except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+  egress: []
 
 # The build profile (D-42, A.13, Q-17): with `enabled` the namespace of every organisation is Pod Security `baseline` by label (a build needs
 # root in its container) and the ValidatingAdmissionPolicy of this chart gives every Pod but a build Pod what `restricted` has over `baseline`.

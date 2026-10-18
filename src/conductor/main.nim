@@ -7,7 +7,7 @@ import std/[os, options, strutils, times, tables, sequtils, random]
 import posix
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, stream, streamstate, runpipe, heartbeat]
+import common/[zmqcurve, stream, streamstate, runpipe, heartbeat, scriptsource]
 import executor/[sandbox, journal, replay, steptable]
 
 import_proto3 "../../build/nimproto/all.proto"
@@ -45,7 +45,23 @@ proc checkMode(payload: string; toSup: cint) =
   let req = Protobuf.decode(cast[seq[byte]](payload), CheckScript)
   var res = CheckResult(check_id: req.check_id)
   try:
-    let p = preflight(req.script, req.given.mapIt((it.key, it.value)), int(req.api_version))
+    var script = req.script
+    var given = req.given.mapIt((it.key, it.value))
+    if req.repository.len > 0:
+      # D-63: the script is in a repository: read the one file at the commit, then check that text like any other. The run is told where it came from (`run.source`).
+      let f = fetchScript(Source(repository: req.repository, commit: req.commit, path: req.path), timeoutSeconds = 45,
+                          transports = getEnv("CINIM_GIT_TRANSPORTS", defaultTransports), schemes = getEnv("CINIM_GIT_SCHEMES", "https://,http://").split(','))
+      if not f.ok:
+        res.code = f.code
+        res.message = f.message
+        res.certain = true
+        if not writePipeFd(toSup, pkChecked, wireString(Protobuf.encode(res))): quit(2)
+        quit(0)
+      script = f.script
+      res.script = f.script
+      res.resolved_commit = f.commit
+      given.add sourceParams(req.repository, f.commit, if req.path.len == 0: defaultPath else: req.path)
+    let p = preflight(script, given, int(req.api_version))
     res.code = p.code
     res.message = p.message
     res.certain = p.certain
@@ -139,6 +155,7 @@ type
     eof: bool
     isCheck: bool             ## a check of a script (PIP-016), not a run: it holds no place and is not among the runs the conductor reports
     startedAt: float
+    wallSeconds: float        ## a check that takes longer is killed: 20 s, and 70 s when it reads the script from a repository first
 
   Flight = object             ## a frame sent to the core and not answered yet
     runId: string
@@ -152,7 +169,7 @@ var
 
 proc onTerm(sig: cint) {.noconv.} = stopping = true
 
-proc startProc(id: string; first: PipeKind; payload: string; isCheck = false): bool =
+proc startProc(id: string; first: PipeKind; payload: string; isCheck = false; wallSeconds = 20.0; reads = false): bool =
   ## a process of this program in `--run` mode, with the pipes to it and its limits; a run's (the lease) or a check's (the script). A check gets less: it is a pass and nothing more.
   var inP, outP: array[2, cint]      # inP: supervisor writes [1], run reads [0]; outP: run writes [1], supervisor reads [0]
   if not openPipe(inP) or not openPipe(outP): return false
@@ -166,8 +183,14 @@ proc startProc(id: string; first: PipeKind; payload: string; isCheck = false): b
   discard posix_spawn_file_actions_adddup2(actions, outP[1], 1)
   let argv = allocCStringArray([getAppFilename(), "--run"])
   # the run process gets no environment of the Pod: no credentials, no addresses; only its limits
-  let envp = allocCStringArray(["CINIM_RUN_MEMORY_MB=" & (if isCheck: "256" else: getEnv("CINIM_RUN_MEMORY_MB", "1024")),
-                                "CINIM_RUN_CPU_SECONDS=" & (if isCheck: "15" else: getEnv("CINIM_RUN_CPU_SECONDS", "3600"))])
+  # (a check that reads the script from a repository (`reads`) runs `git`: it gets the path to find it, the transports it may use and the address space and CPU time that git needs)
+  var env = @["CINIM_RUN_MEMORY_MB=" & (if reads: "1024" elif isCheck: "256" else: getEnv("CINIM_RUN_MEMORY_MB", "1024")),
+              "CINIM_RUN_CPU_SECONDS=" & (if reads: "60" elif isCheck: "15" else: getEnv("CINIM_RUN_CPU_SECONDS", "3600"))]
+  if reads:
+    env.add "PATH=" & getEnv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    for k in ["CINIM_GIT_TRANSPORTS", "CINIM_GIT_SCHEMES", "SSL_CERT_FILE", "SSL_CERT_DIR"]:
+      if existsEnv(k): env.add k & "=" & getEnv(k)
+  let envp = allocCStringArray(env)
   var pid: Pid
   let rc = posix_spawn(pid, getAppFilename().cstring, actions, attr, argv, envp)
   discard posix_spawn_file_actions_destroy(actions)
@@ -180,7 +203,7 @@ proc startProc(id: string; first: PipeKind; payload: string; isCheck = false): b
     closeFd inP[1]
     closeFd outP[0]
     return false
-  runs[id] = RunProc(runId: id, pid: pid, toRun: inP[1], fromRun: outP[0], isCheck: isCheck, startedAt: epochTime())
+  runs[id] = RunProc(runId: id, pid: pid, toRun: inP[1], fromRun: outP[0], isCheck: isCheck, startedAt: epochTime(), wallSeconds: wallSeconds)
   writePipeFd(inP[1], first, payload)
 
 proc startRun(g: LeaseGranted): bool = startProc(g.run_id, pkLease, wireString(Protobuf.encode(g)))
@@ -254,7 +277,7 @@ proc main() =
       for _, r in runs:
         if r.isCheck: inc busy
       let id = "check-" & req.check_id
-      if req.check_id.len == 0 or stopping or busy >= maxChecks or id in runs or not startProc(id, pkCheck, f.payload, isCheck = true):
+      if req.check_id.len == 0 or stopping or busy >= maxChecks or id in runs or not startProc(id, pkCheck, f.payload, isCheck = true, wallSeconds = (if req.repository.len > 0: 70.0 else: 20.0), reads = req.repository.len > 0):
         if req.check_id.len > 0:
           let res = CheckResult(check_id: req.check_id, code: "busy", message: "the conductor is busy")
           inc frameNo
@@ -324,7 +347,7 @@ proc main() =
       if r.reader.broken:
         stderr.writeLine "conductor: the pipe of run " & id & " is broken"
         r.eof = true
-      if r.isCheck and not r.ended and epochTime() - r.startedAt > 20.0:
+      if r.isCheck and not r.ended and epochTime() - r.startedAt > r.wallSeconds:
         # a pass that does not end (the limits of the process cut it at 15 s of CPU; this is the wall clock): the core is told, the process is killed
         discard kill(r.pid, SIGKILL)
         r.ended = true

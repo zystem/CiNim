@@ -2,8 +2,10 @@
 # Runs the unit and integration test files in parallel: tools/test/run.sh [-j N] [-u|-i] [file.nim ...]
 #   -j N   workers (default 8); every worker has its own scratch rqlite in a Docker container (RAM-backed), so the suites do not meet in one database
 #   -u|-i  only the unit tests / only the integration tests (default: both)
-# Needs Docker for the integration tests. The containers (cinim-rqlite-N, ports 24600+N) are made new at every run and left running afterwards; remove them with
+# The integration tests need a scratch rqlite each. With Docker they are containers (cinim-rqlite-N, ports 24600+N), made new at every run and left running afterwards; remove them with
 #   docker rm -f $(docker ps -aq --filter name=cinim-rqlite-)
+# Without Docker, or with CINIM_RQLITE_BIN=<path of rqlited>, they are rqlited processes of this script (ports 24600+N and 24700+N, data in /dev/shm when it has room, else in the temporary directory), stopped when it ends:
+# this is how the pipeline of the repository runs the tests in a Pod (.ci/pipeline.lua; tools/image/Dockerfile.test has rqlited).
 # The log of a file that failed is build/test-logs/<name>.log. Exit code: the number of failed files (capped at 100).
 cd "$(dirname "$0")/../.." || exit 2
 jobs=8; unit=1; integ=1; files=()
@@ -27,8 +29,26 @@ if [ ${#files[@]} -eq 0 ]; then
 fi
 mkdir -p build/tests build/test-logs
 need_db=0; for f in "${files[@]}"; do case $f in tests/integration/*) need_db=1;; esac; done
-if [ $need_db = 1 ]; then
-  command -v docker >/dev/null || { echo "docker is needed for the integration tests"; exit 2; }
+native=${CINIM_RQLITE_BIN:-}
+[ -z "$native" ] && ! command -v docker >/dev/null && native=$(command -v rqlited || true)
+rqpids=()
+if [ $need_db = 1 ] && [ -n "$native" ]; then
+  # RAM (faster) when /dev/shm has room for the biggest test (a container has 64 MiB of it by default), else the temporary directory
+  shm=""; [ -d /dev/shm ] && [ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -gt 1500000 ] && shm=/dev/shm
+  rqdir=$(mktemp -d "${shm:-${TMPDIR:-/tmp}}/cinim-rqlite.XXXXXX")
+  trap 'for p in "${rqpids[@]}"; do kill "$p" 2>/dev/null; done; wait; rm -rf "$rqdir"' EXIT
+  for ((i = 0; i < jobs; i++)); do
+    "$native" -node-id "n$i" -http-addr "127.0.0.1:$((24600 + i))" -raft-addr "127.0.0.1:$((24700 + i))" -fk -disco-mode= "$rqdir/$i" >"$rqdir/$i.log" 2>&1 &
+    rqpids+=($!)
+  done
+  for ((i = 0; i < jobs; i++)); do
+    until curl -sf "127.0.0.1:$((24600 + i))/readyz" >/dev/null; do
+      kill -0 "${rqpids[$i]}" 2>/dev/null || { echo "rqlited $i did not start:"; cat "$rqdir/$i.log"; exit 2; }
+      sleep 0.5
+    done
+  done
+elif [ $need_db = 1 ]; then
+  command -v docker >/dev/null || { echo "docker (or rqlited: CINIM_RQLITE_BIN) is needed for the integration tests"; exit 2; }
   for ((i = 0; i < jobs; i++)); do
     name=cinim-rqlite-$i
     docker rm -f $name >/dev/null 2>&1       # always a fresh, empty database: what an earlier run left in it must not matter
@@ -52,7 +72,8 @@ one() {   # file slot
 }
 export -f one
 # a free slot number for every job: xargs -P gives no slot, so a slot is a lock directory
-slotdir=$(mktemp -d); trap 'rm -rf "$slotdir"' EXIT; export slotdir
+slotdir=$(mktemp -d)
+trap 'for p in "${rqpids[@]}"; do kill "$p" 2>/dev/null; done; wait; rm -rf "$slotdir" "${rqdir:-}"' EXIT; export slotdir
 run() {
   for ((s = 0; s < jobs; s++)); do
     if mkdir "$slotdir/$s" 2>/dev/null; then one "$1" $s; rmdir "$slotdir/$s"; return; fi
