@@ -1,5 +1,5 @@
-# The runtime stages of tools/image/Dockerfile.kaniko for images whose binaries were built on this machine (tools/image/build-local.sh): the same contents, with the binaries
-# taken from the build context instead of from a build stage. Keep the two files alike.
+# The runtime stages of tools/image/Dockerfile.<component> for images whose binaries were built on this machine (tools/image/build-local.sh): the same contents, with the binaries
+# taken from the build context instead of from a build stage. Keep them alike.
 FROM scratch AS core
 COPY core-static /core
 COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

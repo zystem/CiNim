@@ -2,7 +2,7 @@
 # (helm install cinim-storage ./cinim-storage -n cinim-001), so that it finds the shard's rqlite; the core is pointed at it by `storage.url` of the chart cinim-shard.
 # Required: image.repository, and either secrets.existingSecret or the four secrets below.
 
-# The image of the module (tools/image/Dockerfile.kaniko, target storage).
+# The image of the module (tools/image/Dockerfile.storage).
 image:
   repository: ""
   tag: latest
@@ -51,7 +51,7 @@ stores:
     default: false
     nodes: 2                          # 1 to 4
     minAcks: 0                        # 0: every node must confirm a write; 1 keeps writing with a node away (the repair gives it back)
-    image:                            # tools/image/Dockerfile.kaniko, target caddy-store (TARGETS=caddy-store:cinim-store-dav)
+    image:                            # tools/image/Dockerfile.caddy-store (TARGETS=caddy-store:cinim-store-dav)
       repository: ""
       tag: latest
     persistence: {size: 100Gi, storageClass: ""}

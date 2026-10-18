@@ -77,7 +77,7 @@ tools/shim/build_static.sh build/core-static src/core/main.nim "-d:ssl" 0
 ```
 
 The two images of the platform need no Docker daemon: `tools/image/kaniko-build.sh` builds them in the cluster with Kaniko, as a build Pod (D-42), from
-`tools/image/Dockerfile.kaniko`; `tools/image/build_core.sh` and `build_controller.sh` build the same images with a local Docker.
+`tools/image/Dockerfile.<component>` (each from the image of the libraries, `Dockerfile.deps`); `tools/image/build_core.sh` and `build_controller.sh` build the same images with a local Docker.
 
 Long runs (the soak test of NFR-013) use `tools/soak/run72.sh`. `tools/bench/state_store_bench.py` is the state-store benchmark behind A.2 (rqlite, PXC, PostgreSQL); `tools/bench/postgres.helmfile.yaml` deploys the PostgreSQL cluster it uses.
 

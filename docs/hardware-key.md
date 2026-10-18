@@ -187,7 +187,7 @@ The core's side is built and tested without the card, against an emulator of the
   reason), nothing new is written.
 - **The emulator** holds the key in memory: from the Secret `--key-secret NAME` (made at the first start), from `--key-file`, or, with neither, a new one at every start, and can be told to misbehave: `POST /emu/fault` with `{"mode": "fDown"}`, `fLocked`, `fThrottle`,
   `fSlow` (with `delay_ms`) or `fNone`; `POST /emu/rekey` is "another card was put in". `deploy/examples/kekd-emu/kekd-emu.yaml` runs it in a cluster, with its key in the Secret `kekd-emu-key` (`--key-secret`: made at the first start, read at every later one, so that a restart does not lose the secrets of a shard) (the `kekd-emu` target
-  of `tools/image/Dockerfile.kaniko`). It is not secure and plain HTTP: never for anything that matters.
+  of `tools/image/Dockerfile.kekd-emu`). It is not secure and plain HTTP: never for anything that matters.
 
 Checked on a cluster with the emulator over plain HTTP (the mutual TLS of section 9 is tested apart, not in the cluster): a data key opened through it; a step that starts while the service is down gets its secrets from the cache; a core that starts while
 it is down answers `secrets_unavailable`, a step started then waits in its shim and runs 19 s later when the service is back; a service with another key than the one that sealed

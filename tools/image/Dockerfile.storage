@@ -1,0 +1,16 @@
+# The image of the storage module (docs/storage-module.md, D-60): a Deployment with no volume; the settings are in rqlite and in the environment. Built from the image of the libraries
+# (`--build-arg DEPS_IMAGE=`, tools/image/Dockerfile.deps).
+ARG DEPS_IMAGE
+FROM ${DEPS_IMAGE} AS build
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/storage-static src/storage/main.nim -d:ssl -d:curlStatic -d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto \
+      --passL:"-L/opt/zmq/lib -L/opt/k8s/lib -lsodium -lcurl -lssl -lcrypto -lz -lm"; \
+    strip /out/*; cp /etc/ssl/certs/ca-certificates.crt /out/
+
+FROM scratch
+COPY --from=build /out/storage-static /cinim-storage
+COPY --from=build /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 65532:65532
+EXPOSE 18090
+ENTRYPOINT ["/cinim-storage"]

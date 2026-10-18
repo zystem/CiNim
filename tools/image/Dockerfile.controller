@@ -1,0 +1,21 @@
+# The image of the job controller of an organisation (SHD-007): the controller and the shim that it puts into every step Pod. Built from the image of the libraries
+# (`--build-arg DEPS_IMAGE=`, tools/image/Dockerfile.deps).
+ARG DEPS_IMAGE
+FROM ${DEPS_IMAGE} AS build-shim
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/cicd-shim src/shim/shim.nim -d:shimLogging --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm"; \
+    strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null
+
+FROM ${DEPS_IMAGE} AS build-controller
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/controller-static src/jobcontroller/main.nim -d:k8sPrefix=/opt/k8s -d:k8sStatic --dynlibOverride:sqlite3 \
+      --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm"; strip /out/*
+
+FROM scratch
+COPY --from=build-controller /out/controller-static /controller
+COPY --from=build-shim /out/cicd-shim /cicd-shim
+ENV CINIM_SHIM_BIN=/cicd-shim
+USER 65532:65532
+ENTRYPOINT ["/controller"]

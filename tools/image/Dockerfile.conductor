@@ -1,0 +1,12 @@
+# The image of the conductors of an organisation (docs/conductors.md): the supervisor and, in the same program, the run process it starts. Built from the image of the libraries
+# (`--build-arg DEPS_IMAGE=`, tools/image/Dockerfile.deps).
+ARG DEPS_IMAGE
+FROM ${DEPS_IMAGE} AS build
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/conductor-static src/conductor/main.nim --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm"; strip /out/*
+
+FROM scratch
+COPY --from=build /out/conductor-static /conductor
+USER 65532:65532
+ENTRYPOINT ["/conductor"]

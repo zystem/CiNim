@@ -229,7 +229,7 @@ rolls out its own platform should not be replayed by an older executor. The whol
 ## CiNim builds itself
 
 `deploy/examples/self-build/self-build.lua` builds the images of the platform side by side (it is described in its header): a job `prep` keeps a bare mirror of the repository as a cache of the
-organisation (`git-<commit>`) and finds the commit, a job makes the image of the libraries once (`cinim-deps:<hash>`, the stage `deps-build` of `tools/image/Dockerfile.kaniko`, pushed to the registry
+organisation (`git-<commit>`) and finds the commit, a job makes the image of the libraries once (`cinim-deps:<hash>`, `tools/image/Dockerfile.deps`, pushed to the registry
 and found there by the next run), and the images of the components are built by `ci.matrix` with `fail_fast`, each build in a volume of its own (`workspace = "isolated"`) that it clones the commit
 into from the mirror, and each from `DEPS_IMAGE` so that none makes the libraries. (This replaces the three build steps in a row that shared the run's volume; the text that follows is of the first form.)
 The registry address and the tag are launch parameters (`REGISTRY`, `TAG`, also `REPO` and `REF`): `POST /api/v1/runs` with `"params": {"REGISTRY": "<host:port>", "TAG": "dev-1"}`. The clone is a build step
@@ -352,7 +352,7 @@ convenience (T-48); keep the default for an organisation that runs untrusted pip
 ## Building the images in the cluster
 
 `tools/image/kaniko-build.sh` makes a namespace under the build-pod policy (the files of `deploy/examples/build-pods`), sends the working tree to a
-Kaniko build Pod and builds both images from `tools/image/Dockerfile.kaniko`, the second one from the layer cache in the registry:
+Kaniko build Pod and builds the images of the components, each from its own `tools/image/Dockerfile.<component>` and from the image of the libraries (`Dockerfile.deps`, pushed as `cinim-deps:<hash>` and found there by the next build):
 
 ```bash
 REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/image/kaniko-build.sh
@@ -360,11 +360,11 @@ REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/i
 
 A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
 
-Every binary has a build stage of its own in the Dockerfile (`build-core`, `build-storage`, `build-controller` with `build-shim`, ...), and the script runs Kaniko with `--skip-unused-stages`, so a target builds only what it needs: `TARGETS="storage:cinim-storage"` compiles the module and nothing else. Do not build Go (the Caddy image) in a build Pod on a node that also runs rqlite; it starved the node once.
+Every component has a Dockerfile of its own (`tools/image/Dockerfile.core`, `.storage`, `.conductor`, `.controller` with the shim, `.kekd-emu`, `.caddy-store`) that starts from the image of the libraries, and the binaries are compiled by `tools/image/build-static.sh`, which has the flags they share; a target builds only its own: `TARGETS="storage:cinim-storage"` compiles the module and nothing else. Do not build Go (the Caddy image) in a build Pod on a node that also runs rqlite; it starved the node once.
 
 ### Building on this machine (the quick way for iterations)
 
-`tools/image/build-local.sh <tag> [target ...]` compiles the binaries in a container of the dependencies image `cinim-deps:local` (the stage `deps` of the same Dockerfile: libzmq, libsodium, the Kubernetes client with libcurl, the nimble packages; made once, 3-4 minutes) with the working tree mounted and Nim's C files kept in `build/nimcache/<binary>`, so that the next build recompiles only what changed, then puts the images together from `tools/image/Dockerfile.local`, and with `REGISTRY=<host>` pushes them with `skopeo` (plain HTTP). Measured on a 32-core workstation: the module 3 s after a change of one file, the core 23 s, the controller with the shim and the conductor together 42 s with the push. It builds the working tree as it is, so for a release use the build Pod.
+`tools/image/build-local.sh <tag> [target ...]` compiles the binaries in a container of the dependencies image `cinim-deps:local` (`tools/image/Dockerfile.deps`: libzmq, libsodium, the Kubernetes client with libcurl, the nimble packages; made once, 3-4 minutes) with the working tree mounted and Nim's C files kept in `build/nimcache/<binary>`, so that the next build recompiles only what changed, then puts the images together from `tools/image/Dockerfile.local`, and with `REGISTRY=<host>` pushes them with `skopeo` (plain HTTP). Measured on a 32-core workstation: the module 3 s after a change of one file, the core 23 s, the controller with the shim and the conductor together 42 s with the push. It builds the working tree as it is, so for a release use the build Pod.
 
 ```bash
 REGISTRY=registry.example.com tools/image/build-local.sh h84 core storage controller conductor

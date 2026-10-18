@@ -2,7 +2,7 @@
 ## (storage/service.nim) and hands each piece on to the stores before it reads the next, so that a block of 8 MiB is never in memory: a piece is passed on when every transfer that is
 ## still alive has taken the one before, and a slow store slows the sender down. A transfer that ends before the body does (refused, reset, answered early) is dropped from the pass and its
 ## result kept; the others go on; the caller decides whether enough of them succeeded. Built with libcurl found at run time (`libcurl.so.4`), or linked in with `-d:curlStatic`
-## and `--passL:"-L/opt/k8s/lib -lcurl -lssl -lcrypto -lz"` (tools/image/Dockerfile.kaniko), the way the image of the module is made.
+## and `--passL:"-L/opt/k8s/lib -lcurl -lssl -lcrypto -lz"` (tools/image/Dockerfile.deps and the Dockerfile of the component), the way the image of the module is made.
 import std/strutils
 import ../common/storagebackend
 

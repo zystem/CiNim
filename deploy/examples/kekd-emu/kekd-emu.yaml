@@ -1,7 +1,7 @@
 # The emulator of the key service (tools/kekd-emu), for trying the core's behaviour with a master key that lives elsewhere without a card.
 # NOT for production: plain HTTP, and the key is kept in the Secret `kekd-emu-key` in plain (made at the first start, read at every later one, so that a restart of the
 # Pod does not change the key that sealed the secrets of a shard; delete the Secret to get a new key, and every secret sealed with the old one is lost).
-# Set `image` to where you pushed the `kekd-emu` target of tools/image/Dockerfile.kaniko.
+# Set `image` to where you pushed the image of tools/image/Dockerfile.kekd-emu.
 #   kubectl -n <shard namespace> apply -f kekd-emu.yaml
 #   helm upgrade ... --set secrets.kekd.url=http://kekd-emu:8443
 # Then make it misbehave: kubectl -n <ns> exec deploy/kekd-emu -- ... is not possible (the image has no shell); use a port-forward:

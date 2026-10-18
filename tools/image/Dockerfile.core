@@ -1,0 +1,14 @@
+# The image of the shard (chart cinim-shard): the core. Built from the image of the libraries: `--build-arg DEPS_IMAGE=<registry>/cinim-deps:<hash>` (tools/image/Dockerfile.deps).
+ARG DEPS_IMAGE
+FROM ${DEPS_IMAGE} AS build
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/core-static src/core/main.nim -d:ssl -d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto --passL:"-L/opt/zmq/lib -lzmq -lsodium -lssl -lcrypto -lstdc++ -lm"; \
+    strip /out/*; cp /etc/ssl/certs/ca-certificates.crt /out/
+
+FROM scratch
+COPY --from=build /out/core-static /core
+COPY --from=build /out/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+USER 65532:65532
+EXPOSE 18081 19742 19743 19744 19745
+ENTRYPOINT ["/core"]

@@ -1,5 +1,5 @@
 ## XChaCha20-Poly1305 (IETF construction) from libsodium, which the core and the shim already link for the CURVE transport (D-24; the static
-## build of tools/image/Dockerfile.kaniko, a `--enable-minimal` libsodium, has this primitive). A 256-bit key, a 192-bit nonce that can safely be drawn at
+## build of tools/image/Dockerfile.deps, a `--enable-minimal` libsodium, has this primitive). A 256-bit key, a 192-bit nonce that can safely be drawn at
 ## random for every message (AES-GCM's 96-bit nonce cannot, past about 2^32 messages under one key), a 128-bit tag, and additional data. It is
 ## constant-time in software, which a table-driven AES in pure Nim is not.
 ## A program that imports this module links `-lsodium`.

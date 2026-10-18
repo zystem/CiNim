@@ -1,0 +1,21 @@
+# The libraries every binary of the platform is built with (libsodium, libzmq, the Kubernetes C client, the nimble packages), as one image: `cinim-deps:<hash>`, made once
+# (tools/image/kaniko-build.sh, deploy/examples/self-build, tools/image/build-local.sh) and named by the components' Dockerfiles with `--build-arg DEPS_IMAGE=`. The hash is
+# that of this file, cinim.nimble and tools/k8s/build_client.sh: the three things the image is made of.
+FROM nimlang/nim:2.2.4-alpine
+RUN apk add --no-cache bash coreutils upx g++ make cmake git autoconf automake libtool linux-headers curl openssl-dev openssl-libs-static \
+    zlib-dev zlib-static sqlite-dev sqlite-static ca-certificates
+# libsodium and libzmq as static archives (the ZeroMQ transport, D-24)
+RUN set -eu; W=$(mktemp -d); cd "$W"; \
+    git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium; \
+    (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix=/opt/zmq --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null); \
+    git clone -q --depth 1 --branch v4.3.5 https://github.com/zeromq/libzmq zmq; \
+    cmake -S zmq -B zmq/b -DCMAKE_PREFIX_PATH=/opt/zmq -DCMAKE_INSTALL_PREFIX=/opt/zmq -DWITH_LIBSODIUM=ON -DWITH_LIBSODIUM_STATIC=ON \
+      -DENABLE_CURVE=ON -DBUILD_SHARED=OFF -DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DWITH_DOCS=OFF -DWITH_PERFTOOL=OFF -DENABLE_DRAFTS=OFF \
+      -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" >/dev/null; \
+    cmake --build zmq/b -j"$(nproc)" --target install >/dev/null; rm -rf "$W"
+# the Kubernetes C client with libcurl, libwebsockets, libyaml (static)
+COPY tools/k8s/build_client.sh /src/tools/k8s/build_client.sh
+RUN K8S_STATIC=1 /src/tools/k8s/build_client.sh /opt/k8s >/dev/null
+# the nimble packages, from the package file alone so that this layer is cached
+COPY cinim.nimble /src/cinim.nimble
+RUN cd /src && nimble install -y --depsOnly

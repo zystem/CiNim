@@ -1,9 +1,9 @@
 -- CiNim builds itself and rolls itself out (D-42, D-47, D-48), the images in parallel, each build in a volume of its own (STO-002, `workspace = "isolated"`) and so on any node:
 --   1. `prep`: fetch the repository into a bare mirror kept as a cache of the organisation (`git-<commit>`, docs/cache.md; the next run fetches only what is new), find the commit
 --      of REF, the tag of the images and the hash of what the libraries image is made of,
---   2. `deps`: the image of the libraries (libsodium, libzmq, the Kubernetes C client, the nimble packages) as `cinim-deps:<hash>`, made once and found in the registry afterwards,
+--   2. `deps`: the image of the libraries (libsodium, libzmq, the Kubernetes C client, the nimble packages; tools/image/Dockerfile.deps) as `cinim-deps:<hash>`, made once and found in the registry afterwards,
 --   3. the images of the components side by side (`ci.matrix`, `fail_fast`: the first build that fails stops the others): each build restores the mirror of its commit, clones from it
---      into its own volume and runs Kaniko with DEPS_IMAGE (tools/image/Dockerfile.kaniko) so that none of them makes the libraries,
+--      into its own volume and runs Kaniko on the Dockerfile of its component with DEPS_IMAGE (tools/image/Dockerfile.<component>) so that none of them makes the libraries,
 --   4. a deploy step (profile = "deploy"): an ordinary, non-root Pod that may reach the Kubernetes API server and change the image of the core with a narrow token (deployer.yaml).
 --      The step is left out when DEPLOY is false, the builds when BUILD is false.
 -- Submit it through the API:
@@ -18,7 +18,7 @@ local KANIKO = "ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc
 local GIT = "alpine/git:v2.47.2"
 local KUBECTL = "alpine/k8s:1.34.1"
 
--- the component (a stage of tools/image/Dockerfile.kaniko) and the image it is pushed as
+-- the component (tools/image/Dockerfile.<component>) and the image it is pushed as
 local COMPONENTS = { { target = "core", image = "cinim" }, { target = "controller", image = "cinim-controller" },
                      { target = "conductor", image = "cinim-conductor" }, { target = "storage", image = "cinim-storage" } }
 
@@ -28,8 +28,7 @@ set -eu
 [ -f mirror.git/HEAD ] || git init -q --bare mirror.git
 git -C mirror.git fetch -q "$REPO" "+refs/heads/$REF:refs/heads/$REF" || git -C mirror.git fetch -q "$REPO" "+refs/tags/$REF:refs/tags/$REF"
 sha=$(git -C mirror.git rev-parse "$REF^{commit}")
-deps=$({ git -C mirror.git show "$sha:cinim.nimble"; git -C mirror.git show "$sha:tools/k8s/build_client.sh"
-         git -C mirror.git show "$sha:tools/image/Dockerfile.kaniko" | sed -n '/AS deps-build/,/AS deps$/p'; } | sha256sum | cut -c1-16)
+deps=$({ git -C mirror.git show "$sha:cinim.nimble"; git -C mirror.git show "$sha:tools/k8s/build_client.sh"; git -C mirror.git show "$sha:tools/image/Dockerfile.deps"; } | sha256sum | cut -c1-16)
 { echo "SHA=$sha"; echo "TAG=${TAG:-$(date -u +%Y%m%d)-$(echo "$sha" | cut -c1-7)}"; echo "DEPS=$deps"; } >> "$CICD_OUTPUT"
 ]]
 
@@ -41,8 +40,8 @@ git -C src -c advice.detachedHead=false -c checkout.workers=0 checkout -q "$SHA"
 ]]
 
 local REGISTRY_FLAGS = "--insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull"
-local function kaniko(target, image, tag, extra)
-  return "/kaniko/executor --dockerfile=/cicd/workspace/src/tools/image/Dockerfile.kaniko --context=dir:///cicd/workspace/src --target=" .. target .. " " .. (extra or "") ..
+local function kaniko(component, image, tag, extra)
+  return "/kaniko/executor --dockerfile=/cicd/workspace/src/tools/image/Dockerfile." .. component .. " --context=dir:///cicd/workspace/src " .. (extra or "") ..
          " --destination=$REGISTRY/" .. image .. ":" .. tag .. " --cache=true --cache-repo=$REGISTRY/cinim-cache " .. REGISTRY_FLAGS
 end
 
@@ -94,7 +93,7 @@ return ci.pipeline({
       -- 2. the libraries, once for as long as what they are made of stays the same
       checked_out(env, function(j)
         j:sh('wget -q -O /dev/null --header "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" ' ..
-             'http://$REGISTRY/v2/cinim-deps/manifests/$DEPS && echo "cinim-deps:$DEPS is in the registry" || ' .. kaniko("deps-build", "cinim-deps", "$DEPS"), {image = KANIKO})
+             'http://$REGISTRY/v2/cinim-deps/manifests/$DEPS && echo "cinim-deps:$DEPS is in the registry" || ' .. kaniko("deps", "cinim-deps", "$DEPS"), {image = KANIKO})
       end)
       -- 3. the components side by side
       local names, by = {}, {}

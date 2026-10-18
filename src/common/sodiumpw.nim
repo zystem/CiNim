@@ -1,4 +1,4 @@
-## Password hashing with Argon2id from libsodium (`crypto_pwhash_str`; the minimal static libsodium of tools/image/Dockerfile.kaniko has it). A password that a person
+## Password hashing with Argon2id from libsodium (`crypto_pwhash_str`; the minimal static libsodium of tools/image/Dockerfile.deps has it). A password that a person
 ## chooses is not 256 random bits, so the fast hash of an API token (D-44) is not enough for it: Argon2id is memory-hard and salted, and the stored string holds the
 ## algorithm, the cost and the salt (`$argon2id$v=19$m=8192,t=16,p=1$...`), so the cost can be changed later and old strings still verify. The cost is **8 MiB and 16 passes**: the product of memory and passes, which is what an attacker pays
 ## for, is that of libsodium's own default (64 MiB, 2 passes), and OWASP's profiles for Argon2id keep that product near constant (46 MiB x 1 ... 7 MiB x 5). The core is built to be small, and
