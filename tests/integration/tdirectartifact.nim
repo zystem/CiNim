@@ -84,10 +84,9 @@ suite "D-61 the artifacts of a step, sent straight to the storage module":
       configureStorage("http://module.test:18090", secret, "001", "http://module.test:18091")
       check c.query(%*[["SELECT count(*) FROM artifacts WHERE run_id = ? AND path = 'dist/a.bin'", runId]])["results"][0]["values"][0][0].getInt == 0     # nothing was started
       # the ways that carried bytes are gone
-      var part = req("put_part", "dist/a.bin"); part.part = 1; part.data = cast[seq[byte]]("x")
+      var part = req("put_part", "dist/a.bin"); part.upload_id = "x"
       check handleArtifact(c, part, master, fixedStoreSet(be)).failure.code == "bad_request"
-      var blk = req("get_block", "dist/b.bin"); blk.length = 1
-      check handleArtifact(c, blk, master, fixedStoreSet(be)).failure.code == "bad_request"
+      check handleArtifact(c, req("get_block", "dist/b.bin"), master, fixedStoreSet(be)).failure.code == "bad_request"
       # a put_end that names no digests is refused too
       let began2 = handleArtifact(c, b, master, fixedStoreSet(be))
       var nodig = req("put_end", "dist/a.bin"); nodig.upload_id = began2.upload_id; nodig.parts = @[artifactingest.ArtifactPart(part: 1, etag: "e1")]
@@ -98,7 +97,7 @@ suite "D-61 the artifacts of a step, sent straight to the storage module":
       var empty = req("put_object", "dist/empty.txt"); empty.size = 0; empty.sha256 = shaOf("")
       check handleArtifact(c, empty, master, fixedStoreSet(be)).accepted
       check c.storedArtifact(runId, "dist/empty.txt").found and objectKey(org, runId, "dist/empty.txt") notin be.objects      # the row says all there is; the store has no object of no bytes
-      var notEmpty = req("put_object", "dist/x.txt"); notEmpty.size = 1; notEmpty.sha256 = shaOf("x"); notEmpty.data = cast[seq[byte]]("x")
+      var notEmpty = req("put_object", "dist/x.txt"); notEmpty.size = 1; notEmpty.sha256 = shaOf("x")
       check handleArtifact(c, notEmpty, master, fixedStoreSet(be)).failure.code == "bad_request"
 
     test "D-61 put_end completes the upload when the digests of the shim are those of the module, and drops it when one is not":

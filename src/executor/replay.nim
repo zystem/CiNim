@@ -29,7 +29,7 @@ type
     message*: string
     value*: string
 
-const hostKinds = ["now", "random", "sh", "sleep", "job_sh", "params", "lock", "unlock", "par_cancel", "par_peek"]
+const hostKinds = ["now", "random", "sleep", "job_sh", "params", "lock", "unlock", "par_cancel", "par_peek"]
 
 proc cancelPayload(text: string; placeKeys: Table[string, string]): string =
   ## The decision of `fail_fast` as the script's scheduler writes it (bootstrap.lua): the path of the `ci.parallel`, the branch that failed, the branches not started (tabs), and

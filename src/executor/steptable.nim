@@ -122,7 +122,7 @@ proc numberOf*(t: var StepTable; line, instance: int): int =
 proc stubHost(seq: int; kind, payload: string): Option[string] =
   ## the host of the pass: nothing is done, every step succeeds, time stands still
   case kind
-  of "job_sh", "sh": some("0\n")
+  of "job_sh": some("0\n")
   of "now": some("0")
   of "random": some("0.5")
   else: some("")

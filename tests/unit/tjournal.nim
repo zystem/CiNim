@@ -16,7 +16,7 @@ suite "PIP-003 run journal":
     check r.code == "ok"
     check j.entries.len == fixtureCalls
     check j.entries[0].kind == "now"
-    check j.entries[1].kind == "sh" and j.entries[1].payload == "echo one"
+    check j.entries[1].kind == "job_sh" and j.entries[1].payload.endsWith("\techo one")
     check j.entries[5].result == "1\nboom"
     check j.verify()
 
@@ -156,7 +156,7 @@ suite "PIP-003/PIP-004 the journal is found by the key of a call, not by place":
   test "every entry has a key: steps s<number>, the others <kind>#<n> in the order of that kind":
     let (_, j) = runClean()
     check j.entries[0].key == "now#0"
-    check j.entries[1].key == "sh#0"
+    check j.entries[1].key == "s0"
     var seen: seq[string]
     for e in j.entries:
       check e.key.len > 0
@@ -164,7 +164,7 @@ suite "PIP-003/PIP-004 the journal is found by the key of a call, not by place":
       seen.add e.key
   test "the key is part of the chain: another key under the same hash is found":
     var (_, j) = runClean()
-    j.entries[1].key = "sh#9"
+    j.entries[1].key = "s9"
     check not j.verify()
   test "replay finds an entry whatever its place: the entries in another order give the same run":
     let (r1, j) = runClean()
@@ -197,7 +197,7 @@ suite "PIP-003/PIP-004 the journal is found by the key of a call, not by place":
     var sb = newSandbox()
     var j2 = j
     let r = sb.execute(j2, scriptSrc.replace("echo one", "echo two"), fakeHost)
-    check r.code == "script_nondeterminism" and "sh#0" in r.message
+    check r.code == "script_nondeterminism" and "s0" in r.message
   test "the key of a step is the number the caller gives it":
     var sb = newSandbox()
     var j = Journal()

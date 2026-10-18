@@ -27,13 +27,8 @@ proc openState*(path: string): CtrlState =
   result.db.exec(sql"""CREATE TABLE IF NOT EXISTS pods (
     name TEXT PRIMARY KEY, run_id TEXT NOT NULL, seq INTEGER NOT NULL, attempt INTEGER NOT NULL, created_at INTEGER NOT NULL,
     started INTEGER NOT NULL DEFAULT 0, last_log REAL NOT NULL DEFAULT 0, reported_at INTEGER NOT NULL DEFAULT 0,
-    ok INTEGER NOT NULL DEFAULT 0)""")
-  for alter in [sql"ALTER TABLE pods ADD COLUMN fully_read INTEGER NOT NULL DEFAULT 0",       # state files from before these columns
-                sql"ALTER TABLE pods ADD COLUMN end_reason TEXT NOT NULL DEFAULT ''",
-                sql"ALTER TABLE pods ADD COLUMN pod_reason TEXT NOT NULL DEFAULT ''",
-                sql"ALTER TABLE pods ADD COLUMN pod_message TEXT NOT NULL DEFAULT ''"]:
-    try: result.db.exec(alter)
-    except DbError: discard
+    ok INTEGER NOT NULL DEFAULT 0, fully_read INTEGER NOT NULL DEFAULT 0, end_reason TEXT NOT NULL DEFAULT '',
+    pod_reason TEXT NOT NULL DEFAULT '', pod_message TEXT NOT NULL DEFAULT '')""")
 
 proc close*(s: CtrlState) = s.db.close()
 

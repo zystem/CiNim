@@ -4,13 +4,14 @@ The project has no release yet and the owner has said that compatibility with ol
 something made **before** a change still works. Delete it when its condition is met, in the same commit as the change that makes it unnecessary, and strike the line here.
 Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wire compat"); this is not a promise that nothing else is left.
 
-| What | Where | Why it exists | Delete when |
-|---|---|---|---|
-| The columns of the controller's state added by `ALTER TABLE` | `jobcontroller/ctrlstate.nim` (line "state files from before these columns") | controller state files from before | the state volumes of the controllers are made again, or a migration number replaces the ALTERs |
-| The `ALTER TABLE … ADD COLUMN` list of the core | `core/schema.nim` (`migrate`) | databases from before each column | when there is a first release: fold the columns into `CREATE TABLE` and number the migrations |
-| `project_id` dropped from `runs` and `triggers`, and its index (D-54) | `core/schema.nim` (`migrate`, the loop over `runs` and `triggers`) | a shard made before D-54 has the column, which is NOT NULL and has no default | every shard has migrated (the TESTING cluster's has); then the loop goes |
-| `DROP TABLE object_stores`, `store_repair`, the `OBJECTSTORE_SECRET_KEY:*` secrets of `_platform` and `vault_meta` `objectstore` | `core/schema.nim` (`migrate`, after the DDL) | a shard made before D-60 kept its stores in the core | every shard has migrated; then the four statements go |
-| The host call `sh` and `ci.sh` (a fixture of the tests) | `executor/replay.nim` (`hostKinds`), `executor/bootstrap.lua`, `tests/unit/tluaapi.nim` (`fixtureOnly`) | the early tests of the sandbox | the tests use `Job:sh` |
+*Nothing is left (2026-10-18).* A new line goes into this table when code is written that exists only for something made before a change.
+
+
+## Deleted (2026-10-18, the second part)
+
+* The `ALTER TABLE … ADD COLUMN` list of the core (56 columns), the loop that dropped `project_id` from `runs` and `triggers` (D-54), the four statements that dropped what a shard kept of its stores before D-60 (`object_stores`, `store_repair`, the `OBJECTSTORE_SECRET_KEY:*` secrets, the `vault_meta` row) and the drop of an old `log_streams`: the columns are in the `CREATE TABLE`s now (`core/schema.nim`; a fresh database and one made by the old code have the same 280 columns, types, defaults and keys, which was compared), and `migrate` has a list `columnsAdded` of the same form, empty, for the next column. The columns of the controller's state (`ctrlstate.nim`) are in its `CREATE TABLE` too. A database or a state file made before the columns existed is not read any more (the TESTING cluster's have them all).
+* The host call `sh` and `ci.sh`: the tests of the sandbox and the journal run their fixture through `ci.job` and `Job:sh`. The stub host of the table pass knows `job_sh` only.
+* The fields of `ArtifactRequest` and `ArtifactAck` that carried bytes (`part`, `offset`, `length`, `data`; `etag`, `data`) are `reserved`, and the baseline of the protocol check (`proto/compat/baseline.binpb`) was made again.
 
 ## Deleted (2026-10-18)
 

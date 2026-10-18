@@ -54,21 +54,18 @@ message ArtifactFile {
 }
 
 message ArtifactRequest {
+  reserved 9, 11, 12, 13;            // part, offset, length, data: no block of bytes goes through the core since 2026-10-18 (the baseline of the check was made again)
   Header header = 1;
   StepRef step = 2;
   string job_token = 3;
-  // put_object (a file of no bytes: no `data`), put_begin (starts a multipart upload; `direct` must be true), put_end (`parts` in order, with the digest of each),
+  // put_object (a file of no bytes), put_begin (starts a multipart upload; `direct` must be true), put_end (`parts` in order, with the digest of each),
   // put_abort, get_list (`names` of the step's download list; answers with `files`, each with a grant to read it from the storage module)
   string op = 4;
   string path = 5;
   uint64 size = 6;                   // of the whole file, for put_object and put_begin
   string sha256 = 7;                 // of the whole file; core keeps it and a reader checks it
   string upload_id = 8;              // put_end, put_abort: what put_begin answered
-  uint32 part = 9;                   // (not used since 2026-10-18)
   repeated ArtifactPart parts = 10;  // put_end
-  uint64 offset = 11;                // (not used since 2026-10-18: no block of bytes goes through the core)
-  uint32 length = 12;                // (not used since 2026-10-18)
-  bytes data = 13;                   // (not used since 2026-10-18)
   repeated string names = 14;        // get_list; cache_find: the restore keys (prefixes), in order
   bool direct = 16;                  // the shim can send the bytes straight to the storage module (D-61): put_begin may answer with a grant, and put_end then names the digest of every part
   bool cache = 15;                   // DAT-004: the request is about the step's cache, not its artifacts: `path` is the cache key, `op` is cache_find (answers with `files`: the entry found, if any),
@@ -76,12 +73,11 @@ message ArtifactRequest {
 }
 
 message ArtifactAck {
+  reserved 5, 6;                     // etag, data: as above
   Header header = 1;
   bool accepted = 2;
   Failure failure = 3;               // bad_token, not_current, not_declared, bad_path, too_big, artifact_missing, store_not_configured, store_unavailable (the same call may work later)
   string upload_id = 4;              // put_begin
-  string etag = 5;                   // (not used since 2026-10-18)
-  bytes data = 6;                    // (not used since 2026-10-18)
   repeated ArtifactFile files = 7;   // get_list
   string direct_url = 8;             // direct transfer (D-61): where the storage module takes the shims' bytes, e.g. http://cinim-storage.cinim-001.svc:18091 (get_list, cache_find, put_begin)
   string grant = 9;                  // put_begin: the token for putting the parts of this upload with `direct_path`; always set: the parts go to the storage module (a shard that cannot give one refuses put_begin with direct_required)

@@ -1157,11 +1157,6 @@ G.ci = {
     if type(seconds) ~= "number" then error("ci.sleep: number expected", 2) end
     call("sleep", tostring_(seconds))
   end,
-  sh = function(cmd)  -- test fixture surface only (tests/unit); real pipelines use Job:sh
-    if type(cmd) ~= "string" then error("ci.sh: string expected", 2) end
-    local code, out = call("sh", cmd):match("^(%-?%d+)\n(.*)$")
-    return { exit = tonumber(code), outputs = out }
-  end,
   parallel = parallel,
   matrix = matrix,
   finally = function(fn)

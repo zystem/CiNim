@@ -18,7 +18,11 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS organizations (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, slug TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
        state TEXT NOT NULL DEFAULT 'active', settings TEXT NOT NULL DEFAULT '{}', plan TEXT NOT NULL DEFAULT '',
-       created_at TEXT NOT NULL)""",
+       created_at TEXT NOT NULL,
+       network_egress TEXT NOT NULL DEFAULT '',
+       network_ingress TEXT NOT NULL DEFAULT '',
+       controller_spec TEXT NOT NULL DEFAULT '',
+       disabled_at INTEGER NOT NULL DEFAULT 0)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
   # the step secrets of an organisation (VAR-002, 6.7), each sealed with the organisation's data key (core/secretvault.nim); the data key is
   # wrapped by the master key, which is not in the database
@@ -46,7 +50,9 @@ const ddl = [
   # IAM-001, core/audit.nim: who did what to whom; also what the throttle of the login counts
   """CREATE TABLE IF NOT EXISTS audit_log (
        id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '',
-       outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')""",
+       outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+       before TEXT NOT NULL DEFAULT '',
+       after TEXT NOT NULL DEFAULT '')""",
   "CREATE INDEX IF NOT EXISTS audit_log_action ON audit_log (action, outcome, target, at)",
   # PIP-014, core/joblocks.nim: who holds the lock of a name in an organisation, and who waits for it, in the order of coming
   """CREATE TABLE IF NOT EXISTS run_locks (
@@ -69,7 +75,19 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS runs (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', bundle_id TEXT,
        trigger_id TEXT, parent_run_id TEXT, state TEXT NOT NULL, actor_id TEXT,
-       version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+       version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+       fail_code TEXT NOT NULL DEFAULT '',
+       fail_message TEXT NOT NULL DEFAULT '',
+       storage_released INTEGER NOT NULL DEFAULT 0,
+       params TEXT NOT NULL DEFAULT '',
+       profile_id TEXT NOT NULL DEFAULT '',
+       api_version INTEGER NOT NULL DEFAULT 1,
+       journal_tip TEXT NOT NULL DEFAULT '',
+       step_table TEXT NOT NULL DEFAULT '',
+       lease_attempt INTEGER NOT NULL DEFAULT 0,
+       lease_until INTEGER NOT NULL DEFAULT 0,
+       lease_owner TEXT NOT NULL DEFAULT '',
+       dirty INTEGER NOT NULL DEFAULT 0)""",
   # the triggers of an organisation (6.3, core/triggers.nim): a stored way to start a run, by the clock (`schedule`), by a call with the trigger's own secret (`webhook`),
   # or by hand; `secret_hash` is the SHA-256 of the webhook's secret (shown once)
   """CREATE TABLE IF NOT EXISTS triggers (
@@ -80,7 +98,9 @@ const ddl = [
   # the artifacts of runs (DAT-003, core/objectstore.nim): the object is in the store, this is what the platform knows about it; a path is one artifact of a run
   """CREATE TABLE IF NOT EXISTS artifacts (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL, step_ordinal INTEGER NOT NULL, path TEXT NOT NULL, s3_key TEXT NOT NULL,
-       size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+       size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, created_at INTEGER NOT NULL,
+       upload_id TEXT NOT NULL DEFAULT '',
+       store TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS artifacts_run_path ON artifacts (run_id, path)",
   "CREATE UNIQUE INDEX IF NOT EXISTS triggers_tenant_name ON triggers (tenant_id, name)",
   "CREATE INDEX IF NOT EXISTS runs_trigger ON runs (trigger_id, state)",
@@ -97,7 +117,8 @@ const ddl = [
   # (D-54) the run is in. A key is immutable: it is stored once.
   """CREATE TABLE IF NOT EXISTS caches (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '', key TEXT NOT NULL, s3_key TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
-       sha256 TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, upload_id TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL)""",
+       sha256 TEXT NOT NULL DEFAULT '', state TEXT NOT NULL, upload_id TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL,
+       store TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS caches_scope_key ON caches (tenant_id, scope, key)",
   "CREATE INDEX IF NOT EXISTS caches_used ON caches (tenant_id, last_used_at)",
   # DAT-004, core/cachestore.nim: the cache limits of a group (0 is nothing of its own: the group above decides, then the organisation, then the shard)
@@ -113,7 +134,9 @@ const ddl = [
   # DAT-006, core/heldlogs.nim: the copy of the log of a step of a held run, kept in the object store while the hold stands
   """CREATE TABLE IF NOT EXISTS held_logs (
        run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, attempt INTEGER NOT NULL, tenant_id TEXT NOT NULL, s3_key TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
-       line_count INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, PRIMARY KEY (run_id, ordinal, attempt))""",
+       line_count INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+       store TEXT NOT NULL DEFAULT '',
+       PRIMARY KEY (run_id, ordinal, attempt))""",
   # D-59: which store an organisation uses for a purpose (artifacts, caches, held_logs, audit); no row means the module's default. The stores themselves are the storage module's (D-60)
   """CREATE TABLE IF NOT EXISTS org_storage (
        tenant_id TEXT NOT NULL, purpose TEXT NOT NULL, store_name TEXT NOT NULL, updated_by TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, purpose))""",
@@ -123,6 +146,8 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS run_journal (
        run_id TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL, fingerprint TEXT NOT NULL,
        payload TEXT NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL,
+       call_key TEXT NOT NULL DEFAULT '',
+       hash TEXT NOT NULL DEFAULT '',
        PRIMARY KEY (run_id, seq))""",
   """CREATE TABLE IF NOT EXISTS jobs (
        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, key TEXT NOT NULL, state TEXT NOT NULL,
@@ -140,8 +165,16 @@ const ddl = [
        opts TEXT NOT NULL DEFAULT '',
        shim_n INTEGER NOT NULL DEFAULT 0, shim_phase TEXT NOT NULL DEFAULT '', shim_json TEXT NOT NULL DEFAULT '',
        shim_seen_at INTEGER NOT NULL DEFAULT 0, shim_source TEXT NOT NULL DEFAULT '',
-       claimed_at INTEGER NOT NULL DEFAULT 0)""",
+       claimed_at INTEGER NOT NULL DEFAULT 0,
+       retries INTEGER NOT NULL DEFAULT 0,
+       profile TEXT NOT NULL DEFAULT '',
+       pod_reason TEXT NOT NULL DEFAULT '',
+       pod_message TEXT NOT NULL DEFAULT '',
+       pod_diag TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS steps_run_ordinal ON steps (run_id, ordinal)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS run_journal_key ON run_journal (run_id, call_key) WHERE call_key != ''",      # a call has one record
+  "CREATE INDEX IF NOT EXISTS runs_group ON runs (tenant_id, group_id)",
+  "CREATE INDEX IF NOT EXISTS runs_storage ON runs (profile_id, storage_released, state)",    # what the polls of the controllers ask (core/runstorage.nim)
   "CREATE INDEX IF NOT EXISTS steps_state_profile_priority ON steps (state, profile_id, priority)",
   """CREATE TABLE IF NOT EXISTS job_controllers (
        id TEXT PRIMARY KEY, cluster_id TEXT NOT NULL, identity TEXT NOT NULL, state TEXT NOT NULL,
@@ -156,7 +189,16 @@ const ddl = [
        trust_level TEXT NOT NULL DEFAULT 'trusted', max_parallel INTEGER NOT NULL DEFAULT 100,
        infra_retries INTEGER NOT NULL DEFAULT 3, log_max_bytes INTEGER NOT NULL DEFAULT 1073741824,
        liveness_timeout INTEGER NOT NULL DEFAULT 300,
-       log_spool_bytes INTEGER NOT NULL DEFAULT 10485760, log_hold_timeout INTEGER NOT NULL DEFAULT 600)""",
+       log_spool_bytes INTEGER NOT NULL DEFAULT 10485760, log_hold_timeout INTEGER NOT NULL DEFAULT 600,
+       pod_limit INTEGER NOT NULL DEFAULT 20,
+       job_pod_limit_percent INTEGER NOT NULL DEFAULT 20,
+       runs_per_conductor INTEGER NOT NULL DEFAULT 10,
+       artifact_quota_bytes INTEGER NOT NULL DEFAULT 0,
+       cache_quota_bytes INTEGER NOT NULL DEFAULT 0,
+       cache_retention_days INTEGER NOT NULL DEFAULT 0,
+       artifact_retention_days INTEGER NOT NULL DEFAULT 0,
+       conductor_min INTEGER NOT NULL DEFAULT 1,
+       audit_variables TEXT NOT NULL DEFAULT 'off')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS execution_profiles_tenant_name ON execution_profiles (tenant_id, name)",
   # index_name is the VictoriaLogs "job" label value written by the collector (the step's Pod name) -
   # lets a reader reconstruct the LogsQL query from this row alone (spec line 838's column list).
@@ -171,81 +213,18 @@ proc hasColumn(c: var RqClient; table, column: string): bool =
   let r = c.query(%*[["SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", table, column]])
   r["results"][0]{"values"}[0][0].getInt > 0
 
+const columnsAdded: seq[(string, string, string)] = @[]
+  ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
+  ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
+  ## next fold, here too.
+
 proc migrate*(c: var RqClient) =
-  # log_streams was created one day before it gained `attempt` (it is bookkeeping only, rebuilt on first use) - a primary
-  # key cannot be altered in place, so an older table is dropped before the current DDL recreates it
-  if not c.hasColumn("log_streams", "attempt") and c.query(%*[["SELECT count(*) FROM sqlite_master WHERE name = 'log_streams'"]])["results"][0]{"values"}[0][0].getInt > 0:
-    discard c.execute(%*[["DROP TABLE log_streams"]])
   var stmts = newJArray()
   for s in ddl: stmts.add %s
   discard c.execute(stmts, transaction = true)
-  # D-60: the stores moved to the storage module; what the core kept of them before is gone (docs/compat.md)
-  for s in ["DROP TABLE IF EXISTS object_stores", "DROP TABLE IF EXISTS store_repair", "DELETE FROM step_secrets WHERE tenant_id = '_platform' AND name LIKE 'OBJECTSTORE_SECRET_KEY%'",
-            "DELETE FROM vault_meta WHERE key = 'objectstore'"]:
-    discard c.execute(%*[[s]])
-  # D-54: there is no project; a run and a trigger belong to a group (or to the organisation). A shard made before has the column and an index on it
-  for table in ["runs", "triggers"]:
-    if c.hasColumn(table, "project_id"):
-      discard c.execute(%*[["DROP INDEX IF EXISTS runs_project_created"]])
-      if not c.hasColumn(table, "group_id"): discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN group_id TEXT NOT NULL DEFAULT ''"]])
-      discard c.execute(%*[["ALTER TABLE " & table & " DROP COLUMN project_id"]])
-  discard c.execute(%*[["CREATE INDEX IF NOT EXISTS runs_group ON runs (tenant_id, group_id)"]])      # after the column exists in a shard made before
-  # columns added after a table already existed in a shard (CREATE TABLE IF NOT EXISTS leaves old tables alone)
-  for (table, column, definition) in [
-      ("steps", "retries", "INTEGER NOT NULL DEFAULT 0"),      # how many times a person asked to run the step again (docs/parallel.md section 11): its journal key is s<n>~<retries>
-      ("steps", "attempt", "INTEGER NOT NULL DEFAULT 1"), ("steps", "not_before", "INTEGER NOT NULL DEFAULT 0"),
-      ("steps", "profile", "TEXT NOT NULL DEFAULT ''"),   # the job's profile name as the script gave it: "" or "build" (part of the journalled call)
-      ("steps", "opts", "TEXT NOT NULL DEFAULT ''"),      # the Lua step options as one JSON object (mask, metrics, timeout)
-      # the shim's last known state (D-29): the same JSON as its Pod-log line, numbered by event
-      ("steps", "shim_n", "INTEGER NOT NULL DEFAULT 0"), ("steps", "shim_phase", "TEXT NOT NULL DEFAULT ''"),
-      ("steps", "shim_json", "TEXT NOT NULL DEFAULT ''"), ("steps", "shim_seen_at", "INTEGER NOT NULL DEFAULT 0"),
-      ("steps", "shim_source", "TEXT NOT NULL DEFAULT ''"), ("steps", "claimed_at", "INTEGER NOT NULL DEFAULT 0"),
-      # what Kubernetes said about the end of the step's Pod (status.reason, status.message), kept for investigations
-      ("steps", "pod_reason", "TEXT NOT NULL DEFAULT ''"), ("steps", "pod_message", "TEXT NOT NULL DEFAULT ''"),
-      ("steps", "pod_diag", "TEXT NOT NULL DEFAULT ''"),
-      ("run_locks", "job_key", "TEXT NOT NULL DEFAULT ''"), ("lock_waiters", "job_key", "TEXT NOT NULL DEFAULT ''"),     # the job (its key in the run) that holds or waits for the lock
-      ("users", "must_change", "INTEGER NOT NULL DEFAULT 0"),      # IAM-001: the password must be changed before anything else (the administrator after the first login)
-      ("step_secrets", "value_enc", "TEXT NOT NULL DEFAULT ''"),      # the sealed value (core/secretvault.nim)     # the first administrator token: it may only be changed (IAM-003)     # JSON: the containers' states, the Pod's conditions, node, events (RUN-017)
-      ("organizations", "network_egress", "TEXT NOT NULL DEFAULT ''"),    # "open" or "restricted"; "" = the shard's default (SHD-009)
-      ("organizations", "network_ingress", "TEXT NOT NULL DEFAULT ''"),   # "open" or "closed"; "" = the shard's default
-      ("organizations", "controller_spec", "TEXT NOT NULL DEFAULT ''"),   # the fingerprint of the controller's Deployment that the core made last (SHD-008); "" = not recorded
-      ("organizations", "disabled_at", "INTEGER NOT NULL DEFAULT 0"),     # unix time of the switch-off, from which the retention runs (SHD-007, SHD-008); 0 = not set
-      ("artifacts", "upload_id", "TEXT NOT NULL DEFAULT ''"),     # the store's id of a multipart upload that is under way
-      ("artifacts", "store", "TEXT NOT NULL DEFAULT ''"),         # D-59: the named store the object lies in (''  = the default one at the time of reading)
-      ("caches", "store", "TEXT NOT NULL DEFAULT ''"),
-      ("held_logs", "store", "TEXT NOT NULL DEFAULT ''"),
-      ("runs", "fail_code", "TEXT NOT NULL DEFAULT ''"), ("runs", "fail_message", "TEXT NOT NULL DEFAULT ''"),   # why the run did not succeed (executor's FinishRun)
-      ("runs", "storage_released", "INTEGER NOT NULL DEFAULT 0"),   # the controller deleted the run's volume (STO-006, core/runstorage.nim)
-      ("runs", "params", "TEXT NOT NULL DEFAULT ''"),         # the launch parameters: a JSON object of text values, at most 4 KiB (VAR-002, core/runparams.nim)
-      ("runs", "profile_id", "TEXT NOT NULL DEFAULT ''"),     # the execution profile of the run's organisation (SHD-007)
-      ("execution_profiles", "infra_retries", "INTEGER NOT NULL DEFAULT 3"),
-      ("execution_profiles", "log_max_bytes", "INTEGER NOT NULL DEFAULT 1073741824"),
-      ("execution_profiles", "liveness_timeout", "INTEGER NOT NULL DEFAULT 300"),
-      ("execution_profiles", "log_spool_bytes", "INTEGER NOT NULL DEFAULT 10485760"),
-      ("execution_profiles", "log_hold_timeout", "INTEGER NOT NULL DEFAULT 600"),
-      ("runs", "api_version", "INTEGER NOT NULL DEFAULT 1"),      # PIP-001, common/luaapi.nim: the version of the Lua host API the run was made with
-      ("runs", "journal_tip", "TEXT NOT NULL DEFAULT ''"),        # T-03, core/journalchain.nim: the hash of the newest record of the run's journal
-      ("run_journal", "call_key", "TEXT NOT NULL DEFAULT ''"),    # the identity of the call the record answers (docs/parallel.md section 4); seq is the order of appending
-      ("run_journal", "hash", "TEXT NOT NULL DEFAULT ''"),        # the chain: SHA-256 of the previous hash and this record
-      ("runs", "step_table", "TEXT NOT NULL DEFAULT ''"),         # docs/parallel.md section 3.4: the table of step numbers, sent by the executor with the first lease
-      ("runs", "lease_attempt", "INTEGER NOT NULL DEFAULT 0"),    # RUN-008, core/runlease.nim: the attempt of the last lease of the run,
-      ("runs", "lease_until", "INTEGER NOT NULL DEFAULT 0"),      # when it runs out (0: given back),
-      ("runs", "lease_owner", "TEXT NOT NULL DEFAULT ''"),        # and to whom (the executor's id, for the operator)
-      ("runs", "dirty", "INTEGER NOT NULL DEFAULT 0"),            # docs/parallel.md section 6: a step of the run has ended (or a lock came to it) since it was last leased; the run may be led again even with other steps in flight
-      ("execution_profiles", "pod_limit", "INTEGER NOT NULL DEFAULT 20"),              # RUN-004, core/admission.nim: step Pods in flight of the organisation
-      ("execution_profiles", "job_pod_limit_percent", "INTEGER NOT NULL DEFAULT 20"),   # the share of it one run may hold
-      ("execution_profiles", "runs_per_conductor", "INTEGER NOT NULL DEFAULT 10"),      # docs/conductors.md: runs one conductor Pod leads at once
-      ("execution_profiles", "artifact_quota_bytes", "INTEGER NOT NULL DEFAULT 0"),    # DAT-006, core/artifactingest.nim: the most bytes of artifacts the organisation may hold (0: no limit)
-      ("execution_profiles", "cache_quota_bytes", "INTEGER NOT NULL DEFAULT 0"),      # DAT-004, core/cachestore.nim: the most bytes of caches the organisation holds (0: the shard's, -1: no limit)
-      ("execution_profiles", "cache_retention_days", "INTEGER NOT NULL DEFAULT 0"),    # ... and how long an entry may stay unused (0: the shard's, -1: for ever)
-      ("execution_profiles", "artifact_retention_days", "INTEGER NOT NULL DEFAULT 0"),  # DAT-006, core/artifactsweep.nim: how long its artifacts live (0: the shard's retention)
-      ("execution_profiles", "conductor_min", "INTEGER NOT NULL DEFAULT 1"),            # conductors kept warm
-      ("execution_profiles", "audit_variables", "TEXT NOT NULL DEFAULT 'off'"),         # VAR-006: 'off', 'digest' or 'full' (core/varaudit.nim)
-      ("audit_log", "before", "TEXT NOT NULL DEFAULT ''"), ("audit_log", "after", "TEXT NOT NULL DEFAULT ''")]:     # VAR-006: the old and the new value (or a digest) of a variable
+  for (table, column, definition) in columnsAdded:
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
-  discard c.execute(%*[["CREATE UNIQUE INDEX IF NOT EXISTS run_journal_key ON run_journal (run_id, call_key) WHERE call_key != ''"]])      # a call has one record
-  discard c.execute(%*[["CREATE INDEX IF NOT EXISTS runs_storage ON runs (profile_id, storage_released, state)"]])    # what the polls of the controllers ask (core/runstorage.nim)
 
 proc seedDefaultProfile*(c: var RqClient; namespace: string; id = "default"): string =
   ## Idempotent: the one execution profile needed for now (there is no admin UI to create one yet).

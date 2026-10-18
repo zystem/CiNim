@@ -212,7 +212,7 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
     let key = objectKey(tenant, runId, path)
     case req.op
     of "put_object", "put_begin":
-      if req.op == "put_object" and (req.size != 0 or req.data.len != 0): return refuse("bad_request", "put_object is for a file of no bytes; the bytes of any other go straight to the storage module")
+      if req.op == "put_object" and req.size != 0: return refuse("bad_request", "put_object is for a file of no bytes; the bytes of any other go straight to the storage module")
       if req.op == "put_begin":
         let need = directRefusal(req)
         if not need.accepted: return need

@@ -8,7 +8,6 @@ const specNames = ["ci.pipeline", "ci.string", "ci.number", "ci.bool", "ci.choic
   "ci.random", "ci.finally", "ci.log", "ci.fail", "b58x", "b58xx", "b58f",
   "Job:checkout", "Job:sh", "Job:use", "Job:env", "JobArtifact.upload", "JobArtifact.download", "JobCache.save", "JobCache.restore",
   "Handle:wait", "Handle:cancel"]
-const fixtureOnly = ["sh"]      # ci.sh is a test fixture; API v1 has Job:sh
 
 proc declaredFunctions(): HashSet[string] =
   for line in readFile("lua/stdlib/cicd.d.lua").splitLines:
@@ -36,9 +35,9 @@ suite "PIP-017 Lua API v1 signatures":
     let r = sb.run("local f, e = load([==[" & src & "]==], '=stub', 't', {})\nif not f then error(e) end\nf()\nreturn 'ok'")
     check r.code == "ok"
 
-  test "PIP-005 the sandbox ci table exposes only API v1 names (plus the documented fixture)":
+  test "PIP-005 the sandbox ci table exposes only API v1 names":
     var sb = newSandbox()
     let r = sb.run("local n = {} for k in pairs(ci) do n[#n + 1] = k end return table.concat(n, ',')")
     check r.code == "ok"
     for name in r.value.split(','):
-      check ("ci." & name) in specNames or name in fixtureOnly
+      check ("ci." & name) in specNames
