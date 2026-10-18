@@ -122,8 +122,8 @@ after a round: if some branch moved, go on;  if all unfinished ones are parked, 
 
 ## 7. Storage and shared files
 
-* All branches share `/cicd/workspace` and `/cicd/state`. Writing the same file from two branches is the script's business; `workspace = "isolated"` (STO-002, not built yet) gives a job a directory of its own.
-* With a `ReadWriteOnce` class the Pods of a run are kept on one node (pod affinity over the run label), so the parallelism of a run is that of the node; a `ReadWriteMany` class (NFS) spreads it, but a build Pod cannot mount such a volume (idmapped mounts, docs/deployment.md).
+* All branches share `/cicd/workspace` and `/cicd/state`. Writing the same file from two branches is the script's business; `workspace = "isolated"` (STO-002, built 2026-10-18) gives a job a volume of its own.
+* With a `ReadWriteOnce` class the Pods of a run are kept on one node (pod affinity over the run label), so the parallelism of a run is that of the node; a `ReadWriteMany` class (NFS) spreads it, but a build Pod cannot mount such a volume (idmapped mounts, docs/deployment.md). **The jobs that are isolated spread over the nodes**: each has a claim of its own and its Pods are tied to one another only (`cicd.io/volume`), so the builds of a `ci.parallel` run where the nodes have room. The self-build example (`deploy/examples/self-build`) does that, each build cloning its commit from a mirror kept as a cache.
 * **`$CICD_ENV` under parallelism.** A step reads the file when it starts; the lines that parallel branches append are interleaved and a later step sees all of those written before it started. To bring a value back to the script use `outputs` (`$CICD_OUTPUT`), not the env file.
 
 ## 8. Tests

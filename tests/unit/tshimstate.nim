@@ -21,6 +21,11 @@ suite "D-53 the result and what became of the artifacts and the log are in the s
     let back = parseLine(marker & $toJson(s, 1000)).get
     check back.result == "success" and back.logs == lsUndelivered and back.artifacts == asUndelivered and back.reason == "logs_undelivered"
     check toJson(s, 1000).hasKey("result") and toJson(s, 1000)["arts"].getStr == "undelivered"
+  test "STO-003 the outputs of the step (the text of $CICD_OUTPUT, validated) survive the Pod-log line; a state without them has none":
+    var s = ShimState(run: "s1_r", seq: 0, attempt: 1, n: 4, event: seDone, phase: spDone)
+    check not toJson(s, 1000).hasKey("outputs") and parseLine(marker & $toJson(s, 1000)).get.outputs == ""
+    s.outputs = "SHA=ab12\nTAG=20261018-ab12\n"
+    check parseLine(marker & $toJson(s, 1000)).get.outputs == "SHA=ab12\nTAG=20261018-ab12\n"
   test "DAT-004 the keys the shim restored for the step's caches survive the Pod-log line; a state without them has none":
     var s = st(6, seDone, cmdExit = some(0), reason = "ok", exitCode = some(0))
     check not toJson(s, 1000).hasKey("cache") and parseLine(marker & $toJson(s, 1000)).get.cache.len == 0

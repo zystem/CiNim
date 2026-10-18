@@ -9,6 +9,7 @@ type
   PodRequest* = object
     ## What the platform wants a step Pod to be; the adapter turns it into a Pod spec (volumes, security context, ...).
     name*, image*, runId*: string
+    volume*: string              ## "" = the run's volume; else the id of the job whose volume the step mounts (`workspace = "isolated"`, STO-002)
     cmd*: seq[string]            ## the container's command: the shim, its flags, `--` and the step's command
     logging*: bool               ## the shim streams logs: it needs the CURVE keys (its spool is on the run's volume)
     spoolBytes*: int
@@ -45,12 +46,12 @@ type
       ## the last lines of the Pod's log; "" on any failure
     deletePod*: proc (name: string; graceSeconds: int): bool
       ## true = gone afterwards (deleted, or it was not there)
-    createDrainPod*: proc (name, runId, image: string; cmd: seq[string]): CreateOutcome
+    createDrainPod*: proc (name, runId, volume, image: string; cmd: seq[string]): CreateOutcome
       ## a Pod that mounts the run's volume and runs `cmd` (the shim's `--drain`, docs/artifacts.md), to deliver what a step that has ended left there; idempotent
-    ensureRunVolume*: proc (runId: string): CreateOutcome
-      ## the run's PersistentVolumeClaim exists afterwards (idempotent: it is made at the first step of the run); nil when the controller has no run volumes
+    ensureRunVolume*: proc (runId, volume: string): CreateOutcome
+      ## the PersistentVolumeClaim of the step exists afterwards: the run's (`volume` "") or a job's own (idempotent: it is made at the first step that mounts it); nil when the controller has no run volumes
     releaseRunVolume*: proc (runId: string): bool
-      ## the claim is deleted (STO-006); true = gone afterwards, also when it never existed
+      ## the claims of the run, its own and its jobs', are deleted (STO-006); true = gone afterwards, also when there never were any
     createConductor*: proc (name, secretJson, podJson: string): CreateOutcome
       ## the conductor's Secret (its credential) and then its Pod exist afterwards (idempotent); nil when the controller makes no conductors
     listConductors*: proc (): tuple[ok: bool, pods: seq[ConductorPod]]

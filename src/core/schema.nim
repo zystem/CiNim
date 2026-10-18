@@ -43,7 +43,7 @@ const ddl = [
   # organisation fetches them when told. `state` is pending | done | failed.
   """CREATE TABLE IF NOT EXISTS step_drains (
        run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, attempt INTEGER NOT NULL, profile_id TEXT NOT NULL, image TEXT NOT NULL DEFAULT '',
-       artifacts INTEGER NOT NULL DEFAULT 0, logs INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'pending', tries INTEGER NOT NULL DEFAULT 0,
+       volume TEXT NOT NULL DEFAULT '', artifacts INTEGER NOT NULL DEFAULT 0, logs INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'pending', tries INTEGER NOT NULL DEFAULT 0,
        next_at INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
        PRIMARY KEY (run_id, ordinal, attempt))""",
   "CREATE INDEX IF NOT EXISTS step_drains_state ON step_drains (profile_id, state, next_at)",
@@ -213,7 +213,8 @@ proc hasColumn(c: var RqClient; table, column: string): bool =
   let r = c.query(%*[["SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", table, column]])
   r["results"][0]{"values"}[0][0].getInt > 0
 
-const columnsAdded: seq[(string, string, string)] = @[]
+const columnsAdded: seq[(string, string, string)] = @[
+  ("step_drains", "volume", "TEXT NOT NULL DEFAULT ''")]      # STO-002: the id of the job whose volume the step used (2026-10-18)
   ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
   ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
   ## next fold, here too.

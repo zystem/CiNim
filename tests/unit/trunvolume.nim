@@ -38,5 +38,23 @@ suite "STO-002 what a step Pod gets of it":
   test "RUN-014 with ReadWriteOnce the Pods of a run are kept on one node; with ReadWriteMany they are not":
     let a = podVolume(rwo, "s1_r", "img", shimMount, ctx, res).affinity
     let term = a["podAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][0]
-    check term["labelSelector"]["matchLabels"]["cicd.io/run"].getStr == "s1_r" and term["topologyKey"].getStr == "kubernetes.io/hostname"
+    check term["labelSelector"]["matchLabels"]["cicd.io/volume"].getStr == "s1_r" and term["topologyKey"].getStr == "kubernetes.io/hostname"
     check podVolume(volumeSettings("", "", "ReadWriteMany"), "s1_r", "img", shimMount, ctx, res).affinity.isNil
+
+suite "STO-002 the volume of a job with workspace = isolated":
+  test "its claim is named for the job, carries the run's label (the run's storage goes with the run) and the job's as the volume":
+    check claimName("s1_r", "s1_0198-job") == "cicd-job-s1-0198-job"
+    let l = claimBody(rwo, "s1_r", "s1_job")["metadata"]["labels"]
+    check l["cicd.io/run"].getStr == "s1_r" and l["cicd.io/volume"].getStr == "s1_job"
+    check claimBody(rwo, "s1_r")["metadata"]["labels"]["cicd.io/volume"].getStr == "s1_r"      # the run's own volume is named by the run
+  test "a Pod of the job mounts it, and nothing of the run's volume":
+    let v = podVolume(rwo, "s1_r", "img", shimMount, ctx, res, "s1_job")
+    check v.volumes[1]["persistentVolumeClaim"]["claimName"].getStr == "cicd-job-s1-job"
+    check v.volumes.allIt(it{"persistentVolumeClaim", "claimName"}.getStr != "cicd-run-s1-r")
+    var paths: seq[string]
+    for m in v.mounts: paths.add m["mountPath"].getStr & "=" & m{"subPath"}.getStr
+    check paths == @["/cicd/run=", "/cicd/workspace=workspace", "/cicd/state=state"]
+  test "the Pods of one job are kept on one node (ReadWriteOnce), by the job's label, so that the job does not pull the run's other Pods to its node":
+    let term = podVolume(rwo, "s1_r", "img", shimMount, ctx, res, "s1_job").affinity["podAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][0]
+    check term["labelSelector"]["matchLabels"]["cicd.io/volume"].getStr == "s1_job"
+    check podVolume(volumeSettings("", "", "ReadWriteMany"), "s1_r", "img", shimMount, ctx, res, "s1_job").affinity.isNil

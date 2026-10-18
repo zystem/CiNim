@@ -25,6 +25,21 @@ suite "RUN-010 runner shim":
     check r.msg["outputs"].getInt == 1 and r.msg["digest"].getStr.len == 64
     check ($r.msg).len <= 4096
 
+  test "STO-003 the outputs are in the shim's final state, ready for the script: a line each, a line break in a value as a backslash and n, a backslash doubled":
+    let d = getTempDir() / "shim-t-outputs"; removeDir(d); createDir(d)
+    writeFile(d / "out.env", "SHA=ab12\nMULTI=\"one\\ntwo\"\nPATHS=\"c:\\\\x\"\n")       # MULTI="one\ntwo" and PATHS="c:\\x" as the step writes them
+    let p = startProcess(shimExe, args = @["--run-dir", d, "--termination-log", d / "tlog", "--", "sh", "-c", "cat " & (d / "out.env") & " >> \"$CICD_OUTPUT\""],
+                         options = {poStdErrToStdout})
+    let output = p.outputStream.readAll()
+    check p.waitForExit() == 0
+    p.close()
+    var found = ""
+    for line in output.splitLines:
+      if line.startsWith("CICD-SHIM "):
+        let st = parseJson(line["CICD-SHIM ".len .. ^1])
+        if st{"outputs"} != nil: found = st["outputs"].getStr
+    check found == "SHA=ab12\nMULTI=one\\ntwo\nPATHS=c:\\\\x\n"
+
   test "STO-003 variables from CICD_ENV of a previous step reach the next step":
     let d = getTempDir() / "shim-t2"; createDir(d)
     writeFile(d / "CICD_ENV", "FOO=bar\n")

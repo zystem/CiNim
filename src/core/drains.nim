@@ -5,7 +5,7 @@
 ## accept the files of a step that has already ended while its drain is under way.
 import std/[json, times]
 import std/options
-import ../common/[rqlite, shimstate]
+import ../common/[rqlite, shimstate, stepenv]
 import objectstore
 
 const
@@ -17,6 +17,7 @@ type DrainRow* = object
   runId*: string
   ordinal*, attempt*: int
   image*: string
+  volume*: string                 ## the id of the job whose volume the step used, "" for the run's (STO-002)
   artifacts*, logs*: bool
 
 proc noteUndelivered*(c: var RqClient; runId: string; ordinal, attempt: int; reason: string; cmdExit: int; now: int64) =
@@ -24,7 +25,7 @@ proc noteUndelivered*(c: var RqClient; runId: string; ordinal, attempt: int; rea
   ## What exactly is read from the shim's own account, which the Pod log carries (shimstate.nim: `logs` and `arts` say what became of each; D-53); when that is not
   ## there, from the reason and from what the step declared. A command that failed put no artifacts (the shim puts them only after a success): only its log is to be fetched.
   if reason notin ["logs_undelivered", "artifacts_undelivered"]: return
-  let r = c.query(%*[["SELECT profile_id, image, opts, shim_json FROM steps WHERE run_id = ? AND ordinal = ? AND attempt = ?", runId, ordinal, attempt]])
+  let r = c.query(%*[["SELECT profile_id, image, opts, shim_json, job_id FROM steps WHERE run_id = ? AND ordinal = ? AND attempt = ?", runId, ordinal, attempt]])
   let v = r["results"][0]{"values"}
   if v == nil or v.len == 0: return
   let declared = artifactDecl(v[0][2].getStr).upload.len > 0
@@ -38,18 +39,18 @@ proc noteUndelivered*(c: var RqClient; runId: string; ordinal, attempt: int; rea
   let arts = succeeded and (artsState == asUndelivered or reason == "artifacts_undelivered" or
              (reason == "logs_undelivered" and declared and artsState notin {asDelivered, asFailed}))
   if not arts and not logs: return
-  discard c.execute(%*[["INSERT OR IGNORE INTO step_drains (run_id, ordinal, attempt, profile_id, image, artifacts, logs, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    runId, ordinal, attempt, v[0][0].getStr, v[0][1].getStr, (if arts: 1 else: 0), (if logs: 1 else: 0), now, now]])
+  discard c.execute(%*[["INSERT OR IGNORE INTO step_drains (run_id, ordinal, attempt, profile_id, image, volume, artifacts, logs, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    runId, ordinal, attempt, v[0][0].getStr, v[0][1].getStr, (if isolatedWorkspace(v[0][2].getStr): v[0][4].getStr else: ""), (if arts: 1 else: 0), (if logs: 1 else: 0), now, now]])
 
 proc dueDrains*(c: var RqClient; profileId: string; now: int64): seq[DrainRow] =
   ## the drains of this organisation to order now: pending, not waiting for a retry; the ones older than a day are given up here
   discard c.execute(%*[["UPDATE step_drains SET state = 'failed', detail = 'given up after a day', updated_at = ? WHERE state = 'pending' AND created_at < ?", now, now - giveUpAfter]])
-  let r = c.query(%*[["SELECT run_id, ordinal, attempt, image, artifacts, logs FROM step_drains WHERE profile_id = ? AND state = 'pending' AND next_at <= ? ORDER BY created_at LIMIT ?",
+  let r = c.query(%*[["SELECT run_id, ordinal, attempt, image, artifacts, logs, volume FROM step_drains WHERE profile_id = ? AND state = 'pending' AND next_at <= ? ORDER BY created_at LIMIT ?",
     profileId, now, maxOrders]])
   let vals = r["results"][0]{"values"}
   if vals == nil: return
   for row in vals:
-    result.add DrainRow(runId: row[0].getStr, ordinal: row[1].getInt, attempt: row[2].getInt, image: row[3].getStr, artifacts: row[4].getInt == 1, logs: row[5].getInt == 1)
+    result.add DrainRow(runId: row[0].getStr, ordinal: row[1].getInt, attempt: row[2].getInt, image: row[3].getStr, volume: row[6].getStr, artifacts: row[4].getInt == 1, logs: row[5].getInt == 1)
 
 proc recordDrained*(c: var RqClient; runId: string; ordinal, attempt: int; ok, final: bool; detail: string; now: int64) =
   ## what the controller said of an order: done, given up for good, or (neither) tried and to be tried again later

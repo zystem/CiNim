@@ -81,6 +81,12 @@ proc setCache*(restored: seq[string]) =
     withLock lock:
       cur.cache = restored
 
+proc setOutputs*(text: string) =
+  ## the step's outputs (STO-003), validated, as `name=value` lines; they ride along with the next line, and the verdict has them
+  {.cast(gcsafe).}:
+    withLock lock:
+      cur.outputs = text
+
 proc currentMetrics*(): seq[(string, float)] =
   {.cast(gcsafe).}:
     withLock lock:

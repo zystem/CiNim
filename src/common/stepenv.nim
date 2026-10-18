@@ -22,6 +22,14 @@ proc envOf*(optsJson, key: string): seq[(string, string)] =
     result.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
   except CatchableError: discard
 
+proc isolatedWorkspace*(optsJson: string): bool =
+  ## the job of the step asked for a volume of its own (`workspace = "isolated"`, STO-002)
+  if optsJson.len == 0: return
+  try:
+    let j = parseJson(optsJson)
+    j.kind == JObject and j{"workspace"} != nil and j{"workspace"}.kind == JString and j{"workspace"}.getStr == "isolated"
+  except CatchableError: false
+
 proc checkEnv*(optsJson: string): string =
   ## "" if the options' environments may be given to a step, else why not (the core's answer to the script)
   if optsJson.len == 0: return

@@ -68,3 +68,53 @@ suite "DAT-004 the answer of a cache restore step":
       let r = runWithStep(restoreOpts)
       ends(r, shimLine(r, @["deps-1"]), exit = 2)
       check journalled(r) == "2\n"
+
+suite "STO-003 the outputs of a step in its answer":
+  if url.len == 0:
+    echo "  skipped: CINIM_RQLITE_URL is not set"
+  else:
+    var c = newRq(url)
+    migrate(c)
+    initGate(Watch(disabled: true, cfg: defaultConfig()))
+    let defaultProfile = c.seedDefaultProfile("cinim-default-ns")
+    let sfx = newId()
+    let org = c.addOrganization("so-" & sfx, "SO")
+    let ns = "cinim-001-so-" & sfx
+    let prof = c.ensureOrganizationProfile(org, ns)
+    let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns")
+    proc runWithStep(opts: string): string =
+      let r = co.createRun("return 1", org, prof)
+      let jobId = newId()
+      discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'job-1', 'RUNNING', ?)", jobId, r, prof]])
+      discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at, attempt, claimed_at) " &
+        "VALUES (?, ?, ?, 0, 'sh', 'RUNNING', ?, 'alpine', 'true', ?, '1', 1, ?)", newId(), r, jobId, prof, opts, getTime().toUnix()]])
+      r
+    proc shimLine(run, outputs: string; exit = 0): string =
+      $toJson(ShimState(run: run, seq: 0, attempt: 1, n: 9, event: seDone, phase: spDone, cmdStarted: true, cmdExit: some(exit), logs: lsDelivered, result: (if exit == 0: "success" else: "failed"),
+                        reason: "ok", exitCode: some(exit), outputs: outputs), 1000)
+    proc ends(r, shim: string; exit = 0) =
+      discard handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-so-" & sfx, namespace: ns, free_pod_slots: 0,
+        transitions: @[PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 1), state: (if exit == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED), exit_code: int32(exit),
+                                     termination_reason: "ok", shim_state_json: shim)]), push = false)
+    proc journalled(r: string): string =
+      let v = c.query(%*[["SELECT result FROM run_journal WHERE run_id = ? AND kind = 'job_sh'", r]])["results"][0]{"values"}
+      if v != nil and v.len > 0: v[0][0].getStr else: "(none)"
+
+    test "the outputs the shim validated come after the exit code and a newline, for the script to read":
+      let r = runWithStep("")
+      ends(r, shimLine(r, "SHA=ab12\nTAG=20261018-ab12\n"))
+      check journalled(r) == "0\nSHA=ab12\nTAG=20261018-ab12\n"
+    test "a step with none answers as before, and so does one whose state carries none":
+      let r = runWithStep("")
+      ends(r, shimLine(r, ""))
+      check journalled(r) == "0\n"
+    test "a failed step carries them too (the script may have asked to go on)":
+      let r = runWithStep("")
+      ends(r, shimLine(r, "WHY=disk\n", exit = 3), exit = 3)
+      check journalled(r) == "3\nWHY=disk\n"
+    test "a cache restore step answers with its key, not with outputs":
+      let r = runWithStep("""{"cache":[{"key":"deps-2","mode":"restore","paths":[],"restore_keys":["deps-"]}]}""")
+      var s = ShimState(run: r, seq: 0, attempt: 1, n: 9, event: seDone, phase: spDone, cmdStarted: true, cmdExit: some(0), logs: lsDelivered, result: "success", reason: "ok", exitCode: some(0),
+                        cache: @["deps-1"], outputs: "X=1\n")
+      ends(r, $toJson(s, 1000))
+      check journalled(r) == "0\ndeps-1"

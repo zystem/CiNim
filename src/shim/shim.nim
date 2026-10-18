@@ -51,6 +51,7 @@ else:
 const
   exitTimeout = 124            ## the step ran past its timeout_seconds (the same code `timeout(1)` uses)
   exitEnvRejected = 70
+  maxOutputsToScript = 4096        ## the outputs a step may return to the script (STO-003)
   exitSecretsUnavailable = 73  ## the step's secrets could not be fetched from core: the command was not started
   exitArtifactsFailed = 74     ## the command succeeded, but its artifacts could not be put into the store (DAT-003)
   exitArtifactsUndelivered = 76  ## the command succeeded, its artifacts are still on the Pod: the core could not take them (the controller drains them when the core orders it)
@@ -760,6 +761,15 @@ proc main(): int =
     return
   var canon = ""
   for o in outputs: canon.add o.name & "=" & o.value & "\n"
+  # what the script reads (`r.outputs`, STO-003): a line for each, a backslash as \\ and a line break in a value as \n, at most 4 KiB in all
+  var forScript = ""
+  for o in outputs: forScript.add o.name & "=" & o.value.replace("\\", "\\\\").replace("\n", "\\n") & "\n"
+  if forScript.len > maxOutputsToScript:
+    writeTermination(termLog, %*{"exit_code": exitEnvRejected, "reason": "env_rejected", "detail": "the outputs are more than " & $maxOutputsToScript & " bytes"})
+    result = done("env_rejected", exitEnvRejected)
+    release(exitEnvRejected, "env_rejected")
+    return
+  setOutputs(forScript)
   if not logsDelivered:
     # both are said: the log was not delivered, and what became of the artifacts (the reason is the log's, which comes first)
     writeTermination(termLog, %*{"exit_code": exitLogsUndelivered, "reason": "logs_undelivered", "command_exit_code": code,

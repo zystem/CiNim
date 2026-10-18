@@ -33,6 +33,7 @@ type
     secretNames*: seq[string]            ## the secrets the step asked for (core/stepsecrets.nim)
     stepToken*: string                   ## the step's credential for fetching them from core
     env*: seq[(string, string)]          ## the run's launch parameters as plain environment variables (VAR-002)
+    volume*: string                      ## "" = the run's volume; else the id of the job that has a volume of its own (`workspace = "isolated"`, STO-002)
 
   Config* = object
     collectorAddr*, stepReportAddr*: string   ## where the shim in the Pod reaches core; both empty = no log streaming
@@ -79,7 +80,7 @@ func buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   if r.secretNames.len > 0 and r.stepToken.len > 0: cmd.add "--fetch-secrets"
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
-  PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, cmd: cmd, logging: logging,
+  PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, volume: r.volume, cmd: cmd, logging: logging,
              spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
@@ -89,7 +90,7 @@ proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: in
   if be.ensureRunVolume != nil:
     # the claim of the run is made before its first Pod (and found again by every later one); a refusal (the namespace's quota of claims or of storage is used
     # up, or a claim the class cannot give) is told the way a refused Pod is, and nothing is tracked for a Pod that will not exist
-    let vol = be.ensureRunVolume(r.runId)
+    let vol = be.ensureRunVolume(r.runId, r.volume)
     if vol.kind != ckOk: return vol
   st.track(req.name, r.runId, r.seq, r.attempt, now)
   result = be.createPod(req)

@@ -228,8 +228,10 @@ rolls out its own platform should not be replayed by an older executor. The whol
 
 ## CiNim builds itself
 
-`deploy/examples/self-build/self-build.lua` is a pipeline of three build steps that share the run's volume: the first clones the source into `/cicd/workspace`
-(`alpine/git`), the other two are Kaniko build Pods that build the two images of the platform from that directory (`tools/image/Dockerfile.kaniko`) and push them to the registry.
+`deploy/examples/self-build/self-build.lua` builds the images of the platform side by side (it is described in its header): a job `prep` keeps a bare mirror of the repository as a cache of the
+organisation (`git-<commit>`) and finds the commit, a job makes the image of the libraries once (`cinim-deps:<hash>`, the stage `deps-build` of `tools/image/Dockerfile.kaniko`, pushed to the registry
+and found there by the next run), and the images of the components are built by `ci.matrix` with `fail_fast`, each build in a volume of its own (`workspace = "isolated"`) that it clones the commit
+into from the mirror, and each from `DEPS_IMAGE` so that none makes the libraries. (This replaces the three build steps in a row that shared the run's volume; the text that follows is of the first form.)
 The registry address and the tag are launch parameters (`REGISTRY`, `TAG`, also `REPO` and `REF`): `POST /api/v1/runs` with `"params": {"REGISTRY": "<host:port>", "TAG": "dev-1"}`. The clone is a build step
 too, because only build Pods reach the internet. Checked on the TESTING cluster through the API alone: an organisation, a run of that script; the images `cinim` and `cinim-controller` appeared in the registry
 (the second build read the cache of the first), and an earlier run of the same kind had been upgraded to run on its images. Kaniko needs one step per build, since it works on one Dockerfile and target at a time. A step that exits
@@ -398,6 +400,11 @@ Pod of the run and mounts it in the Pod of every step, its `workspace/` at `/cic
 file that one step writes is there for the next; so is a variable it writes to `$CICD_ENV`. The step's own files (`$CICD_OUTPUT`, `$CICD_MASK`) are in an `emptyDir` at
 `/cicd/run`, so that two steps of a run never write the same one. Artifacts (docs/artifacts.md) are for what must outlive the run or reach people; the volume is for
 what the steps of one run hand to each other.
+
+A job with `workspace = "isolated"` (STO-002) has a volume of its own, `cicd-job-<job id>`, made at its first step and mounted in its steps only; it is deleted with the run's volume. The
+Pods of such a job are kept on one node (ReadWriteOnce), the Pods of different jobs are not tied to each other, so the jobs of one run (the builds of `ci.parallel`) spread over the nodes.
+It has a `state/` of its own as well: `$CICD_ENV` does not reach other jobs, pass values with `env = {...}` of `ci.job` or `outputs`. A job that clones with one tool and builds with
+another runs its steps in different images (`j:sh(cmd, {image = ...})`). The size is that of the run's volume, so a run of N isolated jobs holds N+1 claims of `runStorage.size`.
 
 ```yaml
 runStorage:

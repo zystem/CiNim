@@ -302,19 +302,21 @@ proc stepJournalKey(c: var RqClient; runId: string; ordinal: int): string =
   let r = c.query(%*[["SELECT retries FROM steps WHERE run_id = ? AND ordinal = ?", runId, ordinal]])["results"][0]{"values"}
   stepKeyOf(ordinal, if r != nil and r.len > 0: r[0][0].getInt else: 0)
 
-proc restoredCacheKey(c: var RqClient; t: PodTransition; attempt: int): string =
-  ## The answer of a `j.cache.restore` step (DAT-004): the key the shim restored, from its newest state (the one the controller read from the Pod's log, or the one stored); "" for a miss
-  ## and for every other step.
+proc answerText(c: var RqClient; t: PodTransition; attempt: int): string =
+  ## What follows the exit code in the answer of a step, from the shim's newest state (the one the controller read from the Pod's log, or the one stored). The answer of a `j.cache.restore`
+  ## step (DAT-004) is the key the shim restored, "" for a miss. The answer of any other step is its outputs (STO-003): the validated text of `$CICD_OUTPUT`, which the script reads as `r.outputs`.
   let r = c.query(%*[["SELECT opts, shim_json FROM steps WHERE run_id = ? AND ordinal = ? AND attempt = ?", t.step.run_id, int(t.step.seq), attempt]])["results"][0]{"values"}
   if r == nil or r.len == 0: return
   let ds = cacheDecls(r[0][0].getStr)
-  if ds.len == 0 or ds[0].mode != "restore": return
+  let restore = ds.len > 0 and ds[0].mode == "restore"
   var best = none(ShimState)
   for text in [t.shim_state_json, r[0][1].getStr]:
     if text.len == 0: continue
     let st = try: fromJson(parseJson(text)) except CatchableError: none(ShimState)
-    if st.isSome and st.get.cache.len > 0 and (best.isNone or st.get.n > best.get.n): best = st
-  if best.isSome: best.get.cache[0] else: ""
+    if st.isSome and (best.isNone or st.get.n > best.get.n): best = st
+  if best.isNone: return
+  if restore: (if t.exit_code == 0 and best.get.cache.len > 0: best.get.cache[0] else: "")
+  else: best.get.outputs
 
 proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let attempt = int(t.step.attempt)
@@ -403,7 +405,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
           stderr.writeLine "core: step " & t.step.run_id & "/" & $t.step.seq & " attempt " & $attempt & ": the Pod says " &
             protoName(podSays) & ", the shim's last state says " & protoName(shimSays) & " (" & shim.get.reason & ")"
     # the step's own result: write it into run_journal, close out the step
-    let res = $t.exit_code & "\n" & (if t.exit_code == 0: c.restoredCacheKey(t, attempt) else: "")
+    let res = $t.exit_code & "\n" & c.answerText(t, attempt)
     # payload must equal exactly what the executor's host call sent (bootstrap.lua Job:sh:
     # self.__key .. "\t" .. self.__image .. "\t" .. profile .. "\t" .. opts .. "\t" .. cmd, handleCall's req.payload) or replay sees it
     # as a different call than the one in the journal and fails script_nondeterminism - steps.command
@@ -688,7 +690,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       "pod_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_reason END, " &
       "pod_message = CASE WHEN wait_reason = 'quota_exceeded' THEN '' ELSE pod_message END, " &
       "wait_reason = CASE WHEN wait_reason = 'quota_exceeded' THEN NULL ELSE wait_reason END " &
-      "WHERE id = ? AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts, profile",
+      "WHERE id = ? AND state = ? RETURNING run_id, ordinal, image, command, attempt, opts, profile, job_id",
       protoName(ssStarting), req.session_id, claimedNow, stepId, protoName(ssPending)]])
     let vals = r["results"][0]{"values"}
     if vals == nil or vals.len == 0: continue    # another poll took it first
@@ -697,7 +699,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
-      profile: row[6].getStr, secret_names: secretNamesOf(row[5].getStr), env: startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow, row[5].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
+      profile: row[6].getStr, volume: (if isolatedWorkspace(row[5].getStr): row[7].getStr else: ""), secret_names: secretNamesOf(row[5].getStr), env: startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow, row[5].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
       step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr) or cacheDecls(row[5].getStr).len > 0: stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   # STO-006: the controller deleted these volumes; and the runs whose volume may go now (it is told again until it says it is done)
@@ -711,7 +713,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
   if not push and profileId.len > 0:      # the push channel answers for work, the poll names the drains
     for d in c.dueDrains(profileId, getTime().toUnix()):
       drainOrders.add DrainStep(step: StepRef(run_id: d.runId, seq: uint32(d.ordinal), attempt: uint32(d.attempt)), image: d.image,
-                                step_token: stepToken(master, d.runId, d.ordinal, d.attempt), artifacts: d.artifacts, logs: d.logs)
+                                step_token: stepToken(master, d.runId, d.ordinal, d.attempt), artifacts: d.artifacts, logs: d.logs, volume: d.volume)
   PollResponse(header: Header(protocol: 1), commands: commands, drain_steps: drainOrders, release_storage: release, config: controllerConfigOf(shardSettingsFromEnv()),
                gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000,
                conductors: (if push or profileId.len == 0: ConductorPlan() else: conductorPlanOf(c, profileId, master, req.namespace, settings)))

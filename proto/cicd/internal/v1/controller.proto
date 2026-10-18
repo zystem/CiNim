@@ -99,6 +99,7 @@ message DrainStep {
   string step_token = 3;
   bool artifacts = 4;                // the manifest of the artifacts is to be drained
   bool logs = 5;                     // the log spool is to be drained
+  string volume = 6;                 // the volume the step used: as StartStep.volume
 }
 
 // The end of an order: `ok` (everything asked is delivered, the reader Pod is gone), or `final` (it cannot be done: the volume is gone, the files do not match their SHA-256, the
@@ -111,13 +112,13 @@ message StepDrained {
 }
 
 message StartStep {
+  reserved 6;                        // workspace_isolated: the volume below says it
   StepRef step = 1;
   string image = 2;
   repeated string command = 3;
   map<string, string> env = 4;       // non-secret environment
   repeated string secret_names = 5;  // the secrets the step asked for, names only (6.7): the Pod's environment holds a placeholder for each and the shim
                                      // fetches the values from core with `step_token`; no value passes through the controller or the Pod's specification
-  bool workspace_isolated = 6;
   uint32 timeout_seconds = 7;
   uint64 log_max_bytes = 9;          // the profile's per-step log limit (0 = unlimited): the shim cuts the log there, with a marker
   uint64 log_spool_bytes = 10;       // the profile's spool size on the Pod (0 = the controller's default)
@@ -125,6 +126,7 @@ message StartStep {
   string profile = 12;               // D-42: the profile the step asked for ("" = ordinary, "build" = an image build): the controller picks the Pod's security class from it
   string step_token = 13;            // the step's own credential for fetching its secrets from core: an HMAC bound to this run, step and attempt, good while the step runs
   string opts_json = 8;              // the Lua step options as one canonical JSON object: mask, metrics, timeout (docs/metrics.md, docs/secrets-masking.md); "" = none
+  string volume = 14;                // STO-002: "" = the run's volume, shared by the jobs of the run; else the id of the job, whose steps share a volume of their own (`workspace = "isolated"`)
 }
 
 message CancelStep {

@@ -277,7 +277,7 @@ proc main() =
       released = releaseRunVolumes(be, resp.release_storage)       # idempotent: a run that never had a volume counts as released
       if released.len > 0: echo "jobcontroller: released the volume of ", released.len, " finished run(s)"
     for d in resp.drain_steps:
-      let o = DrainOrder(runId: d.step.run_id, seq: int(d.step.seq), attempt: int(d.step.attempt), image: d.image, token: d.step_token, artifacts: d.artifacts, logs: d.logs)
+      let o = DrainOrder(runId: d.step.run_id, seq: int(d.step.seq), attempt: int(d.step.attempt), image: d.image, volume: d.volume, token: d.step_token, artifacts: d.artifacts, logs: d.logs)
       let key = drainPodName(o.runId, o.seq, o.attempt)
       drainWork[key] = DrainWork(order: o, retryAt: (if key in drainWork: drainWork[key].retryAt else: 0.0), namedAt: epochTime())
     # one drain looked at per round: the Pod does the work, the controller only makes it and reads how it ended
@@ -320,7 +320,7 @@ proc main() =
           let made = startPod(be, st, cfg, StartRequest(runId: s.step.run_id, seq: int(s.step.seq), attempt: int(s.step.attempt),
             image: s.image, command: s.command, logMaxBytes: s.log_max_bytes, optsJson: s.opts_json,
             logSpoolBytes: s.log_spool_bytes, logHoldTimeout: int(s.log_hold_timeout_seconds), profile: s.profile,
-            secretNames: s.secret_names, stepToken: s.step_token,
+            secretNames: s.secret_names, stepToken: s.step_token, volume: s.volume,
             env: s.env.mapIt((it.key, it.value))), int64(epochTime()))
           case made.kind
           of ckQuota:

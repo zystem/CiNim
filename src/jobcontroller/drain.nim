@@ -15,6 +15,7 @@ const
 type
   DrainOrder* = object
     runId*: string
+    volume*: string                ## the id of the job whose volume the step used, "" for the run's (STO-002)
     seq*, attempt*: int
     image*, token*: string
     artifacts*, logs*: bool
@@ -67,7 +68,7 @@ proc drainStep*(be: Backend; o: DrainOrder; a: DrainAddrs): DrainOutcome =
   if seen == nil or seen.kind != JObject: return DrainOutcome(state: dsRetry, detail: "the Pod could not be read")
   if seen{"kind"}.getStr == "Status":
     if seen{"code"}.getInt != 404 and seen{"reason"}.getStr != "NotFound": return DrainOutcome(state: dsRetry, detail: "the Pod could not be read")
-    let made = be.createDrainPod(pod, o.runId, o.image, drainCommand(o, a))
+    let made = be.createDrainPod(pod, o.runId, o.volume, o.image, drainCommand(o, a))
     case made.kind
     of ckOk, ckTransport: return DrainOutcome(state: dsMore, detail: "the drain Pod is being made")
     of ckQuota: return DrainOutcome(state: dsRetry, detail: "no drain Pod for now: " & made.message)

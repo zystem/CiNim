@@ -102,10 +102,10 @@ proc applyShardSettings*(s: ShardSettings) = shard = s
 proc podBody(r: PodRequest): JsonNode =
   let sec = podsec.podSecurity(shard.build, r.build, r.deploy)
   let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
-  let vol = runvolume.podVolume(shard.volume, r.runId, r.image, shimMount, sec.containerCtx, sec.resources)
+  let vol = runvolume.podVolume(shard.volume, r.runId, r.image, shimMount, sec.containerCtx, sec.resources, r.volume)
   result = %*{
     "apiVersion": "v1", "kind": "Pod",
-    "metadata": {"name": r.name, "labels": {"cicd.io/run": r.runId}},
+    "metadata": {"name": r.name, "labels": {runvolume.runLabel: r.runId, runvolume.volumeLabel: runvolume.volumeId(r.runId, r.volume)}},
     "spec": {
       "restartPolicy": "Never", "automountServiceAccountToken": false,
       # the kubelet's SIGTERM -> SIGKILL window must cover the shim's own: build grace (20 s) + a short log flush
@@ -130,7 +130,7 @@ proc podBody(r: PodRequest): JsonNode =
   for k, v in sec.labels: result["metadata"]["labels"][k] = v
   if not sec.hostUsers: result["spec"]["hostUsers"] = %false
 
-proc drainBody(name, runId, image: string; cmd: seq[string]): JsonNode =
+proc drainBody(name, runId, volume, image: string; cmd: seq[string]): JsonNode =
   ## The Pod of a drain (docs/artifacts.md): the run's volume as a step Pod sees it (`/cicd/workspace`, `/cicd/state`), the shim, and the keys of the shim to reach the core, running
   ## `cicd-shim --drain`. Same security class as an ordinary step, so that it reads what a step of that user wrote. On the node of the run's other Pods when there are any (a
   ## ReadWriteOnce volume is attached to one node), anywhere else when there are none. It is a Pod of the steps' policy: DNS and the core's ports, nothing else.
@@ -138,7 +138,7 @@ proc drainBody(name, runId, image: string; cmd: seq[string]): JsonNode =
   let shimMount = %*{"name": "shim", "mountPath": "/cicd/shim", "readOnly": true}
   result = %*{
     "apiVersion": "v1", "kind": "Pod",
-    "metadata": {"name": name, "labels": {"cicd.io/run": runId, "cicd.io/drain": "true"}},
+    "metadata": {"name": name, "labels": {runvolume.runLabel: runId, runvolume.volumeLabel: runvolume.volumeId(runId, volume), "cicd.io/drain": "true"}},
     "spec": {
       "restartPolicy": "Never", "automountServiceAccountToken": false, "terminationGracePeriodSeconds": 30,
       "securityContext": sec.podCtx,
@@ -151,9 +151,9 @@ proc drainBody(name, runId, image: string; cmd: seq[string]): JsonNode =
       "volumes": [%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}},
                   %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [
                     {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"}, {"key": "core.pub", "path": "curve/core.pub"}]}},
-                  %*{"name": "data", "persistentVolumeClaim": {"claimName": runvolume.claimName(runId)}}],
+                  %*{"name": "data", "persistentVolumeClaim": {"claimName": runvolume.claimName(runId, volume)}}],
       "affinity": {"podAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [
-        {"weight": 100, "podAffinityTerm": {"labelSelector": {"matchLabels": {runvolume.runLabel: runId}}, "topologyKey": "kubernetes.io/hostname"}}]}}}}
+        {"weight": 100, "podAffinityTerm": {"labelSelector": {"matchLabels": {runvolume.volumeLabel: runvolume.volumeId(runId, volume)}}, "topologyKey": "kubernetes.io/hostname"}}]}}}}
   for k, v in sec.labels: result["metadata"]["labels"][k] = v
   if not sec.hostUsers: result["spec"]["hostUsers"] = %false
 
@@ -178,8 +178,8 @@ proc backendOf*(k: K8s): Backend =
         return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
       echo "jobcontroller: created pod ", r.name
       CreateOutcome(kind: ckOk),
-    createDrainPod: proc (name, runId, image: string; cmd: seq[string]): CreateOutcome =
-      let raw = Generic_createNamespacedResource(kk.pods, kk.ns.cstring, ($drainBody(name, runId, image, cmd)).cstring, nil)
+    createDrainPod: proc (name, runId, volume, image: string; cmd: seq[string]): CreateOutcome =
+      let raw = Generic_createNamespacedResource(kk.pods, kk.ns.cstring, ($drainBody(name, runId, volume, image, cmd)).cstring, nil)
       if raw == nil:
         return CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "no response from the Kubernetes API client")
       let j = jstr(raw)
@@ -222,24 +222,38 @@ proc backendOf*(k: K8s): Backend =
         return false
       echo "jobcontroller: deleted pod ", name
       true,
-    ensureRunVolume: proc (runId: string): CreateOutcome =
-      let raw = Generic_createNamespacedResource(kk.claims, kk.ns.cstring, ($claimBody(shard.volume, runId)).cstring, nil)
+    ensureRunVolume: proc (runId, volume: string): CreateOutcome =
+      let name = claimName(runId, volume)
+      let raw = Generic_createNamespacedResource(kk.claims, kk.ns.cstring, ($claimBody(shard.volume, runId, volume)).cstring, nil)
       if raw == nil:
-        stderr.writeLine "jobcontroller: create claim " & claimName(runId) & ": no response from the Kubernetes API client"
+        stderr.writeLine "jobcontroller: create claim " & name & ": no response from the Kubernetes API client"
         return CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "no response from the Kubernetes API client")
       let j = jstr(raw)
       if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "AlreadyExists":
-        stderr.writeLine "jobcontroller: create claim " & claimName(runId) & " failed: " & $j
+        stderr.writeLine "jobcontroller: create claim " & name & " failed: " & $j
         return classifyCreateFailure(j{"code"}.getInt, j{"reason"}.getStr, j{"message"}.getStr)
-      if j.kind == JObject and j{"status"}.getStr != "Failure": echo "jobcontroller: created claim ", claimName(runId)
+      if j.kind == JObject and j{"status"}.getStr != "Failure": echo "jobcontroller: created claim ", name
       CreateOutcome(kind: ckOk),
     releaseRunVolume: proc (runId: string): bool =
-      let j = jstr(Generic_deleteNamespacedResource(kk.claims, kk.ns.cstring, claimName(runId).cstring, "{}".cstring))
-      if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "NotFound":
-        stderr.writeLine "jobcontroller: delete claim " & claimName(runId) & " failed: " & $j
-        return false
-      echo "jobcontroller: released the volume of run ", runId
-      true,
+      ## the run's claim and those of its jobs (STO-002): every claim that carries the run's label, and the run's own by name in case the list could not be read
+      var names = @[claimName(runId)]
+      let q = list_createList()
+      let selector = runLabel & "=" & runId       # the client keeps the pointer: it must outlive the call
+      list_addElement(q, keyValuePair_create("labelSelector".cstring, cast[pointer](selector.cstring)))
+      let listed = jstr(Generic_listNamespaced(kk.claims, kk.ns.cstring, q))
+      list_freeList(q)
+      if listed.kind != JObject or listed{"items"} == nil or listed["items"].kind != JArray: return false       # not read: conclude nothing, ask again
+      for it in listed["items"]:
+        let n = it{"metadata", "name"}.getStr
+        if n.len > 0 and n notin names: names.add n
+      var allGone = true
+      for n in names:
+        let j = jstr(Generic_deleteNamespacedResource(kk.claims, kk.ns.cstring, n.cstring, "{}".cstring))
+        if j.kind == JObject and j{"status"}.getStr == "Failure" and j{"reason"}.getStr != "NotFound":
+          stderr.writeLine "jobcontroller: delete claim " & n & " failed: " & $j
+          allGone = false
+      if allGone: echo "jobcontroller: released the volumes of run ", runId, " (", names.len, ")"
+      allGone,
     createConductor: proc (name, secretJson, podJson: string): CreateOutcome =
       ## the conductor's Secret first (its credential; one that is there already is the same), then its Pod
       let rs = jstr(Generic_createNamespacedResource(kk.secrets, kk.ns.cstring, secretJson.cstring, nil))

@@ -2,7 +2,11 @@
 # Alpine stage (musl end to end, as tools/shim/build_static.sh, build_core.sh and build_controller.sh do with `docker run`) and copied into
 # scratch images. Run it with tools/image/kaniko-build.sh, or by hand with Kaniko and --target=core and --target=controller (the second run
 # finds every RUN of the build stage in the cache, --cache=true).
-FROM nimlang/nim:2.2.4-alpine AS deps
+# DEPS_IMAGE: the image that the stage `deps` below is made from. Empty: the stage `deps-build` is built here (every build then makes the libraries again, or finds them in the cache). A
+# registry image of the `deps-build` stage (--target=deps-build, pushed as cinim-deps:<hash of this stage, cinim.nimble and tools/k8s/build_client.sh>) lets the builds of the
+# components run side by side, each from it, without any of them making the libraries (deploy/examples/self-build).
+ARG DEPS_IMAGE=
+FROM nimlang/nim:2.2.4-alpine AS deps-build
 RUN apk add --no-cache bash coreutils upx g++ make cmake git autoconf automake libtool linux-headers curl openssl-dev openssl-libs-static \
     zlib-dev zlib-static sqlite-dev sqlite-static ca-certificates
 # libsodium and libzmq as static archives (the ZeroMQ transport, D-24)
@@ -20,6 +24,7 @@ RUN K8S_STATIC=1 /src/tools/k8s/build_client.sh /opt/k8s >/dev/null
 # the nimble packages, from the package file alone so that this layer is cached
 COPY cinim.nimble /src/cinim.nimble
 RUN cd /src && nimble install -y --depsOnly
+FROM ${DEPS_IMAGE:-deps-build} AS deps
 # one build stage for every binary (Kaniko is run with --skip-unused-stages: a target builds only its own)
 FROM deps AS build-shim
 COPY . /src

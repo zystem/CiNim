@@ -108,19 +108,34 @@ suite "the volume the steps of a run share (STO-001, STO-006)":
     let st = openState(":memory:")
     var order: seq[string]
     var be = backendOf(newFake())
-    be.ensureRunVolume = proc (runId: string): CreateOutcome =
-      order.add "claim " & runId & (if st.has("ci-s1-run-0-1"): " (row exists)" else: "")
+    be.ensureRunVolume = proc (runId, volume: string): CreateOutcome =
+      order.add "claim " & runId & (if volume.len > 0: "/" & volume else: "") & (if st.has("ci-s1-run-0-1"): " (row exists)" else: "")
       CreateOutcome(kind: ckOk)
     be.createPod = proc (r: PodRequest): CreateOutcome =
       order.add "pod"
       CreateOutcome(kind: ckOk)
     check startPod(be, st, volCfg, req(), 100).ok
     check order == @["claim s1_run", "pod"]
+  test "STO-002 the claim made is that of the step's volume: the job's when it asked for one of its own, and the Pod is told which":
+    let st = openState(":memory:")
+    var claimed: seq[string]
+    var podVolume: string
+    var be = backendOf(newFake())
+    be.ensureRunVolume = proc (runId, volume: string): CreateOutcome =
+      claimed.add runId & "/" & volume
+      CreateOutcome(kind: ckOk)
+    be.createPod = proc (r: PodRequest): CreateOutcome =
+      podVolume = r.volume
+      CreateOutcome(kind: ckOk)
+    var r = req()
+    r.volume = "s1_job"
+    check startPod(be, st, volCfg, r, 100).ok
+    check claimed == @["s1_run/s1_job"] and podVolume == "s1_job"
   test "a claim that is refused (the quota of claims is used up) leaves no row and no Pod, and is told like a refused Pod":
     let st = openState(":memory:")
     let f = newFake()
     var be = backendOf(f)
-    be.ensureRunVolume = proc (runId: string): CreateOutcome =
+    be.ensureRunVolume = proc (runId, volume: string): CreateOutcome =
       CreateOutcome(kind: ckQuota, reason: "Forbidden", message: "exceeded quota: persistentvolumeclaims")
     let o = startPod(be, st, volCfg, req(), 100)
     check o.kind == ckQuota and f.creates.len == 0 and not st.has("ci-s1-run-0-1")

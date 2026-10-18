@@ -53,6 +53,7 @@ type
     memPeak*: int64              ## its peak memory, bytes
     oomKills*: int               ## OOM kills in its cgroup
     cache*: seq[string]          ## the caches the step declared, in order: the key that was restored for each, "" for a miss (DAT-004); the result of a `j.cache.restore` step
+    outputs*: string             ## the step's outputs (STO-003): the validated text of $CICD_OUTPUT, `name=value` lines, at most 4 KiB; the script reads them as `r.outputs`
     reason*: string              ## once stopping/done: ok | failed | timeout | terminated | logs_undelivered | env_rejected | ...
     exitCode*: Option[int]       ## the shim's own exit code once done
 
@@ -152,6 +153,7 @@ proc toJson*(s: ShimState; t: int64): JsonNode =
   if s.artifacts != asNone: result["arts"] = %($s.artifacts)
   if s.result.len > 0: result["result"] = %s.result
   if s.cache.len > 0: result["cache"] = %s.cache
+  if s.outputs.len > 0: result["outputs"] = %s.outputs
   if s.cpuSec > 0 or s.memPeak > 0 or s.oomKills > 0:
     result["res"] = %*{"cpu_s": s.cpuSec, "mem_peak": s.memPeak, "oom": s.oomKills}
   if s.cmdExit.isSome: result["cmd"]["exit"] = %s.cmdExit.get
@@ -167,7 +169,7 @@ proc fromJson*(j: JsonNode): Option[ShimState] =
                       phase: parseEnum[ShimPhase](j["ph"].getStr), cmdStarted: j{"cmd", "started"}.getBool,
                       logs: parseEnum[LogsState](j{"logs"}.getStr("none")),
                       artifacts: parseEnum[ArtifactsState](j{"arts"}.getStr("none")), result: j{"result"}.getStr, lines: j{"lines"}.getInt,
-                      blocks: j{"blocks"}.getInt, dropped: j{"dropped"}.getInt, truncated: j{"trunc"}.getBool, reason: j{"reason"}.getStr,
+                      blocks: j{"blocks"}.getInt, dropped: j{"dropped"}.getInt, truncated: j{"trunc"}.getBool, reason: j{"reason"}.getStr, outputs: j{"outputs"}.getStr,
                       cpuSec: j{"res", "cpu_s"}.getFloat, memPeak: j{"res", "mem_peak"}.getBiggestInt, oomKills: j{"res", "oom"}.getInt)
     if j{"cache"} != nil and j["cache"].kind == JArray:
       for k in j["cache"].elems: s.cache.add k.getStr

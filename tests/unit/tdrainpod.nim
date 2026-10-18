@@ -11,6 +11,7 @@ func sha(data: string): string =
 type World = ref object
   pods: Table[string, JsonNode]
   cmds: Table[string, seq[string]]
+  volumes: Table[string, string]      ## the volume each drain Pod was asked to mount
   deleted: seq[string]
   refuse: CreateOutcome
 
@@ -18,7 +19,8 @@ proc backendOf(w: World): Backend =
   Backend(
     readPod: proc (name: string): JsonNode =
       if name in w.pods: w.pods[name] else: %*{"kind": "Status", "code": 404, "reason": "NotFound"},
-    createDrainPod: proc (name, runId, image: string; cmd: seq[string]): CreateOutcome =
+    createDrainPod: proc (name, runId, volume, image: string; cmd: seq[string]): CreateOutcome =
+      w.volumes[name] = volume
       if w.refuse.kind != ckOk: return w.refuse
       w.pods[name] = %*{"status": {"phase": "Pending"}}
       w.cmds[name] = cmd
@@ -56,6 +58,15 @@ suite "DAT-003 the Pod of a drain":
     let logsOnly = World()
     discard drainStep(logsOnly.backendOf, order(artifacts = false, logs = true), addrs)
     check "--logs" in logsOnly.cmds[podName] and "--artifacts" notin logsOnly.cmds[podName]
+  test "STO-002 the drain Pod mounts the volume of the order: the job's when the step had one of its own":
+    let w = World()
+    var o = order()
+    o.volume = "s1_job"
+    discard drainStep(w.backendOf, o, addrs)
+    check w.volumes[podName] == "s1_job"
+    let shared = World()
+    discard drainStep(shared.backendOf, order(), addrs)
+    check shared.volumes[podName] == ""
   test "a Pod that is being made or is working is waited for, and not made twice":
     let w = World()
     let be = w.backendOf

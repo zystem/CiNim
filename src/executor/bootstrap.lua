@@ -302,6 +302,14 @@ local function norm_lock(v)
   return v
 end
 
+-- `workspace` of ci.job (STO-002): "shared" (the default) is the run's volume, every job sees it; "isolated" is a volume of the job's own, made for it and seen by no other job. The steps of a job
+-- share it. It reaches the core in the options of each step, where "shared" says nothing.
+local function norm_workspace(v)
+  if v == nil or v == "shared" then return nil end
+  if v ~= "isolated" then error("ci.job: workspace is \"shared\" or \"isolated\"", 3) end
+  return v
+end
+
 local function norm_timeout(v)
   if v == nil or v == false then return nil end
   local s = parse_duration(v, "timeout")
@@ -580,8 +588,18 @@ local function step_opts(job, opts)
   if secrets and #secrets > 0 then parts[#parts + 1] = '"secrets":' .. secrets_json(secrets) end
   if step_env then parts[#parts + 1] = '"step_env":' .. env_json(step_env) end
   if timeout then parts[#parts + 1] = '"timeout":' .. timeout end
+  if job.__workspace then parts[#parts + 1] = '"workspace":' .. jstr(job.__workspace) end
   if #parts == 0 then return "" end
   return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- The outputs of a step (STO-003): the text after the exit code in its answer is `name=value` lines (a backslash is \\ and a line break is \n in a value); a line that is not a pair is left out.
+local function parse_outputs(text)
+  local t = {}
+  for name, value in text:gmatch("([A-Za-z_][A-Za-z0-9_]*)=([^\n]*)\n") do
+    t[name] = value:gsub("\\(.)", function(c) if c == "n" then return "\n" end return c end)
+  end
+  return t
 end
 
 local Job_mt = { __index = {
@@ -599,12 +617,17 @@ local Job_mt = { __index = {
     -- payload: job key, image, profile ("" = the ordinary one), canonical options JSON ("" = none) and the command, tab-separated; the
     -- command is last because it may itself contain tabs (core splits into five fields)
     if opts and opts.ignore_failure ~= nil and type(opts.ignore_failure) ~= "boolean" then error("Job:sh: ignore_failure must be a boolean", 2) end
-    local code, out = call("job_sh", self.__key .. "\t" .. self.__image .. "\t" .. self.__profile .. "\t" .. step_opts(self, opts) .. "\t" .. cmd, line):match("^(%-?%d+)\n(.*)$")
+    local image = self.__image
+    if opts and opts.image ~= nil then
+      if type(opts.image) ~= "string" or opts.image == "" then error("Job:sh: image is a non-empty string", 2) end
+      image = opts.image
+    end
+    local code, out = call("job_sh", self.__key .. "\t" .. image .. "\t" .. self.__profile .. "\t" .. step_opts(self, opts) .. "\t" .. cmd, line):match("^(%-?%d+)\n(.*)$")
     code = tonumber(code)
     -- a non-zero code fails the job (and so the run, unless the script catches the error); `ignore_failure = true` returns it instead
     -- (6.7, ShOpts.ignore_failure). The code is in the journal, so a replay fails at the same call.
     if code ~= 0 and not (opts and opts.ignore_failure) then error("step failed with code " .. tostring(code), 2) end
-    return { code = code, outputs = {}, stdout = (opts and opts.capture) and out or nil }
+    return { code = code, outputs = parse_outputs(out), stdout = (opts and opts.capture) and out or nil }
   end,
 } }
 
@@ -615,7 +638,7 @@ local Job_mt = { __index = {
 local function cache_step(job, decl, line)
   step_count = step_count + 1
   if step_count > MAX_STEPS then error("step_limit: a run has at most " .. MAX_STEPS .. " steps; the step at line " .. line .. " is the " .. step_count .. "th", 0) end
-  local only = { __key = job.__key, __image = job.__image, __profile = job.__profile, __metrics = "", __mask = job.__mask, __timeout = job.__timeout, __env = job.__env, __cache = { decl } }
+  local only = { __key = job.__key, __image = job.__image, __profile = job.__profile, __metrics = "", __mask = job.__mask, __timeout = job.__timeout, __env = job.__env, __cache = { decl }, __workspace = job.__workspace }
   local code, out = call("job_sh", job.__key .. "\t" .. job.__image .. "\t" .. job.__profile .. "\t" .. step_opts(only, nil) .. "\t" .. "true", line):match("^(%-?%d+)\n(.*)$")
   code = tonumber(code)
   if code ~= 0 then error("step failed with code " .. tostring(code), 3) end
@@ -1173,7 +1196,7 @@ G.ci = {
     if opts.id ~= nil then claim_id(check_id(opts.id, "ci.job"), getline()) end
     cur.jobs = cur.jobs + 1
     local j = setmetatable({ __key = (cur.path == "m" and "" or (cur.path .. "/")) .. "job-" .. cur.jobs, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
-      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
+      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __workspace = norm_workspace(opts.workspace), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
       __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env"), __cache = norm_cache(opts.cache, 3) }, Job_mt)
     j.cache = job_cache_api(j)
     local lock = norm_lock(opts.lock)
