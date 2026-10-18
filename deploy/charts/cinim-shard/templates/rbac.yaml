@@ -27,9 +27,10 @@ rules:
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [delete]
+  # get: the reconciliation compares a policy with the one the core makes now and replaces it when they differ (SHD-008)
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]
-    verbs: [create, delete]
+    verbs: [create, delete, get]
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [rolebindings]
     verbs: [create, delete]
@@ -37,7 +38,7 @@ rules:
   # the deploy profile (D-48) reaches the API server through a CiliumNetworkPolicy that the core makes in the namespace of each organisation
   - apiGroups: [cilium.io]
     resources: [ciliumnetworkpolicies]
-    verbs: [create, delete]
+    verbs: [create, delete, get]
 {{- end }}
   # giving the step role away is allowed for that role only
   - apiGroups: [rbac.authorization.k8s.io]

@@ -465,7 +465,8 @@ A step's command starts in `/cicd/workspace` (the shim changes to it before the 
 At start and every `organizations.reconcileInterval` seconds (300) the core compares the organisations in its database with their Kubernetes objects
 and makes again what is missing, with the same content: a deleted NetworkPolicy, a lost Deployment, the whole namespace after a restore into a new
 cluster. A switched-off organisation is expected without its controller and its Ingress. The controller of an organisation is a Pod that the core makes and supervises (D-62): it lists the controller Pods of the namespace and deletes the ones it does not know or that are not healthy, and when none is good it
-makes one with the token of the current generation of the identity (a new generation first when the identity was used). Apart from the controller's Pod, the reconciliation
+makes one with the token of the current generation of the identity (a new generation first when the identity was used). Apart from the controller's Pod and a NetworkPolicy that differs from what the core makes now (every policy carries the
+fingerprint of the object, `cinim.io/spec-hash`; one with another or none is deleted and made again, `policies_replaced` says which), the reconciliation
 deletes nothing: a namespace of this shard that no organisation owns, or whose policy labels differ from what the core would make (Pod Security,
 the build-pod policy), is an alert. The core reads only namespaces and the controller Pods, so a Secret or a NetworkPolicy that was
 changed by hand is not noticed, only one that is missing.

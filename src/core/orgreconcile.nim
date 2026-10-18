@@ -38,6 +38,7 @@ type
     controllerReplaced*: bool      ## the controller's Pod was not the one the core makes now (a new image, new settings) and has been made again
     identityRenewed*: bool         ## a new generation of the controller's identity was made in this pass (the controller was not enrolled, was silent, or ended)
     controllerRemoved*: seq[string] ## "<Pod>: <why>" for every controller Pod the core deleted
+    policiesReplaced*: seq[string]  ## the NetworkPolicies that differed from what the core makes now and were deleted and made again
     error*: string
 
   Alert* = object
@@ -149,6 +150,22 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: 
   if not r.ok:
     result.error = r.failedStep & ": " & r.error
     return
+  # A policy that differs from what the core makes now (a new port in the rules of the shard, a changed network mode) is deleted and made again: it carries the fingerprint of the
+  # object the core made (`hashAnnotation`), and one that carries another, or none (made before the fingerprint), is not the policy the core means. Nothing else is replaced.
+  let (steps, _) = organizationSteps(cfg, o.slug, curve, active)
+  for st in steps:
+    if st.kind notin policyKinds: continue
+    let have = k.getObject(st.kind, st.namespace, st.objectName)
+    if have.error.len > 0:
+      result.error = "reading " & st.name & ": " & have.error
+      return
+    if not have.found or have.obj{"metadata", "annotations", hashAnnotation}.getStr == st.obj["metadata"]["annotations"][hashAnnotation].getStr: continue
+    let gone = k.remove(st.kind, st.namespace, st.objectName)
+    let made = if gone.outcome == oFailed: gone else: k.create(st.kind, st.namespace, st.obj)
+    if made.outcome == oFailed:
+      result.error = "replacing " & st.name & ": " & made.detail
+      return
+    result.policiesReplaced.add st.objectName
   if cfg.controllerImage.len > 0: superviseController(k, cfg, o.slug, active, hooks, now, coreStarted, result)
 
 proc namespaceAlerts(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; shard: string): tuple[alerts: seq[Alert], error: string] =
@@ -227,7 +244,7 @@ func toJson*(p: PassResult): JsonNode =
   var orgs = newJArray()
   for o in p.orgs:
     orgs.add %*{"slug": o.slug, "state": o.state, "created": o.created, "controller_replaced": o.controllerReplaced,
-                "identity_renewed": o.identityRenewed, "controller_removed": o.controllerRemoved, "error": o.error}
+                "identity_renewed": o.identityRenewed, "controller_removed": o.controllerRemoved, "policies_replaced": o.policiesReplaced, "error": o.error}
   var alerts = newJArray()
   for a in p.alerts:
     alerts.add %*{"code": a.code, "namespace": a.namespace, "organization": a.organization, "detail": a.detail}
@@ -311,6 +328,7 @@ proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.
           for o in r.orgs:
             if o.created.len > 0: echo "core: reconciliation made again for ", o.slug, ": ", o.created.join(", ")
             for g in o.controllerRemoved: echo "core: the controller of ", o.slug, ": deleted ", g
+            if o.policiesReplaced.len > 0: echo "core: the network policies of ", o.slug, " differed from what the core makes and were made again: ", o.policiesReplaced.join(", ")
             if o.error.len > 0: stderr.writeLine "core: reconciliation of " & o.slug & ": " & o.error
           for s in r.purged: echo "core: the retention of the organisation ", s, " is over, deleted"
         except CatchableError as e:

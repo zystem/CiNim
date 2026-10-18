@@ -86,6 +86,17 @@ suite "SHD-007 the objects of an organisation":
       if st.objectName == "cinim-controller-curve": s = st.obj
     check s["stringData"]["core.pub"].getStr == "CP" and s["stringData"]["client.key"].getStr == "LK"
     check not s["stringData"].hasKey("core.key")
+  test "SHD-008 every network policy carries the fingerprint of the object the core made, which changes with its content (the reconciliation replaces a policy by it)":
+    var hashes: seq[string]
+    for st in organizationSteps(cfg(), "acme", curve).steps:
+      if st.kind == "NetworkPolicy": hashes.add st.obj["metadata"]["annotations"]["cinim.io/spec-hash"].getStr
+    check hashes.len >= 3 and hashes.deduplicate.len == hashes.len
+    var c = cfg()
+    c.storageDirectPort = 18091
+    var changed = 0
+    for st in organizationSteps(c, "acme", curve).steps:
+      if st.kind == "NetworkPolicy" and st.obj["metadata"]["annotations"]["cinim.io/spec-hash"].getStr notin hashes: inc changed
+    check changed == 1                                   # the policy of the steps got a rule; the others are the same
   test "a quota, a limit range and three network policies, default-deny first":
     let steps = organizationSteps(cfg(), "acme", curve).steps
     var kinds: seq[string]

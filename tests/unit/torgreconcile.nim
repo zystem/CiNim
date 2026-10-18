@@ -297,6 +297,55 @@ suite "IAM-003, D-62 the core supervises the controller: a Pod of its own, with 
     let r = f.pass(mk, newRec())
     check r.orgs[0].error == "" and f.pods.len == 0 and f.calls.filterIt("/pods" in it).len == 0
 
+suite "SHD-008 a NetworkPolicy that differs from what the core makes now is replaced":
+  let dns = "/apis/networking.k8s.io/v1/namespaces/cinim-001-acme/networkpolicies/allow-dns-and-collector"
+  test "policies the core made are left alone: the fingerprint they carry is the one it would make":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    check r.orgs[0].policiesReplaced.len == 0 and f.deletes.len == 0
+    check f.objects[dns]["metadata"]["annotations"]["cinim.io/spec-hash"].getStr.len == 24
+  test "a policy that carries another fingerprint (the rules of the core changed: a port, the network mode) is deleted and made again with the new content":
+    let f = Cluster()
+    let old = maker()
+    f.made(old, "acme")
+    let fresh: ConfigMaker = proc (egress, ingress: string): ProvisionConfig {.gcsafe.} =
+      {.cast(gcsafe).}: result = old(egress, ingress)
+      result.storageDirectPort = 18091                      # a rule the policy did not have when it was made
+    let r = reconcilePass(api(f), fresh, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    check r.orgs[0].policiesReplaced == @["allow-dns-and-collector"] and r.orgs[0].error == ""
+    let at = f.calls.find("DELETE " & dns)
+    check at >= 0 and "POST /apis/networking.k8s.io/v1/namespaces/cinim-001-acme/networkpolicies" in f.calls[at + 1 .. ^1]       # deleted, then made again
+    var ports: seq[int]
+    for rule in f.objects[dns]["spec"]["egress"]:
+      for p in rule{"ports"}.getElems: ports.add p["port"].getInt
+    check 18091 in ports
+    check reconcilePass(api(f), fresh, curve, @[org("acme")], hooksFor(newRec()), 1000, 100).orgs[0].policiesReplaced.len == 0       # and then it is the one wanted
+  test "a policy made before the fingerprint existed has none: it is replaced once":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    f.objects[dns]["metadata"].delete "annotations"
+    check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100).orgs[0].policiesReplaced == @["allow-dns-and-collector"]
+  test "a policy that is missing is made, not counted as replaced":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    f.objects.del dns
+    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    check r.orgs[0].policiesReplaced.len == 0 and "network policy allow-dns-and-collector" in r.orgs[0].created
+  test "a refusal to delete or to read a policy is told for that organisation":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")
+    f.objects[dns]["metadata"]["annotations"]["cinim.io/spec-hash"] = %"stale"
+    let denying = KubeApi(transport: proc (meth, path, body: string): tuple[code: int, body: string] =
+      if meth == "DELETE" and path == dns: return (403, $(%*{"message": "forbidden: delete"}))
+      api(f).transport(meth, path, body))
+    let r = reconcilePass(denying, mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    check "replacing network policy allow-dns-and-collector" in r.orgs[0].error and r.orgs[0].policiesReplaced.len == 0
+
 suite "SHD-008 reconciliation":
   test "an organisation whose objects are all there: nothing is made, nothing is deleted":
     let f = Cluster()

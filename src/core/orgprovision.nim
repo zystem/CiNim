@@ -11,6 +11,8 @@ const
   controllerName* = "cinim-job-controller"      ## the ServiceAccount and the label of the organisation's controller; its Pod is `<name>-<generation>`
   curveSecretName* = "cinim-controller-curve"
   generationAnnotation* = "cinim.io/generation" ## on the controller's Pod: the generation of the identity whose one-time token it was started with (IAM-003, common/ctrlauth.nim)
+  hashAnnotation* = "cinim.io/spec-hash"        ## on a NetworkPolicy: the fingerprint of the object the core made; the reconciliation replaces a policy that carries another one (SHD-008)
+  policyKinds* = ["NetworkPolicy", "CiliumNetworkPolicy"]
   specAnnotation* = "cinim.io/controller-spec"  ## on the controller's Pod: the fingerprint of what the core makes (`controllerSpecHash`)
   stateClaimName* = "cinim-job-controller-state"
   coreServiceName* = "cinim-core"               ## the Service of the core in the namespace of the shard (chart cinim-shard)
@@ -260,7 +262,7 @@ func ingressObject(cfg: ProvisionConfig; slug: string): JsonNode =
   if cfg.tlsSecret.len > 0 and cfg.host.len > 0:
     result["spec"]["tls"] = %*[{"hosts": [cfg.host], "secretName": cfg.tlsSecret}]
 
-func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; active = true): tuple[steps: seq[Step], skipped: seq[string]] =
+proc organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; active = true): tuple[steps: seq[Step], skipped: seq[string]] =
   ## SHD-007 (2)..(5): the objects of the namespace of the organisation, in the order of the specification, and its Ingress in the `multi` mode.
   ## Builds (D-42) need none of their own: a build Pod is made by the same controller, in the same namespace. A switched-off organisation
   ## (`active` false) is expected without its Ingress (SHD-008); everything else of it stays. The controller's Pod is not here: the core starts it with a token of its own
@@ -293,7 +295,9 @@ func organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; ac
       {"type": "Container", "default": {"memory": "1Gi", "ephemeral-storage": (if cfg.stepEphemeralLimit.len > 0: cfg.stepEphemeralLimit else: "1Gi")},
       "defaultRequest": {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "64Mi"}, "max": {"memory": "32Gi"}}]}})
   for p in networkPolicies(cfg, slug):
-    result.steps.add step("network policy " & p["metadata"]["name"].getStr, p["kind"].getStr, ns, p["metadata"]["name"].getStr, p)
+    var stamped = p.copy
+    stamped["metadata"]["annotations"] = %*{hashAnnotation: fingerprint($p)}      # the API server fills defaults in, so a stored policy is compared by this, not by its spec
+    result.steps.add step("network policy " & p["metadata"]["name"].getStr, p["kind"].getStr, ns, p["metadata"]["name"].getStr, stamped)
   if cfg.multi and active:
     result.steps.add Step(name: "ingress", kind: "Ingress", namespace: cfg.shardNamespace, objectName: ingressName(slug), obj: ingressObject(cfg, slug))
 
