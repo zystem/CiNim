@@ -6,7 +6,7 @@
 # throw-away key pair in software, asks the token for the shared secret with the throw-away public key and compares it with the software result.
 set -euo pipefail
 MODULE="${MODULE:-/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so}"
-KEY_ID="${KEY_ID:-01}"
+KEY_ID="${KEY_ID:-b7b300e04c0eacc53c12e752758af79f7f35f97d}"
 SLOT_ARGS="${SLOT_ARGS:-}"
 : "${CARD_PIN:?set CARD_PIN (the user PIN) in the environment; do not put it on the command line}"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT

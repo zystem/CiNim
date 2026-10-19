@@ -15,8 +15,14 @@ What exists today and what does not:
 | Wrapping a data key for two cards at once (a spare), rotation of the master key | not built |
 
 The commands of sections 4 and 5 (`pkcs11-tool` for the key pair, the public key and the ECDH, and `tools/hsm/card-check.sh`) were run against SoftHSM2, a software
-token, with the OpenSC 0.25 tools; the options of `sc-hsm-tool` were checked against that tool's own help. **Nothing was run on the card itself yet**; what depends
-on the card is marked [U] (unverified).
+token, with the OpenSC 0.25 tools; the options of `sc-hsm-tool` were checked against that tool's own help. What depends on the card is marked [U] (unverified).
+
+**Run on a card (2026-10-19, SmartCard-HSM 4K, firmware 4.1, OMNIKEY 3x21 reader, initialised with `--dkek-shares 2` and one key domain in use):** `tools/hsm/card-check.sh` passes: `ECDH1-DERIVE` is
+offered, the token's shared secret equals OpenSSL's, 391 ms per call including the start of `pkcs11-tool` and the login (the card itself is about 60 ms). Things that were different from this page:
+the card is initialised and its shares imported and the key made with the *Smart Card Shell* key manager (CardContact), which gives the key its own label and an ID that is a SHA-1 in hex (not `01`), so
+`KEY_ID=<that id> tools/hsm/card-check.sh`; `sc-hsm-tool` without arguments shows `DKEK shares` and the key check value of the DKEK (compare them on the second card), but it does not see key domains
+and says "Data object not found" for a card that uses them until the shares are imported; the key reference of the key is 1 (`pkcs15-tool --list-keys`). The backup (`--wrap-key`) and the restore on a
+second card are not yet tried.
 
 ## What is bought
 
