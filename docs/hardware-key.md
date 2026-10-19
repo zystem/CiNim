@@ -11,7 +11,7 @@ What exists today and what does not:
 | Master key from a file (`CINIM_SECRETS_KEY_FILE`) or derived from the CURVE key | built |
 | `KekProvider` seam in `core/kekprovider.nim` (wrap, unwrap, key id, "may pass or final" failures) | built |
 | The core's side of a key service next to the token (`CINIM_KEKD_URL`, mutual TLS, retry, cache, a component in `/api/v1/components`), and an emulator of that service | built, tested on a cluster with the emulator (sections 9 and 10) |
-| The service itself, `kekd`, with ECDH on the card | **not built yet**; this page prepares the hardware and the key so that it can be |
+| The service itself, `kekd` (`src/kekd`, section 11), with ECDH on the card | built; the cryptography and the door are tested with a software key, the card's public part and its fingerprint are read from the real card; the login and the ECDH on the card are run by the owner with `tools/hsm/kekd-card-test.sh` |
 | Wrapping a data key for two cards at once (a spare), rotation of the master key | not built |
 
 The commands of sections 4 and 5 (`pkcs11-tool` for the key pair, the public key and the ECDH, and `tools/hsm/card-check.sh`) were run against SoftHSM2, a software
@@ -143,7 +143,7 @@ The key reference of the key (1 here) is the number the card gave it; `sc-hsm-to
   `read -s CARD_PIN; export CARD_PIN` and unset it afterwards.
 - The SO-PIN: offline only.
 - The DKEK shares and their passwords: section 3.
-- `kekd`, when it exists, will run on a machine that nobody else uses, with the reader in a place that is not reachable by people who should not take the card.
+- `kekd` runs on a machine that nobody else uses, with the reader in a place that is not reachable by people who should not take the card.
 
 ## 8. What goes wrong, and what it costs
 
@@ -182,7 +182,7 @@ certificate for the same address is refused by the core; a core with no certific
 ## 10. The emulator, and what is built on the core's side
 
 The core's side is built and tested without the card, against an emulator of the key service (`tools/kekd-emu`, `src/kekd/emulator.nim`). The card's own service
-(`kekd`: ECDH on the card, a standard ECDH-ES construction for the wrapped key) is **not built yet**; it will speak the same protocol and replace the emulator.
+(`kekd`, section 11: ECDH on the card, a standard ECDH-ES construction for the wrapped key) speaks the same protocol and replaces the emulator.
 
 - **The protocol** (core/kekclient.nim, version 1): `GET /v1/info` gives the fingerprint of the master key; `POST /v1/wrap` and `POST /v1/unwrap` take and give a data key (hex)
   with additional data that binds it to its organisation. Errors that will not pass (`wrong_key`, `damaged`: 409, 422) are told from those that may (`locked`, busy,
@@ -199,5 +199,88 @@ Checked on a cluster with the emulator over plain HTTP (the mutual TLS of sectio
 it is down answers `secrets_unavailable`, a step started then waits in its shim and runs 19 s later when the service is back; a service with another key than the one that sealed
 the database is refused.
 
-Still to do, for the card: `kekd` itself; wrapping to two public keys, so that the spare card opens the secrets without the DKEK dance; rotation of the master key (the data
+Still to do, for the card: wrapping to two public keys, so that the spare card opens the secrets without the DKEK dance; rotation of the master key (the data
 keys re-wrapped; the secrets themselves are not re-encrypted).
+
+## 11. `kekd`: the key service of the card
+
+`src/kekd` (the program `kekd`, `src/kekd/main.nim`), the protocol of section 10.
+
+- **The construction** (`ecies.nim`): ECDH-ES on P-256. To **wrap**, the service needs the master *public* key only (so it wraps with the card out, and a spare card needs no ceremony to
+  receive new keys): it makes an ephemeral key pair in software (OpenSSL, `ossl.nim`), `Z` = ECDH(ephemeral, master public), `K` = HKDF-SHA256(`Z`, salt `cinim/kek/v1`, info
+  `cinim/kek/v1|<fingerprint>|<ephemeral point, hex>` and a byte `01`), and seals the data key with XChaCha20-Poly1305 (libsodium) under `K`, the additional data being the one the core gave.
+  The text is `ecies1.<fingerprint, 64 hex>.<ephemeral point, 65 bytes, hex>.<nonce 24 || ciphertext || tag, hex>`. To **unwrap**, the card does `Z` = ECDH(master private, ephemeral point)
+  (PKCS#11 `C_DeriveKey`, `CKM_ECDH1_DERIVE`, no KDF: the raw 32 bytes); the rest is the same. A point that is not on the curve is refused before the card sees it; the fingerprint in the text
+  is compared with the service's own first (`wrong_key`, 409, without asking the card); a tag that does not verify is `damaged` (422).
+- **The fingerprint** of the master key is the SHA-256 of its DER SubjectPublicKeyInfo: the number that `tools/hsm/card-check.sh` prints, and the `key_id` of `GET /v1/info`
+  (the core names its provider `kekd:<fingerprint>`).
+- **The card** (`pkcs11.nim`): the PKCS#11 module of OpenSC (`opensc-pkcs11.so`) is loaded with `dlopen`, so the program is built, or at least run, on the machine whose OpenSC it will use
+  (not in the static core's image); the layout of the module's function table is checked against its exported symbols at the start, and a module that does not match is refused. The
+  token is found by its label (`--token-label`), the key pair by its `CKA_ID` (`--key-id`). The PIN is read from `--pin-file` once, and **tried once**: if the card refuses it the service
+  answers `locked` (423) until it is started again, never retries (the card blocks after three wrong tries). A card that is taken out is `unavailable` (503, may pass) and is found again.
+- **The door** (`service.nim`, section 9): only additional data that begins with `cinim/dek/v1|` is wrapped or opened (422 `bad_aad` otherwise: the service is no oracle for anything else);
+  `--per-minute` and `--per-day` limits (429 `busy`); `--disable-file`: while that file exists everything is refused with 503 and the card is not touched (the switch of section 9);
+  every call is a JSON line in `--audit-file` (or the standard output): time, the client that the TLS front named in `--client-header`, operation, additional data, result; never a key or the PIN.
+- **Start**:  `kekd --key-id <CKA_ID> --pin-file <file> [--port 8443] [--public-key-file kek.pub.der] [--audit-file ...] [--disable-file ...] [--client-header x-client]`. With
+  `--public-key-file` (DER, `pkcs11-tool --read-object --type pubkey`) it starts and wraps with the card out, and a card in the reader that holds another key is refused at the start. It
+  listens on **every** address, in plain HTTP (GuildenStern has no bind option): run it behind the TLS front with client certificates of section 9 and close the port to everything else. Under systemd
+  give the PIN as `LoadCredential=pin:/etc/cinim/card-pin` and `--pin-file ${CREDENTIALS_DIRECTORY}/pin`.
+- **Tests**: `tests/unit/tkekdecies.nim` (a software key stands for the card: fingerprint equal to OpenSSL's, round trip, another additional data, another key, tampering, invalid points, a card that is
+  not there), `tests/unit/tkekdservice.nim` (the door, the audit, the answers the core tells apart, and the core's own `httpKek` against the running service). **On the real card**: the public key
+  was read and its fingerprint equals the card-check one, and `info` and `wrap` work through the program (no PIN, no login). The login and the ECDH on the card are checked by
+  `tools/hsm/kekd-card-test.sh` with your PIN in a file you make yourself (the script prints the time of an unwrap, the round trip, the refusals and the audit).
+
+## 12. OpenBao unsealed by the same card (PKCS#11 seal)
+
+Tried with OpenBao v2.6.1 and the plugin `kms-pkcs11` v0.2.1 (openbao-plugins; the seal is built in only up to v2.6.x and a plugin from v2.7.0), the OpenSC module, on this card.
+It is a second use of the card, next to `kekd`: the card unseals an OpenBao, `kekd` opens the data keys of CiNim.
+
+- **The key**: the seal cannot use the EC key of `kekd` (it takes `RSA_PKCS_OAEP` or `AES_GCM` only) and the card has no AES-GCM (its AES is CBC and CMAC; the OpenSC module offers none). Make an RSA-4096 pair on the card, with the
+  algorithms `RSA_DECRYPT_RAW,RSA_DECRYPT_OAEP` (OpenSC does the OAEP padding in software over the raw decryption), label `openbao`, in the DKEK domain as the first key was, and keep its backup like the first one's.
+  `tools/hsm/rsa-oaep-check.sh` (with `PIN_FILE=...` when there is no terminal) encrypts in software and decrypts on the card with OAEP SHA-256 (and SHA-1): both worked, about 1 s with the login.
+- **The configuration**: the plugin is declared and the seal is named like it (the library path is plain here; the plugin has `-alias name=path` and `BAO_PKCS11_ALIASES` to forbid plain paths):
+
+      plugin_directory = "/path/to/plugins"
+      plugin "kms" "pkcs11" { command = "openbao-plugin-kms-pkcs11"  version = "v0.2.1"  sha256sum = "<of the binary>" }
+      seal "pkcs11" {
+        lib           = "/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so"
+        token_label   = "cinim (UserPIN)"      # OpenSC adds " (UserPIN)" to the label of the token: `pkcs11-tool -L`
+        key_label     = "openbao"
+        mechanism     = "RSA_PKCS_OAEP"
+        rsa_oaep_hash = "sha256"
+        pin           = "file:///path/to/pin-file"       # a file, not the configuration or the environment
+      }
+
+- **What was run**: `bao operator init -recovery-shares=1` unsealed the server with the card; a secret written, the server stopped and started again: it unsealed by itself (the decryption on the card) and gave the secret back.
+  A `kekd` with its own login ran on the card at the same time (a wrap, an unwrap, the test of `kekd-card-test.sh`) and an OpenBao restart did not disturb it, nor it the restart.
+- **Not run**: a server of several nodes (Raft), a real deployment (the plugin is a dynamically linked binary that loads the OpenSC module: it runs on the machine with the reader, not in a container without `pcscd`),
+  the restore of this key from its backup on the second card, a wrong PIN (do not try: the seal and `kekd` each log in, and three wrong attempts block the card).
+
+## 13. OpenBao unsealed through `kekd` (the Transit face), also from another machine
+
+Section 12 needs the card on the machine of OpenBao. For OpenBao on another machine `kekd` has a **Transit face**: the two calls of the seal `transit` of OpenBao (`PUT /v1/<mount>/encrypt/<key>`,
+`PUT /v1/<mount>/decrypt/<key>`), answered like the Transit engine. Nothing is installed on the OpenBao side: the seal `transit` is built in, there is no plugin. The state of the search that led here
+(ready-made things first): OpenBao has the seals `kmip` (needs a KMIP server over the card: the Eviden KMS names the SmartCard-HSM, not tried), `transit` (this), and the plugins of its `openbao-plugins` collection
+(AWS, Azure, GCP, Alibaba, OCI, OVH, T Cloud, Securosys, PKCS#11); the clouds' protocols need SigV4, OAuth or request signing with a key, Transit needs none; no open server of any of them stands on a PKCS#11 card.
+
+- **Start** `kekd` with `--transit-key bao-seal` (repeatable; without it the face is off; `--transit-mount` if OpenBao's `mount_path` is not `transit`).
+- **OpenBao**:
+
+      seal "transit" {
+        address         = "https://kekd.example:8443"      # the TLS front of section 9
+        key_name        = "bao-seal"
+        mount_path      = "transit/"
+        disable_renewal = "true"                           # there is no token to renew
+        tls_ca_cert     = "/etc/openbao/kekd-ca.pem"
+        tls_client_cert = "/etc/openbao/client.pem"        # the client certificate that the front lets in
+        tls_client_key  = "/etc/openbao/client.key"
+      }
+
+  No `token`: **the token is not looked at**; who may call is decided by the front's client certificates (section 9), and `--client-header` puts the client's name in the audit.
+- **What it does**: the ciphertext is `vault:v1:` and the base64 of the wrapped text of section 11; the additional data is `openbao/seal/v1|<key name>`, so the core's door (`/v1/wrap`, `/v1/unwrap`: only `cinim/dek/v1|`) cannot open what OpenBao sealed, and
+  the face cannot open the core's data keys. The switch, the limits and the audit (`transit-encrypt`, `transit-decrypt`) are the same as for the core. An unknown key name is 404; a ciphertext that does not open is 400; a locked or absent card is 503
+  (the client of OpenBao tries again).
+- **Run**: OpenBao v2.6.1 with this `kekd` on the card, plain HTTP on one machine: `bao operator init -recovery-shares=1` unsealed with the card, a secret was written, the server stopped and started again: it unsealed by itself (the decryption on the
+  card, the audit lines `transit-decrypt`) and gave the secret back. Unit tests: `tkekdservice` (the face, the other door, the switch, the limit, the audit, the HTTP routes).
+- **Not run**: the same through the TLS front with client certificates and across a network (the seal's options `tls_*` are in the config but were not tried), a server of several nodes, and what OpenBao does when `kekd` is not reachable at its start
+  (it does not unseal and tries again; a restart of OpenBao while the key service or the card is away leaves it sealed until they are back).
