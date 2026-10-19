@@ -94,7 +94,7 @@ exit $rc
 -- brought back to the revision they had. The controllers and the conductors follow the core by themselves: the core replaces a controller of another image and drains a conductor of another image (D-62).
 -- The subcharts of the shard chart (rqlite, VictoriaLogs) are not in the repository (their archives are ignored by git) and the deploy profile reaches nothing but the API server: a job of the build
 -- profile fetches them once for a lock (`helm dependency build`) and keeps them as a cache of the organisation, the deploy job restores that.
-local HELM_DEPS = [[
+local HELM_DEPS = [=[
 set -eu
 [ -d charts-cache ] && exit 0
 export HELM_CACHE_HOME=$PWD/.helm/cache HELM_CONFIG_HOME=$PWD/.helm/config HELM_DATA_HOME=$PWD/.helm/data
@@ -103,7 +103,7 @@ cd src
 for u in $(grep -h '^[[:space:]]*repository:' deploy/charts/cinim-shard/Chart.yaml | awk '{print $2}' | sort -u); do helm repo add "r$(printf %s "$u" | cksum | cut -d' ' -f1)" "$u" >/dev/null; done
 helm dependency build deploy/charts/cinim-shard >/dev/null
 cp -r deploy/charts/cinim-shard/charts ../charts-cache
-]]
+]=]
 
 -- The core's own restart ends the Pod that this step runs next to, and the step's result is delivered to the new core when it is up (the shim keeps trying).
 local ROLLOUT = [[
