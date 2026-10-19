@@ -1,0 +1,117 @@
+# Keeps the registry small: once a day, at 05:00 in Kyiv, after the night's builds (and not if something was pushed in the 20 minutes before), it keeps the 3 newest tags of each repository, deletes the other tags, and collects the blobs that no tag needs (D-63's pipeline pushes a set of images
+# with every run, and the registry has a disk of 5 Gi: it was full once). The repository `cinim-cache` (the layers Kaniko caches, one tag for each) is kept by age, 14 days, since the newest 3
+# of it would throw the cache away.
+#
+# The garbage collection of the registry is safe only while nothing writes to it, and a registry that has collected blobs must be started again (its cache of blob descriptors would
+# otherwise say that a blob exists that is gone: a push that skips it makes an image that cannot be pulled). So the Job takes the registry down for the collection: it scales the Deployment to
+# 0 (Pods that push in that minute fail and are run again), works on the volume itself (the Pod is put on the node of the registry: the volume is local), and scales it to 1 again, whatever
+# happened (`trap`). Apply it in the namespace of the registry:  kubectl --context <cluster> -n registry apply -f deploy/registry/gc-cronjob.yaml
+# Run it by hand:  kubectl --context <cluster> -n registry create job --from=cronjob/registry-gc registry-gc-now
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: registry-gc}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: registry-gc}
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, deployments/scale]
+    resourceNames: [registry-docker-registry]
+    verbs: [get, patch, update]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: registry-gc}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: registry-gc}
+subjects:
+  - {kind: ServiceAccount, name: registry-gc}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: registry-gc}
+spec:
+  schedule: "0 5 * * *"                 # 05:00 in Kyiv, after the night's builds
+  timeZone: Europe/Kyiv
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          serviceAccountName: registry-gc
+          restartPolicy: Never
+          securityContext: {runAsUser: 1000, runAsNonRoot: true, fsGroup: 1000, seccompProfile: {type: RuntimeDefault}}
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector: {matchLabels: {app: docker-registry, release: registry}}
+                  topologyKey: kubernetes.io/hostname
+          initContainers:
+            - name: registry-binary             # the program that collects (a static Go binary), next to the kubectl of the container below
+              image: registry:3.0.0
+              command: [sh, -c, "cp /bin/registry /shared/registry"]
+              securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+              volumeMounts: [{name: shared, mountPath: /shared}]
+          containers:
+            - name: gc
+              image: alpine/k8s:1.34.1
+              securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+              env:
+                - {name: KEEP, value: "3"}               # tags kept in each repository
+                - {name: CACHE_DAYS, value: "14"}        # tags of cinim-cache kept this long
+              command:
+                - bash
+                - -ceu
+                - |
+                  NS=registry; DEP=registry-docker-registry
+                  ROOT=/var/lib/registry/docker/registry/v2/repositories
+                  up() { kubectl -n "$NS" scale "deploy/$DEP" --replicas=1; echo "the registry is started again"; }
+                  echo "before: $(du -sh /var/lib/registry | cut -f1)"
+                  # at night nothing is built; if something was pushed in the last 20 minutes after all, leave it for tomorrow rather than stop the registry under it
+                  if [ -n "$(find /var/lib/registry/docker/registry/v2/blobs -type f -mmin -20 2>/dev/null | head -n 1)" ]; then
+                    echo "the registry was written to in the last 20 minutes: not today"; exit 0
+                  fi
+                  # take the registry down: no writer, and the volume is free of its Pod
+                  trap up EXIT
+                  kubectl -n "$NS" scale "deploy/$DEP" --replicas=0
+                  kubectl -n "$NS" wait --for=delete pod -l app=docker-registry,release=registry --timeout=180s || true
+                  now=$(date +%s)
+                  # every repository is a directory with `_manifests/tags/<tag>/current/link`; a tag is as new as the last write of that link
+                  find "$ROOT" -type d -name _manifests -prune | while read -r m; do
+                    repo=${m#"$ROOT"/}; repo=${repo%/_manifests}; tags="$m/tags"
+                    [ -d "$tags" ] || continue
+                    for t in $(ls "$tags"); do
+                      echo "$(stat -c %Y "$tags/$t/current/link" 2>/dev/null || echo 0) $t"
+                    done | sort -rn > /tmp/tags
+                    if [ "$repo" = cinim-cache ]; then
+                      awk -v now="$now" -v days="$CACHE_DAYS" 'now - $1 > days * 86400 {print $2}' /tmp/tags > /tmp/drop
+                    else
+                      awk -v keep="$KEEP" 'NR > keep {print $2}' /tmp/tags > /tmp/drop
+                    fi
+                    n=$(wc -l < /tmp/drop)
+                    while read -r t; do rm -rf "${tags:?}/$t"; done < /tmp/drop
+                    echo "$repo: $(wc -l < /tmp/tags) tags, $n deleted"
+                  done
+                  /shared/registry garbage-collect --delete-untagged /etc/distribution/config.yml | tail -n 3
+                  echo "after: $(du -sh /var/lib/registry | cut -f1)"
+              volumeMounts:
+                - {name: data, mountPath: /var/lib/registry}
+                - {name: config, mountPath: /etc/distribution, readOnly: true}
+                - {name: shared, mountPath: /shared}
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {memory: 512Mi}
+          volumes:
+            - name: data
+              persistentVolumeClaim: {claimName: registry-docker-registry}
+            - name: config
+              configMap: {name: registry-docker-registry-config}
+            - name: shared
+              emptyDir: {}

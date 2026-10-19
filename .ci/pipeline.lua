@@ -25,7 +25,7 @@ local KUBECTL = "alpine/k8s:1.34.1"             -- kubectl, helm, git, jq
 local COMPONENTS = { { target = "core", image = "cinim" }, { target = "controller", image = "cinim-controller" },
                      { target = "conductor", image = "cinim-conductor" }, { target = "storage", image = "cinim-storage" } }
 
--- the mirror, the commit and the hashes, returned to the script as outputs: SHA, TAG, DEPS (the hash of the stage of the libraries, cinim.nimble and the script of the Kubernetes client) and TESTDEPS (cinim.nimble and the Dockerfile of the tests)
+-- the mirror, the commit and the hashes, returned to the script as outputs: SHA, TAG, DEPS (the hash of the stage of the libraries, cinim.nimble and the script of the Kubernetes client) TESTDEPS (cinim.nimble and the Dockerfile of the tests) and HELMDEPS (the lock of the subcharts of the shard chart)
 local PREP = [[
 set -eu
 [ -f mirror.git/HEAD ] || git init -q --bare mirror.git
@@ -37,7 +37,8 @@ fi
 sha=$(git -C mirror.git rev-parse "$REF^{commit}")
 deps=$({ git -C mirror.git show "$sha:cinim.nimble"; git -C mirror.git show "$sha:tools/k8s/build_client.sh"; git -C mirror.git show "$sha:tools/image/Dockerfile.deps"; } | sha256sum | cut -c1-16)
 tests=$({ git -C mirror.git show "$sha:cinim.nimble"; git -C mirror.git show "$sha:tools/image/Dockerfile.test"; } | sha256sum | cut -c1-16)
-{ echo "SHA=$sha"; echo "TAG=${TAG:-$(date -u +%Y%m%d)-$(echo "$sha" | cut -c1-7)}"; echo "DEPS=$deps"; echo "TESTDEPS=$tests"; } >> "$CICD_OUTPUT"
+helm=$(git -C mirror.git show "$sha:deploy/charts/cinim-shard/Chart.lock" | sha256sum | cut -c1-16)
+{ echo "SHA=$sha"; echo "TAG=${TAG:-$(date -u +%Y%m%d)-$(echo "$sha" | cut -c1-7)}"; echo "DEPS=$deps"; echo "TESTDEPS=$tests"; echo "HELMDEPS=$helm"; } >> "$CICD_OUTPUT"
 ]]
 
 -- the source of the commit in the volume of the job: from the mirror that the cache gave, the files written by one worker (checkout.workers=0 was the fastest, docs/storage-module.md)
@@ -91,6 +92,15 @@ exit $rc
 
 -- Rolling the core out is helm's: both releases at the new tag, atomic and waiting for the readiness probes of the Pods (/readyz of the core and of the module); if either fails both are
 -- brought back to the revision they had. The controllers and the conductors follow the core by themselves: the core replaces a controller of another image and drains a conductor of another image (D-62).
+-- The subcharts of the shard chart (rqlite, VictoriaLogs) are not in the repository (their archives are ignored by git) and the deploy profile reaches nothing but the API server: a job of the build
+-- profile fetches them once for a lock (`helm dependency build`) and keeps them as a cache of the organisation, the deploy job restores that.
+local HELM_DEPS = [[
+set -eu
+[ -d charts-cache ] && exit 0
+cd src && helm dependency build deploy/charts/cinim-shard >/dev/null
+cp -r deploy/charts/cinim-shard/charts ../charts-cache
+]]
+
 -- The core's own restart ends the Pod that this step runs next to, and the step's result is delivered to the new core when it is up (the shim keeps trying).
 local ROLLOUT = [[
 set -eu
@@ -100,6 +110,8 @@ kubectl config set-cluster c --server=https://kubernetes.default.svc --certifica
 kubectl config set-credentials d --token="$DEPLOY_TOKEN" >/dev/null
 kubectl config set-context x --cluster=c --user=d --namespace="$NAMESPACE" >/dev/null
 kubectl config use-context x >/dev/null
+mkdir -p src/deploy/charts/cinim-shard/charts
+cp -r charts-cache/. src/deploy/charts/cinim-shard/charts/               # the subcharts that the job of the build profile fetched
 cd src
 revision() { helm history "$1" -n "$NAMESPACE" --max 1 -o json | jq -r '.[0].revision'; }
 shard_was=$(revision "$RELEASE"); storage_was=$(revision "$STORAGE_RELEASE")
@@ -150,7 +162,7 @@ return ci.pipeline({
     ci.job({image = GIT, profile = "build", workspace = "isolated", env = {REPO = repo, REF = ref}}, function(j)
       j.cache.restore({"git-none", "git-"})            -- no key is exactly "git-none": the latest "git-<commit>" is the one restored
       info = j:sh(PREP).outputs
-      if not (info.SHA and info.TAG and info.DEPS and info.TESTDEPS) then error("no commit found for " .. ref) end
+      if not (info.SHA and info.TAG and info.DEPS and info.TESTDEPS and info.HELMDEPS) then error("no commit found for " .. ref) end
       j.cache.save("git-" .. info.SHA, {"mirror.git"})
     end)
     tag = info.TAG
@@ -196,7 +208,14 @@ return ci.pipeline({
     end
     -- 4. the new tag in the cluster
     if p.DEPLOY then
+      local helm_key = "helm-" .. info.HELMDEPS
       checked_out(env, function(j)
+        j.cache.restore({helm_key})
+        j:sh(HELM_DEPS)
+        pcall(function() j.cache.save(helm_key, {"charts-cache"}) end)       -- there already for this lock: nothing to keep
+      end, {image = KUBECTL})
+      checked_out(env, function(j)
+        j.cache.restore({helm_key})
         j:sh(ROLLOUT)
       end, {image = KUBECTL, profile = "deploy", secrets = {"DEPLOY_TOKEN", "DEPLOY_CA"}})
     end
