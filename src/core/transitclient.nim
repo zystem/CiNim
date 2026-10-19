@@ -10,9 +10,10 @@
 ## A failure is `{"errors": ["..."]}`. Whether it may pass is told by the header `X-Hsmgate-Retryable` (hsmgate); without it: 429, 5xx and no answer at all may pass, other statuses
 ## (a wrong key or context is 400, a key not granted 403) are final. The sealed text is the service's own; the core keeps it and gives it back.
 ## With `https://` the connection is mutual TLS: the core checks the service's certificate against `ca` and shows its own (`cert`, `key`); this needs a core built with -d:ssl
-## (the image is). The service ignores the token a Vault client sends; a Vault or an OpenBao wants one (`tokenFile`).
-import std/[json, httpclient, strutils, net, base64]
+## (the image is). Through a proxy (`proxy`, CONNECT) the TLS still runs from the core to the service; the proxy sees only the address and the bytes. The service ignores the token a Vault client sends; a Vault or an OpenBao wants one (`tokenFile`).
+import std/[json, httpclient, strutils, net, base64, uri]
 import kekprovider
+import ../common/connecthttp
 
 type
   TransitConfig* = object
@@ -21,33 +22,57 @@ type
     keyName*: string                 ## the key in the service
     ca*, cert*, key*: string         ## files of PEM, for https
     tokenFile*: string               ## a file with a Vault token, sent as X-Vault-Token (empty: none)
+    proxy*: string                   ## an HTTP proxy that takes CONNECT, http://host:port (empty: none); the TLS and the certificates are still the core's and the service's, end to end
     timeoutMs*: int
 
 proc newClient(cfg: TransitConfig): HttpClient =
   let timeout = if cfg.timeoutMs > 0: cfg.timeoutMs else: 5000
+  let proxy = if cfg.proxy.len > 0: newProxy(cfg.proxy) else: nil
   when defined(ssl):
     if cfg.url.startsWith("https://"):
       let ctx = newContext(verifyMode = CVerify_Peer, caFile = cfg.ca, certFile = cfg.cert, keyFile = cfg.key)
-      return newHttpClient(timeout = timeout, sslContext = ctx)
+      return newHttpClient(timeout = timeout, sslContext = ctx, proxy = proxy)
   else:
     if cfg.url.startsWith("https://"): raise newException(ValueError, "https needs a core built with -d:ssl")
-  newHttpClient(timeout = timeout)
+  newHttpClient(timeout = timeout, proxy = proxy)
 
-type Answer = tuple[code: int, body: JsonNode, retryHeader, error: string]       ## code 0: no answer at all
+type Answer = tuple[code: int, body: JsonNode, retryHeader, error, raw: string]       ## code 0: no answer at all; raw: the start of the body as it came
 
 func path(cfg: TransitConfig; op: string): string =
   "/v1/" & (if cfg.mount.len > 0: cfg.mount else: "transit") & "/" & op & "/" & cfg.keyName
 
+when defined(ssl):
+  proc callViaConnect(cfg: TransitConfig; meth: HttpMethod; path: string; body: JsonNode): Answer =
+    ## https through an HTTP proxy: our own CONNECT (common/connecthttp.nim; std/httpclient of Nim 2.2.6 writes a wrong request line inside the tunnel)
+    try:
+      let u = parseUri(cfg.url)
+      let ctx = newContext(verifyMode = CVerify_Peer, caFile = cfg.ca, certFile = cfg.cert, keyFile = cfg.key)
+      var headers = @[("Content-Type", "application/json"), ("Accept", "application/json"), ("User-Agent", "cinim-core")]
+      if cfg.tokenFile.len > 0:
+        try: headers.add ("X-Vault-Token", readFile(cfg.tokenFile).strip)
+        except IOError: return (0, nil, "", "cannot read the token file " & cfg.tokenFile, "")
+      let timeout = if cfg.timeoutMs > 0: cfg.timeoutMs else: 5000
+      let r = viaConnect(cfg.proxy, u.hostname, u.port, $meth, path, headers, (if body == nil: "" else: $body), ctx, timeout)
+      result.code = r.code
+      result.raw = r.body[0 ..< min(r.body.len, 400)]
+      result.body = try: parseJson(r.body) except JsonParsingError: newJObject()
+      result.retryHeader = headerOf(r.headers, "X-Hsmgate-Retryable")
+    except CatchableError as e:
+      result.error = e.msg
+
 proc call(cfg: TransitConfig; meth: HttpMethod; path: string; body: JsonNode = nil): Answer =
+  when defined(ssl):
+    if cfg.proxy.len > 0 and cfg.url.startsWith("https://"): return callViaConnect(cfg, meth, path, body)
   var c: HttpClient
   try:
     c = newClient(cfg)
     c.headers = newHttpHeaders({"Content-Type": "application/json"})
     if cfg.tokenFile.len > 0:
       try: c.headers["X-Vault-Token"] = readFile(cfg.tokenFile).strip
-      except IOError: return (0, nil, "", "cannot read the token file " & cfg.tokenFile)
+      except IOError: return (0, nil, "", "cannot read the token file " & cfg.tokenFile, "")
     let r = c.request(cfg.url.strip(chars = {'/'}) & path, httpMethod = meth, body = (if body == nil: "" else: $body))
     result.code = r.code.int
+    result.raw = r.body[0 ..< min(r.body.len, 400)]
     result.body = try: parseJson(r.body) except JsonParsingError: newJObject()
     result.retryHeader = r.headers.getOrDefault("X-Hsmgate-Retryable")
   except CatchableError as e:
@@ -60,6 +85,16 @@ func failure(a: Answer): tuple[retry: bool, error: string] =
   var what = "error " & $a.code
   let errors = a.body{"errors"}
   if errors != nil and errors.kind == JArray and errors.len > 0: what = errors[0].getStr(what)
+  else:
+    # not the service's own words (a proxy's page, a gateway): say what it says, as text, so that a person can tell who answered
+    var text = ""
+    var inTag = false
+    for c in a.raw:
+      if c == '<': inTag = true; text.add ' '
+      elif c == '>': inTag = false
+      elif not inTag: text.add (if c in {'\n', '\r', '\t'}: ' ' else: c)
+    text = text.splitWhitespace.join(" ")
+    if text.len > 0: what &= ": " & text[0 ..< min(text.len, 160)]
   # the service says whether it may pass; one that does not (Vault, OpenBao): a throttle and a server error may, the rest is final
   let retry = case a.retryHeader.toLowerAscii
     of "true": true

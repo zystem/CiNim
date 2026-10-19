@@ -10,7 +10,7 @@ import crunchy
 import ../../src/common/sodiumaead
 
 type
-  Fault* = enum fNone, fDown, fLocked, fSlow, fThrottle
+  Fault* = enum fNone, fDown, fLocked, fSlow, fThrottle, fProxyPage    ## fProxyPage: an answer that is not the service's own (a proxy's HTML page)
 
 const mount = "transit"
 
@@ -106,6 +106,9 @@ proc onRequest() {.raises: [], gcsafe.} =
         return
       of fThrottle:
         fail(Http429, "rate limit exceeded", true)
+        return
+      of fProxyPage:
+        reply(Http400, "<html><body><h1>400 Bad Request</h1><p>The request could not be understood by the proxy.</p></body></html>", ["Content-Type: text/html"])
         return
       of fSlow:
         sleep d

@@ -3,6 +3,7 @@
 ## (needs the openssl command). Built with -d:ssl (thsmgate_tls.nim.cfg).
 import std/[unittest, os, osproc, strutils, net, times]
 import ../../src/core/[transitclient, kekprovider]
+import ../support/connectproxy
 
 const port = 18942
 let bin = getEnv("HSMGATE_BIN")
@@ -90,6 +91,37 @@ clients:
     if not ready: skip()
     else:
       check not httpKek(cfgFor("", dir / "core.crt", dir / "core.key")).ok
+
+  test "through an HTTP proxy (CONNECT), as the cluster reaches the service: the mutual TLS runs from the core to the service, the proxy only carries it":
+    if not ready: skip()
+    else:
+      # HSMGATE_TEST_PROXY=http://host:port runs the same against a real proxy (tinyproxy, with ConnectPort 18942), and skips what only the stand-in can say
+      let real = getEnv("HSMGATE_TEST_PROXY")
+      if real.len == 0:
+        startProxy(port + 10)
+        sleep 200
+      var cfg = cfgFor(dir / "server-ca.crt", dir / "core.crt", dir / "core.key")
+      cfg.proxy = if real.len > 0: real else: "http://127.0.0.1:" & $(port + 10)
+      let k = httpKek(cfg)
+      require k.ok
+      var dek = newSeq[byte](32)
+      for i in 0 ..< 32: dek[i] = byte(i + 7)
+      let w = k.kek.wrap(dek, "cinim/dek/v1|via-proxy")
+      require w.ok
+      check k.kek.unwrap(w.wrapped, "cinim/dek/v1|via-proxy").plain == dek
+      if real.len == 0:
+        check lastRequestLine() == "CONNECT 127.0.0.1:" & $port & " HTTP/1.1"
+        check connects >= 3                             # the three calls went through it, none beside it
+      # the proxy cannot make the service trust another client: a rogue certificate is refused through it as well
+      var rogue = cfgFor(dir / "server-ca.crt", dir / "rogue.crt", dir / "rogue.key")
+      rogue.proxy = cfg.proxy
+      check not httpKek(rogue).ok
+      # a proxy that refuses: the key service is not reached at all
+      if real.len == 0:
+        setMode(pmRefuse)
+        check not httpKek(cfg).ok
+        setMode(pmTunnel)
+        stopProxy()
 
   test "teardown":
     if server != nil:

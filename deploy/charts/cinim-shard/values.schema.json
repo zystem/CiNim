@@ -26,7 +26,7 @@
               "ingress": {"oneOf": [{"type": "array", "items": {"type": "object"}}, {"const": "all"}]},
               "capabilities": {"type": "array", "items": {"enum": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETFCAP", "SETGID", "SETUID"]}},
               "memoryLimit": {"type": "string"}, "ephemeralStorageLimit": {"type": "string"}}},
-    "secrets": {"type": "object", "properties": {"keySecret": {"type": "string"}, "keyService": {"type": "object", "properties": {"url": {"type": "string"}, "keyName": {"type": "string"}, "mount": {"type": "string"}, "tlsSecret": {"type": "string"}}}}},
+    "secrets": {"type": "object", "properties": {"keySecret": {"type": "string"}, "keyService": {"type": "object", "properties": {"url": {"type": "string"}, "keyName": {"type": "string"}, "mount": {"type": "string"}, "proxy": {"type": "string"}, "tlsSecret": {"type": "string"}}}}},
     "auth": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "adminToken": {"type": "string"}, "adminTokenSecret": {"type": "string"}}},
     "steps": {"type": "object", "properties": {"ephemeralStorageLimit": {"type": "string"}}},
     "deploy": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "kubeApiServer": {"type": "boolean"}, "egress": {"type": ["array", "string"]}}},

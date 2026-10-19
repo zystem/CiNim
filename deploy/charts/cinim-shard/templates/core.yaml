@@ -106,6 +106,9 @@ spec:
             {{- if .Values.secrets.keyService.mount }}
             - {name: CINIM_KEYSERVICE_MOUNT, value: {{ .Values.secrets.keyService.mount | quote }}}
             {{- end }}
+            {{- if .Values.secrets.keyService.proxy }}
+            - {name: CINIM_KEYSERVICE_PROXY, value: {{ .Values.secrets.keyService.proxy | quote }}}
+            {{- end }}
             {{- if .Values.secrets.keyService.tlsSecret }}
             - {name: CINIM_KEYSERVICE_CA, value: /etc/cinim-keyservice/ca.crt}
             - {name: CINIM_KEYSERVICE_CERT, value: /etc/cinim-keyservice/tls.crt}

@@ -166,6 +166,7 @@ secrets:
     url: ""
     keyName: cinim-shard
     mount: ""                          # the Transit mount; empty: transit
+    proxy: ""                          # an HTTP proxy that takes CONNECT, http://host:port, when the cluster has no road to the service of its own; the mutual TLS still runs from the core to the service
     tlsSecret: ""
 
 # Step Pods (the LimitRange of an organisation's namespace). A Pod that asks for no ephemeral storage gets a request of 64Mi (so it is not the

@@ -3,7 +3,7 @@
 import std/[unittest, os, strutils]
 import ../../src/core/[transitclient, kekprovider, secretvault]
 import ../../src/common/sodiumaead
-import ../support/transitemu
+import ../support/[transitemu, connectproxy]
 
 const port = 18791
 let cfg = TransitConfig(url: "http://127.0.0.1:" & $port, keyName: "cinim-shard", timeoutMs: 1500)
@@ -65,6 +65,17 @@ suite "a key on another machine (Transit)":
     check not bad.ok and not bad.retry                # 400
     setRetryHeader(true)
 
+  test "an answer that is not the service's (a proxy's page) is told with what it says, and is not taken for the service's own refusal":
+    let k = httpKek(cfg).kek
+    let w = k.wrap(key(0x34), "a")
+    setFault(fProxyPage)
+    let u = k.unwrap(w.wrapped, "a")
+    check not u.ok
+    check "error 400" in u.error and "Bad Request" in u.error and "<" notin u.error      # the text, without the markup
+    let made = httpKek(cfg)
+    check not made.ok and "Bad Request" in made.error
+    setFault(fNone)
+
   test "a slow service is waited for up to the timeout, then it is a failure that may pass":
     let k = httpKek(cfg).kek
     let w = k.wrap(key(0x32), "a")
@@ -109,6 +120,18 @@ suite "a key on another machine (Transit)":
     let nobody = TransitConfig(url: "http://127.0.0.1:1", keyName: "cinim-shard", timeoutMs: 500)
     let k = httpKek(nobody)
     check not k.ok and k.retry
+
+  test "through a proxy: the core asks it for a CONNECT to the key service itself, and the refusal of a proxy is told in the message":
+    startProxy(port + 5)
+    sleep 200
+    let viaProxy = TransitConfig(url: "https://127.0.0.1:" & $port, keyName: "cinim-shard", proxy: "http://127.0.0.1:" & $(port + 5), timeoutMs: 2000)
+    setMode(pmRefuse)
+    let r = httpKek(viaProxy)
+    check not r.ok
+    check lastRequestLine() == "CONNECT 127.0.0.1:" & $port & " HTTP/1.1"          # to the key service itself, not to some address it was handed
+    check "the key service does not answer" in r.error and "rejected" in r.error.toLowerAscii   # the proxy's refusal is told, not hidden
+    setMode(pmTunnel)
+    stopProxy()
 
   test "teardown":
     stopEmulator()

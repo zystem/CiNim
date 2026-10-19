@@ -14,7 +14,7 @@ proc buildKek*(certs: string): tuple[ok, retry: bool, kek: KekProvider, error: s
     let timeout = try: parseInt(getEnv("CINIM_KEYSERVICE_TIMEOUT_MS", "5000")) except ValueError: 5000
     return httpKek(TransitConfig(url: url, mount: getEnv("CINIM_KEYSERVICE_MOUNT"), keyName: getEnv("CINIM_KEYSERVICE_KEY_NAME", "cinim-shard"),
                                  ca: getEnv("CINIM_KEYSERVICE_CA"), cert: getEnv("CINIM_KEYSERVICE_CERT"), key: getEnv("CINIM_KEYSERVICE_KEY"),
-                                 tokenFile: getEnv("CINIM_KEYSERVICE_TOKEN_FILE"), timeoutMs: timeout))
+                                 tokenFile: getEnv("CINIM_KEYSERVICE_TOKEN_FILE"), proxy: getEnv("CINIM_KEYSERVICE_PROXY"), timeoutMs: timeout))
   let keyFile = getEnv("CINIM_SECRETS_KEY_FILE")
   if keyFile.len > 0:
     let k = fileKek(keyFile)
