@@ -18,7 +18,7 @@ requires "zippy >= 0.10.0"  # compression of log blocks (src/shim/logspool.nim)
 requires "nimja >= 0.10.0"  # server-side HTML templates of the UI (src/ui/render.nim)
 # HTTP layer (D-25). 9.0.1 has our two fixes (the ~200 ms delay of a chunked response, olliNiinivaara/GuildenStern#35, and the delivered-byte
 # count under backpressure, #36), which were a local patch on 9.0.0.
-requires "guildenstern >= 9.0.1"
+requires "guildenstern >= 9.0.2"
 # ZeroMQ+CURVE transport (D-24): our fork, not upstream, while
 # nim-lang/nim-zmq#57 (high-level CURVE: connect/listen configure callback) is open. Branch `cinim` of the fork is
 # upstream master (which already has #58, the setsockopt value-width fix, and #59, the `=destroy` leak fix) plus #57;
