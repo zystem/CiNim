@@ -24,7 +24,7 @@ if [ ${#files[@]} -eq 0 ]; then
     files+=("$f")
   done
   [ $unit = 1 ] && for f in tests/unit/t*.nim; do
-    case $f in *tkekclient_tls*|*thsperf*) continue;; esac     # the TLS test needs -d:ssl and Python, the performance test is a benchmark
+    case $f in *thsperf*) continue;; esac     # the performance test is a benchmark
     files+=("$f")
   done
 fi

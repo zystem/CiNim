@@ -376,7 +376,7 @@ REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/i
 
 A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
 
-Every component has a Dockerfile of its own (`tools/image/Dockerfile.core`, `.storage`, `.conductor`, `.controller` with the shim, `.kekd-emu`, `.caddy-store`) that starts from the image of the libraries, and the binaries are compiled by `tools/image/build-static.sh`, which has the flags they share; a target builds only its own: `TARGETS="storage:cinim-storage"` compiles the module and nothing else. Do not build Go (the Caddy image) in a build Pod on a node that also runs rqlite; it starved the node once.
+Every component has a Dockerfile of its own (`tools/image/Dockerfile.core`, `.storage`, `.conductor`, `.controller` with the shim, `.caddy-store`) that starts from the image of the libraries, and the binaries are compiled by `tools/image/build-static.sh`, which has the flags they share; a target builds only its own: `TARGETS="storage:cinim-storage"` compiles the module and nothing else. Do not build Go (the Caddy image) in a build Pod on a node that also runs rqlite; it starved the node once.
 
 ### Building on this machine (the quick way for iterations)
 

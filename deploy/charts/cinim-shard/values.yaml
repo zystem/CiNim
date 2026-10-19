@@ -158,11 +158,14 @@ auth:
 # anyway; changing that key then loses the secrets. The core refuses to serve secrets when its key is not the one that sealed what the database holds.
 secrets:
   keySecret: ""
-  # The master key on a token that another machine holds (docs/hardware-key.md): the address of its key service, and a Secret with ca.crt, tls.crt and tls.key
-  # for mutual TLS (https). When `kekd.url` is set it is used instead of `keySecret`. The core starts without waiting for the service and asks again every
-  # 15 s; the secrets answer `secrets_unavailable` until it is there.
-  kekd:
+  # The master key on a token that another machine holds (docs/hardware-key.md): the address of a key service with the Transit API (hsmgate, github.com/zystem/hsmgate;
+  # a Vault or an OpenBao Transit engine would do), the name of the key in it, and a Secret with ca.crt, tls.crt and tls.key for mutual TLS (https). When `keyService.url`
+  # is set it is used instead of `keySecret`. The core starts without waiting for the service and asks again every 15 s; the secrets answer `secrets_unavailable` until it is there.
+  # The service must let the core use the key with the contexts `cinim/dek/v1|<tenant>` and `cinim/kek-check/v1` (hsmgate: `aad: {mode: context, allow: [...]}`).
+  keyService:
     url: ""
+    keyName: cinim-shard
+    mount: ""                          # the Transit mount; empty: transit
     tlsSecret: ""
 
 # Step Pods (the LimitRange of an organisation's namespace). A Pod that asks for no ephemeral storage gets a request of 64Mi (so it is not the

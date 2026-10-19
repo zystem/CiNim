@@ -82,7 +82,7 @@ const checkAad = "cinim/kek-check/v1"
 const checkText = "cinim secrets key check"
 
 var
-  kekReport*: proc (up: bool) {.gcsafe.}      ## told whether the master key answered (the component `kekd` in /api/v1/components); set by vaultsetup.nim
+  kekReport*: proc (up: bool) {.gcsafe.}      ## told whether the master key answered (the component `keyservice` in /api/v1/components); set by vaultsetup.nim
   vaultErrorText: string
   vaultErrorLock: Lock
 initLock(vaultErrorLock)

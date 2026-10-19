@@ -26,12 +26,6 @@ ENV CINIM_SHIM_BIN=/cicd-shim
 USER 65532:65532
 ENTRYPOINT ["/controller"]
 
-FROM scratch AS kekd-emu
-COPY kekd-emu /kekd-emu
-USER 65532:65532
-EXPOSE 8443
-ENTRYPOINT ["/kekd-emu"]
-
 # the Caddy node: the binary of tools/store/build-caddy.sh (build/caddy-store) on the Caddy image
 FROM caddy:2 AS caddy-store
 COPY caddy-store /usr/bin/caddy

@@ -2,9 +2,9 @@
 # Builds images on this machine, much faster than a build Pod for the next build after a change: the dependencies (libzmq, libsodium, the Kubernetes C client, libcurl, the nimble packages)
 # are one image, `cinim-deps:local`, made once from tools/image/Dockerfile.deps; every binary is compiled in a container of it with the source mounted and the
 # C files of Nim kept in build/nimcache/<binary>, so that a change recompiles what it touches and nothing else; the images are put together from tools/image/Dockerfile.local.
-#   tools/image/build-local.sh <tag> [target ...]       targets: core storage conductor controller kekd-emu caddy-store   (default: core)
+#   tools/image/build-local.sh <tag> [target ...]       targets: core storage conductor controller caddy-store   (default: core)
 #   REGISTRY=<host[:port]> tools/image/build-local.sh h82 core storage     also pushes <REGISTRY>/<image>:<tag> with skopeo (plain HTTP registry, as in docs/deployment.md)
-# The images are `cinim` (core), `cinim-storage`, `cinim-conductor`, `cinim-controller` (with the shim), `cinim-kekd-emu`, `cinim-store-dav` (the Caddy node; needs build/caddy-store from
+# The images are `cinim` (core), `cinim-storage`, `cinim-conductor`, `cinim-controller` (with the shim), `cinim-store-dav` (the Caddy node; needs build/caddy-store from
 # tools/store/build-caddy.sh). `FORCE_DEPS=1` makes `cinim-deps:local` again (it is also made again when cinim.nimble or tools/k8s/build_client.sh changed).
 # For a release use the build Pod (tools/image/kaniko-build.sh): this image is built from the working tree as it is.
 set -euo pipefail
@@ -12,10 +12,10 @@ cd "$(dirname "$0")/../.."
 TAG="${1:?usage: build-local.sh <tag> [target ...]}"; shift
 TARGETS=("$@"); [ ${#TARGETS[@]} -gt 0 ] || TARGETS=(core)
 DEPSFILE=tools/image/Dockerfile.deps
-declare -A IMAGE=([core]=cinim [storage]=cinim-storage [conductor]=cinim-conductor [controller]=cinim-controller [kekd-emu]=cinim-kekd-emu [caddy-store]=cinim-store-dav)
+declare -A IMAGE=([core]=cinim [storage]=cinim-storage [conductor]=cinim-conductor [controller]=cinim-controller [caddy-store]=cinim-store-dav)
 # the binaries of a target: the file of the component and the stage of it that compiles the binary (tools/image/Dockerfile.<component>)
-declare -A BINS=([core]="core" [storage]="storage" [conductor]="conductor" [controller]="controller-static shim" [kekd-emu]="kekd-emu" [caddy-store]="")
-declare -A STAGE=([core]="Dockerfile.core build" [storage]="Dockerfile.storage build" [conductor]="Dockerfile.conductor build" [controller-static]="Dockerfile.controller build-controller" [shim]="Dockerfile.controller build-shim" [kekd-emu]="Dockerfile.kekd-emu build")
+declare -A BINS=([core]="core" [storage]="storage" [conductor]="conductor" [controller]="controller-static shim" [caddy-store]="")
+declare -A STAGE=([core]="Dockerfile.core build" [storage]="Dockerfile.storage build" [conductor]="Dockerfile.conductor build" [controller-static]="Dockerfile.controller build-controller" [shim]="Dockerfile.controller build-shim")
 
 # 1. the dependencies image
 want=$(cat cinim.nimble tools/k8s/build_client.sh "$DEPSFILE" | sha256sum | cut -c1-16)
@@ -52,7 +52,6 @@ for t in "${TARGETS[@]}"; do
     storage) cp build/image-out/storage/storage-static build/image-out/storage/ca-certificates.crt "$ctx/";;
     conductor) cp build/image-out/conductor/conductor-static "$ctx/";;
     controller) cp build/image-out/controller-static/controller-static build/image-out/shim/cicd-shim "$ctx/";;
-    kekd-emu) cp build/image-out/kekd-emu/kekd-emu "$ctx/";;
     caddy-store) [ -x build/caddy-store ] || tools/store/build-caddy.sh; cp build/caddy-store "$ctx/";;
   esac
   echo "== image ${IMAGE[$t]}:$TAG"
