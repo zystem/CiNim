@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 TAG="${1:?usage: build_controller.sh <image:tag>}"
 CTX=build/controller-image
-IMAGE="${SHIM_BUILD_IMAGE:-nimlang/nim:2.2.4-alpine}"
+IMAGE="${SHIM_BUILD_IMAGE:-ghcr.io/zystem/nim:2.2.12-alpine}"
 mkdir -p "$CTX" build/k8s-static
 tools/shim/build_static.sh "$CTX/cicd-shim" src/shim/shim.nim "-d:shimLogging" 1     # also builds libzmq and libsodium into build/zmq-static
 docker run --rm -v "$PWD:/src" -v "$HOME/.nimble/pkgs2:/root/.nimble/pkgs2:ro" -w /src \

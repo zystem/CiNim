@@ -1,7 +1,8 @@
 # The libraries every binary of the platform is built with (libsodium, libzmq, the Kubernetes C client, the nimble packages), as one image: `cinim-deps:<hash>`, made once
 # (tools/image/kaniko-build.sh, deploy/examples/self-build, tools/image/build-local.sh) and named by the components' Dockerfiles with `--build-arg DEPS_IMAGE=`. The hash is
 # that of this file, cinim.nimble and tools/k8s/build_client.sh: the three things the image is made of.
-FROM nimlang/nim:2.2.4-alpine
+# Nim 2.2.12 on Alpine, made by github.com/zystem/nim-alpine (the official Alpine images stopped at 2.2.6, whose httpclient is wrong for https through a proxy: see CLAUDE.md)
+FROM ghcr.io/zystem/nim:2.2.12-alpine
 RUN apk add --no-cache bash coreutils upx g++ make cmake git autoconf automake libtool linux-headers curl openssl-dev openssl-libs-static \
     zlib-dev zlib-static sqlite-dev sqlite-static ca-certificates
 # libsodium and libzmq as static archives (the ZeroMQ transport, D-24)

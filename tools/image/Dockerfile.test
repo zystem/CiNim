@@ -2,7 +2,7 @@
 # libraries is not used), the system libraries the tests link (libzmq, libsodium, libpcre, sqlite, OpenSSL), the nimble packages, git, curl and the openssl command (the certificates of the TLS test of the key service), and
 # `rqlited`, so that the integration tests start their own scratch databases without Docker (tools/test/run.sh with CINIM_RQLITE_BIN). Built with the repository as the context; the hash of the
 # image is that of this file and cinim.nimble.
-FROM nimlang/nim:2.2.4
+FROM nimlang/nim:2.2.12
 RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git procps openssl \
       libzmq3-dev libsodium-dev libpcre3-dev libsqlite3-dev libssl-dev && rm -rf /var/lib/apt/lists/*
 # rqlited for glibc: the release of the project (the one in its image is built for musl)

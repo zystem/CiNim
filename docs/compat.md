@@ -7,6 +7,12 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 *Nothing is left (2026-10-18).* A new line goes into this table when code is written that exists only for something made before a change.
 
 
+## To delete when its condition is met
+
+| Code | Why it exists | Delete when |
+|---|---|---|
+| `src/common/connecthttp.nim` and its use in `core/transitclient.nim` (`callViaConnect`), `tests/unit/tconnecthttp.nim`, `tests/support/connectproxy.nim` | the `std/httpclient` of Nim 2.2.6 wrote `GET host:port/path` inside the CONNECT tunnel (nim-lang/Nim#25319; fixed in 2.2.8) | every image and every workstation builds with Nim >= 2.2.8 and a test of `std/httpclient` through a real tinyproxy passes (`HSMGATE_TEST_PROXY`): then the client can use `newHttpClient(proxy = ...)` again. Not urgent: the code is correct on every version |
+
 ## Deleted (2026-10-18, the second part)
 
 * The `ALTER TABLE … ADD COLUMN` list of the core (56 columns), the loop that dropped `project_id` from `runs` and `triggers` (D-54), the four statements that dropped what a shard kept of its stores before D-60 (`object_stores`, `store_repair`, the `OBJECTSTORE_SECRET_KEY:*` secrets, the `vault_meta` row) and the drop of an old `log_streams`: the columns are in the `CREATE TABLE`s now (`core/schema.nim`; a fresh database and one made by the old code have the same 280 columns, types, defaults and keys, which was compared), and `migrate` has a list `columnsAdded` of the same form, empty, for the next column. The columns of the controller's state (`ctrlstate.nim`) are in its `CREATE TABLE` too. A database or a state file made before the columns existed is not read any more (the TESTING cluster's have them all).

@@ -8,5 +8,5 @@ TAG="${1:?usage: build_core.sh <image:tag>}"
 CTX=build/core-image
 mkdir -p "$CTX"
 tools/shim/build_static.sh "$CTX/core-static" src/core/main.nim "-d:ssl" 0
-docker run --rm "${SHIM_BUILD_IMAGE:-nimlang/nim:2.2.4-alpine}" sh -c 'apk add --no-cache ca-certificates >/dev/null && cat /etc/ssl/certs/ca-certificates.crt' > "$CTX/ca-certificates.crt"
+docker run --rm "${SHIM_BUILD_IMAGE:-ghcr.io/zystem/nim:2.2.12-alpine}" sh -c 'apk add --no-cache ca-certificates >/dev/null && cat /etc/ssl/certs/ca-certificates.crt' > "$CTX/ca-certificates.crt"
 docker build -f deploy/core/Dockerfile -t "$TAG" "$CTX"
