@@ -1,12 +1,13 @@
-## Starting the secrets store (core/secretvault.nim): which master key, and waiting for it. The key is, in this order, a key service next to a token
-## (`CINIM_KEYSERVICE_URL`, core/transitclient.nim), a key file (`CINIM_SECRETS_KEY_FILE`), or derived from the core's CURVE key. A key that lives on another machine may not be
-## there when the core starts (the machine restarts with it, the token waits for a PIN), so the core does not wait for it: a thread asks every `retryEvery`
-## seconds until it answers, and the API says `secrets_unavailable` meanwhile (the shims wait and ask again, and a step that does not need secrets is not held up).
+## Starting the secrets store (core/secretvault.nim): which master key. The key is, in this order, a key service next to a token (`CINIM_KEYSERVICE_URL`, core/transitclient.nim), a key file
+## (`CINIM_SECRETS_KEY_FILE`), or derived from the core's CURVE key. The key has to be there when the core starts: if the key service does not answer (it restarts, the token waits for a PIN) or
+## refuses the core, nothing in the shard can open its secrets, so the core says why and exits, and Kubernetes shows CrashLoopBackOff and starts it again with a growing pause (`setupAtStart`).
+## After the start, a key service that goes away is waited for (the shims get `secrets_unavailable` and ask again, the opened data keys are kept for CINIM_SECRETS_DEK_CACHE seconds).
 import std/[os, strutils, times, atomics]
 import kekprovider, secretvault, transitclient, orgprovision, components
 import ../common/rqlite
 
-const retryEvery = 15
+proc exitImmediately(code: cint) {.importc: "_exit", header: "<unistd.h>", noreturn.}
+  ## `quit` runs the exit handlers of Nim while the other threads still work, and they crash (exit code 139 and a trace instead of the message); `_exit` does not
 
 proc buildKek*(certs: string): tuple[ok, retry: bool, kek: KekProvider, error: string] =
   let url = getEnv("CINIM_KEYSERVICE_URL")
@@ -33,6 +34,15 @@ proc tryActivate*(rqliteUrl, certs: string): tuple[ready, retry: bool, error: st
   echo "core: the secrets are sealed with the key ", b.kek.id
   (true, false, "")
 
+type SetupAttempt* = tuple[ready, retry: bool, error: string]
+
+proc setupAtStart*(attempt: proc (): SetupAttempt {.gcsafe.}; onReady: proc () {.gcsafe.}; onFatal: proc (error: string; mayPass: bool) {.gcsafe.}) =
+  ## One try, at the start of the core. The master key has to be there: if it is not, nothing in the shard can open its secrets and all of it is unusable, so `onFatal` ends the process (the real
+  ## one), and Kubernetes shows CrashLoopBackOff, which is the way to tell a person, and starts the core again with a growing pause, which is the retry. `mayPass` is only for the words: the key
+  ## service may be back in a moment, or a person has to look.
+  let r = try: attempt() except CatchableError as e: (false, true, "the secrets store could not start: " & e.msg)
+  if r.ready: onReady() else: onFatal(r.error, r.retry)
+
 proc runVaultSetup*(args: tuple[rqliteUrl, certs: string, stop: ptr Atomic[bool]]) {.thread.} =
   {.cast(gcsafe).}:
     let remote = getEnv("CINIM_KEYSERVICE_URL").len > 0
@@ -40,16 +50,18 @@ proc runVaultSetup*(args: tuple[rqliteUrl, certs: string, stop: ptr Atomic[bool]
     if remote:
       kekReport = proc (up: bool) {.gcsafe.} =
         discard registrySet("keyservice", "master-key", (if up: csUp else: csDown), epochTime())
-    while not args.stop[].load:
-      let r = try: tryActivate(args.rqliteUrl, args.certs) except CatchableError as e: (false, true, "the secrets store could not start: " & e.msg)
-      if r.ready:
-        if remote: discard registrySet("keyservice", "master-key", csUp, epochTime())
-        setVaultError("")
-        return
-      setVaultError(r.error)
-      stderr.writeLine "core: " & r.error & (if r.retry: " (asking again in " & $retryEvery & " s)" else: "")
-      if remote and r.retry: discard registrySet("keyservice", "master-key", csDown, epochTime())
-      if not r.retry: return               # a different key, a damaged setting: waiting does not help, a person must look
-      for _ in 0 ..< retryEvery * 10:
-        if args.stop[].load: return
-        sleep 100
+    setupAtStart(
+      proc (): SetupAttempt {.gcsafe.} = {.cast(gcsafe).}: tryActivate(args.rqliteUrl, args.certs),
+      proc () {.gcsafe.} =
+        {.cast(gcsafe).}:
+          if remote: discard registrySet("keyservice", "master-key", csUp, epochTime())
+          setVaultError(""),
+      proc (error: string; mayPass: bool) {.gcsafe.} =
+        {.cast(gcsafe).}:
+          setVaultError(error)
+          if remote: discard registrySet("keyservice", "master-key", csDown, epochTime())
+          stderr.writeLine "core: FATAL: the secrets store cannot start: " & error
+          stderr.writeLine (if mayPass: "core: exiting; the key service may be back in a moment: Kubernetes starts the core again (CrashLoopBackOff, a growing pause)"
+                            else: "core: exiting; waiting will not help, a person must look: the key service, its policy for this core, or the key that sealed this database (Kubernetes shows CrashLoopBackOff)")
+          flushFile(stderr)
+          exitImmediately(1))

@@ -160,7 +160,7 @@ secrets:
   keySecret: ""
   # The master key on a token that another machine holds (docs/hardware-key.md): the address of a key service with the Transit API (hsmgate, github.com/zystem/hsmgate;
   # a Vault or an OpenBao Transit engine would do), the name of the key in it, and a Secret with ca.crt, tls.crt and tls.key for mutual TLS (https). When `keyService.url`
-  # is set it is used instead of `keySecret`. The core starts without waiting for the service and asks again every 15 s; the secrets answer `secrets_unavailable` until it is there.
+  # is set it is used instead of `keySecret`. The key has to be there when the core starts: a core that cannot open it exits and Kubernetes shows CrashLoopBackOff (it starts it again with a growing pause); a running core waits for a service that goes away (`secrets_unavailable`).
   # The service must let the core use the key with the contexts `cinim/dek/v1|<tenant>` and `cinim/kek-check/v1` (hsmgate: `aad: {mode: context, allow: [...]}`).
   keyService:
     url: ""

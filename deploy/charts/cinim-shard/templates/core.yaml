@@ -175,6 +175,9 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 3
             failureThreshold: 6
+          # when the core exits because its secrets cannot be opened (core/vaultsetup.nim: the key is not the one that sealed the database, the key service refuses it), the last lines of its log
+          # are the message of the termination: `kubectl describe pod` says why it is in CrashLoopBackOff
+          terminationMessagePolicy: FallbackToLogsOnError
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
