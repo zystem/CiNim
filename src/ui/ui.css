@@ -1,0 +1,27 @@
+:root { color-scheme: light dark; --fg: #1b1f23; --bg: #fff; --muted: #6a737d; --line: #d0d7de; --link: #0a58ca; --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --bg: #0d1117; --muted: #8b949e; --line: #30363d; --link: #58a6ff; --ok: #3fb950; --bad: #f85149; --warn: #d29922; } }
+body { margin: 0; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+header { display: flex; gap: 1rem; align-items: center; padding: .6rem 1rem; border-bottom: 1px solid var(--line); }
+header .brand { font-weight: 700; text-decoration: none; color: var(--fg); }
+header nav { flex: 1; display: flex; gap: 1rem; }
+main { padding: 1rem; max-width: 80rem; margin: 0 auto; overflow-x: auto; }   /* a wide table scrolls inside the page, not the page */
+a { color: var(--link); }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+code, pre { font: 13px/1.4 ui-monospace, monospace; }
+pre.log { overflow: auto; padding: .6rem; border: 1px solid var(--line); white-space: pre; }
+pre.log .n { color: var(--muted); user-select: none; display: inline-block; min-width: 4ch; text-align: right; margin-right: .6ch; }
+.state-SUCCEEDED, .state-up, .state-active { color: var(--ok); font-weight: 600; }
+.state-FAILED, .state-down, .state-disabled, .error { color: var(--bad); }
+.state-RUNNING, .state-PENDING { color: var(--warn); }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; }
+.facts dt { color: var(--muted); } .facts dd { margin: 0; }
+.login { display: grid; gap: .6rem; max-width: 22rem; }
+.login input { width: 100%; box-sizing: border-box; padding: .4rem; }
+.filter a.active { font-weight: 700; }
+.runid { white-space: nowrap; font-family: ui-monospace, monospace; }
+.empty, .detail { color: var(--muted); }
+.logout { margin: 0; }
+button { padding: .35rem .8rem; }
+@media (max-width: 40rem) { th, td { padding: .25rem .35rem; } header { flex-wrap: wrap; } }

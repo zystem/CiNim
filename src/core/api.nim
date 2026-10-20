@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
 import ../common/scriptsource
-import audit, joblocks, orgvars, pwcheck, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import audit, joblocks, orgvars, pwcheck, runlist, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -1427,6 +1427,28 @@ proc onRequest() {.raises: [], gcsafe.} =
         of roRetried:
           rc.record(getTime().toUnix(), actorOf(who), "run.retry", runId, "ok", "steps " & $done.steps)
           jsonOk(Http200, %*{"id": runId, "state": done.state, "retried_steps": done.steps})
+      elif meth == "GET" and rest.len == 0:
+        # the list of runs (docs/ui.md): ?organization=<slug>&state=<STATE>&limit=<n>&before=<run id>, newest first; a token of an organisation sees its own only
+        var askedOrg, askedState, before = ""
+        var limit = -1
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            case k
+            of "organization": askedOrg = v
+            of "state": askedState = v
+            of "before": before = v
+            of "limit":
+              try: limit = parseInt(v)
+              except ValueError:
+                problem(Http400, "invalid_request", "limit must be an integer")
+                return
+            else: discard
+        let scope = runListScope(who, askedOrg)
+        if not scope.ok:
+          problem(Http403, "forbidden", "this token may list the runs of its own organisation only")
+          return
+        var c = newRq(coreRef.rqliteUrl)
+        jsonOk(Http200, c.listRuns(scope.organization, askedState, limit, before))
       elif meth == "GET" and rest.len > 0:
         let run = coreRef.getRun(rest)
         if run != nil and not who.mayUseOrg(run{"organization"}.getStr):

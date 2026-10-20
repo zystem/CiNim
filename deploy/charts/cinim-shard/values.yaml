@@ -288,3 +288,16 @@ vlagent:
     limits: {memory: 128Mi}
   serviceMonitor:
     enabled: false
+
+# The UI (docs/ui.md, D-65): pages for people, a service of its own that asks the core's API with the token of the user (the login form, a cookie that scripts cannot read). Read-only so far:
+# the organisations, their runs, a run with its steps and the windows of a step's log, the components. The Ingress sends `path` of the domain to it, so that `path` is not the name of an organisation
+# (the slug `ui` is reserved). The image is <image.repository>-ui:<image.tag> unless `image` says otherwise.
+ui:
+  enabled: false
+  path: /ui
+  image: ""
+  replicas: 1
+  cookieSecure: false                  # true when the Ingress has TLS (`ingress.tls`): the cookie then says Secure
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {memory: 128Mi}

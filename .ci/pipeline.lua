@@ -23,7 +23,8 @@ local KUBECTL = "alpine/k8s:1.34.1"             -- kubectl, helm, git, jq
 
 -- the component (tools/image/Dockerfile.<component>) and the image it is pushed as
 local COMPONENTS = { { target = "core", image = "cinim" }, { target = "controller", image = "cinim-controller" },
-                     { target = "conductor", image = "cinim-conductor" }, { target = "storage", image = "cinim-storage" } }
+                     { target = "conductor", image = "cinim-conductor" }, { target = "storage", image = "cinim-storage" },
+                     { target = "ui", image = "cinim-ui" } }
 
 -- the mirror, the commit and the hashes, returned to the script as outputs: SHA, TAG, DEPS (the hash of the stage of the libraries, cinim.nimble and the script of the Kubernetes client) TESTDEPS (cinim.nimble and the Dockerfile of the tests) and HELMDEPS (the lock of the subcharts of the shard chart)
 local PREP = [[

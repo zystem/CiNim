@@ -4,7 +4,7 @@
 import std/strutils
 
 const
-  reservedSlugs* = ["list", "api", "logs", "x"]   ## paths under <basePath> that belong to the platform; digits-only names belong to shards
+  reservedSlugs* = ["list", "api", "logs", "x", "ui"]   ## paths under <basePath> that belong to the platform; digits-only names belong to shards
   maxNamespaceLen* = 63
 
 func namespaceName*(prefix, shard, slug: string): string = prefix & "-" & shard & "-" & slug

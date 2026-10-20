@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}CiNim{% endblock %}</title>
+<link rel="stylesheet" href="{{ h(base) }}/static/ui.css?v={{ h(cssVersion) }}"></head>
+<body>
+<header><a class="brand" href="{{ h(base) }}/">CiNim</a>
+{% if loggedIn %}<nav><a href="{{ h(base) }}/orgs">Organisations</a> <a href="{{ h(base) }}/runs">All runs</a> <a href="{{ h(base) }}/status">Components</a></nav>
+<form class="logout" method="post" action="{{ h(base) }}/logout"><button type="submit">Log out</button></form>{% endif %}</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body></html>

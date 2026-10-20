@@ -1,0 +1,99 @@
+{{- if .Values.ui.enabled }}
+# The UI (docs/ui.md, D-65): pages for people, a service of its own. It keeps nothing: it asks the core's API with the token of the user, which the browser holds in a cookie. The core
+# is reached by its Service (plain HTTP inside the namespace); the Ingress below carries the pages at `ui.path` of the domain, and the TLS of the Ingress is the TLS of the pages.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cinim-ui
+  namespace: {{ include "cinim-shard.ns" . }}
+  labels:
+    app.kubernetes.io/name: cinim-ui
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cinim-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cinim-ui
+        {{- include "cinim-shard.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ui
+          image: {{ include "cinim-shard.uiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - {name: CINIM_UI_CORE_URL, value: "http://cinim-core:80"}
+            - {name: CINIM_UI_BASE, value: {{ .Values.ui.path | quote }}}
+            - {name: CINIM_UI_COOKIE_SECURE, value: {{ if .Values.ui.cookieSecure }}"on"{{ else }}"off"{{ end }}}
+          ports:
+            - {name: http, containerPort: 18100}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cinim-ui
+  namespace: {{ include "cinim-shard.ns" . }}
+  labels:
+    app.kubernetes.io/name: cinim-ui
+    {{- include "cinim-shard.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: cinim-ui
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cinim-ui
+  namespace: {{ include "cinim-shard.ns" . }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.domain | quote }}]
+      secretName: {{ required "ingress.tls.secretName is required when tls is enabled" .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ required "domain is required" .Values.domain | quote }}
+      http:
+        paths:
+          - path: {{ required "ui.path is required" .Values.ui.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: cinim-ui
+                port:
+                  name: http
+{{- end }}

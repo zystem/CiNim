@@ -18,7 +18,7 @@ suite "SHD-001 slug rules":
     check "digits only" in checkSlug("001", "cinim", "001")
     check checkSlug("1a", "cinim", "001") == ""
   test "the reserved slugs are refused":
-    for s in ["list", "api", "logs", "x"]: check "reserved" in checkSlug(s, "cinim", "001")
+    for s in ["list", "api", "logs", "x", "ui"]: check "reserved" in checkSlug(s, "cinim", "001")      # "ui": the pages of the UI (docs/ui.md) are at <basePath>/ui
   test "SHD-007: the namespace name <prefix>-<shard>-<slug> must fit 63 characters":
     check namespaceName("cinim", "001", "acme") == "cinim-001-acme"
     check maxSlugLen("cinim", "001") == 63 - 5 - 3 - 2     # 53

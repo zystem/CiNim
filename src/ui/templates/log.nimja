@@ -1,0 +1,8 @@
+{% extends "layout.nimja" %}
+{% block title %}Log of step {{ h(step) }} of {{ h(runId) }} - CiNim{% endblock %}
+{% block content %}<h1>Log of step {{ h(step) }}</h1>
+<p><a href="{{ h(base) }}/runs/{{ h(runId) }}">Run <code>{{ h(runId) }}</code></a> - step state: <span class="state-{{ h(stepState) }}">{{ h(stepState) }}</span>{% if complete %} - the log is complete{% endif %}</p>
+<p class="pager">{% if prev.len > 0 %}<a href="{{ h(prev) }}">Earlier lines</a>{% endif %}{% if next.len > 0 %} <a href="{{ h(next) }}">Later lines</a>{% endif %}</p>
+<pre class="log">{% for l in lines %}<span class="n">{{ h(l.n) }}</span> {{ h(l.text) }}
+{% endfor %}</pre>
+{% if lines.len == 0 %}<p class="empty">No lines in this window.</p>{% endif %}{% endblock %}

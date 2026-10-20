@@ -7,7 +7,7 @@ package cicd.internal.v1;
 
 import "google/protobuf/timestamp.proto";
 
-// Identifiers are UUIDv7 strings. Every identifier carries its shard as a prefix "<shard>_<uuidv7>" (SHD-004).
+// Identifiers are strings, time-ordered: "<shard>_<11 characters of base32>", the time in microseconds (SHD-004, D-66). Every identifier carries its shard as a prefix.
 message StepRef {
   string run_id = 1;
   uint32 seq = 2;      // ordinal of the step in the run journal

@@ -2,7 +2,7 @@
 
 A self-hosted CI/CD platform for Kubernetes, written in Nim. The full specification is in [`docs/specification.md`](docs/specification.md): requirements, the decision log (D-xx) and, in Appendix A, the measurements behind the decisions.
 
-Working today, through the REST API only: Lua pipelines with a replay journal (`ci.pipeline`, `ci.job`, `Job:sh`, `ci.now`, `ci.random`,
+Working today, through the REST API and a read-only UI (`/ui`: the login, the runs, a run with its steps and logs, the components; docs/ui.md): Lua pipelines with a replay journal (`ci.pipeline`, `ci.job`, `Job:sh`, `ci.now`, `ci.random`,
 `ci.sleep`), typed launch parameters (`ci.string`, `ci.number`, `ci.bool`, `ci.choice`) that reach the steps as environment variables, a Pod per step,
 the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the launch gate (RUN-015), component liveness, step metrics, diagnostics of a Pod's end
 (reason, message, events, node), organisations with a namespace and a job controller each (SHD-001 to SHD-009: create, switch off, delete, the reconciliation with

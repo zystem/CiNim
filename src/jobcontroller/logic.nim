@@ -49,8 +49,8 @@ func defaultConfig*(): Config =
          logEvery: 5)
 
 func podName*(runId: string; seq, attempt: int): string =
-  ## run_id is shard-prefixed ("s1_<uuid7>") - the underscore is not valid in a Kubernetes RFC 1123 name, so it becomes '-'
-  ## (run_id is otherwise lowercase hex/dashes, so this stays injective). Must equal the shim's and core's podName.
+  ## run_id is shard-prefixed ("s1_<11 characters of base32>", D-66) - the underscore is not valid in a Kubernetes RFC 1123 name, so it becomes '-'
+  ## (run_id is otherwise lowercase letters and digits, so this stays injective). Must equal the shim's and core's podName.
   "ci-" & runId.replace("_", "-") & "-" & $seq & "-" & $attempt
 
 func drainDir*(seq, attempt: int): string =

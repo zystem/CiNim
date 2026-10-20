@@ -57,6 +57,11 @@ http://victorialogs-0:9428,http://victorialogs-1:9428
 {{- printf "%s-conductor:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag -}}
 {{- end -}}
 
+{{/* the image of the UI service: <repository>-ui:<tag>, next to the shard image (docs/ui.md) */}}
+{{- define "cinim-shard.uiImage" -}}
+{{- default (printf "%s-ui:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag) .Values.ui.image -}}
+{{- end -}}
+
 {{- define "cinim-shard.labels" -}}
 app.kubernetes.io/part-of: cinim
 cinim.io/shard: {{ .Values.shard | quote }}

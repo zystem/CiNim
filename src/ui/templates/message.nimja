@@ -1,0 +1,6 @@
+{% extends "layout.nimja" %}
+{% block title %}{{ h(title) }} - CiNim{% endblock %}
+{% block content %}<h1>{{ h(title) }}</h1>
+<p>{{ h(text) }}</p>
+{% if detail.len > 0 %}<p class="detail"><code>{{ h(detail) }}</code></p>{% endif %}
+{% if back.len > 0 %}<p><a href="{{ h(back) }}">{{ h(backText) }}</a></p>{% endif %}{% endblock %}

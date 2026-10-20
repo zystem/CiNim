@@ -21,7 +21,7 @@ func volumeSettings*(size, storageClass, access: string): VolumeSettings =
   VolumeSettings(size: (if size.len > 0: size else: defaultSize), storageClass: storageClass, readWriteMany: access == "ReadWriteMany")
 
 func claimName*(runId: string; volume = ""): string =
-  ## the run id is shard-prefixed ("s1_<uuid>"): the underscore is not valid in a Kubernetes name. `volume` is the id of a job that has a volume of its own (`workspace = "isolated"`),
+  ## the run id is shard-prefixed ("s1_<11 characters of base32>"): the underscore is not valid in a Kubernetes name. `volume` is the id of a job that has a volume of its own (`workspace = "isolated"`),
   ## "" for the volume of the run
   if volume.len > 0: "cicd-job-" & volume.replace("_", "-") else: "cicd-run-" & runId.replace("_", "-")
 

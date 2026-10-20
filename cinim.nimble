@@ -11,7 +11,6 @@ srcDir        = "src"
 requires "nim >= 2.0.0"
 requires "checksums >= 0.2.1"
 requires "protobuf_serialization >= 0.6.2"
-requires "uniq >= 0.2.1"  # UUIDv7 identifiers (common.proto: "shard>_<uuidv7>", SHD-004)
 requires "crunchy >= 0.1.11"  # crc32c (DAT-001/logs.proto's LogChunk.crc32c) - no stdlib/checksums CRC32
 requires "db_connector >= 0.1.0"  # sqlite state of the job-controller (adoption after a restart, D-33)
 requires "zippy >= 0.10.0"  # compression of log blocks (src/shim/logspool.nim)

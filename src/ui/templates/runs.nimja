@@ -1,0 +1,9 @@
+{% extends "layout.nimja" %}
+{% block title %}Runs{% if org.len > 0 %} of {{ h(org) }}{% endif %} - CiNim{% endblock %}
+{% block content %}<h1>Runs{% if org.len > 0 %} of {{ h(org) }}{% endif %}</h1>
+<p class="filter">State: <a href="{{ h(allLink) }}">all</a>{% for s in states %} <a href="{{ h(s.link) }}"{% if s.active %} class="active"{% endif %}>{{ h(s.name) }}</a>{% endfor %}</p>
+<table><thead><tr><th>Run</th><th>State</th>{% if org.len == 0 %}<th>Organisation</th>{% endif %}<th>Source</th><th>Started</th><th>Updated</th><th>Why</th></tr></thead><tbody>
+{% for r in runs %}<tr id="run-{{ h(r.id) }}"><td class="runid"><a href="{{ h(base) }}/runs/{{ h(r.id) }}" title="{{ h(r.id) }}">{{ h(r.short) }}</a></td><td class="state-{{ h(r.state) }}">{{ h(r.state) }}</td>{% if org.len == 0 %}<td>{{ h(r.organization) }}</td>{% endif %}<td>{{ h(r.source) }}</td><td>{{ h(r.created) }}</td><td>{{ h(r.updated) }}</td><td>{{ h(r.failure) }}</td></tr>
+{% endfor %}</tbody></table>
+{% if runs.len == 0 %}<p class="empty">No runs.</p>{% endif %}
+{% if older.len > 0 %}<p class="pager"><a href="{{ h(older) }}">Older runs</a></p>{% endif %}{% endblock %}

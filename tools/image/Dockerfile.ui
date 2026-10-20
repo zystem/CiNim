@@ -1,0 +1,13 @@
+# The image of the UI service (docs/ui.md): one static program, no certificates and no git (it speaks plain HTTP to the core inside the cluster and the Ingress carries the TLS).
+# Built from the image of the libraries (`--build-arg DEPS_IMAGE=`, tools/image/Dockerfile.deps).
+ARG DEPS_IMAGE
+FROM ${DEPS_IMAGE} AS build
+COPY . /src
+WORKDIR /src
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/ui-static src/ui/main.nim; strip /out/*
+
+FROM scratch
+COPY --from=build /out/ui-static /cinim-ui
+USER 65532:65532
+EXPOSE 18100
+ENTRYPOINT ["/cinim-ui"]

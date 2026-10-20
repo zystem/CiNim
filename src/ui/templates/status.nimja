@@ -1,0 +1,7 @@
+{% extends "layout.nimja" %}
+{% block title %}Components - CiNim{% endblock %}
+{% block content %}<h1>Components</h1>
+<table><thead><tr><th>Kind</th><th>Id</th><th>State</th><th>Last seen</th></tr></thead><tbody>
+{% for c in components %}<tr><td>{{ h(c.kind) }}</td><td>{{ h(c.id) }}</td><td class="state-{{ h(c.state) }}">{{ h(c.state) }}</td><td>{{ h(c.seen) }}</td></tr>
+{% endfor %}</tbody></table>
+{% if components.len == 0 %}<p class="empty">No components reported.</p>{% endif %}{% endblock %}

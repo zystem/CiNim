@@ -2,16 +2,13 @@
 ## and the shim's last state: shim_*, D-29), `job_controllers`, `leases`, `execution_profiles` (the settings of docs/settings.md)
 ## plus `log_streams` (DAT-001 - per-attempt VictoriaLogs stream bookkeeping, not log content). `backups`, `artifacts`,
 ## `environments`, `deployments`, `credentials`, `outbox`, `audit_events` are not created yet; `organizations` is the record only (the namespace,
-## controller and Ingress of SHD-007 are not created by the core yet). Identifiers are UUIDv7 with a shard prefix (SHD-004); one shard is hardcoded, no
+## controller and Ingress of SHD-007 are not created by the core yet). Identifiers are a shard prefix and the time in microseconds in base32 (`common/ids.nim`, SHD-004, D-66); one shard is hardcoded, no
 ## directory yet.
 
 import std/[json, times]
-import uniq
-import ../common/[rqlite, ctrlauth]
+import ../common/[rqlite, ctrlauth, ids]
+export ids.shardId, ids.newId
 
-const shardId* = "s1"  ## single shard, no directory yet (stage M5 of the roadmap adds it)
-
-proc newId*(): string = shardId & "_" & $uuid7()
 
 const ddl = [
   # the organisations of this shard (SHD-001, SHD-007); id doubles as tenant_id everywhere else
