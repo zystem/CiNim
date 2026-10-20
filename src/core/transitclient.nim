@@ -10,10 +10,13 @@
 ## A failure is `{"errors": ["..."]}`. Whether it may pass is told by the header `X-Hsmgate-Retryable` (hsmgate); without it: 429, 5xx and no answer at all may pass, other statuses
 ## (a wrong key or context is 400, a key not granted 403) are final. The sealed text is the service's own; the core keeps it and gives it back.
 ## With `https://` the connection is mutual TLS: the core checks the service's certificate against `ca` and shows its own (`cert`, `key`); this needs a core built with -d:ssl
-## (the image is). Through a proxy (`proxy`, CONNECT) the TLS still runs from the core to the service; the proxy sees only the address and the bytes. The service ignores the token a Vault client sends; a Vault or an OpenBao wants one (`tokenFile`).
-import std/[json, httpclient, strutils, net, base64, uri]
+## (the image is). Through a proxy (`proxy`, CONNECT) the TLS still runs from the core to the service; the proxy sees only the address and the bytes (needs Nim >= 2.2.8: the httpclient of 2.2.6 writes a wrong request line inside the tunnel, nim-lang/Nim#25319). The service ignores the token a Vault client sends; a Vault or an OpenBao wants one (`tokenFile`).
+import std/[json, httpclient, strutils, net, base64]
 import kekprovider
-import ../common/connecthttp
+
+static:
+  # the request line of an https request through an HTTP proxy is wrong in 2.2.6 (the server answers 400); keep it out of the build
+  doAssert NimVersion != "2.2.6", "Nim 2.2.6 cannot be used: its httpclient is wrong for https through a proxy (nim-lang/Nim#25319); use >= 2.2.8"
 
 type
   TransitConfig* = object
@@ -41,28 +44,7 @@ type Answer = tuple[code: int, body: JsonNode, retryHeader, error, raw: string] 
 func path(cfg: TransitConfig; op: string): string =
   "/v1/" & (if cfg.mount.len > 0: cfg.mount else: "transit") & "/" & op & "/" & cfg.keyName
 
-when defined(ssl):
-  proc callViaConnect(cfg: TransitConfig; meth: HttpMethod; path: string; body: JsonNode): Answer =
-    ## https through an HTTP proxy: our own CONNECT (common/connecthttp.nim; std/httpclient of Nim 2.2.6 writes a wrong request line inside the tunnel)
-    try:
-      let u = parseUri(cfg.url)
-      let ctx = newContext(verifyMode = CVerify_Peer, caFile = cfg.ca, certFile = cfg.cert, keyFile = cfg.key)
-      var headers = @[("Content-Type", "application/json"), ("Accept", "application/json"), ("User-Agent", "cinim-core")]
-      if cfg.tokenFile.len > 0:
-        try: headers.add ("X-Vault-Token", readFile(cfg.tokenFile).strip)
-        except IOError: return (0, nil, "", "cannot read the token file " & cfg.tokenFile, "")
-      let timeout = if cfg.timeoutMs > 0: cfg.timeoutMs else: 5000
-      let r = viaConnect(cfg.proxy, u.hostname, u.port, $meth, path, headers, (if body == nil: "" else: $body), ctx, timeout)
-      result.code = r.code
-      result.raw = r.body[0 ..< min(r.body.len, 400)]
-      result.body = try: parseJson(r.body) except JsonParsingError: newJObject()
-      result.retryHeader = headerOf(r.headers, "X-Hsmgate-Retryable")
-    except CatchableError as e:
-      result.error = e.msg
-
 proc call(cfg: TransitConfig; meth: HttpMethod; path: string; body: JsonNode = nil): Answer =
-  when defined(ssl):
-    if cfg.proxy.len > 0 and cfg.url.startsWith("https://"): return callViaConnect(cfg, meth, path, body)
   var c: HttpClient
   try:
     c = newClient(cfg)

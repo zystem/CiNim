@@ -7,11 +7,11 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 *Nothing is left (2026-10-18).* A new line goes into this table when code is written that exists only for something made before a change.
 
 
-## To delete when its condition is met
+*Nothing is left (2026-10-20).*
 
-| Code | Why it exists | Delete when |
-|---|---|---|
-| `src/common/connecthttp.nim` and its use in `core/transitclient.nim` (`callViaConnect`), `tests/unit/tconnecthttp.nim`, `tests/support/connectproxy.nim` | the `std/httpclient` of Nim 2.2.6 wrote `GET host:port/path` inside the CONNECT tunnel (nim-lang/Nim#25319; fixed in 2.2.8) | every image and every workstation builds with Nim >= 2.2.8 and a test of `std/httpclient` through a real tinyproxy passes (`HSMGATE_TEST_PROXY`): then the client can use `newHttpClient(proxy = ...)` again. Not urgent: the code is correct on every version |
+## Deleted (2026-10-20)
+
+* `src/common/connecthttp.nim` (a CONNECT of our own for https through an HTTP proxy), its use in `core/transitclient.nim` and `tests/unit/tconnecthttp.nim`: the `std/httpclient` of Nim 2.2.6 wrote `GET host:port/path` inside the tunnel (nim-lang/Nim#25319, fixed in 2.2.8). The images and the workstation build with Nim 2.2.12, the standard client passes the test through a real tinyproxy and the real hsmgate (`HSMGATE_TEST_PROXY`), and `transitclient.nim` refuses to compile with 2.2.6.
 
 ## Deleted (2026-10-18, the second part)
 
