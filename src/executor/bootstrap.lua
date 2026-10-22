@@ -121,16 +121,15 @@ local function park()
   if running() == state.main then yield_("__suspend") else yield_({ kind = "__park" }) end
 end
 
-local function call(kind, payload, line)
+local function call(kind, payload, line, stepno)
   local co = running()
   if co ~= state.main and not branch_co[co] then
     error("ci." .. kind .. ": host calls are not supported inside nested coroutines", 3)
   end
   local ctx = cur
   local nth
-  if kind == "job_sh" then                                 -- a step is told apart by the line and the n-th time it is made there, in its own context
-    nth = ctx.ln[line or 0] or 0
-    ctx.ln[line or 0] = nth + 1
+  if kind == "job_sh" then                                 -- a step is told apart by its number, made of the id of its job and its own (D-67): the same in every replay, whatever the branches do
+    nth = stepno
   else
     nth = ctx.kn[kind] or 0
     ctx.kn[kind] = nth + 1
@@ -168,25 +167,63 @@ end
 -- same as `for`/`pcall` are not journaled --- only what a job's steps actually do is (PIP-003).
 -- `use`, `ci.input`, services and `ci.spawn` are not implemented yet (`ci.parallel` and `ci.matrix` are: docs/parallel.md).
 
--- The limit of steps in a run and the ids that the author gives to jobs and steps (docs/parallel.md section 3). A run has at most 1000 steps (D-67): the 1001st is an error
--- returned to the author (`step_limit`). An id is 1 to 8 letters and digits starting with a letter (so that it cannot be taken for a number), unique in the run, and a repeat
--- is the author's to resolve: the run fails with `duplicate_id` and the two lines. The script runs again in a fresh state at every replay, so both checks are made again each time.
+-- The limit of steps in a run and the ids that the author gives to jobs and steps (D-67). A run has at most 1000 steps: the 1001st is an error returned to the author (`step_limit`).
+-- An id is Crockford base32 in lowercase, `0123456789abcdefghjkmnpqrstvwxyz` (the digits and the letters but i l o u), of a fixed width: a job's 2 characters, a step's 4. A shorter id is
+-- padded with zeros in front (`a` is `0a`), upper case is read as lower case, so `a`, `A` and `0a` are one id. The id of a job is unique in the run and the id of a step in its job: a
+-- repeat is the author's to resolve, the run fails with `duplicate_id` and the two lines. The script runs again in a fresh state at every replay, so these checks are made again each time.
+-- A step is told to the host by one number, `job * 2^20 + step`: it is the same in every replay and no table is needed (src/common/crockford.nim has the same rules for the core).
 local MAX_STEPS = 1000
 local step_count = 0
-local ids_seen = {}                      -- id -> the line where it was first used
+local job_ids = {}                       -- the normalized id of a job -> the line where it was first used
+local ID_DIGITS = "0123456789abcdefghjkmnpqrstvwxyz"
+local JOB_ID_WIDTH, STEP_ID_WIDTH = 2, 4
 
-local function check_id(v, what)
-  if v == nil then return nil end
-  if type(v) ~= "string" or #v > 8 or not v:find("^[A-Za-z][A-Za-z0-9]*$") then
-    error(what .. ": an id is 1 to 8 letters and digits starting with a letter, got " .. (type(v) == "string" and ("'" .. v .. "'") or type(v)), 3)
-  end
-  return v
+local function id_number(s)
+  local n = 0
+  for i = 1, #s do n = n * 32 + (ID_DIGITS:find(s:sub(i, i), 1, true) - 1) end
+  return n
 end
 
-local function claim_id(id, line)
-  local first = ids_seen[id]
-  if first then error("duplicate_id: the id '" .. id .. "' is used at line " .. first .. " and again at line " .. line, 0) end
-  ids_seen[id] = line
+-- the id `v` of at most `width` characters, normalized; an error for anything else. `what` names the call, for the message; the error is at the line of the script (level 3 from the
+-- function that makes the id: it is called by the index of `ci.single[...]` or of `step.sh[...]`, which the script calls)
+local function norm_ref(v, width, what)
+  if type(v) ~= "string" then error(what .. ": an id is a string of at most " .. width .. " characters of 0-9 and a-z without i, l, o, u, got " .. type(v), 3) end
+  if #v == 0 then error(what .. ": an id is not empty", 3) end
+  if #v > width then error(what .. ": an id is at most " .. width .. " characters, got " .. #v .. " ('" .. v .. "')", 3) end
+  local lower = v:lower()
+  for i = 1, #lower do
+    local c = lower:sub(i, i)
+    if not ID_DIGITS:find(c, 1, true) then
+      if c == "i" or c == "l" or c == "o" or c == "u" then
+        error(what .. ": the character '" .. c .. "' is not in the alphabet of ids (i, l, o and u are left out: write 1 for i and l, 0 for o)", 3)
+      end
+      error(what .. ": the character '" .. v:sub(i, i) .. "' is not in the alphabet of ids (digits and the letters but i, l, o, u)", 3)
+    end
+  end
+  return string.rep("0", width - #lower) .. lower
+end
+
+-- the same without an error: nil for what is not an id (a lookup in the results by an id as the author writes it)
+local function try_ref(v, width)
+  if type(v) ~= "string" or #v == 0 or #v > width then return nil end
+  local lower = v:lower()
+  if lower:find("[^" .. ID_DIGITS .. "]") then return nil end
+  return string.rep("0", width - #lower) .. lower
+end
+
+local function claim_job(id, line)
+  local first = job_ids[id]
+  if first then error("duplicate_id: the job id '" .. id .. "' is used at line " .. first .. " and again at line " .. line, 0) end
+  job_ids[id] = line
+end
+
+-- the name of a branch of `ci.parallel` (D-69 will replace the branches by jobs): letters and digits, a letter first, at most 8
+local function check_branch(v, what)
+  if v == nil then return nil end
+  if type(v) ~= "string" or #v > 8 or not v:find("^[A-Za-z][A-Za-z0-9]*$") then
+    error(what .. ": a name is 1 to 8 letters and digits starting with a letter, got " .. (type(v) == "string" and ("'" .. v .. "'") or type(v)), 3)
+  end
+  return v
 end
 
 -- Application metrics of a step (`metrics = {...}` in ci.job / Job:sh options). The shim in the step's Pod reads them
@@ -615,72 +652,120 @@ local function parse_outputs(text)
   return t
 end
 
+-- A step is a table that describes it and runs nothing: `step.sh["ab"]{ cmd = "make lint" }`, `step.cache_restore["c"]{ keys = {...} }`, `step.cache_save["d"]{ key = ..., paths = {...} }`.
+-- The id is the index (D-67), so a step without one cannot be written; it is checked at once, with the line. A job runs its list of steps in order (`steps = { ... }`) or, for the logic
+-- that needs a result of a step to go on (`body = function(j) ... end`), runs them one by one with `j:run(step)`. A step that fails (a code other than 0, unless `ignore_failure`) fails the job.
+local STEP_FIELDS = {
+  sh = { cmd = true, name = true, ignore_failure = true, capture = true, image = true, env = true, cache = true, artifacts = true, secrets = true, metrics = true, mask = true, timeout = true },
+  cache_restore = { keys = true, name = true },
+  cache_save = { key = true, paths = true, name = true },
+}
+local steps_made = setmetatable({}, { __mode = "k" })    -- the descriptions that the constructors made: a script cannot pass off a table of its own for one
+
+local function check_name(v, what)
+  if v ~= nil and (type(v) ~= "string" or #v == 0 or #v > 200) then error(what .. ": name is a text of 1 to 200 characters", 3) end
+end
+
+local function step_ctor(kind)
+  local what = "step." .. kind
+  return setmetatable({}, {
+    __index = function(_, id)
+      local sid = norm_ref(id, STEP_ID_WIDTH, what)
+      return function(opts)
+        if type(opts) ~= "table" then error(what .. "[\"" .. sid .. "\"]: a table of fields expected", 2) end
+        for k in rawnext, opts do
+          if not STEP_FIELDS[kind][k] then error(what .. "[\"" .. sid .. "\"]: unknown field '" .. tostring_(k) .. "'", 2) end
+        end
+        check_name(opts.name, what)
+        if kind == "sh" then
+          if type(opts.cmd) ~= "string" or opts.cmd == "" then error(what .. "[\"" .. sid .. "\"]: cmd is a command, a text", 2) end
+        elseif kind == "cache_restore" then
+          local keys = opts.keys
+          if type(keys) ~= "table" or rawlen(keys) < 1 or rawlen(keys) > 6 then error(what .. ": keys is a list of 1 to 6 keys: the first is the key, the others are key prefixes", 2) end
+        else
+          if type(opts.key) ~= "string" then error(what .. ": key is a text", 2) end
+        end
+        local d = { kind = kind, id = sid, line = getline(), opts = opts }
+        steps_made[d] = true
+        return d
+      end
+    end,
+    __call = function() error(what .. ": the id is the index: " .. what .. "[\"a\"]{ ... }", 2) end,
+  })
+end
+local step = { sh = step_ctor("sh"), cache_restore = step_ctor("cache_restore"), cache_save = step_ctor("cache_save") }
+
+-- the outputs of a step (STO-003) are parsed by `parse_outputs` above; the result of a step is { status = "ok"|"failed", code, outputs, stdout }
+local function run_sh(job, d)
+  local o = d.opts
+  local line = d.line
+  if o.ignore_failure ~= nil and type(o.ignore_failure) ~= "boolean" then error("step.sh: ignore_failure must be a boolean", 3) end
+  local image = job.__image
+  if o.image ~= nil then
+    if type(o.image) ~= "string" or o.image == "" then error("step.sh: image is a non-empty string", 3) end
+    image = o.image
+  end
+  -- payload: job key, image, profile ("" = the ordinary one), canonical options JSON ("" = none) and the command, tab-separated; the command is last because it may itself contain
+  -- tabs (core splits into five fields)
+  local no = job.__no * 1048576 + id_number(d.id)
+  local code, out = call("job_sh", job.__key .. "\t" .. image .. "\t" .. job.__profile .. "\t" .. step_opts(job, o) .. "\t" .. o.cmd, line, no):match("^(%-?%d+)\n(.*)$")
+  code = tonumber(code)
+  -- a non-zero code fails the job (and so the run, unless the script catches the error); `ignore_failure = true` returns it instead. The code is in the journal, so a replay fails at the same call.
+  if code ~= 0 and not o.ignore_failure then error("step failed with code " .. tostring(code) .. " (job " .. job.__key .. ", step " .. d.id .. ")", 3) end
+  return { status = code == 0 and "ok" or "failed", code = code, outputs = parse_outputs(out), stdout = o.capture and out or nil }
+end
+
+-- `step.cache_restore` and `step.cache_save` of the API v1 signatures (lua/stdlib/cicd.d.lua): each is a step of its own in the job's Pod, on the run's workspace, so a script can restore a
+-- cache in the middle of a job, or save one when it chooses. `keys` is the key and then the key prefixes to fall back on, as `restore_keys` of the `cache` option; the answer of a restore is
+-- `{ hit = true, key = <the key restored> }` or `{ hit = false }`: the shim says which key it restored, the core puts that in the step's result (the journal), so a replay sees the same. A
+-- restore that finds nothing is not an error; a save of a key that is stored already is not one either (a key is immutable). The job's image needs a shell (`true`).
+local function run_cache(job, d)
+  local decl
+  if d.kind == "cache_restore" then
+    local keys = d.opts.keys
+    local rest = {}
+    for i = 1, rawlen(keys) do
+      local k = keys[i]
+      if type(k) ~= "string" or #k < 1 or #k > 200 or not k:match(CACHE_KEY_PAT) then error("step.cache_restore: a key is 1..200 characters: letters, digits and . _ : + = @ % - (no '/')", 3) end
+      if i > 1 then rest[i - 1] = k end
+    end
+    decl = { key = keys[1], mode = "restore", paths = {}, restore_keys = rest }
+  else
+    local list = norm_cache({ key = d.opts.key, paths = d.opts.paths }, 3)
+    decl = list[1]
+    decl.mode = "save"
+  end
+  local only = { __key = job.__key, __image = job.__image, __profile = job.__profile, __metrics = "", __mask = job.__mask, __timeout = job.__timeout, __env = job.__env, __cache = { decl }, __workspace = job.__workspace }
+  local no = job.__no * 1048576 + id_number(d.id)
+  local code, out = call("job_sh", job.__key .. "\t" .. job.__image .. "\t" .. job.__profile .. "\t" .. step_opts(only, nil) .. "\t" .. "true", d.line, no):match("^(%-?%d+)\n(.*)$")
+  code = tonumber(code)
+  if code ~= 0 then error("step failed with code " .. tostring(code) .. " (job " .. job.__key .. ", step " .. d.id .. ")", 3) end
+  if d.kind == "cache_save" then return { status = "ok", code = 0, outputs = {} } end
+  if out == "" then return { status = "ok", code = 0, outputs = {}, hit = false } end
+  return { status = "ok", code = 0, outputs = {}, hit = true, key = out }
+end
+
 local Job_mt = { __index = {
   -- `j:env{ NAME = "value" }`: variables for the steps of this job that follow (no Pod is started); the env of the job in VAR-004
   env = function(self, tbl)
     if type(tbl) ~= "table" then error("Job:env: a table NAME = \"value\" expected", 2) end
     self.__env = merge_env(self.__env, norm_env(tbl, "Job:env", 3), "Job:env")
   end,
-  sh = function(self, cmd, opts)
-    if type(cmd) ~= "string" then error("Job:sh: string expected", 2) end
-    local line = getline()
+  -- `j:run(step)`: runs a step that a constructor of `step` described, and returns its result (`steps` of the job's result has it too, by its id)
+  run = function(self, d)
+    if type(d) ~= "table" or not steps_made[d] then error("Job:run: a step made by step.sh[\"id\"]{ ... } expected", 2) end
+    local first = self.__step_ids[d.id]
+    if first then error("duplicate_id: the step id '" .. d.id .. "' is used in the job '" .. self.__key .. "' at line " .. first .. " and again at line " .. d.line, 0) end
+    self.__step_ids[d.id] = d.line
     step_count = step_count + 1
-    if step_count > MAX_STEPS then error("step_limit: a run has at most " .. MAX_STEPS .. " steps; the step at line " .. line .. " is the " .. step_count .. "th", 0) end
-    if opts and opts.id ~= nil then claim_id(check_id(opts.id, "Job:sh"), line) end
-    -- payload: job key, image, profile ("" = the ordinary one), canonical options JSON ("" = none) and the command, tab-separated; the
-    -- command is last because it may itself contain tabs (core splits into five fields)
-    if opts and opts.ignore_failure ~= nil and type(opts.ignore_failure) ~= "boolean" then error("Job:sh: ignore_failure must be a boolean", 2) end
-    local image = self.__image
-    if opts and opts.image ~= nil then
-      if type(opts.image) ~= "string" or opts.image == "" then error("Job:sh: image is a non-empty string", 2) end
-      image = opts.image
-    end
-    local code, out = call("job_sh", self.__key .. "\t" .. image .. "\t" .. self.__profile .. "\t" .. step_opts(self, opts) .. "\t" .. cmd, line):match("^(%-?%d+)\n(.*)$")
-    code = tonumber(code)
-    -- a non-zero code fails the job (and so the run, unless the script catches the error); `ignore_failure = true` returns it instead
-    -- (6.7, ShOpts.ignore_failure). The code is in the journal, so a replay fails at the same call.
-    if code ~= 0 and not (opts and opts.ignore_failure) then error("step failed with code " .. tostring(code), 2) end
-    return { code = code, outputs = parse_outputs(out), stdout = (opts and opts.capture) and out or nil }
+    if step_count > MAX_STEPS then error("step_limit: a run has at most " .. MAX_STEPS .. " steps; the step at line " .. d.line .. " is the " .. step_count .. "th", 0) end
+    local r
+    if d.kind == "sh" then r = run_sh(self, d) else r = run_cache(self, d) end
+    self.__results[d.id] = r
+    return r
   end,
+  sh = function() error("Job:sh is gone (D-67): a step is described by step.sh[\"ab\"]{ cmd = \"make\" }, in the list `steps` of the job or run by j:run(...)", 2) end,
 } }
-
--- `j.cache.restore(keys)` and `j.cache.save(key, paths)` of the API v1 signatures (lua/stdlib/cicd.d.lua): each is a step of its own in the job's Pod, on the run's workspace, so a
--- script can restore a cache in the middle of a job, or save one when it chooses. `keys` is the key and then the key prefixes to fall back on, as `restore_keys` of the `cache` option;
--- the answer is `{ hit = true, key = <the key restored> }` or `{ hit = false }`: the shim says which key it restored, the core puts that in the step's result (the journal), so a replay
--- sees the same. A restore that finds nothing is not an error; a save of a key that is stored already is not one either (a key is immutable). The job's image needs a shell (`true`).
-local function cache_step(job, decl, line)
-  step_count = step_count + 1
-  if step_count > MAX_STEPS then error("step_limit: a run has at most " .. MAX_STEPS .. " steps; the step at line " .. line .. " is the " .. step_count .. "th", 0) end
-  local only = { __key = job.__key, __image = job.__image, __profile = job.__profile, __metrics = "", __mask = job.__mask, __timeout = job.__timeout, __env = job.__env, __cache = { decl }, __workspace = job.__workspace }
-  local code, out = call("job_sh", job.__key .. "\t" .. job.__image .. "\t" .. job.__profile .. "\t" .. step_opts(only, nil) .. "\t" .. "true", line):match("^(%-?%d+)\n(.*)$")
-  code = tonumber(code)
-  if code ~= 0 then error("step failed with code " .. tostring(code), 3) end
-  return out
-end
-local function job_cache_api(job)
-  return {
-    restore = function(keys)
-      local line = getline()
-      if type(keys) ~= "table" or rawlen(keys) < 1 or rawlen(keys) > 6 then error("Job.cache.restore: a list of 1 to 6 keys: the first is the key, the others are key prefixes", 2) end
-      local rest = {}
-      for i = 1, rawlen(keys) do
-        local k = keys[i]
-        if type(k) ~= "string" or #k < 1 or #k > 200 or not k:match(CACHE_KEY_PAT) then error("Job.cache.restore: a key is 1..200 characters: letters, digits and . _ : + = @ % - (no '/')", 2) end
-        if i > 1 then rest[i - 1] = k end
-      end
-      local out = cache_step(job, { key = keys[1], mode = "restore", paths = {}, restore_keys = rest }, line)
-      if out == "" then return { hit = false } end
-      return { hit = true, key = out }
-    end,
-    save = function(key, paths)
-      local line = getline()
-      local list = norm_cache({ key = key, paths = paths }, 3)
-      local decl = list[1]
-      decl.mode = "save"
-      cache_step(job, decl, line)
-    end,
-  }
-end
 
 -- Launch parameters (PIP-012, VAR-002). The script declares them in `ci.pipeline{ params = { NAME = ci.string{...}, ... } }`; the names are the names of
 -- environment variables (VAR-003). The values given when the run was started arrive as text (`given`); they are checked against the declarations and
@@ -1237,7 +1322,7 @@ local function parallel(spec, a, b)
     for k, f in stable_pairs(spec) do
       local label
       if mtype(k) == "integer" then label = tostring_(k)
-      elseif type(k) == "string" then label = check_id(k, "ci.parallel: a branch name"); label = k
+      elseif type(k) == "string" then label = check_branch(k, "ci.parallel: a branch name"); label = k
       else error("ci.parallel: a branch is named by a string or is a place in a list", 2) end
       if type(f) ~= "function" then error("ci.parallel: branch '" .. label .. "' is not a function", 2) end
       entries[#entries + 1] = { key = k, label = label, fn = f }
@@ -1247,6 +1332,7 @@ local function parallel(spec, a, b)
   return run_parallel(entries, opts)
 end
 
+local JOB_FIELDS = { name = true, image = true, profile = true, metrics = true, mask = true, timeout = true, workspace = true, shm = true, secrets = true, artifacts = true, env = true, cache = true, lock = true, steps = true, body = true }
 local finals = {}                       -- the cleanups of `ci.finally`, in the order registered
 G.ci = {
   now = function() return tonumber(call("now", "")) end,
@@ -1265,24 +1351,61 @@ G.ci = {
   end,
   pipeline = function(spec) return spec end,  -- metadata phase, pure, not journaled (PIP-002)
   string = param_ctor("string"), number = param_ctor("number"), bool = param_ctor("bool"), choice = param_ctor("choice"),
-  job = function(opts, fn)
-    if type(opts) ~= "table" then error("ci.job: table expected", 2) end
-    if type(fn) ~= "function" then error("ci.job: function expected", 2) end
-    if opts.id ~= nil then claim_id(check_id(opts.id, "ci.job"), getline()) end
-    cur.jobs = cur.jobs + 1
-    local j = setmetatable({ __key = (cur.path == "m" and "" or (cur.path .. "/")) .. "job-" .. cur.jobs, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
-      __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __workspace = norm_workspace(opts.workspace), __shm = norm_shm(opts.shm), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
-      __env = merge_env(pipeline_env, norm_env(opts.env, "ci.job env", 3), "ci.job env"), __cache = norm_cache(opts.cache, 3) }, Job_mt)
-    j.cache = job_cache_api(j)
-    local lock = norm_lock(opts.lock)
-    if lock and cur.path ~= "m" then error("ci.job: a lock inside a branch of ci.parallel is not supported yet", 2) end
-    if lock then call("lock", lock .. "\t" .. j.__key) end   -- the run waits here, suspended, until the lock is its turn; the job is named so that the lock can show who holds it
-    local ok, err = pcall(fn, j)
-    if lock then call("unlock", lock) end           -- also when the job ended with an error
-    if not ok then error(err, 0) end
-    return { ok = true, outputs = {} }
-  end,
+  single = setmetatable({}, {
+    -- `ci.single["a"]{ ... }` runs one job (D-67): the id is the index, the steps are a list or a function. It waits for its steps and returns { status = "ok", steps = { [id] = result } }.
+    __index = function(_, id)
+      local jid = norm_ref(id, JOB_ID_WIDTH, "ci.single")
+      return function(opts)
+        if type(opts) ~= "table" then error("ci.single[\"" .. jid .. "\"]: a table expected", 2) end
+        for k in rawnext, opts do
+          if not JOB_FIELDS[k] then error("ci.single[\"" .. jid .. "\"]: unknown field '" .. tostring_(k) .. "'", 2) end
+        end
+        check_name(opts.name, "ci.single")
+        local list, body = opts.steps, opts.body
+        if (list == nil) == (body == nil) then error("ci.single[\"" .. jid .. "\"]: exactly one of steps (a list of step.sh[\"id\"]{ ... }) and body (a function) is given", 2) end
+        if list ~= nil and type(list) ~= "table" then error("ci.single[\"" .. jid .. "\"]: steps is a list of steps", 2) end
+        if body ~= nil and type(body) ~= "function" then error("ci.single[\"" .. jid .. "\"]: body is a function", 2) end
+        local line = getline()
+        -- the ids of the steps of a list are all known before one runs: a repeated id fails the run before a Pod is made
+        if list ~= nil then
+          local seen = {}
+          for n = 1, rawlen(list) do
+            local d = list[n]
+            if type(d) ~= "table" or not steps_made[d] then error("ci.single[\"" .. jid .. "\"]: steps[" .. n .. "] is not a step made by step.sh[\"id\"]{ ... }", 2) end
+            if seen[d.id] then error("duplicate_id: the step id '" .. d.id .. "' is used in the job '" .. jid .. "' at line " .. seen[d.id] .. " and again at line " .. d.line, 0) end
+            seen[d.id] = d.line
+          end
+        end
+        claim_job(jid, line)
+        local results = setmetatable({}, { __index = function(t, k) local nk = try_ref(k, STEP_ID_WIDTH) if nk and nk ~= k then return rawget(t, nk) end end })
+        local j = setmetatable({ __key = jid, __no = id_number(jid), __step_ids = {}, __results = results, __image = opts.image or "", __profile = norm_profile(opts.profile), __metrics = norm_metrics(opts.metrics),
+          __mask = norm_mask(opts.mask), __timeout = norm_timeout(opts.timeout), __workspace = norm_workspace(opts.workspace), __shm = norm_shm(opts.shm), __secrets = norm_secrets(opts.secrets, 3), __artifacts = norm_artifacts(opts.artifacts, 3),
+          __env = merge_env(pipeline_env, norm_env(opts.env, "ci.single env", 3), "ci.single env"), __cache = norm_cache(opts.cache, 3) }, Job_mt)
+        local lock = norm_lock(opts.lock)
+        if lock and cur.path ~= "m" then error("ci.single: a lock inside a branch of ci.parallel is not supported yet", 2) end
+        if lock then call("lock", lock .. "\t" .. j.__key) end   -- the run waits here, suspended, until the lock is its turn; the job is named so that the lock can show who holds it
+        local ok, err = pcall(function()
+          if list ~= nil then
+            for n = 1, rawlen(list) do j:run(list[n]) end
+          else
+            body(j)
+          end
+        end)
+        if lock then call("unlock", lock) end           -- also when the job ended with an error
+        if not ok then error(err, 0) end
+        return { status = "ok", steps = results }
+      end
+    end,
+    __call = function() error("ci.single: the id is the index: ci.single[\"a\"]{ image = ..., steps = { step.sh[\"a\"]{ cmd = ... } } }", 2) end,
+  }),
+  -- (the names below are not keys of `ci`, they answer through the metatable: `ci.step` is `step`, and `ci.job` says it is gone)
 }
+setmetatable(G.ci, { __index = function(_, k)
+  if k == "step" then return step end
+  if k == "job" then
+    return function() error("ci.job is gone (D-67): a job is ci.single[\"a\"]{ image = ..., steps = { step.sh[\"a\"]{ cmd = ... } } } (or body = function(j) ... end, with j:run(step.sh[...]{ ... }))", 2) end
+  end
+end })
 
 -- `run` is the argument for a real (`ci.pipeline`) script's `main(run)`; a script that returns a
 -- plain value directly, as the sandbox test fixtures do, is unaffected.
@@ -1324,5 +1447,6 @@ local function run_main(fn, run)
   return v
 end
 
+rawset(G, "step", step)
 rawset(G, "_G", proxy)
 return proxy, run_main

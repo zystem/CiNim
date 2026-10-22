@@ -26,10 +26,10 @@ The module tries the settings before it keeps them: it puts, reads and deletes o
 ## In a pipeline
 
 ```lua
-ci.job({ image = "alpine" }, function(j)
-  j:sh("mkdir -p dist && echo built > dist/app.txt", { artifacts = { upload = { "dist/**" } } })
-  j:sh("cat dist/app.txt", { artifacts = { download = { "dist" } } })
-end)
+ci.single['01']{ image = "alpine", body = function(j)
+  j:run(step.sh['1']{ cmd = "mkdir -p dist && echo built > dist/app.txt", artifacts = { upload = { "dist/**" } } })
+  j:run(step.sh['2']{ cmd = "cat dist/app.txt", artifacts = { download = { "dist" } } })
+ end }
 ```
 
 * `upload` is a list of patterns, relative to the shared workspace `/cicd/workspace` (the same directory in every step of a run: the steps share a volume, docs/deployment.md). A command starts in the workspace (the shim changes to it before the command runs), so relative paths mean files there. `*` is any characters within a name, `**` crosses directories (`dist/**`, `**/*.log`), `?` is one character. **Every pattern must match at least one file**; a pattern that matches nothing fails the step with `artifacts_failed` and says which one. Symbolic links and the shim's own `.run` directory are never taken. At most 1000 files per step and 5 GiB per file.

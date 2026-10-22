@@ -14,11 +14,13 @@ is needed for metrics inside the application is added to the application itself 
 ## Lua syntax
 
 ```lua
-ci.job({ image = "maven:3.9-eclipse-temurin-21",
-         metrics = { runtime = "jvm" } },                    -- default for all steps of the job
-  function(job)
-    job:sh("mvn -B verify")                                  -- inherits the job's declaration
-    job:sh("java -jar target/it.jar", {                      -- replaces it entirely
+ci.single["a"] {
+  image   = "maven:3.9-eclipse-temurin-21",
+  metrics = { runtime = "jvm" },                             -- default for all steps of the job
+  steps   = {
+    step.sh["1"] { cmd = "mvn -B verify" },                  -- inherits the job's declaration
+    step.sh["2"] {                                           -- replaces it entirely
+      cmd = "java -jar target/it.jar",
       metrics = {
         runtime = "jvm",
         scrape = {
@@ -27,9 +29,10 @@ ci.job({ image = "maven:3.9-eclipse-temurin-21",
           { url = "http://127.0.0.1:8080/debug/vars", name = "gopprof", format = "expvar" },
         },
       },
-    })
-    job:sh("make lint", { metrics = false })                 -- this step has level 1 only
-  end)
+    },
+    step.sh["3"] { cmd = "make lint", metrics = false },     -- this step has level 1 only
+  },
+}
 ```
 
 Fields of `ScrapeSpec`:

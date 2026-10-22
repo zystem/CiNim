@@ -161,7 +161,7 @@ suite "PIP-003/PIP-004 the journal is found by the key of a call, not by place":
   test "every entry has a key: steps s<number>, the others <kind>#<n> in the order of that kind":
     let (_, j) = runClean()
     check j.entries[0].key == "now#0"
-    check j.entries[1].key == "s0"
+    check j.entries[1].key == "s1048577"      # the job 01 and its step 1
     var seen: seq[string]
     for e in j.entries:
       check e.key.len > 0
@@ -202,14 +202,11 @@ suite "PIP-003/PIP-004 the journal is found by the key of a call, not by place":
     var sb = newSandbox()
     var j2 = j
     let r = sb.execute(j2, scriptSrc.replace("echo one", "echo two"), fakeHost)
-    check r.code == "script_nondeterminism" and "s0" in r.message
-  test "the key of a step is the number the caller gives it":
+    check r.code == "script_nondeterminism" and "s1048577" in r.message
+  test "D-67 the key of a step is s and the number the script makes of the ids: the job's id times 2^20 plus the step's":
     var sb = newSandbox()
     var j = Journal()
-    var numbers = @[7, 3]
-    var next = 0
     let host: HostCallProc = proc(seq: int; kind, payload: string): Option[string] = some("0\n")
-    let r = sb.execute(j, "ci.job({image='a'}, function(x) x:sh('one'); x:sh('two') end)", host,
-                       stepKey = proc (): string = (let n = numbers[next]; inc next; "s" & $n))
+    let r = sb.execute(j, "ci.single['01']{ image='a', body = function(x) x:run(step.sh['1']{ cmd = 'one' }); x:run(step.sh['2']{ cmd = 'two' }) end }", host)
     check r.code == "ok"
-    check j.entries.mapIt(it.key) == @["s7", "s3"]
+    check j.entries.mapIt(it.key) == @["s" & $(1 * 1048576 + 1), "s" & $(1 * 1048576 + 2)]

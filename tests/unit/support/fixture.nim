@@ -2,9 +2,11 @@
 import std/[options, strutils]
 
 const scriptSrc* = """
+local n = 0
 local function sh(cmd)
   local out
-  ci.job({image = "x"}, function(j) out = j:sh(cmd, {capture = true, ignore_failure = true}) end)
+  n = n + 1
+  ci.single[b32f("{xx}", n)]{ image = "x", body = function(j) out = j:run(step.sh['1']{ cmd = cmd, capture = true, ignore_failure = true }) end }
   return out
 end
 local t0 = ci.now()

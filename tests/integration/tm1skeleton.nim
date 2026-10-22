@@ -246,7 +246,7 @@ proc stepLogLines(runId: string): seq[string] =
 const sleepScript = """
   return ci.pipeline({name = "lost", main = function(run)
     local r
-    ci.job({image = "busybox:1.36"}, function(j) r = j:sh("sleep 30; echo survived-the-loss") end)
+    ci.single['01']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "sleep 30; echo survived-the-loss" })  end }
     return "code=" .. tostring(r.code)
   end})"""
 
@@ -322,7 +322,7 @@ suite "walking skeleton end to end":
       let script = """
         return ci.pipeline({name = "walking-skeleton", main = function(run)
           local r
-          ci.job({image = "busybox:1.36"}, function(j) r = j:sh("echo hello-from-m1-skeleton") end)
+          ci.single['02']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "echo hello-from-m1-skeleton" })  end }
           return "code=" .. tostring(r.code)
         end})"""
       let created = postRun(apiPort, "", script)
@@ -443,7 +443,7 @@ suite "walking skeleton end to end":
           let script = """
             return ci.pipeline({name = "gate", main = function(run)
               local r
-              ci.job({image = "busybox:1.36"}, function(j) r = j:sh("echo gate-test-step") end)
+              ci.single['03']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "echo gate-test-step" })  end }
               return "code=" .. tostring(r.code)
             end})"""
           runId = postRun(apiPort, "", script)["id"].getStr   # creating a run is not blocked (RUN-015 b)
@@ -540,7 +540,7 @@ suite "walking skeleton end to end":
         let never = """
           return ci.pipeline({name = "never", main = function(run)
             local r
-            ci.job({image = "registry.invalid/never-pulled:1"}, function(j) r = j:sh("echo unreachable") end)
+            ci.single['04']{ image = "registry.invalid/never-pulled:1", body = function(j) r = j:run(step.sh['1']{ cmd = "echo unreachable" })  end }
             return "code=" .. tostring(r.code)
           end})"""
         try:
@@ -563,7 +563,7 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "lostlog", main = function(run)
             local r
-            ci.job({image = "busybox:1.36"}, function(j) r = j:sh("sleep 25; echo result-is-known") end)
+            ci.single['05']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "sleep 25; echo result-is-known" })  end }
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr
@@ -584,7 +584,7 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "corestop", main = function(run)
             local r
-            ci.job({image = "busybox:1.36"}, function(j) r = j:sh("sleep 6; echo finished-while-core-was-away") end)
+            ci.single['01']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "sleep 6; echo finished-while-core-was-away" }) end }
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr
@@ -612,7 +612,7 @@ suite "walking skeleton end to end":
         let never = """
           return ci.pipeline({name = "nostart", main = function(run)
             local r
-            ci.job({image = "registry.invalid/never-pulled:2"}, function(j) r = j:sh("echo unreachable") end)
+            ci.single['07']{ image = "registry.invalid/never-pulled:2", body = function(j) r = j:run(step.sh['1']{ cmd = "echo unreachable" })  end }
             return "code=" .. tostring(r.code)
           end})"""
         try:
@@ -637,7 +637,7 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "cutoff", main = function(run)
             local r
-            ci.job({image = "busybox:1.36"}, function(j) r = j:sh("i=0; while true; do echo tick-$i; i=$((i+1)); sleep 1; done") end)
+            ci.single['01']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "i=0; while true; do echo tick-$i; i=$((i+1)); sleep 1; done" }) end }
             return "code=" .. tostring(r.code)
           end})"""
         let np = buildDir / "cutoff-np.yaml"
@@ -683,7 +683,7 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "tmo", main = function(run)
             local r
-            ci.job({image = "busybox:1.36"}, function(j) r = j:sh("sleep 120", {timeout = 8}) end)
+            ci.single['09']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "sleep 120", timeout = 8 })  end }
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr
@@ -697,9 +697,9 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "mask", main = function(run)
             local r
-            ci.job({image = "busybox:1.36"}, function(j)
-              r = j:sh("T=tok-q7x9-secret; echo $T >> \"$CICD_MASK\"; echo leaked:$T; echo b64:$(printf %s $T | base64)")
-            end)
+            ci.single['0a']{ image = "busybox:1.36", body = function(j)
+              r = j:run(step.sh['1']{ cmd = "T=tok-q7x9-secret; echo $T >> \"$CICD_MASK\"; echo leaked:$T; echo b64:$(printf %s $T | base64)" })
+             end }
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr
@@ -718,7 +718,7 @@ suite "walking skeleton end to end":
           let script = """
             return ci.pipeline({name = "bigout", main = function(run)
               local r
-              ci.job({image = "busybox:1.36"}, function(j) r = j:sh("seq 1 400000; echo after-the-flood") end)
+              ci.single['0b']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "seq 1 400000; echo after-the-flood" })  end }
               return "code=" .. tostring(r.code)
             end})"""
           let runId = postRun(apiPort, "", script)["id"].getStr
@@ -760,10 +760,9 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "scrape", main = function(run)
             local r
-            ci.job({image = "busybox:1.36"}, function(j)
-              r = j:sh("mkdir -p /tmp/www; printf 'myapp_requests_total 42\\nignored_thing 1\\n' > /tmp/www/metrics; httpd -p 127.0.0.1:9404 -h /tmp/www; sleep 25",
-                {metrics = {scrape = {{url = "http://127.0.0.1:9404/metrics", name = "myapp", interval = "1s", include = {"myapp_*"}}}}})
-            end)
+            ci.single['0c']{ image = "busybox:1.36", body = function(j)
+              r = j:run(step.sh['1']{ cmd = "mkdir -p /tmp/www; printf 'myapp_requests_total 42\\nignored_thing 1\\n' > /tmp/www/metrics; httpd -p 127.0.0.1:9404 -h /tmp/www; sleep 25", metrics = {scrape = {{url = "http://127.0.0.1:9404/metrics", name = "myapp", interval = "1s", include = {"myapp_*"}}}} })
+             end }
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr
@@ -776,10 +775,9 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "jvm", main = function(run)
             local r
-            ci.job({image = "eclipse-temurin:21-jdk"}, function(j)
-              r = j:sh("cat > /tmp/Spin.java <<'EOF'\npublic class Spin { public static void main(String[] a) throws Exception { byte[] k = new byte[20 << 20]; System.gc(); Thread.sleep(25000); } }\nEOF\njava /tmp/Spin.java",
-                {metrics = {runtime = "jvm"}})
-            end)
+            ci.single['0d']{ image = "eclipse-temurin:21-jdk", body = function(j)
+              r = j:run(step.sh['1']{ cmd = "cat > /tmp/Spin.java <<'EOF'\npublic class Spin { public static void main(String[] a) throws Exception { byte[] k = new byte[20 << 20]; System.gc(); Thread.sleep(25000); } }\nEOF\njava /tmp/Spin.java", metrics = {runtime = "jvm"} })
+             end }
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr
@@ -791,7 +789,7 @@ suite "walking skeleton end to end":
         let script = """
           return ci.pipeline({name = "oom", main = function(run)
             local r
-            ci.job({image = "busybox:1.36"}, function(j) r = j:sh("x=$(head -c 400000000 /dev/zero | tr '\\0' a); echo survived") end)
+            ci.single['0e']{ image = "busybox:1.36", body = function(j) r = j:run(step.sh['1']{ cmd = "x=$(head -c 400000000 /dev/zero | tr '\\0' a); echo survived" })  end }
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr

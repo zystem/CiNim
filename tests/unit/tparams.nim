@@ -147,15 +147,16 @@ suite "VAR-003 what core accepts as launch parameters":
     check fromJson("""{"A":"1","PATH":"x","b":"y"}""") == @[("A", "1")]
 
 suite "DAT-003 the artifacts of a step in the script":
-  proc optsOf(job, step: string): string =
-    ## the options JSON that reaches core for one step of a script with these declarations
+  proc optsOf(job, stepFields: string): string =
+    ## the options JSON that reaches core for one step of a script with these declarations (`stepFields` is `""` or `", { name = value }"`: the fields of the step table, braces around)
+    let step = if stepFields.startsWith(", {"): "," & stepFields[3 ..< stepFields.len - 1] else: stepFields
     var sb = newSandbox()
     var j: Journal
     var seen = ""
     let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
       if kind == "job_sh": seen = payload.split('\t', 4)[3]
       some("0\n")
-    let r = replay.execute(sb, j, "return ci.pipeline({ main = function(run) ci.job({ image = 'a'" & job & " }, function(j) j:sh('x'" & step & ") end) end })", host, runId = "r")
+    let r = replay.execute(sb, j, "return ci.pipeline({ main = function(run) ci.single['01']{ image = 'a'" & job & ", body = function(j) j:run(step.sh['1']{ cmd = 'x'" & step & " }) end } end })", host, runId = "r")
     if r.status != esDone: return "ERROR " & r.message
     seen
 

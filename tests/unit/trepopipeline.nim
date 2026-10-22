@@ -1,7 +1,7 @@
 ## D-63: the pipeline of the repository (`.ci/pipeline.lua`) is a script that the platform can run: it loads, its parameters are declared, `run.source` is used, and the pass against the stub host
 ## gets as far as the first step's answer (the stub gives an empty answer to the step that finds the commit, which the script refuses: that is the first thing it needs to know).
 import std/[unittest, strutils, json]
-import executor/steptable
+import executor/pass
 
 import std/os
 let script = readFile(if fileExists(".ci/pipeline.lua"): ".ci/pipeline.lua" else: currentSourcePath().parentDir.parentDir.parentDir / ".ci" / "pipeline.lua")

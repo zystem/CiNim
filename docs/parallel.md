@@ -18,8 +18,8 @@ Four things in the code assume that a run does one thing at a time:
 
 ```lua
 local r = ci.parallel({
-  unit = function() ci.job({image = "alpine"}, function(j) j:sh("make unit") end) end,
-  lint = function() ci.job({image = "alpine"}, function(j) j:sh("make lint") end); return "clean" end,
+  unit = function() ci.single['01']{ image = "alpine", body = function(j) j:run(step.sh['1']{ cmd = "make unit" })  end } end,
+  lint = function() ci.single['02']{ image = "alpine", body = function(j) j:run(step.sh['1']{ cmd = "make lint" })  end }; return "clean" end,
 }, { fail_fast = true, max_parallel = 3 })
 -- r.unit.ok == true; r.lint.value == "clean"; a failed branch: r.x.ok == false, r.x.error == "step failed with code 3"
 ```
@@ -65,7 +65,7 @@ the branch `unit` of the first `ci.parallel`. A key is a function of the **struc
 
 > **The limits are 1000 steps in a run and 1000 branches in a call since 2026-10-22 (D-67; they were 200); the nesting is limited to 10 levels (it was 200; GitHub's reusable workflows go 10 deep, GitLab's child pipelines 2 in the older documents, so 10 is enough, and the vendored Lua no longer needs a raised `LUAI_MAXCCALLS`).** The text below that says 200 steps, branches or levels was written before this.
 >
-> **Superseded by D-67 (2026-10-21), not yet built:** the id of a step is mandatory and is its identity together with its job; the table of numbers (3.4), its hashes and its overflow go. What follows is what is built today.
+> **Superseded by D-67 (2026-10-21); built in phase 2a (2026-10-22): the id of a job and of a step is mandatory and is the index (`ci.single["a"]{...}`, `step.sh["ab"]{...}`), a step's number is `job * 2^20 + step`, and `executor/steptable.nim` is `executor/pass.nim`; `ci.job`, `j:sh`, the table and its hashes below are as they were:** the id of a step is mandatory and is its identity together with its job; the table of numbers (3.4), its hashes and its overflow go. What follows is what is built today.
 
 A step has a number, `StepRef.seq` (`uint32`), which is its identity in the run: in the journal, in the name of its Pod, in the log URL, in the API and the UI. It is **given by a table made before the steps run** (3.4), not by the order in which they happen to start, and numbers need not follow each other.
 

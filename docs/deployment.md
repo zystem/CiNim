@@ -177,9 +177,9 @@ build:
 ```
 
 ```lua
-ci.job({image = "ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572", profile = "build"}, function(j)
-  j:sh("/kaniko/executor --dockerfile=Dockerfile --context=dir:///cicd/workspace --destination=registry.example.com/team/app:1.0")
-end)
+ci.single['01']{ image = "ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572", profile = "build", body = function(j)
+  j:run(step.sh['1']{ cmd = "/kaniko/executor --dockerfile=Dockerfile --context=dir:///cicd/workspace --destination=registry.example.com/team/app:1.0" })
+ end }
 ```
 
 A step may publish to several sinks at the same time, for example an image to a registry and a package to a Nexus: `build.egress` is a list, and
@@ -436,12 +436,12 @@ file that one step writes is there for the next; so is a variable it writes to `
 `/cicd/run`, so that two steps of a run never write the same one. Artifacts (docs/artifacts.md) are for what must outlive the run or reach people; the volume is for
 what the steps of one run hand to each other.
 
-A job may ask for a `/dev/shm` of its own, in memory: `ci.job{shm = "1Gi"}` (64Mi to 8Gi; a Pod has 64Mi unless asked). It is an `emptyDir` with `medium: Memory` mounted at `/dev/shm`, counted in the Pod's memory limit, and it is for what keeps its data in memory: the scratch databases of the test run of the repository's pipeline, whose fsyncs on the disks of a node took from 1 ms to 160 ms and made the tests time out, a browser. A job's volume and a Pod's CPU: the build Pods have a CPU request and limit (`build.cpuRequest`, `build.cpuLimit`, 500m and 4 cores): a build or a compile that is not stopped takes every core of its node and starves the database of the platform.
+A job may ask for a `/dev/shm` of its own, in memory: `ci.single["a"]{ shm = "1Gi", ... }` (64Mi to 8Gi; a Pod has 64Mi unless asked). It is an `emptyDir` with `medium: Memory` mounted at `/dev/shm`, counted in the Pod's memory limit, and it is for what keeps its data in memory: the scratch databases of the test run of the repository's pipeline, whose fsyncs on the disks of a node took from 1 ms to 160 ms and made the tests time out, a browser. A job's volume and a Pod's CPU: the build Pods have a CPU request and limit (`build.cpuRequest`, `build.cpuLimit`, 500m and 4 cores): a build or a compile that is not stopped takes every core of its node and starves the database of the platform.
 
 A job with `workspace = "isolated"` (STO-002) has a volume of its own, `cicd-job-<job id>`, made at its first step and mounted in its steps only; it is deleted with the run's volume. The
 Pods of such a job are kept on one node (ReadWriteOnce), the Pods of different jobs are not tied to each other, so the jobs of one run (the builds of `ci.parallel`) spread over the nodes.
-It has a `state/` of its own as well: `$CICD_ENV` does not reach other jobs, pass values with `env = {...}` of `ci.job` or `outputs`. A job that clones with one tool and builds with
-another runs its steps in different images (`j:sh(cmd, {image = ...})`). The size is that of the run's volume, so a run of N isolated jobs holds N+1 claims of `runStorage.size`.
+It has a `state/` of its own as well: `$CICD_ENV` does not reach other jobs, pass values with `env = {...}` of `ci.single` or `outputs`. A job that clones with one tool and builds with
+another runs its steps in different images (`step.sh["a"]{ cmd = ..., image = ... }`). The size is that of the run's volume, so a run of N isolated jobs holds N+1 claims of `runStorage.size`.
 
 ```yaml
 runStorage:

@@ -56,11 +56,15 @@ The `env` levels are in the script, and are about a step, not about the run, so 
 return ci.pipeline({
   env = { LOG_LEVEL = "info" },                        -- every step of every job
   main = function(run)
-    ci.job({ image = "alpine", env = { REGION = "eu-west" } }, function(j)     -- every step of this job
-      j:sh("echo $LOG_LEVEL $REGION")
-      j:env({ LOG_LEVEL = "debug" })                   -- the steps of this job that follow (no Pod is started)
-      j:sh("echo $LOG_LEVEL", { env = { LOG_LEVEL = "trace" } })               -- this step only, above $CICD_ENV
-    end)
+    ci.single["a"] {
+      image = "alpine",
+      env   = { REGION = "eu-west" },                  -- every step of this job
+      body  = function(j)
+        j:run(step.sh["1"] { cmd = "echo $LOG_LEVEL $REGION" })
+        j:env({ LOG_LEVEL = "debug" })                 -- the steps of this job that follow (no Pod is started)
+        j:run(step.sh["2"] { cmd = "echo $LOG_LEVEL", env = { LOG_LEVEL = "trace" } })     -- this step only, above $CICD_ENV
+      end,
+    }
   end })
 ```
 

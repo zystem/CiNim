@@ -52,11 +52,10 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
               params: seq[(string, string)] = @[];
               onSite: proc (seq: int; kind: string; line: int) = nil;
               onCall: proc (seq: int; kind, key: string) = nil;
-              stepKey: proc (): string = nil;
               onPlace: proc (seq: int; kind: string; line: int; ctx: string; nth: int) = nil): ExecResult =
   ## `params` are the launch parameters given when the run was created, as text. `onSite` is told, for every host call that has one, the line of the script it was made on
-  ## (a step: docs/parallel.md section 3.4); the table of step numbers is made from it. Every call has a **key**, the identity under which the journal keeps its answer: for a
-  ## step `stepKey()` (the caller's `s<number>`; without one `s<n>`, the n-th step), for any other call `<kind>#<n>`, the n-th call of that kind. The journal is found by key, so
+  ## (a step: docs/parallel.md section 3.4). Every call has a **key**, the identity under which the journal keeps its answer: for a step `s<number>`, the number the script made of the id
+  ## of the job and the id of the step (D-67: it comes as `nth`), for any other call `<kind>#<n>`, the n-th call of that kind. The journal is found by key, so
   ## a record may be missing or be anywhere (a retry of only the failed steps, branches that end in any order): a call without a record goes to the host. `onCall` is told
   ## the key before the host is.
   ## `ctx` and `nth` say where a call is made in the tree of branches (docs/parallel.md section 3.1): `ctx` is the path (`m` for `main`, `m.p1[unit]` for the branch `unit` of the first
@@ -89,7 +88,6 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
 
   var nargs = 2.cint
   var seq = 0
-  var stepsMade = 0                              # the n-th step, the key of a step when the caller gives no numbers (`stepKey`)
   var firstPending = ""                          # what the run waits for, for the message of a suspension
   var placeKeys = initTable[string, string]()    # `ctx<TAB>line<TAB>nth` of a step -> its key, for the decision of fail_fast
   var index = initTable[string, int]()           # key -> place in j.entries, so that a long journal is not searched at every call
@@ -137,10 +135,9 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
       if onSite != nil: onSite(seq, kind, line)          # line 0: the host call has none (a step without one is numbered from the overflow)
       if onPlace != nil: onPlace(seq, kind, line, ctx, nth)
       var res: string
-      let base0 = if kind == "job_sh": (if stepKey != nil: stepKey() else: "s" & $stepsMade) else: kind & "#" & $nth
+      let base0 = if kind == "job_sh": "s" & $nth else: kind & "#" & $nth
       let key = effectiveKey(if kind != "job_sh" and ctx != "m": ctx & "/" & base0 else: base0)
       if kind == "job_sh":
-        inc stepsMade
         placeKeys[ctx & "\t" & $line & "\t" & $nth] = key
       if kind == "par_cancel": payload = cancelPayload(payload, placeKeys)
       if onCall != nil: onCall(seq, kind, key)

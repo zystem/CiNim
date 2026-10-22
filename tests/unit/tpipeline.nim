@@ -19,9 +19,9 @@ return ci.pipeline({
   main = function(run)
     local seen_run_id = run.run_id
     local r
-    ci.job({image = "alpine"}, function(j)
-      r = j:sh("echo hi")
-    end)
+    ci.single['01']{ image = "alpine", body = function(j)
+      r = j:run(step.sh['1']{ cmd = "echo hi" })
+     end }
     return seen_run_id .. "|" .. tostring(r.code)
   end,
 })
@@ -31,8 +31,8 @@ const pipelineTwoJobs = """
 return ci.pipeline({
   main = function(run)
     local keys = {}
-    ci.job({image = "a"}, function(j) j:sh("one") end)
-    ci.job({image = "b"}, function(j) j:sh("two") end)
+    ci.single['02']{ image = "a", body = function(j) j:run(step.sh['1']{ cmd = "one" })  end }
+    ci.single['03']{ image = "b", body = function(j) j:run(step.sh['1']{ cmd = "two" })  end }
     return "ok"
   end,
 })
@@ -42,10 +42,10 @@ const pipelineJobFails = """
 return ci.pipeline({
   main = function(run)
     local ok, err = pcall(function()
-      ci.job({image = "a"}, function(j)
-        local r = j:sh("fail")
+      ci.single['04']{ image = "a", body = function(j)
+        local r = j:run(step.sh['1']{ cmd = "fail" })
         if r.code ~= 0 then error("step failed") end
-      end)
+       end }
     end)
     return tostring(ok)
   end,
@@ -55,7 +55,7 @@ return ci.pipeline({
 const pipelineStepFails = """
 return ci.pipeline({
   main = function(run)
-    ci.job({image = "a"}, function(j) j:sh("fail") end)
+    ci.single['05']{ image = "a", body = function(j) j:run(step.sh['1']{ cmd = "fail" })  end }
     return "not reached"
   end,
 })
@@ -65,7 +65,7 @@ const pipelineIgnoreFailure = """
 return ci.pipeline({
   main = function(run)
     local r
-    ci.job({image = "a"}, function(j) r = j:sh("fail", {ignore_failure = true}) end)
+    ci.single['06']{ image = "a", body = function(j) r = j:run(step.sh['1']{ cmd = "fail", ignore_failure = true })  end }
     return "code=" .. tostring(r.code)
   end,
 })
@@ -92,15 +92,15 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
   test "6.7: ignore_failure must be a boolean":
     var sb = newSandbox()
     var j = Journal()
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {ignore_failure = 'yes'}) end) end})", fakeHost, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['07']{ image = 'a', body = function(j) j:run(step.sh['1']{ cmd = 'x', ignore_failure = 'yes' })  end } end})", fakeHost, runId = "s1_abc")
     check r.code == "script_error" and "ignore_failure" in r.message
 
   test "6.7: secrets are names in the journalled options, sorted, a job's and a step's together, no repeats":
     var sb = newSandbox()
     var j = Journal()
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', secrets = {'REGISTRY_PASSWORD', 'A_TOKEN'}}, function(j) j:sh('x', {secrets = {'A_TOKEN', 'DEPLOY_KEY'}}) end) end})", fakeHost, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['08']{ image = 'a', secrets = {'REGISTRY_PASSWORD', 'A_TOKEN'}, body = function(j) j:run(step.sh['1']{ cmd = 'x', secrets = {'A_TOKEN', 'DEPLOY_KEY'} })  end } end})", fakeHost, runId = "s1_abc")
     check r.code == "ok"
-    check j.entries[0].payload == "job-1\ta\t\t{\"secrets\":[\"A_TOKEN\",\"DEPLOY_KEY\",\"REGISTRY_PASSWORD\"]}\tx"
+    check j.entries[0].payload == "08\ta\t\t{\"secrets\":[\"A_TOKEN\",\"DEPLOY_KEY\",\"REGISTRY_PASSWORD\"]}\tx"
 
   test "6.7: a step without secrets has no secrets key":
     var sb = newSandbox()
@@ -111,10 +111,10 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
   test "VAR-004 the env of the pipeline, of the job, of j:env and of the step are in the journalled options: the first three together as env (the pipeline's under the job's), the step's apart":
     var sb = newSandbox()
     var j = Journal()
-    let r = sb.execute(j, "return ci.pipeline({env = {A = 'pipeline', B = 'pipeline'}, main = function(run) ci.job({image = 'a', env = {B = 'job', C = 3}}, function(j) j:sh('x'); j:env({D = true, A = 'later'}); j:sh('y', {env = {E = 'step', B = 'step'}}) end) end})", fakeHost, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({env = {A = 'pipeline', B = 'pipeline'}, main = function(run) ci.single['09']{ image = 'a', env = {B = 'job', C = 3}, body = function(j) j:run(step.sh['1']{ cmd = 'x' }); j:env({D = true, A = 'later'}); j:run(step.sh['2']{ cmd = 'y', env = {E = 'step', B = 'step'} })  end } end})", fakeHost, runId = "s1_abc")
     check r.code == "ok"
-    check j.entries[0].payload == "job-1\ta\t\t{\"env\":{\"A\":\"pipeline\",\"B\":\"job\",\"C\":\"3\"}}\tx"
-    check j.entries[1].payload == "job-1\ta\t\t{\"env\":{\"A\":\"later\",\"B\":\"job\",\"C\":\"3\",\"D\":\"true\"},\"step_env\":{\"B\":\"step\",\"E\":\"step\"}}\ty"
+    check j.entries[0].payload == "09\ta\t\t{\"env\":{\"A\":\"pipeline\",\"B\":\"job\",\"C\":\"3\"}}\tx"
+    check j.entries[1].payload == "09\ta\t\t{\"env\":{\"A\":\"later\",\"B\":\"job\",\"C\":\"3\",\"D\":\"true\"},\"step_env\":{\"B\":\"step\",\"E\":\"step\"}}\ty"
   test "VAR-004 a step with no env has no env key, so the journal of an older run still replays":
     var sb = newSandbox()
     var j = Journal()
@@ -124,56 +124,58 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     for bad in ["{lower = 'x'}", "{['1A'] = 'x'}", "{A = {}}", "{A = 'x\\1'}", "{A = string.rep('x', 9000)}", "'text'"]:
       var sb = newSandbox()
       var j = Journal()
-      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', env = " & bad & "}, function(j) j:sh('x') end) end})", fakeHost, runId = "s1_abc")
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['01']{ image = 'a', env = " & bad & ", body = function(j) j:run(step.sh['1']{ cmd = 'x' }) end } end})", fakeHost, runId = "s1_abc")
       check r.code == "script_error" and "env" in r.message
     var sb = newSandbox()
     var j = Journal()
-    let many = sb.execute(j, "local t = {} for i = 1, 101 do t['V' .. i] = 'x' end return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:env(t) end) end})", fakeHost, runId = "s1_abc")
+    let many = sb.execute(j, "local t = {} for i = 1, 101 do t['V' .. i] = 'x' end return ci.pipeline({main = function(run) ci.single['0a']{ image = 'a', body = function(j) j:env(t)  end } end})", fakeHost, runId = "s1_abc")
     check many.code == "script_error" and "at most 100" in many.message
 
   test "DAT-004 the cache of a step is in the journalled options: a table or a list, a job's and a step's together, the same key is the step's":
     var sb = newSandbox()
     var j = Journal()
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', cache = {key = 'deps-1', paths = {'node_modules'}, restore_keys = {'deps-'}}}, function(j) j:sh('x'); j:sh('y', {cache = {{key = 'deps-1', paths = {'other'}}, {key = 'pip', paths = {'.pip', 'wheels/a'}}}}) end) end})", fakeHost, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['0b']{ image = 'a', cache = {key = 'deps-1', paths = {'node_modules'}, restore_keys = {'deps-'}}, body = function(j) j:run(step.sh['1']{ cmd = 'x' }); j:run(step.sh['2']{ cmd = 'y', cache = {{key = 'deps-1', paths = {'other'}}, {key = 'pip', paths = {'.pip', 'wheels/a'}}} })  end } end})", fakeHost, runId = "s1_abc")
     check r.code == "ok"
-    check j.entries[0].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-1\",\"paths\":[\"node_modules\"],\"restore_keys\":[\"deps-\"]}]}\tx"
-    check j.entries[1].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-1\",\"paths\":[\"other\"],\"restore_keys\":[]},{\"key\":\"pip\",\"paths\":[\".pip\",\"wheels/a\"],\"restore_keys\":[]}]}\ty"
+    check j.entries[0].payload == "0b\ta\t\t{\"cache\":[{\"key\":\"deps-1\",\"paths\":[\"node_modules\"],\"restore_keys\":[\"deps-\"]}]}\tx"
+    check j.entries[1].payload == "0b\ta\t\t{\"cache\":[{\"key\":\"deps-1\",\"paths\":[\"other\"],\"restore_keys\":[]},{\"key\":\"pip\",\"paths\":[\".pip\",\"wheels/a\"],\"restore_keys\":[]}]}\ty"
   test "DAT-004 a key with a slash, no paths, a path outside the workspace, an unknown field and too many caches are refused before the run goes on":
     for bad in ["{key = 'a/b', paths = {'x'}}", "{key = 'a', paths = {}}", "{key = 'a'}", "{key = 'a', paths = {'/etc'}}", "{key = 'a', paths = {'../x'}}", "{key = 'a', paths = {'x'}, mode = 1}",
                 "{key = 'a', paths = {'x'}, restore_keys = {'a/'}}", "{key = '', paths = {'x'}}", "'text'",
                 "{{key='1',paths={'x'}},{key='2',paths={'x'}},{key='3',paths={'x'}},{key='4',paths={'x'}},{key='5',paths={'x'}}}"]:
       var sb = newSandbox()
       var j = Journal()
-      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {cache = " & bad & "}) end) end})", fakeHost, runId = "s1_abc")
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['01']{ image = 'a', body = function(j) j:run(step.sh['1']{ cmd = 'x', cache = " & bad & " }) end } end})", fakeHost, runId = "s1_abc")
       check r.code == "script_error" and "cache" in r.message
   test "DAT-004 j.cache.restore and j.cache.save are steps of their own with the mode in the cache options; the answer of a restore is the key the host gave":
     var sb = newSandbox()
     var j = Journal()
     let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some("0\ndeps-1")
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', cache = {key = 'base', paths = {'b'}}}, function(j) local got = j.cache.restore({'deps-2', 'deps-'}); j.cache.save('deps-2', {'node_modules', 'x/y'}); j:sh('after ' .. tostring(got.hit) .. ' ' .. tostring(got.key)) end) end})", host, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['0c']{ image = 'a', cache = {key = 'base', paths = {'b'}}, body = function(j) local got = j:run(step.cache_restore['1']{ keys = {'deps-2', 'deps-'} }); j:run(step.cache_save['2']{ key = 'deps-2', paths = {'node_modules', 'x/y'} }); j:run(step.sh['3']{ cmd = 'after ' .. tostring(got.hit) .. ' ' .. tostring(got.key) })  end } end})", host, runId = "s1_abc")
     check r.code == "ok"
-    check j.entries[0].kind == "job_sh" and j.entries[0].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-2\",\"mode\":\"restore\",\"paths\":[],\"restore_keys\":[\"deps-\"]}]}\ttrue"
-    check j.entries[1].payload == "job-1\ta\t\t{\"cache\":[{\"key\":\"deps-2\",\"mode\":\"save\",\"paths\":[\"node_modules\",\"x/y\"],\"restore_keys\":[]}]}\ttrue"
+    check j.entries[0].kind == "job_sh" and j.entries[0].payload == "0c\ta\t\t{\"cache\":[{\"key\":\"deps-2\",\"mode\":\"restore\",\"paths\":[],\"restore_keys\":[\"deps-\"]}]}\ttrue"
+    check j.entries[1].payload == "0c\ta\t\t{\"cache\":[{\"key\":\"deps-2\",\"mode\":\"save\",\"paths\":[\"node_modules\",\"x/y\"],\"restore_keys\":[]}]}\ttrue"
     check "\"key\":\"base\"" in j.entries[2].payload and "mode" notin j.entries[2].payload and j.entries[2].payload.endsWith("\tafter true deps-1")   # the job's own cache option belongs to the steps of j:sh only
   test "DAT-004 j.cache.restore tells a hit from a miss, and a failing step fails the job":
     for (answer, hit, key) in [("0\ndeps-1", true, "deps-1"), ("0\n", false, "nil")]:
       var sb = newSandbox()
       var j = Journal()
       let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some(answer)
-      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) local got = j.cache.restore({'deps-1'}); j:sh('hit=' .. tostring(got.hit) .. ' key=' .. tostring(got.key)) end) end})", host, runId = "s1_abc")
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['0d']{ image = 'a', body = function(j) local got = j:run(step.cache_restore['1']{ keys = {'deps-1'} }); j:run(step.sh['2']{ cmd = 'hit=' .. tostring(got.hit) .. ' key=' .. tostring(got.key) })  end } end})", host, runId = "s1_abc")
       check r.code == "ok"
       check j.entries[1].payload.endsWith("\thit=" & $hit & " key=" & key)
     var sb = newSandbox()
     var j = Journal()
     let failing: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some("3\n")
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j.cache.save('k', {'x'}) end) end})", failing, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['0e']{ image = 'a', body = function(j) j:run(step.cache_save['1']{ key = 'k', paths = {'x'} })  end } end})", failing, runId = "s1_abc")
     check r.code == "script_error" and "step failed with code 3" in r.message
   test "DAT-004 j.cache.restore and j.cache.save refuse what the option refuses before a step is made":
-    for bad in ["j.cache.restore({})", "j.cache.restore('deps')", "j.cache.restore({'a/b'})", "j.cache.restore({'a','b','c','d','e','f','g'})", "j.cache.save('a/b', {'x'})",
-                "j.cache.save('a', {})", "j.cache.save('a')", "j.cache.save('a', {'../x'})", "j.cache.save('a', {'/etc'})"]:
+    for bad in ["j:run(step.cache_restore['1']{ keys = {} })", "j:run(step.cache_restore['1']{ keys = 'deps' })", "j:run(step.cache_restore['1']{ keys = {'a/b'} })",
+                "j:run(step.cache_restore['1']{ keys = {'a','b','c','d','e','f','g'} })", "j:run(step.cache_save['1']{ key = 'a/b', paths = {'x'} })",
+                "j:run(step.cache_save['1']{ key = 'a', paths = {} })", "j:run(step.cache_save['1']{ key = 'a' })", "j:run(step.cache_save['1']{ key = 'a', paths = {'../x'} })",
+                "j:run(step.cache_save['1']{ key = 'a', paths = {'/etc'} })"]:
       var sb = newSandbox()
       var j = Journal()
-      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) " & bad & " end) end})", fakeHost, runId = "s1_abc")
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['01']{ image = 'a', body = function(j) " & bad & " end } end})", fakeHost, runId = "s1_abc")
       check r.code == "script_error" and ("ache" in r.message)
       check j.entries.len == 0
   test "a call that the core refuses for good fails the run with the core's words; it is not suspended":
@@ -181,7 +183,7 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     var j = Journal()
     let refusing: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
       raise (ref HostRefusal)(code: "script_error", msg: "the organisation has no secret DEPLOY_KEY")
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x') end) end})", refusing, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['0f']{ image = 'a', body = function(j) j:run(step.sh['1']{ cmd = 'x' })  end } end})", refusing, runId = "s1_abc")
     check r.status == esFailed and r.code == "script_error" and "no secret DEPLOY_KEY" in r.message
     check j.entries.len == 0                      # nothing was journalled: the refusal is not a result
 
@@ -189,11 +191,11 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     for bad in ["'lower'", "'1ABC'", "'A-B'", "42", "'" & "A".repeat(65) & "'", "{}"]:
       var sb = newSandbox()
       var j = Journal()
-      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('x', {secrets = {" & bad & "}}) end) end})", fakeHost, runId = "s1_abc")
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['01']{ image = 'a', body = function(j) j:run(step.sh['1']{ cmd = 'x', secrets = {" & bad & "} }) end } end})", fakeHost, runId = "s1_abc")
       check r.code == "script_error" and "secrets" in r.message
     var sb = newSandbox()
     var j = Journal()
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', secrets = 'X'}, function(j) j:sh('x') end) end})", fakeHost, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['0g']{ image = 'a', secrets = 'X', body = function(j) j:run(step.sh['1']{ cmd = 'x' })  end } end})", fakeHost, runId = "s1_abc")
     check r.code == "script_error" and "secrets" in r.message
 
   test "run.run_id reaches main(), Job:sh yields job_sh and returns StepResult.code":
@@ -204,41 +206,41 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
     check r.value == "s1_abc|0"
     check j.entries.len == 1
     check j.entries[0].kind == "job_sh"
-    check j.entries[0].payload == "job-1\talpine\t\t\techo hi"
+    check j.entries[0].payload == "01\talpine\t\t\techo hi"
 
   test "RUN-004, A.13: a job may ask for the build profile; the profile is a field of the journalled call":
     var sb = newSandbox()
     var j = Journal()
     let r = sb.execute(j, """return ci.pipeline({ main = function(run)
-      ci.job({image = "kaniko", profile = "build"}, function(j) j:sh("build") end)
-      ci.job({image = "a", profile = "default"}, function(j) j:sh("plain") end)
+      ci.single['0h']{ image = "kaniko", profile = "build", body = function(j) j:run(step.sh['1']{ cmd = "build" })  end }
+      ci.single['0j']{ image = "a", profile = "default", body = function(j) j:run(step.sh['1']{ cmd = "plain" })  end }
       return "ok" end })""", fakeHost)
     check r.code == "ok"
-    check j.entries[0].payload == "job-1\tkaniko\tbuild\t\tbuild"
-    check j.entries[1].payload == "job-2\ta\t\t\tplain"       # "default" is the ordinary profile: the field is empty
+    check j.entries[0].payload == "0h\tkaniko\tbuild\t\tbuild"
+    check j.entries[1].payload == "0j\ta\t\t\tplain"       # "default" is the ordinary profile: the field is empty
   test "D-48: a job may ask for the deploy profile too":
     var sb = newSandbox()
     var j = Journal()
     let r = sb.execute(j, """return ci.pipeline({ main = function(run)
-      ci.job({image = "alpine/k8s", profile = "deploy"}, function(j) j:sh("kubectl version") end)
+      ci.single['0k']{ image = "alpine/k8s", profile = "deploy", body = function(j) j:run(step.sh['1']{ cmd = "kubectl version" })  end }
       return "ok" end })""", fakeHost)
     check r.code == "ok"
-    check j.entries[0].payload == "job-1\talpine/k8s\tdeploy\t\tkubectl version"
+    check j.entries[0].payload == "0k\talpine/k8s\tdeploy\t\tkubectl version"
   test "an unknown profile is a script error":
     var sb = newSandbox()
     var j = Journal()
     let r = sb.execute(j, """return ci.pipeline({ main = function(run)
-      ci.job({image = "a", profile = "privileged"}, function(j) j:sh("x") end)
+      ci.single['0m']{ image = "a", profile = "privileged", body = function(j) j:run(step.sh['1']{ cmd = "x" })  end }
       return "ok" end })""", fakeHost)
     check r.code != "ok"
-  test "each ci.job call gets a sequential job key (job-1, job-2, ...)":
+  test "the key of a job is its id (D-67), and a step is told by one number made of the ids":
     var sb = newSandbox()
     var j = Journal()
     let r = sb.execute(j, pipelineTwoJobs, fakeHost)
     check r.code == "ok"
     check j.entries.len == 2
-    check j.entries[0].payload == "job-1\ta\t\t\tone"
-    check j.entries[1].payload == "job-2\tb\t\t\ttwo"
+    check j.entries[0].payload == "02\ta\t\t\tone"
+    check j.entries[1].payload == "03\tb\t\t\ttwo"
 
   test "a failing step's StepResult.code lets the script fail its own job with pcall":
     var sb = newSandbox()
@@ -271,11 +273,11 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
 const pipelineMetrics = """
 return ci.pipeline({
   main = function(run)
-    ci.job({image = "a", metrics = {runtime = "jvm"}}, function(j)
-      j:sh("one")                                                   -- inherits the job's declaration
-      j:sh("two", {metrics = {scrape = {{url = "http://127.0.0.1:9404/metrics", interval = "10s", include = {"jvm_*"}}}}})
-      j:sh("three", {metrics = false})                              -- switched off for this step
-    end)
+    ci.single['01']{ image = "a", metrics = {runtime = "jvm"}, body = function(j)
+      j:run(step.sh['1']{ cmd = "one" })                                                   -- inherits the job's declaration
+      j:run(step.sh['2']{ cmd = "two", metrics = {scrape = {{url = "http://127.0.0.1:9404/metrics", interval = "10s", include = {"jvm_*"}}}} })
+      j:run(step.sh['3']{ cmd = "three", metrics = false })                              -- switched off for this step
+    end }
     return "ok"
   end,
 })
@@ -284,8 +286,8 @@ return ci.pipeline({
 proc metricsRun(body: string): tuple[code, value: string] =
   var sb = newSandbox()
   var j = Journal()
-  let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) " & body &
-    " end) return 'ok' end})", fakeHost)
+  let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['01']{ image = 'a', body = function(j) " & body &
+    " end } return 'ok' end})", fakeHost)
   (r.code, r.value & r.message)
 
 suite "application metrics declaration (docs/metrics.md)":
@@ -295,15 +297,15 @@ suite "application metrics declaration (docs/metrics.md)":
     let r = sb.execute(j, pipelineMetrics, fakeHost)
     check r.code == "ok"
     check j.entries.len == 3
-    check j.entries[0].payload == "job-1\ta\t\t" & """{"metrics":{"runtime":"jvm","scrape":[]}}""" & "\tone"
-    check j.entries[1].payload == "job-1\ta\t\t" &
+    check j.entries[0].payload == "01\ta\t\t" & """{"metrics":{"runtime":"jvm","scrape":[]}}""" & "\tone"
+    check j.entries[1].payload == "01\ta\t\t" &
       """{"metrics":{"runtime":"none","scrape":[{"format":"prometheus","include":["jvm_*"],"interval":10,"name":"app1","timeout":5,"url":"http://127.0.0.1:9404/metrics"}]}}""" & "\ttwo"
-    check j.entries[2].payload == "job-1\ta\t\t\tthree"
+    check j.entries[2].payload == "01\ta\t\t\tthree"
   test "only the step's own Pod may be scraped":
     for url in ["http://example.com/metrics", "http://10.0.0.5:9000/", "https://127.0.0.1/m", "http://127.0.0.1.evil.com/m"]:
-      check metricsRun("j:sh('x', {metrics = {scrape = {{url = '" & url & "'}}}})").code != "ok"
-    check metricsRun("j:sh('x', {metrics = {scrape = {{url = 'http://localhost:8080/m'}}}})").code == "ok"
-    check metricsRun("j:sh('x', {metrics = {scrape = {{url = 'http://[::1]:8080/m'}}}})").code == "ok"
+      check metricsRun("j:run(step.sh['1']{ cmd = 'x', metrics = {scrape = {{url = '" & url & "'}}}})").code != "ok"
+    check metricsRun("j:run(step.sh['1']{ cmd = 'x', metrics = {scrape = {{url = 'http://localhost:8080/m'}}}})").code == "ok"
+    check metricsRun("j:run(step.sh['1']{ cmd = 'x', metrics = {scrape = {{url = 'http://[::1]:8080/m'}}}})").code == "ok"
   test "bad declarations fail before anything runs":
     for m in ["{runtime = 'cobol'}", "{scrape = {{url = 'http://127.0.0.1/m', interval = 0}}}",
               "{scrape = {{url = 'http://127.0.0.1/m', interval = '5s', timeout = '9s'}}}",
@@ -312,7 +314,7 @@ suite "application metrics declaration (docs/metrics.md)":
               "{scrape = {{url = 'http://127.0.0.1/m', include = {'a b'}}}}",
               "{scrape = {{url = 'http://127.0.0.1/m'}, {url = 'http://127.0.0.1/m'}, {url = 'http://127.0.0.1/m'}, {url = 'http://127.0.0.1/m'}, {url = 'http://127.0.0.1/m'}}}",
               "{unknown = 1}", "{scrape = {{url = 'http://127.0.0.1/m', typo = 1}}}", "'text'"]:
-      check metricsRun("j:sh('x', {metrics = " & m & "})").code != "ok"
+      check metricsRun("j:run(step.sh['1']{ cmd = 'x', metrics = " & m & "})").code != "ok"
 
 suite "step options: mask and timeout (docs/secrets-masking.md)":
   test "mask, metrics and timeout travel as one canonical object, keys sorted, job defaults inherited per key":
@@ -320,29 +322,29 @@ suite "step options: mask and timeout (docs/secrets-masking.md)":
     var j = Journal()
     let script = """
       return ci.pipeline({main = function(run)
-        ci.job({image = "a", timeout = "10m", mask = {min_length = 8}}, function(j)
-          j:sh("one")
-          j:sh("two", {timeout = 90, mask = false})
-          j:sh("three", {metrics = {runtime = "jvm"}})
-        end)
+        ci.single['0n']{ image = "a", timeout = "10m", mask = {min_length = 8}, body = function(j)
+          j:run(step.sh['1']{ cmd = "one" })
+          j:run(step.sh['2']{ cmd = "two", timeout = 90, mask = false })
+          j:run(step.sh['3']{ cmd = "three", metrics = {runtime = "jvm"} })
+         end }
         return "ok"
       end})"""
     check sb.execute(j, script, fakeHost).code == "ok"
-    check j.entries[0].payload == "job-1\ta\t\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"timeout":600}""" & "\tone"
-    check j.entries[1].payload == "job-1\ta\t\t" & """{"mask":{"min_length":4,"runtime":false,"variants":false},"timeout":90}""" & "\ttwo"
-    check j.entries[2].payload == "job-1\ta\t\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"metrics":{"runtime":"jvm","scrape":[]},"timeout":600}""" & "\tthree"
+    check j.entries[0].payload == "0n\ta\t\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"timeout":600}""" & "\tone"
+    check j.entries[1].payload == "0n\ta\t\t" & """{"mask":{"min_length":4,"runtime":false,"variants":false},"timeout":90}""" & "\ttwo"
+    check j.entries[2].payload == "0n\ta\t\t" & """{"mask":{"min_length":8,"runtime":true,"variants":true},"metrics":{"runtime":"jvm","scrape":[]},"timeout":600}""" & "\tthree"
   test "nothing set -> no options at all (the shim's defaults apply: runtime values and variants on)":
     var sb = newSandbox()
     var j = Journal()
     check sb.execute(j, pipelineOneStep, fakeHost).code == "ok"
-    check j.entries[0].payload == "job-1\talpine\t\t\techo hi"
+    check j.entries[0].payload == "01\talpine\t\t\techo hi"
   test "bad mask and timeout fail before anything runs":
     for o in ["{mask = 'yes'}", "{mask = {runtime = 'x'}}", "{mask = {min_length = 2}}", "{mask = {typo = 1}}",
               "{timeout = 0}", "{timeout = '5x'}", "{timeout = 100000}"]:
-      check metricsRun("j:sh('x', " & o & ")").code != "ok"
+      check metricsRun("j:run(step.sh['1']{ cmd = 'x', " & o[1 ..< o.len - 1] & " })").code != "ok"
 
 suite "PIP-014 the lock of a job (ci.job{lock = ...})":
-  const lockedJob = "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = 'stand'}, function(j) j:sh('deploy') j:sh('test') end) return 'done' end})"
+  const lockedJob = "return ci.pipeline({main = function(run) ci.single['0p']{ image = 'a', lock = 'stand', body = function(j) j:run(step.sh['1']{ cmd = 'deploy' }) j:run(step.sh['2']{ cmd = 'test' })  end } return 'done' end})"
   proc kindsOf(j: Journal): seq[string] =
     for e in j.entries: result.add e.kind
 
@@ -352,7 +354,7 @@ suite "PIP-014 the lock of a job (ci.job{lock = ...})":
     let r = sb.execute(j, lockedJob, fakeHost, runId = "s1_abc")
     check r.code == "ok" and r.value == "done"
     check kindsOf(j) == @["lock", "job_sh", "job_sh", "unlock"]
-    check j.entries[0].payload == "stand\tjob-1" and j.entries[3].payload == "stand"       # the lock names the job that asks, the unlock only the lock
+    check j.entries[0].payload == "stand\t0p" and j.entries[3].payload == "stand"       # the lock names the job that asks, the unlock only the lock
     check j.entries[0].key == "lock#0" and j.entries[3].key == "unlock#0"
   test "a job without a lock makes no lock calls":
     var sb = newSandbox()
@@ -362,13 +364,13 @@ suite "PIP-014 the lock of a job (ci.job{lock = ...})":
   test "the lock is let go also when the job ends with an error, and the error goes on":
     var sb = newSandbox()
     var j = Journal()
-    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = 'stand'}, function(j) j:sh('fail') end) end})", fakeHost, runId = "s1_abc")
+    let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['0q']{ image = 'a', lock = 'stand', body = function(j) j:run(step.sh['1']{ cmd = 'fail' })  end } end})", fakeHost, runId = "s1_abc")
     check r.code == "script_error" and "step failed" in r.message
     check kindsOf(j) == @["lock", "job_sh", "unlock"]
   test "a job in a job with the same lock asks twice and lets go twice (the core counts the depth)":
     var sb = newSandbox()
     var j = Journal()
-    let s = "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = 'x'}, function(j) ci.job({image = 'b', lock = 'x'}, function(k) k:sh('in') end) end) end})"
+    let s = "return ci.pipeline({main = function(run) ci.single['0r']{ image = 'a', lock = 'x', body = function(j) ci.single['z1']{ image = 'b', lock = 'x', body = function(k) k:run(step.sh['1']{ cmd = 'in' }) end }  end } end})"
     check sb.execute(j, s, fakeHost, runId = "s1_abc").code == "ok"
     check kindsOf(j) == @["lock", "lock", "job_sh", "unlock", "unlock"]
     check j.entries[1].key == "lock#1" and j.entries[4].key == "unlock#1"
@@ -384,7 +386,7 @@ suite "PIP-014 the lock of a job (ci.job{lock = ...})":
     check called == @["lock"] and j.entries.len == 0
   test "when the lock has been granted (the core wrote its record) the run goes on from there and does not ask again":
     var j = Journal()
-    discard j.append("lock#0", "lock", "stand\tjob-1", "")           # what the core writes when it is the waiter's turn
+    discard j.append("lock#0", "lock", "stand\t0p", "")           # what the core writes when it is the waiter's turn
     var called: seq[string]
     let host = proc (seq: int; kind, payload: string): Option[string] =
       called.add kind
@@ -397,12 +399,13 @@ suite "PIP-014 the lock of a job (ci.job{lock = ...})":
     for bad in ["''", "'a b'", "'x/y'", "5", "true", "'" & "n".repeat(65) & "'"]:
       var sb = newSandbox()
       var j = Journal()
-      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.job({image = 'a', lock = " & bad & "}, function(j) j:sh('x') end) end})", fakeHost, runId = "s1_abc")
+      let r = sb.execute(j, "return ci.pipeline({main = function(run) ci.single['01']{ image = 'a', lock = " & bad & ", body = function(j) j:run(step.sh['1']{ cmd = 'x' }) end } end})", fakeHost, runId = "s1_abc")
       check r.code == "script_error" and "lock is a name" in r.message
       check j.entries.len == 0
 
 suite "PIP-015 running again only what failed (replay with a retry record)":
-  const twoJobs = "return ci.pipeline({main = function(run) ci.job({image = 'a'}, function(j) j:sh('one') end) ci.job({image = 'a'}, function(j) j:sh('two') end) return 'done' end})"
+  const twoJobs = "return ci.pipeline({main = function(run) ci.single['0s']{ image = 'a', body = function(j) j:run(step.sh['1']{ cmd = 'one' })  end } ci.single['0t']{ image = 'a', body = function(j) j:run(step.sh['1']{ cmd = 'two' })  end } return 'done' end})"
+  const secondStep = "s" & $(26 * 1048576 + 1)                # the job '0t' (the number 26) and its step '1': a step is `s<job * 2^20 + step>` (D-67)
   proc hostFailing(seq: int; kind, payload: string): Option[string] =
     if kind == "job_sh" and payload.endsWith("\ttwo"): some("1\n") else: some("0\nout")
 
@@ -410,8 +413,8 @@ suite "PIP-015 running again only what failed (replay with a retry record)":
     var j = Journal()
     var sb = newSandbox()
     check sb.execute(j, twoJobs, hostFailing, runId = "s1_abc").code == "script_error"
-    check j.entries.len == 2 and j.entries[1].key == "s1" and j.entries[1].result == "1\n"
-    discard j.append("retry#0", "retry", "[\"s1\"]", "")
+    check j.entries.len == 2 and j.entries[1].key == secondStep and j.entries[1].result == "1\n"
+    discard j.append("retry#0", "retry", "[\"" & secondStep & "\"]", "")
     var asked: seq[string]
     let healed = proc (seq: int; kind, payload: string): Option[string] =
       asked.add payload.split('\t')[^1]
@@ -420,29 +423,29 @@ suite "PIP-015 running again only what failed (replay with a retry record)":
     let r = sb2.execute(j, twoJobs, healed, runId = "s1_abc")
     check r.code == "ok" and r.value == "done"
     check asked == @["two"]                                  # the step that succeeded is answered by the journal
-    check j.entries[^1].key == "s1~1" and j.entries[^1].result == "0\nfixed"
+    check j.entries[^1].key == secondStep & "~1" and j.entries[^1].result == "0\nfixed"
     check j.entries[1].result == "1\n"                       # the old record stays, chained, and is not the answer
-  test "a second retry supersedes the answer of the first: the step is found under s1~2":
+  test "a second retry supersedes the answer of the first: the step is found under <key>~2":
     var j = Journal()
     var sb = newSandbox()
     discard sb.execute(j, twoJobs, hostFailing, runId = "s1_abc")
-    discard j.append("retry#0", "retry", "[\"s1\"]", "")
+    discard j.append("retry#0", "retry", "[\"" & secondStep & "\"]", "")
     var sb2 = newSandbox()
     check sb2.execute(j, twoJobs, hostFailing, runId = "s1_abc").code == "script_error"       # failed again, now recorded as s1~1
-    check j.entries[^1].key == "s1~1"
-    discard j.append("retry#1", "retry", "[\"s1~1\"]", "")
+    check j.entries[^1].key == secondStep & "~1"
+    discard j.append("retry#1", "retry", "[\"" & secondStep & "~1\"]", "")
     var asked = 0
     let healed = proc (seq: int; kind, payload: string): Option[string] =
       inc asked
       some("0\nok")
     var sb3 = newSandbox()
     check sb3.execute(j, twoJobs, healed, runId = "s1_abc").code == "ok"
-    check asked == 1 and j.entries[^1].key == "s1~2"
+    check asked == 1 and j.entries[^1].key == secondStep & "~2"
   test "while the step is waiting to run again the replay suspends at it and asks nothing else":
     var j = Journal()
     var sb = newSandbox()
     discard sb.execute(j, twoJobs, hostFailing, runId = "s1_abc")
-    discard j.append("retry#0", "retry", "[\"s1\"]", "")
+    discard j.append("retry#0", "retry", "[\"" & secondStep & "\"]", "")
     var kinds: seq[string]
     let waiting = proc (seq: int; kind, payload: string): Option[string] =
       kinds.add kind
@@ -458,4 +461,4 @@ suite "PIP-015 running again only what failed (replay with a retry record)":
     discard j.append("retry#1", "retry", "not json", "")
     var sb2 = newSandbox()
     let again = sb2.execute(j, twoJobs, hostFailing, runId = "s1_abc")
-    check again.code == "script_error"                       # the failed step still answers: s1 was not superseded
+    check again.code == "script_error"                       # the failed step still answers: the key was not superseded

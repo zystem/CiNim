@@ -76,7 +76,7 @@ suite "RUN-009 the conductor":
     test "RUN-009 a run that waits for a step is suspended, and led again when the step is over":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t2")
-      let script = "return ci.pipeline({name='m', main=function(run) ci.job({image='busybox:1.36'}, function(j) j:sh('echo hi') end) return 'ok' end})"
+      let script = "return ci.pipeline({name='m', main=function(run) ci.single['01']{ image='busybox:1.36', body = function(j) j:run(step.sh['1']{ cmd = 'echo hi' })  end } return 'ok' end})"
       let r = co.createRun(script, "t1", o.profile)
       let deadline = epochTime() + 30
       var steps = 0
@@ -124,10 +124,10 @@ suite "RUN-009 the conductor":
       if v != nil:
         for row in v: result.add row[0].getInt
 
-    test "PIP-003 the steps of a run get the numbers of its table, not their places in the journal, and the run goes to its end":
+    test "PIP-003 the steps of a run get the numbers made of their ids, not their places in the journal, and the run goes to its end":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t6")
-      let script = "ci.job({image='a'}, function(j)\n  for i = 1, 3 do j:sh('x' .. i) end\n  j:sh('tail')\nend)"
+      let script = "ci.single['01']{ image='a', body = function(j)\n  for i = 1, 3 do j:run(step.sh[b32f('{x}', i)]{ cmd = 'x' .. i }) end\n  j:run(step.sh['a']{ cmd = 'tail' })\nend }"
       let r = co.createRun(script, "t1", o.profile)
       var seen: seq[int]
       let deadline = epochTime() + 90
@@ -138,8 +138,8 @@ suite "RUN-009 the conductor":
             finishStep(r, n)
         sleep 200
       check stateOf(r) == "SUCCEEDED"
-      check seen == @[0, 1, 2, 10]                      # the loop has the block 0..9, the step after it starts at 10
-      check c.query(%*[["SELECT step_table FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr.startsWith("{\"v\":1")
+      check seen == @[1048576 + 1, 1048576 + 2, 1048576 + 3, 1048576 + 10]      # D-67: the job 01, the steps 1, 2, 3 of the loop and `a`: a number is job * 2^20 + step
+      check c.query(%*[["SELECT step_table FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == ""        # no table is kept with a run any more
       check c.query(%*[["SELECT group_concat(seq) FROM run_journal WHERE run_id = ? AND seq >= 0", r]])["results"][0]["values"][0][0].getStr == "0,1,2,3"
       stop p
     test "PIP-003 ci.parallel: the steps of all branches are made together, a branch goes on when its step ends while the others still run, and the run ends":
@@ -148,11 +148,11 @@ suite "RUN-009 the conductor":
       let script = """
         return ci.pipeline({ main = function(run)
           local r = ci.parallel({
-            a = function() ci.job({image = "x"}, function(j) j:sh("a1"); j:sh("a2") end) end,
-            b = function() ci.job({image = "x"}, function(j) j:sh("b1"); j:sh("b2") end) end,
-            c = function() ci.job({image = "x"}, function(j) j:sh("c1"); j:sh("c2") end) end,
+            a = function() ci.single['02']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "a1" }); j:run(step.sh['2']{ cmd = "a2" })  end } end,
+            b = function() ci.single['03']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "b1" }); j:run(step.sh['2']{ cmd = "b2" })  end } end,
+            c = function() ci.single['04']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "c1" }); j:run(step.sh['2']{ cmd = "c2" })  end } end,
           })
-          ci.job({image = "x"}, function(j) j:sh("tail") end)
+          ci.single['05']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "tail" })  end }
           return "done"
         end })"""
       let r = co.createRun(script, "t1", o.profile)
@@ -189,9 +189,9 @@ suite "RUN-009 the conductor":
       let script = """
         return ci.pipeline({ main = function(run)
           ci.parallel({
-            a = function() ci.job({image = "x"}, function(j) j:sh("a1"); j:sh("a2") end) end,
-            b = function() ci.job({image = "x"}, function(j) j:sh("b1") end) end,
-            c = function() ci.job({image = "x"}, function(j) j:sh("c1") end) end,
+            a = function() ci.single['06']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "a1" }); j:run(step.sh['2']{ cmd = "a2" })  end } end,
+            b = function() ci.single['07']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "b1" })  end } end,
+            c = function() ci.single['08']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "c1" })  end } end,
           }, { fail_fast = true })
         end })"""
       let r = co.createRun(script, "t1", o.profile)
@@ -211,9 +211,9 @@ suite "RUN-009 the conductor":
       let p = startConductor(o.ns, "c-t6c")
       let script = """
         return ci.pipeline({ main = function(run)
-          ci.finally(function() ci.job({image = "x"}, function(j) j:sh("clean") end) end)
-          ci.job({image = "x"}, function(j) j:sh("work") end)
-          ci.job({image = "x"}, function(j) j:sh("never") end)
+          ci.finally(function() ci.single['09']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "clean" })  end } end)
+          ci.single['0a']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "work" })  end }
+          ci.single['0b']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "never" })  end }
         end })"""
       let r = co.createRun(script, "t1", o.profile)
       proc ordinalOf(cmd: string): int =
@@ -231,10 +231,10 @@ suite "RUN-009 the conductor":
       check c.query(%*[["SELECT fail_message FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr.contains("step failed with code 3")
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 2
       stop p
-    test "PIP-006 a script with more than 200 steps ends before it makes a single one, with step_limit":
+    test "PIP-006 a script with more than 1000 steps ends before it makes a single one, with step_limit":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t7")
-      let r = co.createRun("ci.job({image='a'}, function(j) for i = 1, 201 do j:sh('x') end end)", "t1", o.profile)
+      let r = co.createRun("ci.single['01']{ image='a', body = function(j) for i = 1, 1001 do j:run(step.sh[b32f('{xxx}', i)]{ cmd = 'x' }) end end }", "t1", o.profile)
       check waitState(r, "FAILED")
       check c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "step_limit"
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
@@ -242,7 +242,7 @@ suite "RUN-009 the conductor":
     test "PIP-018 an id used twice ends the run with duplicate_id before any step is made":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t8")
-      let r = co.createRun("ci.job({image='a'}, function(j)\n j:sh('x', {id='same'})\n j:sh('y', {id='same'})\nend)", "t1", o.profile)
+      let r = co.createRun("ci.single['01']{ image='a', body = function(j)\n j:run(step.sh['a']{ cmd = 'x' })\n j:run(step.sh['0a']{ cmd = 'y' })\nend }", "t1", o.profile)
       check waitState(r, "FAILED")
       check c.query(%*[["SELECT fail_code FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "duplicate_id"
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 0
@@ -258,7 +258,7 @@ suite "RUN-009 the conductor":
     test "PIP-016 a conductor checks a script in a process of its own: what it found, the steps it saw, the parameters a run would have":
       let o = newOrg()
       let p = startConductor(o.ns, "c-t9")
-      const script = "return ci.pipeline({ params = { JOBS = ci.number{ default = 4, min = 1, max = 64, integer = true } }, main = function(run) ci.job({image='a'}, function(j) j:sh('x'); j:sh('y') end) end })"
+      const script = "return ci.pipeline({ params = { JOBS = ci.number{ default = 4, min = 1, max = 64, integer = true } }, main = function(run) ci.single['0d']{ image='a', body = function(j) j:run(step.sh['1']{ cmd = 'x' }); j:run(step.sh['2']{ cmd = 'y' })  end } end })"
       let good = checked(o.ns, script)
       check good.ran and good.code == "" and good.steps == 2 and "\"JOBS\"" in good.paramsJson and good.problemOf == ""
       let bad = checkScript(o.ns, script, @[("JOBS", "0")], 1)

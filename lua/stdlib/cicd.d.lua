@@ -9,12 +9,13 @@
 ---@class Param                            # a typed parameter declaration (PIP-012), built by ci.string, ci.number, ...
 ---@class SecretHandle                     # opaque reference to a secret (ci.secret param value, ci.vault)
 ---@class StepResult
+---@field status "ok"|"failed"          # "failed" only for a step with `ignore_failure`; any other failed step fails the job
 ---@field code integer                     # exit code of the step
 ---@field outputs table<string,string>     # values from $CICD_OUTPUT (STO-003), replayed from the journal
 ---@field stdout? string                   # only when requested with opts.capture
 ---@class JobResult
----@field ok boolean
----@field outputs table<string,string>
+---@field status "ok"
+---@field steps table<string,StepResult>   # by the id of the step, as the author writes it (`steps["a"]` is `steps["000a"]`)
 ---@class InputResult
 ---@field approved boolean
 ---@field approver string
@@ -45,7 +46,10 @@
 ---@field timeout? Duration
 ---@field main fun(run: Run)
 
----@class JobOpts
+---@class JobOpts                          # the table of `ci.single[id]{ ... }` (D-67): the id is the index, and exactly one of `steps` and `body` is given
+---@field name? string                    # a human name for the UI; never an identity
+---@field steps? Step[]                   # the steps in order: `step.sh["a"]{ ... }`, `step.cache_restore["b"]{ ... }`, ...
+---@field body? fun(j: Job)               # the steps run one by one with `j:run(step)`, for logic that needs a result to go on
 ---@field image string
 ---@field profile? string
 ---@field resources? {cpu?:string, memory?:string}
@@ -76,7 +80,13 @@
 ---@field variants? boolean               # also mask base64 (any alignment), URL-encoded and JSON-escaped forms; default true
 ---@field min_length? integer             # values shorter than this are not masked, 4..64; default 4
 
----@class ShOpts
+---@class Step                            # a description of a step, made by `step.sh[id]{...}`, `step.cache_restore[id]{...}`, `step.cache_save[id]{...}`; it runs nothing
+---@field id string                       # the index, normalized: 4 characters of 0-9 and a-z without i, l, o, u
+---@field kind string
+
+---@class ShOpts                          # the fields of `step.sh[id]{ cmd = ..., ... }`
+---@field cmd string                      # the command
+---@field name? string                    # a human name for the UI; never an identity
 ---@field mask? MaskSpec|false            # overrides the job's setting; false = no runtime values, no variants
 ---@field metrics? MetricsSpec|false      # overrides the job's declaration; false switches it off for this step
 ---@field image? string
@@ -106,6 +116,7 @@
 ---@field project? string
 
 local ci = {}
+local step = {}                          -- the global `step` of the sandbox (D-67); `ci.step` is the same table
 
 -- metadata phase: pure functions, no side effects, not journaled (PIP-002) ------------------------------------------
 ---@param spec PipelineSpec
@@ -146,10 +157,22 @@ function ci.matrix(spec) end
 ---@param name string
 ---@param fn fun()
 function ci.stage(name, fn) end
+---@param id string                       # the index: `ci.single["a"]{ ... }`; at most 2 characters of 0-9 and a-z without i, l, o, u, padded with zeros in front, unique in the run
 ---@param opts JobOpts
----@param fn fun(j: Job)
----@return JobResult
-function ci.job(opts, fn) end
+---@return JobResult                       # { status = "ok", steps = { [id] = StepResult } }; a step that fails fails the job (an error), unless `ignore_failure`
+function ci.single(id, opts) end
+---@param id string                       # the index: `step.sh["ab"]{ cmd = "make" }`; at most 4 characters of the same alphabet, unique in its job
+---@param opts ShOpts
+---@return Step
+function step.sh(id, opts) end
+---@param id string                       # the index
+---@param opts {keys: string[], name?: string}   # the key and then the key prefixes to fall back on (1 to 6)
+---@return Step                            # when run: { hit = boolean, key = string|nil }
+function step.cache_restore(id, opts) end
+---@param id string                       # the index
+---@param opts {key: string, paths: string[], name?: string}
+---@return Step
+function step.cache_save(id, opts) end
 ---@param env string
 ---@param fn fun(j: Job)
 ---@return JobResult
@@ -182,6 +205,10 @@ function b58x(n) end
 ---@param n integer                        # 0 to 3363 (a run needs 200 at most)
 ---@return string                          # exactly two characters of Base58; an error if n does not fit; results sort like the numbers. Pure, not journaled. For ids built in loops: "a" .. b58xx(i) .. b58xx(j) .. b58xx(k)
 function b58xx(n) end
+---@param fmt string                      # characters of 0-9 and a-z without i, l, o, u that stand for themselves, and the placeholders `{x}` `{xx}` `{xxx}` `{xxxx}` (1 to 4 characters, in any combination); at most 4 characters in all; nothing is padded
+---@param ... integer                     # one number for each placeholder, in order (0 to 31, 1023, 32767, 1048575)
+---@return string                          # the id built in loops: `b32f("{x}{x}{x}", i, j, k)` is three characters. The format is checked as a whole before the numbers. Pure, not journaled.
+function b32f(fmt, ...) end
 ---@param fmt string                      # letters and digits that stand for themselves, `{x}` (one Base58 character) and `{xx}` (two); at most 8 characters in all, a letter first
 ---@param ... integer                     # one number for each placeholder, in order
 ---@return string                          # the id: `b58f("a{xx}{xx}{xx}", i, j, k)` is `"a" .. b58xx(i) .. b58xx(j) .. b58xx(k)`. The format is checked as a whole before the numbers: too long, a placeholder or digit first, an unknown placeholder or a wrong number of arguments is an error. Pure, not journaled
@@ -214,26 +241,15 @@ function JobArtifact.upload(path, opts) end
 ---@return {path:string, sha256:string}
 function JobArtifact.download(name, opts) end
 
----@class JobCache
-local JobCache = {}
----@param key string
----@param paths string[]
-function JobCache.save(key, paths) end
----@param keys string[]                    # tried in order; the first hit wins
----@return {hit:boolean, key?:string}
-function JobCache.restore(keys) end
-
----@class Job                              # argument of the job function
+---@class Job                              # argument of the `body` function of a job
 ---@field artifact JobArtifact
----@field cache JobCache
 local Job = {}
 ---@param opts? {url?:string, ref?:string, depth?:integer, submodules?:boolean, lfs?:boolean}
 ---@return StepResult
 function Job:checkout(opts) end
----@param cmd string
----@param opts? ShOpts
----@return StepResult
-function Job:sh(cmd, opts) end
+---@param step Step                        # a step that `step.sh[id]{...}` (or a cache constructor) described
+---@return StepResult                      # { status = "ok"|"failed", code, outputs, stdout }; a non-zero code fails the job unless `ignore_failure`
+function Job:run(step) end
 ---@param ref string                       # plugin reference pinned by digest or SemVer from the lockfile
 ---@param inputs? table<string,any>        # validated against the plugin JSON Schema
 ---@return StepResult

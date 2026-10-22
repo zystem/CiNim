@@ -55,14 +55,14 @@ local function kaniko(component, image, tag, extra)
          " --destination=$REGISTRY/" .. image .. ":" .. tag .. " --cache=true --cache-repo=$REGISTRY/cinim-cache " .. REGISTRY_FLAGS
 end
 
--- a job in a volume of its own with the source of the commit in it
-local function checked_out(env, fn, opts)
+-- a job (its id is the first argument, 2 characters, D-67) in a volume of its own with the source of the commit in it; its steps 1 and 2 are the mirror and the clone, the steps of `fn` are 3 on
+local function checked_out(id, env, fn, opts)
   opts = opts or {}
-  ci.job({image = opts.image or GIT, profile = opts.profile or "build", workspace = "isolated", env = env, timeout = opts.timeout, secrets = opts.secrets, shm = opts.shm}, function(j)
-    j.cache.restore({"git-" .. env.SHA})
-    j:sh(CLONE)
+  ci.single[id]{ image = opts.image or GIT, profile = opts.profile or "build", workspace = "isolated", env = env, timeout = opts.timeout, secrets = opts.secrets, shm = opts.shm, body = function(j)
+    j:run(step.cache_restore['1']{ keys = {"git-" .. env.SHA} })
+    j:run(step.sh['2']{ cmd = CLONE })
     fn(j)
-  end)
+  end }
 end
 
 -- Is the image in the registry? (the images of the libraries and of the tests are made once)
@@ -164,36 +164,36 @@ return ci.pipeline({
     local tag = p.TAG
     local info
     -- 1. the mirror (a cache of the organisation: the first run fetches everything, the next ones what is new) and what the commit is
-    ci.job({image = GIT, profile = "build", workspace = "isolated", env = {REPO = repo, REF = ref}}, function(j)
-      j.cache.restore({"git-none", "git-"})            -- no key is exactly "git-none": the latest "git-<commit>" is the one restored
-      info = j:sh(PREP).outputs
+    ci.single['p']{ image = GIT, profile = "build", workspace = "isolated", env = {REPO = repo, REF = ref}, body = function(j)
+      j:run(step.cache_restore['1']{ keys = {"git-none", "git-"} })            -- no key is exactly "git-none": the latest "git-<commit>" is the one restored
+      info = j:run(step.sh['2']{ cmd = PREP }).outputs
       if not (info.SHA and info.TAG and info.DEPS and info.TESTDEPS and info.HELMDEPS) then error("no commit found for " .. ref) end
-      j.cache.save("git-" .. info.SHA, {"mirror.git"})
-    end)
+      j:run(step.cache_save['3']{ key = "git-" .. info.SHA, paths = {"mirror.git"} })
+    end }
     tag = info.TAG
     local env = { SHA = info.SHA, IMAGE_TAG = info.TAG, DEPS = info.DEPS, TESTDEPS = info.TESTDEPS, TEST_JOBS = tostring(p.TEST_JOBS) }
     if p.BUILD or p.TEST then
       -- 2. the libraries, and the tests' image, once for as long as what they are made of stays the same
       if p.BUILD then
-        checked_out(env, function(j)
-          j:sh(in_registry("cinim-deps", "DEPS") .. kaniko("deps", "cinim-deps", "$DEPS"), {image = KANIKO})
+        checked_out('d', env, function(j)
+          j:run(step.sh['3']{ cmd = in_registry("cinim-deps", "DEPS") .. kaniko("deps", "cinim-deps", "$DEPS"), image = KANIKO })
         end)
       end
       if p.TEST then
-        checked_out(env, function(j)
-          j:sh(in_registry("cinim-test", "TESTDEPS") .. kaniko("test", "cinim-test", "$TESTDEPS"), {image = KANIKO})
+        checked_out('t', env, function(j)
+          j:run(step.sh['3']{ cmd = in_registry("cinim-test", "TESTDEPS") .. kaniko("test", "cinim-test", "$TESTDEPS"), image = KANIKO })
         end)
       end
       -- 3. the images of the components, and the tests, side by side: the first that fails stops the others
-      local names, by = {}, {}
-      for _, c in ipairs(COMPONENTS) do names[#names + 1] = c.target; by[c.target] = c end
+      local names, by, number = {}, {}, {}
+      for i, c in ipairs(COMPONENTS) do names[#names + 1] = c.target; by[c.target] = c; number[c.target] = i end
       local branches = {}
       if p.BUILD then
         branches.images = function()
           ci.parallel(ci.matrix{axes = {component = names}, fail_fast = true, max_parallel = p.BUILD_JOBS}, function(c)
             local comp = by[c.component]
-            checked_out(env, function(j)
-              j:sh(kaniko(comp.target, comp.image, "$IMAGE_TAG", "--build-arg DEPS_IMAGE=$REGISTRY/cinim-deps:$DEPS"), {image = KANIKO})
+            checked_out(b32f("{xx}", 32 + number[comp.target]), env, function(j)         -- the jobs 11, 12, ... one for each component
+              j:run(step.sh['3']{ cmd = kaniko(comp.target, comp.image, "$IMAGE_TAG", "--build-arg DEPS_IMAGE=$REGISTRY/cinim-deps:$DEPS"), image = KANIKO })
             end)
           end)
         end
@@ -201,10 +201,10 @@ return ci.pipeline({
       if p.TEST then
         branches.tests = function()
           local key = "nim-" .. info.TESTDEPS .. "-"
-          checked_out(env, function(j)
-            j.cache.restore({key})                     -- the C the tests were compiled to by an earlier run: the next run compiles what changed
-            local ok, err = pcall(function() j:sh(TESTS) end)
-            j.cache.save(key .. info.SHA, {"nimcache"})          -- also after a failed run: the compiling is what took the time, and it was done
+          checked_out('u', env, function(j)
+            j:run(step.cache_restore['3']{ keys = {key} })                -- the C the tests were compiled to by an earlier run: the next run compiles what changed
+            local ok, err = pcall(function() j:run(step.sh['4']{ cmd = TESTS }) end)
+            j:run(step.cache_save['5']{ key = key .. info.SHA, paths = {"nimcache"} })          -- also after a failed run: the compiling is what took the time, and it was done
             if not ok then error(err, 0) end
           end, {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "120m", shm = "1Gi"})      -- the databases of the tests are in memory: the disks of a node fsync in 1 ms or in 160
         end
@@ -214,14 +214,14 @@ return ci.pipeline({
     -- 4. the new tag in the cluster
     if p.DEPLOY then
       local helm_key = "helm-" .. info.HELMDEPS
-      checked_out(env, function(j)
-        j.cache.restore({helm_key})
-        j:sh(HELM_DEPS)
-        pcall(function() j.cache.save(helm_key, {"charts-cache"}) end)       -- there already for this lock: nothing to keep
+      checked_out('h', env, function(j)
+        j:run(step.cache_restore['3']{ keys = {helm_key} })
+        j:run(step.sh['4']{ cmd = HELM_DEPS })
+        pcall(function() j:run(step.cache_save['5']{ key = helm_key, paths = {"charts-cache"} }) end)       -- there already for this lock: nothing to keep
       end, {image = KUBECTL})
-      checked_out(env, function(j)
-        j.cache.restore({helm_key})
-        j:sh(ROLLOUT)
+      checked_out('r', env, function(j)
+        j:run(step.cache_restore['3']{ keys = {helm_key} })
+        j:run(step.sh['4']{ cmd = ROLLOUT })
       end, {image = KUBECTL, profile = "deploy", secrets = {"DEPLOY_TOKEN", "DEPLOY_CA"}})
     end
     return tag

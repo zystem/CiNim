@@ -8,7 +8,7 @@ import posix
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, stream, streamstate, runpipe, heartbeat, scriptsource]
-import executor/[sandbox, journal, replay, steptable]
+import executor/[sandbox, journal, replay, pass]
 
 import_proto3 "../../build/nimproto/all.proto"
 
@@ -97,26 +97,23 @@ proc runMode() =
   var sb = newSandbox(apiVersion = apiVersion)
   var jj = toJournal(g.journal)
   var lostLease = ""
-  # the numbers of the steps (docs/parallel.md section 3): the table the core has kept, or one made now by a pass of the script and sent to the core
-  var prep = prepare(g.script, g.params.mapIt((it.key, it.value)), apiVersion, g.step_table)
-  if prep.refused:
-    # more than 200 steps, or an id used twice: an error for the author, before anything is made
-    send(pkFinish, wireString(Protobuf.encode(FinishRun(run_id: runId, state: RUN_STATE_FAILED, message: prep.message, code: prep.code, lease_token: token))))
-    quit(0)
+  # more than 1000 steps, or an id used twice: an error for the author, found by a pass of the script before anything is made (the first execution of a run only: a journal that has entries
+  # was passed once already). The number of a step is made by the script of the ids (D-67), so there is no table of numbers to keep.
+  if jj.entries.len == 0:
+    let proved = runPass(g.script, g.params.mapIt((it.key, it.value)), apiVersion)
+    if not proved.ok:
+      send(pkFinish, wireString(Protobuf.encode(FinishRun(run_id: runId, state: RUN_STATE_FAILED, message: proved.message, code: proved.code, lease_token: token))))
+      quit(0)
   var lastKey = ""                      # the key of the call being made, told by replay.execute before the host is asked
+  var lastStep = -1                     # the number of the step being made, told the same way
   proc callCore(seq: int; kind, payload: string; numbered = false; stepNo = 0; key = ""): ExecutorResponse =
     send(pkCall, wireString(Protobuf.encode(HostCall(run_id: runId, lease_token: token, seq: uint64(seq), kind: kind,
                                                        payload: cast[seq[byte]](payload), numbered: numbered, step_no: uint32(stepNo), key: key))))
     let back = readPipeFd(0)
     if back.isNone or back.get.kind != pkReply: quit(2)         # the supervisor is gone: nothing more to do here
     Protobuf.decode(cast[seq[byte]](back.get.payload), ExecutorResponse)
-  if prep.toSend.len > 0:
-    let sent = callCore(0, "table", prep.toSend)
-    if sent.body.kind == ExecutorResponseBodyKind.failure and sent.body.failure.code == "lease_lost":
-      send(pkLost, sent.body.failure.detail)
-      quit(0)
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
-    let resp = callCore(seq, kind, payload, numbered = kind == "job_sh" and prep.numbering.lastNo >= 0, stepNo = max(prep.numbering.lastNo, 0), key = lastKey)
+    let resp = callCore(seq, kind, payload, numbered = kind == "job_sh", stepNo = max(lastStep, 0), key = lastKey)
     if resp.body.kind == ExecutorResponseBodyKind.failure and resp.body.failure.code == "lease_lost":
       lostLease = resp.body.failure.detail
       raise (ref HostSuspend)(msg: "the lease was lost")           # nothing more is done for this run, whatever its branches could still do
@@ -126,9 +123,8 @@ proc runMode() =
     if resp.body.result.suspended: return none(string)               # pending: the branch that asked waits, the others go on (docs/parallel.md section 5)
     some(cast[string](resp.body.result.result))
   let r = replay.execute(sb, jj, g.script, host, runId = runId, params = g.params.mapIt((it.key, it.value)),
-                         onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = prep.numbering.onPlace(kind, line, ctx, nth),
-                         onCall = proc (seq: int; kind, key: string) = (lastKey = key),
-                         stepKey = proc (): string = "s" & $max(prep.numbering.lastNo, 0))
+                         onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = (if kind == "job_sh": lastStep = nth),
+                         onCall = proc (seq: int; kind, key: string) = (lastKey = key))
   if lostLease.len > 0:
     send(pkLost, lostLease)
   elif r.status == esSuspended:

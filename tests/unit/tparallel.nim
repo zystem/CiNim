@@ -2,7 +2,7 @@
 ## Pure: a fake host stands for the core; "a step is done" is a set of commands. The script is run again, in a fresh sandbox with the journal so far, after every
 ## completion, as a run is led again by a conductor each time a step has ended.
 import std/[unittest, strutils, sequtils, sets, options, algorithm, tables, json]
-import executor/[steptable, sandbox, journal, replay]
+import executor/[pass, sandbox, journal, replay]
 
 type
   Round = object
@@ -12,29 +12,27 @@ type
 
 proc cmdOf(payload: string): string = payload.split('\t', 4)[^1]
 
-proc runRound(script: string; table: StepTable; j: var Journal; done: HashSet[string]): Round =
+proc runRound(script: string; j: var Journal; done: HashSet[string]): Round =
   ## one execution of the script: what is in the journal is replayed, a call without a record goes to the host, which has an answer for the commands in `done` only
   var sb = newSandbox()
-  var n = newNumbering(table)
+  var lastNo = -1                                 # the number of the step being made: the script makes it of the ids (D-67) and tells it as `nth`
   var r: Round
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
     if kind == "job_sh":
       r.asked.add cmdOf(payload)
-      r.numbers[cmdOf(payload)] = n.lastNo
+      r.numbers[cmdOf(payload)] = lastNo
       if cmdOf(payload) in done: return some("0\n")
       return none(string)
     some("")
   r.result = replay.execute(sb, j, script, host,
-    onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = n.onPlace(kind, line, ctx, nth),
-    stepKey = proc (): string = "s" & $max(n.lastNo, 0))
+    onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = (if kind == "job_sh": lastNo = nth))
   r
 
 proc drive(script: string; order: seq[char]; limit = 60): tuple[last: Round, j: Journal, history: seq[Round], numbers: Table[string, int]] =
   ## lead the script to its end: whenever it suspends, the step that finishes next is, of those asked and not done, the one whose branch letter comes first in `order`
-  let table = buildTable(script).table
   var done = initHashSet[string]()
   for i in 0 ..< limit:
-    let r = runRound(script, table, result.j, done)
+    let r = runRound(script, result.j, done)
     result.history.add r
     result.last = r
     for k, v in r.numbers: result.numbers[k] = v
@@ -51,11 +49,11 @@ proc drive(script: string; order: seq[char]; limit = 60): tuple[last: Round, j: 
 const threeBranches = """
 return ci.pipeline({ main = function(run)
   local r = ci.parallel({
-    a = function() ci.job({image = "x"}, function(j) j:sh("a1"); j:sh("a2") end); return "A" end,
-    b = function() ci.job({image = "x"}, function(j) j:sh("b1") end); return "B" end,
-    c = function() ci.job({image = "x"}, function(j) j:sh("c1"); j:sh("c2") end); return "C" end,
+    a = function() ci.single['01']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "a1" }); j:run(step.sh['2']{ cmd = "a2" })  end }; return "A" end,
+    b = function() ci.single['02']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "b1" })  end }; return "B" end,
+    c = function() ci.single['03']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "c1" }); j:run(step.sh['2']{ cmd = "c2" })  end }; return "C" end,
   })
-  ci.job({image = "x"}, function(j) j:sh("tail") end)
+  ci.single['04']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "tail" })  end }
   return r.a.value .. r.b.value .. r.c.value
 end })
 """
@@ -64,9 +62,9 @@ end })
 const loopBranches = """
 local function build(name)
   return function()
-    ci.job({image = "x"}, function(j)
-      for i = 1, 2 do j:sh(name .. i) end
-    end)
+    ci.single[name]{ image = "x", body = function(j)
+      for i = 1, 2 do j:run(step.sh[b32f("{x}", i)]{ cmd = name .. i }) end
+    end }
     return name
   end
 end
@@ -88,32 +86,29 @@ proc permutations(s: seq[char]): seq[seq[char]] =
 
 suite "PIP-003 ci.parallel: the branches go on together":
   test "every branch asks its first step before any step is answered, in the order of the names":
-    let table = buildTable(threeBranches).table
     var j: Journal
-    let r = runRound(threeBranches, table, j, initHashSet[string]())
+    let r = runRound(threeBranches, j, initHashSet[string]())
     check r.result.status == esSuspended
     check r.asked == @["a1", "b1", "c1"]
   test "a branch goes on when its step is answered, while the others still wait":
-    let table = buildTable(threeBranches).table
     var j: Journal
-    let r = runRound(threeBranches, table, j, ["b1"].toHashSet)
+    let r = runRound(threeBranches, j, ["b1"].toHashSet)
     check r.asked == @["a1", "b1", "c1"]
     check j.entries.len == 1                         # b1 only; the replay finds it, so b1 is not asked a second time
-    let r2 = runRound(threeBranches, table, j, ["b1"].toHashSet)
+    let r2 = runRound(threeBranches, j, ["b1"].toHashSet)
     check r2.asked == @["a1", "c1"]
   test "a script without ci.parallel is led as before: one step, suspended, the next after it is answered":
     let seqScript = """
       return ci.pipeline({ main = function(run)
-        ci.job({image = "x"}, function(j) j:sh("one"); j:sh("two") end)
+        ci.single['05']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "one" }); j:run(step.sh['2']{ cmd = "two" })  end }
         return "done"
       end })"""
-    let table = buildTable(seqScript).table
     var j: Journal
-    var r = runRound(seqScript, table, j, initHashSet[string]())
+    var r = runRound(seqScript, j, initHashSet[string]())
     check r.result.status == esSuspended and r.asked == @["one"]
-    r = runRound(seqScript, table, j, ["one"].toHashSet)             # `one` ended: the replay asks it, the core has it in the journal by now
+    r = runRound(seqScript, j, ["one"].toHashSet)             # `one` ended: the replay asks it, the core has it in the journal by now
     check r.asked == @["one", "two"] and r.result.status == esSuspended
-    r = runRound(seqScript, table, j, ["one", "two"].toHashSet)
+    r = runRound(seqScript, j, ["one", "two"].toHashSet)
     check r.asked == @["two"] and r.result.status == esDone and r.result.value == "done"
 
 suite "PIP-004 ci.parallel: the order of completion does not matter":
@@ -148,20 +143,21 @@ suite "PIP-004 ci.parallel: the order of completion does not matter":
     var seen: HashSet[int]
     for _, n in firstNumbers: seen.incl n
     check seen.len == 6                               # no two steps share a number
-  test "the numbers of the steps are those the table gave in the pass, not the overflow":
+  test "D-67 the numbers of the steps are made of the ids of the job and of the step: one job a, b, c each, two steps":
     let d = drive(loopBranches, @['a', 'b', 'c'])
-    for cmd, n in d.numbers: check n < 100_000
+    check d.numbers["a1"] == 10 * 1048576 + 1 and d.numbers["a2"] == 10 * 1048576 + 2      # the job a is the number 10
+    check d.numbers["b1"] == 11 * 1048576 + 1 and d.numbers["c2"] == 12 * 1048576 + 2
   test "a finished run replays from its journal without asking the host":
     let d = drive(threeBranches, @['c', 'b', 'a'])
     var j = d.j
-    let r = runRound(threeBranches, buildTable(threeBranches).table, j, initHashSet[string]())
+    let r = runRound(threeBranches, j, initHashSet[string]())
     check r.result.status == esDone and r.asked.len == 0
     check j.entries.len == d.j.entries.len
   test "a branch whose command changed since the journal was written is script_nondeterminism, naming its key":
     let d = drive(threeBranches, @['a', 'b', 'c'])
     var j = d.j
-    let changed = threeBranches.replace("j:sh(\"b1\")", "j:sh(\"b1 changed\")")
-    let r = runRound(changed, buildTable(changed).table, j, initHashSet[string]())
+    let changed = threeBranches.replace("cmd = \"b1\"", "cmd = \"b1 changed\"")
+    let r = runRound(changed, j, initHashSet[string]())
     check r.result.status == esFailed and r.result.code == "script_nondeterminism"
     check "key s" in r.result.message
 
@@ -169,8 +165,8 @@ suite "PIP-003 ci.parallel: results, failures, pcall":
   const failing = """
     return ci.pipeline({ main = function(run)
       local r = ci.parallel({
-        ok = function() ci.job({image = "x"}, function(j) j:sh("fine") end); return 7 end,
-        bad = function() ci.job({image = "x"}, function(j) j:sh("broken") end) end,
+        ok = function() ci.single['06']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "fine" })  end }; return 7 end,
+        bad = function() ci.single['07']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "broken" })  end } end,
       }, { keep_going = true })
       return tostring(r.ok.ok) .. tostring(r.ok.value) .. tostring(r.bad.ok) .. tostring(r.bad.error)
     end })"""
@@ -233,7 +229,7 @@ suite "PIP-003 ci.parallel: results, failures, pcall":
     var j: Journal
     let r = replay.execute(sb, j, script, failingHost(initHashSet[string]()))
     check r.status == esDone and r.value.startsWith("false") and "plain data" in r.value
-  test "an empty set of branches gives an empty table":
+  test "an empty set of branches gives an empty result":
     var sb = newSandbox()
     var j: Journal
     let r = replay.execute(sb, j, "return ci.pipeline({ main = function(run) local r = ci.parallel({}); local c = 0; for _ in pairs(r) do c = c + 1 end; return tostring(c) end })", failingHost(initHashSet[string]()))
@@ -242,8 +238,8 @@ suite "PIP-003 ci.parallel: results, failures, pcall":
     let script = """
       return ci.pipeline({ main = function(run)
         ci.parallel({
-          a = function() ci.job({image = "x"}, function(j) j:sh("one", {id = "same"}) end) end,
-          b = function() ci.job({image = "x"}, function(j) j:sh("two", {id = "same"}) end) end,
+          a = function() ci.single['1a']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "one" }) end } end,
+          b = function() ci.single['1a']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "two" }) end } end,
         }, { keep_going = true })
       end })"""
     var sb = newSandbox()
@@ -255,20 +251,19 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
   const limited = """
     return ci.pipeline({ main = function(run)
       local r = ci.parallel({
-        a = function() ci.job({image = "x"}, function(j) j:sh("a1") end) end,
-        b = function() ci.job({image = "x"}, function(j) j:sh("b1") end) end,
-        c = function() ci.job({image = "x"}, function(j) j:sh("c1") end) end,
+        a = function() ci.single['0a']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "a1" })  end } end,
+        b = function() ci.single['0b']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "b1" })  end } end,
+        c = function() ci.single['0c']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "c1" })  end } end,
       }, { max_parallel = 2 })
       return "ok"
     end })"""
   test "max_parallel starts the branches in the order of the names; the next starts when one has ended":
-    let table = buildTable(limited).table
     var j: Journal
-    var r = runRound(limited, table, j, initHashSet[string]())
+    var r = runRound(limited, j, initHashSet[string]())
     check r.asked == @["a1", "b1"]                                # c waits
-    r = runRound(limited, table, j, ["b1"].toHashSet)             # b ends first: c takes its place
+    r = runRound(limited, j, ["b1"].toHashSet)             # b ends first: c takes its place
     check r.asked == @["a1", "b1", "c1"]
-    r = runRound(limited, table, j, ["a1", "b1", "c1"].toHashSet)
+    r = runRound(limited, j, ["a1", "b1", "c1"].toHashSet)
     check r.result.status == esDone
   test "max_parallel is a whole number of at least 1":
     for bad in ["0", "-1", "1.5", "'2'"]:
@@ -306,18 +301,17 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
         local r = ci.parallel({
           o = function()
             local inner = ci.parallel({
-              p = function() ci.job({image = "x"}, function(j) j:sh("op") end); return "P" end,
-              q = function() ci.job({image = "x"}, function(j) j:sh("oq") end); return "Q" end,
+              p = function() ci.single['0d']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "op" })  end }; return "P" end,
+              q = function() ci.single['0e']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "oq" })  end }; return "Q" end,
             })
             return inner.p.value .. inner.q.value
           end,
-          w = function() ci.job({image = "x"}, function(j) j:sh("w1") end); return "W" end,
+          w = function() ci.single['0f']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "w1" })  end }; return "W" end,
         })
         return r.o.value .. r.w.value
       end })"""
-    let table = buildTable(nested).table
     var j: Journal
-    let first = runRound(nested, table, j, initHashSet[string]())
+    let first = runRound(nested, j, initHashSet[string]())
     check first.asked == @["op", "oq", "w1"]
     var results: seq[string]
     for order in [@['o', 'w'], @['w', 'o']]:
@@ -325,7 +319,7 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
       var done = initHashSet[string]()
       var r: Round
       for i in 0 ..< 20:
-        r = runRound(nested, table, jj, done)
+        r = runRound(nested, jj, done)
         if r.result.status != esSuspended: break
         var pending = r.asked.filterIt(it notin done)
         pending.sort(proc (a, b: string): int = cmp(order.find(a[0]), order.find(b[0])))
@@ -377,7 +371,7 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
   test "a lock inside a branch is refused for now":
     let script = """
       return ci.pipeline({ main = function(run)
-        ci.parallel({ a = function() ci.job({image = "x", lock = "L"}, function(j) j:sh("x") end) end })
+        ci.parallel({ a = function() ci.single['0g']{ image = "x", lock = "L", body = function(j) j:run(step.sh['1']{ cmd = "x" })  end } end })
       end })"""
     var sb = newSandbox()
     var j: Journal
@@ -386,7 +380,7 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
   test "host calls in a coroutine of the script are still refused":
     let script = """
       return ci.pipeline({ main = function(run)
-        local co = coroutine.wrap(function() ci.job({image = "x"}, function(j) j:sh("x") end) end)
+        local co = coroutine.wrap(function() ci.single['0h']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "x" })  end } end)
         co()
       end })"""
     var sb = newSandbox()
@@ -394,41 +388,16 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
     let r = replay.execute(sb, j, script, proc (seq: int; kind, payload: string): Option[string] = some("0\n"))
     check r.status == esFailed and "nested coroutines" in r.message
 
-suite "PIP-003 ci.parallel: the table":
-  test "the pass numbers the steps of a script with branches, and the steps made on one line by different branches get different numbers":
-    let r = buildTable(loopBranches)
-    check r.ok and r.steps == 6
-    check r.table.blocks.len == 1                                      # all on one line
-    check r.table.blocks[0].size == 6
-  test "the table of a script with branches is stored and read back with the same numbers":
-    let r = buildTable(loopBranches)
-    var t = r.table
-    let back = decodeTable(encodeTable(t))
-    check back.isSome
-    var b = back.get
-    for (ctx, nth) in [("m.p1[a]", 0), ("m.p1[a]", 1), ("m.p1[b]", 0), ("m.p1[c]", 1)]:
-      let line = r.table.blocks[0].line
-      check b.numberOfAt(line, ctx, nth) == t.numberOfAt(line, ctx, nth)
-  test "a place the pass did not see gets a number that depends on the place alone, whichever is asked first":
-    let r = buildTable(loopBranches)
-    let line = r.table.blocks[0].line
-    var t1 = r.table
-    var t2 = r.table
-    let a1 = t1.numberOfAt(line, "m.p1[a]", 7)
-    let b1 = t1.numberOfAt(line, "m.p1[b]", 7)
-    let b2 = t2.numberOfAt(line, "m.p1[b]", 7)
-    let a2 = t2.numberOfAt(line, "m.p1[a]", 7)
-    check a1 == a2 and b1 == b2 and a1 != b1
-    check a1 >= 1_000_000_000 and a1 < 2_000_000_000
+suite "PIP-006 ci.parallel: the limit of the run":
   test "a script with 1001 steps in its branches is step_limit":
     let script = """
       return ci.pipeline({ main = function(run)
         ci.parallel({
-          a = function() ci.job({image = "x"}, function(j) for i = 1, 500 do j:sh("a" .. i) end end) end,
-          b = function() ci.job({image = "x"}, function(j) for i = 1, 501 do j:sh("b" .. i) end end) end,
+          a = function() ci.single['01']{ image = "x", body = function(j) for i = 1, 500 do j:run(step.sh[b32f("{xxx}", i)]{ cmd = "a" .. i }) end end } end,
+          b = function() ci.single['02']{ image = "x", body = function(j) for i = 1, 501 do j:run(step.sh[b32f("{xxx}", i)]{ cmd = "b" .. i }) end end } end,
         })
       end })"""
-    let r = buildTable(script)
+    let r = runPass(script)
     check not r.ok and r.code == "step_limit"
 
 
@@ -437,11 +406,11 @@ type FastRound = object
   asked: seq[string]            ## the commands the host was asked about
   cancels: seq[JsonNode]        ## the decisions the host was asked to take (kind par_cancel), as the core would get them
 
-proc fastRound(script: string; table: StepTable; j: var Journal; failed, done: HashSet[string]): FastRound =
+proc fastRound(script: string; j: var Journal; failed, done: HashSet[string]): FastRound =
   ## like runRound, and a host that takes the decision of fail_fast the way the core does: the steps named are cancelled, which is written to the journal as the answer of each
   ## of them (`~canceled:<path>`), and the decision itself is answered with the branches that were not started
   var sb = newSandbox()
-  var n = newNumbering(table)
+  var lastNo = -1
   var r: FastRound
   var byKey: Table[string, string]          # step key -> the payload of its call
   var sentinels: seq[(string, string, string)]
@@ -450,7 +419,7 @@ proc fastRound(script: string; table: StepTable; j: var Journal; failed, done: H
     of "job_sh":
       let cmd = cmdOf(payload)
       r.asked.add cmd
-      byKey["s" & $n.lastNo] = payload
+      byKey["s" & $lastNo] = payload
       if cmd in failed: return some("3\n")
       if cmd in done: return some("0\n")
       return none(string)
@@ -461,17 +430,16 @@ proc fastRound(script: string; table: StepTable; j: var Journal; failed, done: H
       return some("u:" & d["unstarted"].mapIt(it.getStr).join("\t"))
     else: return some("")
   r.result = replay.execute(sb, j, script, host,
-    onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = n.onPlace(kind, line, ctx, nth),
-    stepKey = proc (): string = "s" & $max(n.lastNo, 0))
+    onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = (if kind == "job_sh": lastNo = nth))
   for (k, p, res) in sentinels: discard j.append(k, "job_sh", p, res)
   r
 
 const fastScript = """
 return ci.pipeline({ main = function(run)
   local r = ci.parallel({
-    a = function() ci.job({image = "x"}, function(j) j:sh("a1"); j:sh("a2") end); return "A" end,
-    b = function() ci.job({image = "x"}, function(j) j:sh("b1") end); return "B" end,
-    c = function() ci.job({image = "x"}, function(j) j:sh("c1") end); return "C" end,
+    a = function() ci.single['0j']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "a1" }); j:run(step.sh['2']{ cmd = "a2" })  end }; return "A" end,
+    b = function() ci.single['0k']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "b1" })  end }; return "B" end,
+    c = function() ci.single['0m']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "c1" })  end }; return "C" end,
   }, { fail_fast = true KEEP })
   return "survived"
 end })
@@ -480,11 +448,10 @@ end })
 suite "RUN-006 fail_fast: the first failure cancels the branches that still run":
   test "a failed branch cancels the steps of the others, which are told so in the journal; ci.parallel raises, naming the failed branch":
     let script = fastScript.replace(" KEEP", "")
-    let table = buildTable(script).table
     var j: Journal
-    var r = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    var r = fastRound(script, j, initHashSet[string](), initHashSet[string]())
     check r.result.status == esSuspended and r.asked == @["a1", "b1", "c1"] and r.cancels.len == 0
-    r = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    r = fastRound(script, j, ["b1"].toHashSet, initHashSet[string]())
     check r.result.status == esFailed and r.result.code == "script_error"
     check "parallel: branches failed: b" in r.result.message and "canceled: a, c" in r.result.message
     check r.cancels.len == 1
@@ -495,57 +462,52 @@ suite "RUN-006 fail_fast: the first failure cancels the branches that still run"
     check j.verify()
   test "the run is replayed from its journal with no new step and no new decision, and ends the same way":
     let script = fastScript.replace(" KEEP", "")
-    let table = buildTable(script).table
     var j: Journal
-    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
-    let first = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    discard fastRound(script, j, initHashSet[string](), initHashSet[string]())
+    let first = fastRound(script, j, ["b1"].toHashSet, initHashSet[string]())
     for round in 1 .. 2:
-      let again = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+      let again = fastRound(script, j, initHashSet[string](), initHashSet[string]())
       check again.asked.len == 0 and again.cancels.len == 0
       check again.result.status == esFailed and again.result.message == first.result.message
   test "keep_going returns the table: the failed branch failed, the cancelled ones are marked so":
     let script = fastScript.replace(" KEEP", ", keep_going = true").replace("return \"survived\"",
       "return tostring(r.a.canceled) .. tostring(r.a.error) .. tostring(r.b.ok) .. tostring(r.b.canceled) .. tostring(r.c.canceled)")
-    let table = buildTable(script).table
     var j: Journal
-    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
-    let r = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    discard fastRound(script, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, j, ["b1"].toHashSet, initHashSet[string]())
     check r.result.status == esDone and r.result.value == "truecanceledfalseniltrue"
   test "a branch that finished before the failure keeps its result; only the branches still running are cancelled":
     let script = fastScript.replace(" KEEP", ", keep_going = true").replace("return \"survived\"", "return tostring(r.a.ok) .. tostring(r.c.ok) .. tostring(r.c.value) .. tostring(r.b.ok)")
-    let table = buildTable(script).table
     var j: Journal
-    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
-    let r = fastRound(script, table, j, ["b1"].toHashSet, ["c1"].toHashSet)
+    discard fastRound(script, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, j, ["b1"].toHashSet, ["c1"].toHashSet)
     check r.result.status == esDone and r.result.value == "falsetrueCfalse"
     check r.cancels[0]["steps"].len == 1                      # a1 only: c1 had ended
   test "no failure, no decision":
     let script = fastScript.replace(" KEEP", "")
-    let table = buildTable(script).table
     var j: Journal
-    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
-    var r = fastRound(script, table, j, initHashSet[string](), ["a1", "b1", "c1"].toHashSet)
-    r = fastRound(script, table, j, initHashSet[string](), ["a1", "b1", "c1", "a2"].toHashSet)
+    discard fastRound(script, j, initHashSet[string](), initHashSet[string]())
+    var r = fastRound(script, j, initHashSet[string](), ["a1", "b1", "c1"].toHashSet)
+    r = fastRound(script, j, initHashSet[string](), ["a1", "b1", "c1", "a2"].toHashSet)
     check r.result.status == esDone and r.result.value == "survived" and r.cancels.len == 0
   test "with max_parallel a branch not started is cancelled without a step, and a replay does not start it even when slots are free":
     let script = """
       return ci.pipeline({ main = function(run)
         local r = ci.parallel({
-          a = function() ci.job({image = "x"}, function(j) j:sh("a1") end) end,
-          b = function() ci.job({image = "x"}, function(j) j:sh("b1") end) end,
-          c = function() ci.job({image = "x"}, function(j) j:sh("c1") end) end,
-          d = function() ci.job({image = "x"}, function(j) j:sh("d1") end) end,
+          a = function() ci.single['0n']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "a1" })  end } end,
+          b = function() ci.single['0p']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "b1" })  end } end,
+          c = function() ci.single['0q']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "c1" })  end } end,
+          d = function() ci.single['0r']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "d1" })  end } end,
         }, { fail_fast = true, max_parallel = 2 })
       end })"""
-    let table = buildTable(script).table
     var j: Journal
-    var r = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    var r = fastRound(script, j, initHashSet[string](), initHashSet[string]())
     check r.asked == @["a1", "b1"]
-    r = fastRound(script, table, j, ["b1"].toHashSet, initHashSet[string]())
+    r = fastRound(script, j, ["b1"].toHashSet, initHashSet[string]())
     check r.asked == @["a1", "b1", "c1"]                       # b's slot goes to c, d has none
     check r.result.status == esFailed
     check r.cancels[0]["unstarted"].mapIt(it.getStr) == @["d"] and r.cancels[0]["steps"].len == 2
-    let again = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    let again = fastRound(script, j, initHashSet[string](), initHashSet[string]())
     check again.asked.len == 0 and again.cancels.len == 0       # a and c are cancelled in the journal, so their slots are free: d is still not started
     check again.result.status == esFailed
   test "a failure in a nested ci.parallel cancels the steps of that one only; a failure above cancels everything below":
@@ -554,22 +516,21 @@ suite "RUN-006 fail_fast: the first failure cancels the branches that still run"
         local r = ci.parallel({
           o = function()
             ci.parallel({
-              p = function() ci.job({image = "x"}, function(j) j:sh("op") end) end,
-              q = function() ci.job({image = "x"}, function(j) j:sh("oq") end) end,
+              p = function() ci.single['0s']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "op" })  end } end,
+              q = function() ci.single['0t']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "oq" })  end } end,
             })
-            ci.job({image = "x"}, function(j) j:sh("after") end)
+            ci.single['0v']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "after" })  end }
           end,
-          w = function() ci.job({image = "x"}, function(j) j:sh("w1") end) end,
+          w = function() ci.single['0w']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "w1" })  end } end,
         }, { fail_fast = true })
       end })"""
-    let table = buildTable(script).table
     var j: Journal
-    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
-    let r = fastRound(script, table, j, ["w1"].toHashSet, initHashSet[string]())
+    discard fastRound(script, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, j, ["w1"].toHashSet, initHashSet[string]())
     check r.asked == @["op", "oq", "w1"]
     check r.result.status == esFailed and r.cancels.len == 1
     check r.cancels[0]["steps"].len == 2                         # the two steps of the nested branches
-    let again = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    let again = fastRound(script, j, initHashSet[string](), initHashSet[string]())
     check again.asked.len == 0 and again.cancels.len == 0       # nothing is asked: `after` is not reached, the nested branches are cancelled from above
     check again.result.status == esFailed
   test "the decision of a nested ci.parallel does not touch the branches above it":
@@ -578,22 +539,21 @@ suite "RUN-006 fail_fast: the first failure cancels the branches that still run"
         local r = ci.parallel({
           o = function()
             local inner = ci.parallel({
-              p = function() ci.job({image = "x"}, function(j) j:sh("op") end) end,
-              q = function() ci.job({image = "x"}, function(j) j:sh("oq") end) end,
+              p = function() ci.single['0x']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "op" })  end } end,
+              q = function() ci.single['0y']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "oq" })  end } end,
             }, { fail_fast = true, keep_going = true })
             return tostring(inner.p.ok) .. tostring(inner.q.canceled)
           end,
-          w = function() ci.job({image = "x"}, function(j) j:sh("w1") end); return "W" end,
+          w = function() ci.single['0z']{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "w1" })  end }; return "W" end,
         })
         return r.o.value .. r.w.value
       end })"""
-    let table = buildTable(script).table
     var j: Journal
-    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
-    var r = fastRound(script, table, j, ["op"].toHashSet, ["w1"].toHashSet)
+    discard fastRound(script, j, initHashSet[string](), initHashSet[string]())
+    var r = fastRound(script, j, ["op"].toHashSet, ["w1"].toHashSet)
     check r.cancels.len == 1 and r.cancels[0]["by"].getStr == "m.p1[o].p1" and r.cancels[0]["steps"].len == 1
     check r.result.status == esDone and r.result.value == "falsetrueW"
-    r = fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
+    r = fastRound(script, j, initHashSet[string](), initHashSet[string]())
     check r.asked.len == 0 and r.result.status == esDone and r.result.value == "falsetrueW"
 
 proc runPure(script: string): ExecResult =
@@ -655,7 +615,7 @@ suite "PIP-009 ci.matrix":
     return ci.pipeline({ main = function(run)
       local m = ci.matrix { axes = { os = { "linux", "mac" }, arch = { "amd64", "arm64" } }, max_parallel = MAXP, fail_fast = FAST }
       local r = ci.parallel(m, function(c)
-        ci.job({image = "x"}, function(j) j:sh("build " .. c.os .. "-" .. c.arch) end)
+        ci.single[(c.os == "linux" and "1" or "2") .. (c.arch == "amd64" and "1" or "2")]{ image = "x", body = function(j) j:run(step.sh['1']{ cmd = "build " .. c.os .. "-" .. c.arch }) end }
         return c.os .. c.arch
       end OPTS)
       return r["arch=amd64,os=linux"].value .. r["arch=arm64,os=mac"].value
@@ -663,11 +623,10 @@ suite "PIP-009 ci.matrix":
   proc matrixScript(maxp = "nil", fast = "nil", opts = ""): string = matrixRun.replace("MAXP", maxp).replace("FAST", fast).replace("OPTS", opts)
   test "ci.parallel(matrix, fn): a branch for each combination, named by it, started in the order of the combinations, the combination is its argument":
     let script = matrixScript()
-    let table = buildTable(script).table
     var j: Journal
-    var r = runRound(script, table, j, initHashSet[string]())
+    var r = runRound(script, j, initHashSet[string]())
     check r.asked == @["build linux-amd64", "build mac-amd64", "build linux-arm64", "build mac-arm64"]
-    r = runRound(script, table, j, ["build linux-amd64", "build mac-amd64", "build linux-arm64", "build mac-arm64"].toHashSet)
+    r = runRound(script, j, ["build linux-amd64", "build mac-amd64", "build linux-arm64", "build mac-arm64"].toHashSet)
     check r.result.status == esDone and r.result.value == "linuxamd64macarm64"
   test "the same keys and numbers whatever order the combinations finish in":
     let script = matrixScript()
@@ -675,7 +634,6 @@ suite "PIP-009 ci.matrix":
     var firstNumbers: Table[string, int]
     for order in [@['a', 'b', 'c', 'd'], @['d', 'c', 'b', 'a'], @['c', 'a', 'd', 'b']]:
       # the commands start with "build "; rank them by the letter after it, which is the first letter of "linux"/"mac" and "amd64"/"arm64" combined: use the position instead
-      let table = buildTable(script).table
       var jr: Journal
       var done = initHashSet[string]()
       var rank = initTable[string, int]()
@@ -683,7 +641,7 @@ suite "PIP-009 ci.matrix":
       for i, ch in order: rank[cmds[ord(ch) - ord('a')]] = i
       var last: Round
       for k in 0 ..< 20:
-        last = runRound(script, table, jr, done)
+        last = runRound(script, jr, done)
         for c, n in last.numbers: firstNumbers[c] = n
         if last.result.status != esSuspended: break
         var pending = last.asked.filterIt(it notin done)
@@ -695,21 +653,18 @@ suite "PIP-009 ci.matrix":
     check firstNumbers.len == 4
   test "max_parallel of the matrix limits the branches started; the options of ci.parallel override it":
     var script = matrixScript(maxp = "2")
-    var table = buildTable(script).table
     var j: Journal
-    var r = runRound(script, table, j, initHashSet[string]())
+    var r = runRound(script, j, initHashSet[string]())
     check r.asked == @["build linux-amd64", "build mac-amd64"]
     script = matrixScript(maxp = "2", opts = ", { max_parallel = 3 }")
-    table = buildTable(script).table
     var j2: Journal
-    r = runRound(script, table, j2, initHashSet[string]())
+    r = runRound(script, j2, initHashSet[string]())
     check r.asked.len == 3
   test "fail_fast of the matrix cancels the other combinations":
     let script = matrixScript(fast = "true").replace("return r[", "return \"x\" --")
-    let table = buildTable(script).table
     var j: Journal
-    discard fastRound(script, table, j, initHashSet[string](), initHashSet[string]())
-    let r = fastRound(script, table, j, ["build mac-amd64"].toHashSet, initHashSet[string]())
+    discard fastRound(script, j, initHashSet[string](), initHashSet[string]())
+    let r = fastRound(script, j, ["build mac-amd64"].toHashSet, initHashSet[string]())
     check r.result.status == esFailed and "canceled:" in r.result.message
     check r.cancels.len == 1 and r.cancels[0]["steps"].len == 3
   test "a list of combinations that was not made by ci.matrix is taken too, and a function with branches by name is refused":

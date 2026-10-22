@@ -16,9 +16,10 @@ return ci.pipeline({
     TICKET  = ci.string{ required = true },
   },
   main = function(run)
-    ci.job({ image = "alpine" }, function(j)
-      j:sh('echo "building $BRANCH with $JOBS jobs for $TARGET"')   -- an ordinary environment variable
-    end)
+    ci.single["a"] {
+      image = "alpine",
+      steps = { step.sh["1"] { cmd = 'echo "building $BRANCH with $JOBS jobs for $TARGET"' } },     -- an ordinary environment variable
+    }
     if run.params.RELEASE then ... end                                -- typed in the script
   end,
 })
@@ -119,10 +120,10 @@ Only the runs of the same trigger count; a run that has ended is never touched.
 The scenario: every commit has to be tested, a new commit does not cancel the test of the one before it (it brought other changes), but the test environment exists once and can be used by one job at a time. The trigger is `parallel` (a run for every firing); the **job** names a lock:
 
 ```lua
-ci.job({ image = "registry/tests:1", lock = "stand" }, function(j)
-  j:sh("deploy-to-stand")
-  j:sh("run-the-tests")          -- the deploy and the tests that follow it stay together
-end)
+ci.single['02']{ image = "registry/tests:1", lock = "stand", body = function(j)
+  j:run(step.sh['1']{ cmd = "deploy-to-stand" })
+  j:run(step.sh['2']{ cmd = "run-the-tests" })          -- the deploy and the tests that follow it stay together
+ end }
 ```
 
 The jobs of an organisation with the same lock run **one at a time, in turn** (first come, first served), whatever runs they belong to. A run that waits is suspended - it takes no place of a conductor and no Pod - and `GET /api/v1/runs/{id}` says `waiting_for_lock: {name, held_by}`. **Which jobs have the lock:** `GET /api/v1/organizations/{slug}/locks` (every lock that is held or waited for) and `.../locks/{name}` (one) answer with the job that holds it (`run_id`, `job`, `since`) and the jobs that wait, in the order they will get it (`place`). The lock is let go when the job's function ends (also with an error), when the run ends, and when it is cancelled. Different names do not meet; a job in a job with the same name does not wait for itself. A queue is not limited by the lock; the organisation as a whole may have 65000 runs that have not ended (`CINIM_MAX_UNFINISHED_RUNS`), then a new run is `429 queue_full`.

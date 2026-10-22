@@ -5,33 +5,36 @@ A **cache** keeps files between runs: the dependencies a build downloads every t
 ## In a pipeline
 
 ```lua
-ci.job({ image = "node:22", cache = { key = "npm-" .. run.params.LOCKFILE_HASH, paths = { "node_modules" }, restore_keys = { "npm-" } } }, function(j)
-  j:sh("npm ci && npm test")
-end)
+ci.single['01']{ image = "node:22", cache = { key = "npm-" .. run.params.LOCKFILE_HASH, paths = { "node_modules" }, restore_keys = { "npm-" } }, body = function(j)
+  j:run(step.sh['1']{ cmd = "npm ci && npm test" })
+ end }
 ```
 
-* `cache` is an option of `ci.job` and of `Job:sh`, one table or a list of up to 4. A job's declaration and a step's are added together; the same key is the step's.
+* `cache` is an option of `ci.single` and of `step.sh`, one table or a list of up to 4. A job's declaration and a step's are added together; the same key is the step's.
 * **key**: 1 to 200 characters, letters, digits and `. _ : + = @ % -` (no `/`). **paths**: 1 to 20 files or directories of the workspace, relative, without `..`. **restore_keys**: up to 5 prefixes.
 * **Before the command** the shim restores the entry with the key, or, if there is none, the **latest** entry whose key starts with the first restore key that matches (they are tried in order), into the workspace. A miss is a line in the log and the command runs on.
 * **After a command that succeeded** the shim saves the paths under the key, **unless the key was found**: a key is **immutable**, an entry is never replaced. To change a cache, change its key (a hash of the lock file is the usual way). A command that failed or was cut off saves nothing. When two runs save the same key at once, one gives way (the log says so).
 * A cache never fails a step. A miss, a store that does not answer, an archive that is damaged or refused is a line in the step's log (`cicd-shim: cache npm-1: restored from npm-0 (1200 files, 31457280 bytes)`, `miss`, `saved`, `not saved (...)`).
 
-## Restore and save in the middle of a job (`j.cache`)
+## Restore and save in the middle of a job (`step.cache_restore`, `step.cache_save`)
 
-The signatures of the API v1 (`lua/stdlib/cicd.d.lua`) give a job two calls of its own, each a step in the job's Pod on the run's workspace:
+The signatures of the API v1 (`lua/stdlib/cicd.d.lua`) give a job two steps of its own (D-67: each has an id, like any step), each in the job's Pod on the run's workspace:
 
 ```lua
-ci.job({ image = "node:22" }, function(j)
-  local got = j.cache.restore({ "npm-" .. run.params.LOCKFILE_HASH, "npm-" })   -- the key, then key prefixes to fall back on
-  if not got.hit then j:sh("npm ci") end                                          -- got.hit, and got.key: the key that was restored
-  j:sh("npm test")
-  j.cache.save("npm-" .. run.params.LOCKFILE_HASH, { "node_modules" })
-end)
+ci.single["a"] {
+  image = "node:22",
+  body  = function(j)
+    local got = j:run(step.cache_restore["1"] { keys = { "npm-" .. run.params.LOCKFILE_HASH, "npm-" } })   -- the key, then key prefixes to fall back on
+    if not got.hit then j:run(step.sh["2"] { cmd = "npm ci" }) end                                          -- got.hit, and got.key: the key that was restored
+    j:run(step.sh["3"] { cmd = "npm test" })
+    j:run(step.cache_save["4"] { key = "npm-" .. run.params.LOCKFILE_HASH, paths = { "node_modules" } })
+  end,
+}
 ```
 
 * `restore(keys)`: 1 to 6 keys; the first is the key itself, the others are prefixes as `restore_keys` (the latest entry that starts with one). It returns `{hit = true, key = <the key restored>}` or `{hit = false}`. A miss is not an error. The shim says which key it restored, the core writes that in the step's result in the journal, so a replay sees the same answer.
 * `save(key, paths)`: packs the paths and stores them under the key, as the `cache` option does after a command; a key that is stored already is not an error (a key is immutable). It saves nothing if the step does not succeed.
-* Each is a step (it counts toward the 200 of a run) and needs a shell in the job's image, like `Job:sh`. They do not touch the job's own `cache` option, which belongs to the steps of `j:sh`. The two modes are `mode` in the step's options (`"restore"` needs no path; `"save"` needs them).
+* Each is a step (it counts toward the 1000 of a run) and needs a shell in the job's image, like `step.sh`. They do not touch the job's own `cache` option, which belongs to the steps of `j:sh`. The two modes are `mode` in the step's options (`"restore"` needs no path; `"save"` needs them).
 
 ## The view and the deletion by hand
 
@@ -73,7 +76,7 @@ Unit tests of the archive (`tcachepack`: round trip with modes, links, empty fil
 
 On the TESTING cluster (2026-10-13): a run with `cache = {key = "npm-1", paths = {"deps"}, restore_keys = {"npm-"}}` (a 3 MB random file and a text file): the first said `miss` and `saved (2 files, 3003663 bytes)`; the second, with the same key, said `restored from npm-1` and its command printed the same SHA-256 of the random file, and `not saved (the key was restored, and a key is immutable)`; a third with the key `npm-2` and the restore key `npm-` said `restored from npm-1` and saved `npm-2`; the same key in the group `team` said `miss` (the groups do not share). A first attempt found that a step with only a cache was not given the credential of the channel (`not restored (…no credential)`); it is now, and a test says so. The limits (2026-10-13): the organisation's profile took `cache_quota_bytes` and `cache_retention_days` and refused 5 bytes; the group `team` was given a quota of 5 MB and a retention of 2 days, and its subgroup `team/sub` showed `effective_cache_retention_seconds` of 172800 (inherited); a cache of 3 MB saved in `team`, another of 3 MB saved in `team/sub` made room by dropping the first (the pool of `team` holds its subgroups), and asking for the first again was a `miss`; a value a group may not have was refused. Not checked: an entry of more than one block (several parts; the requests are those of the artifacts and a test of the core covers them), a quota that makes room, the sweep against the real store, a cache of tens of thousands of files.
 
-Unit tests of `j.cache.restore` and `j.cache.save` (`tpipeline`: the options they make, the answer, a failing step, what they refuse); integration tests of the answer of a restore step in the journal (`tcacherestore`) and of the view, the pools and the deletion by hand (`tcache`). Not checked on a cluster: the shim's restore and save in the two modes, and the answer reaching the script.
+Unit tests of `step.cache_restore` and `step.cache_save` (`tpipeline`: the options they make, the answer, a failing step, what they refuse); integration tests of the answer of a restore step in the journal (`tcacherestore`) and of the view, the pools and the deletion by hand (`tcache`). Not checked on a cluster: the shim's restore and save in the two modes, and the answer reaching the script.
 
 ## Not built
 

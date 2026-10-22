@@ -40,11 +40,15 @@ GitHub's `::add-mask::`, this is up to the pipeline author.
 ## Configuration in Lua
 
 ```lua
-ci.job({ image = "alpine", mask = { min_length = 8 } }, function(job)      -- default for the job
-  job:sh("deploy.sh")                                                       -- runtime = true, variants = true
-  job:sh("noisy.sh", { mask = { variants = false } })                       -- only "as is" values and $CICD_MASK
-  job:sh("trusted.sh", { mask = false })                                    -- no $CICD_MASK and no variants
-end)
+ci.single["a"] {
+  image = "alpine",
+  mask  = { min_length = 8 },                                               -- default for the job
+  steps = {
+    step.sh["1"] { cmd = "deploy.sh" },                                     -- runtime = true, variants = true
+    step.sh["2"] { cmd = "noisy.sh",   mask = { variants = false } },       -- only "as is" values and $CICD_MASK
+    step.sh["3"] { cmd = "trusted.sh", mask = false },                      -- no $CICD_MASK and no variants
+  },
+}
 ```
 
 `mask.runtime` turns on `$CICD_MASK`, `mask.variants` turns on the forms of a value, `mask.min_length` sets the minimum length (4..64).
@@ -56,10 +60,10 @@ affects only the way of masking.
 A step asks for the secrets it needs by name, on the job or on the step (the two lists are added together):
 
 ```lua
-ci.job({ image = "alpine", secrets = { "REGISTRY_PASSWORD" } }, function(job)
-  job:sh("login.sh")                                         -- $REGISTRY_PASSWORD is in the environment of the command
-  job:sh("deploy.sh", { secrets = { "DEPLOY_KEY" } })        -- this step also gets $DEPLOY_KEY
-end)
+ci.single['01']{ image = "alpine", secrets = { "REGISTRY_PASSWORD" }, body = function(job)
+  job:run(step.sh['1']{ cmd = "login.sh" })                                         -- $REGISTRY_PASSWORD is in the environment of the command
+  job:run(step.sh['2']{ cmd = "deploy.sh", secrets = { "DEPLOY_KEY" } })        -- this step also gets $DEPLOY_KEY
+ end }
 ```
 
 The administrator sets the value for the organisation (`PUT /api/v1/organizations/{slug}/secrets/{NAME}` with `{"value": "..."}`; `GET .../secrets` lists the

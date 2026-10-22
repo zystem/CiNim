@@ -1,21 +1,29 @@
--- Ids built in a loop (docs/parallel.md section 3.3). An id names a step, is 1 to 8 letters and digits starting with a letter, and is unique in the run; a repeat fails the
--- run with `duplicate_id`. `b58f` builds it from a format in which every number shows how many characters it takes: `{x}` one, `{xx}` two (digits and letters of Base58, 0 to
--- 3363 in two, so the 200 steps of a run fit). The format is checked as a whole: at most 8 characters, a letter first, one argument for each placeholder.
--- This script runs today; with `ci.parallel` the two loops become two groups of branches (docs/parallel.md section 2).
+-- Ids built in a loop (D-67, docs/parallel.md section 3.3). The id of a job and of a step is the index of the call, `ci.single["a"]{ ... }` and `step.sh["ab"]{ ... }`: Crockford base32
+-- in lowercase (0-9 and a-z without i, l, o, u), a job's 2 characters and a step's 4, a shorter one padded with zeros in front. The id of a job is unique in the run and the id of a step
+-- in its job; a repeat fails the run with `duplicate_id`. `b32f` builds an id from loop variables from a format in which every number shows how many characters it takes: `{x}` one
+-- (0 to 31), `{xx}` two (0 to 1023), `{xxx}` three, `{xxxx}` four. The format is checked as a whole; nothing is padded by `b32f`.
 local images = { "api", "web", "worker", "cron", "docs" }
 
 return ci.pipeline({
   name = "ids",
   main = function(run)
-    ci.job({ image = "gcr.io/kaniko-project/executor:debug" }, function(j)
-      for i, name in ipairs(images) do
-        j:sh("build " .. name, { id = b58f("b{xx}", i) })        -- b12, b13 ... : 3 characters each
-      end
-    end)
-    ci.job({ image = "aquasec/trivy:latest" }, function(j)
-      for i, name in ipairs(images) do
-        j:sh("trivy image registry.example.com/" .. name, { id = b58f("s{xx}", i) })     -- s12, s13 ...
-      end
-    end)
+    ci.single["b"] {
+      name  = "build",
+      image = "gcr.io/kaniko-project/executor:debug",
+      body  = function(j)
+        for i, name in ipairs(images) do
+          j:run(step.sh[b32f("{xx}", i)] { name = "build " .. name, cmd = "build " .. name })      -- 01, 02 ... : the step ids, padded to 4 characters
+        end
+      end,
+    }
+    ci.single["s"] {
+      name  = "scan",
+      image = "aquasec/trivy:latest",
+      body  = function(j)
+        for i, name in ipairs(images) do
+          j:run(step.sh[b32f("{xx}", i)] { name = "scan " .. name, cmd = "trivy image registry.example.com/" .. name })
+        end
+      end,
+    }
   end,
 })
