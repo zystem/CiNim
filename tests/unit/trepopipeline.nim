@@ -48,3 +48,10 @@ suite "D-67 the ids written in .ci/pipeline.lua (the pass stops at the first ste
       let id = idOfNumber(32 + n, jobIdWidth)
       check checkId(id, jobIdWidth).ok
       check id notin jobs
+
+suite "D-63 the caches of .ci/pipeline.lua":
+  test "a key that ends in '-' is a prefix, and the first key of a restore is exact: a restore that has a prefix only, as its first and only key, can never hit":
+    # the cache of the compiled tests was never restored for this reason (the run took 17 minutes in the Pod instead of the few that a changed file costs)
+    for m in script.findAll(re"cache_restore\[[^\]]*\]\{ *keys *= *\{[^}]*\}"):
+      let keys = m[m.find('{', m.find("keys")) + 1 ..< m.rfind('}')].split(',')
+      if keys.len == 1: check not keys[0].strip.endsWith("-\"") and keys[0].strip != "key"      # `key` is the prefix in the script: it needs an exact key before it

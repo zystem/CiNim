@@ -202,7 +202,7 @@ return ci.pipeline({
         branches.tests = function()
           local key = "nim-" .. info.TESTDEPS .. "-"
           checked_out('v', env, function(j)
-            j:run(step.cache_restore['3']{ keys = {key} })                -- the C the tests were compiled to by an earlier run: the next run compiles what changed
+            j:run(step.cache_restore['3']{ keys = {"nim-none", key} })   -- the C the tests were compiled to by an earlier run: the next run compiles what changed (the first key is exact, the others are prefixes: `key` alone matched nothing, and every run compiled everything)
             local ok, err = pcall(function() j:run(step.sh['4']{ cmd = TESTS }) end)
             j:run(step.cache_save['5']{ key = key .. info.SHA, paths = {"nimcache"} })          -- also after a failed run: the compiling is what took the time, and it was done
             if not ok then error(err, 0) end
