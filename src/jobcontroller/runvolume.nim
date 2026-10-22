@@ -39,6 +39,7 @@ type PodVolume* = object
   ## the parts of a step Pod that the run volume adds
   mounts*, volumes*, initContainers*: seq[JsonNode]
   affinity*: JsonNode                  ## nil when the Pods of the run may run anywhere
+  spread*: JsonNode                    ## `topologySpreadConstraints` (D-74): where the first Pod of a volume lands is where the volume is made
   runDir*: string                      ## where the shim keeps the step's own files (CICD_OUTPUT, CICD_MASK)
 
 func podVolume*(v: VolumeSettings; runId, image: string; shimMount, containerCtx, resources: JsonNode; volume = ""; shm = ""): PodVolume =
@@ -59,6 +60,10 @@ func podVolume*(v: VolumeSettings; runId, image: string; shimMount, containerCtx
     # `shm = "2Gi"` of the job: /dev/shm backed by memory instead of the 64Mi a Pod has
     result.mounts.add %*{"name": "shm", "mountPath": "/dev/shm"}
     result.volumes.add %*{"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": shm}}
+  # D-74: the first Pod of a volume decides the node of the volume (WaitForFirstConsumer), and the default scheduler scores a node by what its Pods request, which small step Pods do not change: in the TESTING cluster every Pod went to the node with the fewest requests and filled one disk while two stood empty.
+  # Soft (ScheduleAnyway): the Pods that have to follow their volume are held by the affinity below, and a full node does not leave a Pod waiting. The Pods counted are the steps' of every run of the namespace
+  result.spread = %*[{"maxSkew": 1, "topologyKey": "kubernetes.io/hostname", "whenUnsatisfiable": "ScheduleAnyway",
+                      "labelSelector": {"matchExpressions": [{"key": runLabel, "operator": "Exists"}]}}]
   if not v.readWriteMany:
     # one node for the Pods that share the volume: with ReadWriteOnce it can be attached to one node. The first Pod matches its own term, which Kubernetes allows. The term names the
     # volume, not the run: a job with a volume of its own does not tie the run's other Pods to its node, and they do not tie it to theirs (STO-002)

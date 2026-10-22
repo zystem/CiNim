@@ -50,6 +50,15 @@ suite "STO-002 what a step Pod gets of it":
     check term["labelSelector"]["matchLabels"]["cicd.io/volume"].getStr == "s1_r" and term["topologyKey"].getStr == "kubernetes.io/hostname"
     check podVolume(volumeSettings("", "", "ReadWriteMany"), "s1_r", "img", shimMount, ctx, res).affinity.isNil
 
+suite "STO-002 (D-74) the volumes of the runs are spread over the nodes":
+  test "a Pod asks to be spread over the nodes among the step Pods of the namespace (every run, every volume), softly: a full or absent node does not leave it waiting":
+    for vol in ["", "s1_job"]:
+      let c = podVolume(rwo, "s1_r", "img", shimMount, ctx, res, vol).spread[0]
+      check c["topologyKey"].getStr == "kubernetes.io/hostname" and c["maxSkew"].getInt == 1 and c["whenUnsatisfiable"].getStr == "ScheduleAnyway"
+      check c["labelSelector"]["matchExpressions"][0]["key"].getStr == "cicd.io/run" and c["labelSelector"]["matchExpressions"][0]["operator"].getStr == "Exists"
+  test "with ReadWriteMany too (the Pods are free to be anywhere, and are then spread as well)":
+    check podVolume(volumeSettings("", "", "ReadWriteMany"), "s1_r", "img", shimMount, ctx, res).spread.len == 1
+
 suite "STO-002 the volume of a job with workspace = isolated":
   test "its claim is named for the job, carries the run's label (the run's storage goes with the run) and the job's as the volume":
     check claimName("s1_r", "s1_0198-job") == "cicd-job-s1-0198-job"

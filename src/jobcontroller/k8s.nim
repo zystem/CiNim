@@ -122,6 +122,7 @@ proc podBody(r: PodRequest): JsonNode =
           {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
   if vol.initContainers.len > 0: result["spec"]["initContainers"] = %vol.initContainers
   if vol.affinity != nil: result["spec"]["affinity"] = vol.affinity
+  if vol.spread != nil: result["spec"]["topologySpreadConstraints"] = vol.spread
   let podEnv = r.podEnv
   if podEnv.len > 0:
     var env = newJArray()
