@@ -94,7 +94,8 @@ const ddl = [
        secret_hash TEXT NOT NULL DEFAULT '', group_id TEXT NOT NULL DEFAULT '', script TEXT NOT NULL, params TEXT NOT NULL DEFAULT '',
        repository TEXT NOT NULL DEFAULT '', ref TEXT NOT NULL DEFAULT '', script_path TEXT NOT NULL DEFAULT '',
        concurrency TEXT NOT NULL DEFAULT 'parallel', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
-       last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '')""",
+       last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '',
+       seen_commit TEXT NOT NULL DEFAULT '', last_checked_at INTEGER NOT NULL DEFAULT 0)""",
   # the artifacts of runs (DAT-003, core/objectstore.nim): the object is in the store, this is what the platform knows about it; a path is one artifact of a run
   """CREATE TABLE IF NOT EXISTS artifacts (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL, step_ordinal INTEGER NOT NULL, path TEXT NOT NULL, s3_key TEXT NOT NULL,
@@ -220,7 +221,9 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("runs", "source_path", "TEXT NOT NULL DEFAULT ''"),
   ("triggers", "repository", "TEXT NOT NULL DEFAULT ''"),     # D-63: a trigger whose script is read from a repository
   ("triggers", "ref", "TEXT NOT NULL DEFAULT ''"),
-  ("triggers", "script_path", "TEXT NOT NULL DEFAULT ''")]
+  ("triggers", "script_path", "TEXT NOT NULL DEFAULT ''"),
+  ("triggers", "seen_commit", "TEXT NOT NULL DEFAULT ''"),            # D-76: a poll trigger: the commit its ref was at when it last looked, and when it looked (2026-10-23)
+  ("triggers", "last_checked_at", "INTEGER NOT NULL DEFAULT 0")]
   ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
   ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
   ## next fold, here too.

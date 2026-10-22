@@ -61,6 +61,27 @@ proc checkSource*(ns: string; source: Source; given: seq[(string, string)]; apiV
   if res.code in ["no_conductor", "busy", "timeout"]: return Answer(skipped: res.code)
   Answer(ran: true, code: res.code, message: res.message, paramsJson: res.params, certain: res.certain, steps: int(res.steps), script: res.script, commit: res.resolved_commit)
 
+type ResolvedRef* = object
+  ok*: bool
+  commit*: string
+  code*, message*: string       ## when not ok: `no_conductor`, `busy`, `timeout`, `unavailable`, or what the conductor's git said (`fetch_failed`, `invalid_source`)
+
+proc resolveCommit*(ns, repository, ref0: string): ResolvedRef =
+  ## D-76: which commit `ref0` is at, asked of a conductor of the organisation (`git ls-remote`, nothing fetched). Shares the limit of the readings from repositories (`busy`).
+  if fetchWaiting.fetchAdd(1) >= maxFetchWaits:
+    discard fetchWaiting.fetchSub(1)
+    return ResolvedRef(code: "busy", message: "too many repositories are being read at the moment")
+  defer: discard fetchWaiting.fetchSub(1)
+  let req = CheckScript(check_id: newId(), repository: repository, commit: ref0, resolve_only: true)
+  if not requestCheck(ns, encodeCheckScript(req)):
+    return ResolvedRef(code: "unavailable", message: "the hub of the conductors does not answer")
+  let got = checkmail.take(req.check_id, fetchWaitSeconds)
+  if not got.found: return ResolvedRef(code: "timeout", message: "no conductor answered in " & $fetchWaitSeconds & " s")
+  let res = try: decodeCheckResult(got.answer) except CatchableError: return ResolvedRef(code: "unavailable", message: "the answer of the conductor cannot be read")
+  if res.code.len > 0: return ResolvedRef(code: res.code, message: res.message)
+  if res.resolved_commit.len == 0: return ResolvedRef(code: "unavailable", message: "the conductor is of a version that cannot read a ref (it is being replaced)")
+  ResolvedRef(ok: true, commit: res.resolved_commit)
+
 func fetchProblem*(a: Answer): tuple[status: int, code, message: string] =
   ## what to tell the caller when the script could not be had: (0, ...) when it was
   if a.ran and a.script.len > 0: return (0, "", "")

@@ -298,6 +298,10 @@ suite "RUN-009 the conductor":
       check waitState(r, "SUCCEEDED")
       check co.getRun(r)["source"]["commit"].getStr == sha
       check c.query(%*[["SELECT COUNT(*) FROM runs WHERE profile_id = ?", o.profile]])["results"][0]["values"][0][0].getInt == 1
+      # D-76: the conductor says which commit a ref is at, and reads and checks nothing else (a poll trigger asks this once a minute)
+      let at = resolveCommit(o.ns, "file://" & root, "main")
+      check at.ok and at.commit == sha
+      check not resolveCommit(o.ns, "file://" & root, "no-such-branch").ok and resolveCommit(o.ns, "file://" & root, "no-such-branch").code == "fetch_failed"
       stop p
       removeDir root
     test "PIP-016 an organisation without a conductor is told so at once, and is not made to wait; so is one whose conductor is gone":

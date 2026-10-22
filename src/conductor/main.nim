@@ -47,6 +47,16 @@ proc checkMode(payload: string; toSup: cint) =
   try:
     var script = req.script
     var given = req.given.mapIt((it.key, it.value))
+    if req.resolve_only:
+      # D-76: only the commit a ref is at (a poll trigger asks once a minute): `git ls-remote`, nothing fetched, no script read or checked
+      let f = resolveRef(req.repository, req.commit, timeoutSeconds = 30, transports = getEnv("CINIM_GIT_TRANSPORTS", defaultTransports),
+                         schemes = getEnv("CINIM_GIT_SCHEMES", "https://,http://").split(','))
+      res.code = f.code
+      res.message = f.message
+      res.certain = true
+      res.resolved_commit = f.commit
+      if not writePipeFd(toSup, pkChecked, wireString(Protobuf.encode(res))): quit(2)
+      quit(0)
     if req.repository.len > 0:
       # D-63: the script is in a repository: read the one file at the commit, then check that text like any other. The run is told where it came from (`run.source`).
       let f = fetchScript(Source(repository: req.repository, commit: req.commit, path: req.path), timeoutSeconds = 45,

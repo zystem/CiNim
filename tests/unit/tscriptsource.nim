@@ -53,6 +53,17 @@ suite "D-63 a script read from a repository":
   test "the transports the core allows are the only ones: file:// is refused by default":
     let f = fetchScript(Source(repository: "file://" & repo & "/", commit: "main"))
     check not f.ok
+  test "D-76 the commit a branch, a tag or HEAD is at is read without fetching anything":
+    proc at(ref0: string; repository = url): Fetched = resolveRef(repository, ref0, timeoutSeconds = 20, transports = "file", schemes = ["file://"])
+    check at("main").commit == second and at("main").ok and at("v1").commit == second and at("").commit == second and at("HEAD").commit == second
+    run repo, "git branch side " & first
+    check at("side").commit == first                                   # a branch, not the tag or the branch of another name that ends the same
+    check at(second).commit == second                                  # a SHA names itself
+    check at("no-such-branch").code == "fetch_failed"
+    check at("main", "file://" & root & "/nothing").code == "fetch_failed"
+  test "D-76 a ref is refused before git is run when it is not a name":
+    check resolveRef("https://example.test/x.git", "--upload-pack=x").code == "invalid_source"
+    check resolveRef("ssh://git@example.test/x.git", "main").code == "invalid_source"
   test "nothing is left behind":
     check walkDir(getTempDir()).toSeq.filterIt("cinim-script-" in it.path).len == 0
   test "a repository that does not answer in time is given up at the deadline":

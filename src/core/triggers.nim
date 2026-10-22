@@ -21,6 +21,8 @@ const
   maxScriptBytes* = 256 * 1024
   maxTriggersPerOrg* = 200
   loopEverySeconds = 20
+  pollEverySeconds* = 60         ## D-76: how often a poll trigger looks at its ref
+  pollsPerPass = 4               ## a look is a conductor's git, up to half a minute: a pass of the loop makes a few, the rest are taken at the next pass
 
 type
   TriggerSpec* = object
@@ -31,10 +33,11 @@ type
 
   TriggerRow* = object
     id*, tenantId*, slug*, name*, kind*, schedule*, secretHash*, groupId*, groupPath*, script*, concurrency*, lastRunId*, lastResult*: string
+    seenCommit*: string                       ## a poll trigger: the commit its ref was at at the last look (D-76)
     repository*, ref0*, scriptPath*: string
     params*: seq[(string, string)]
     enabled*: bool
-    createdAt*, lastFiredAt*: int64
+    createdAt*, lastFiredAt*, lastCheckedAt*: int64
 
   Fired* = object
     started*: bool
@@ -72,7 +75,7 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
     result.spec.enabled = j["enabled"].getBool
   if not validTriggerName(result.spec.name):
     return ("name is 1..64 characters: lowercase letters, digits, - _ .", result.spec)
-  if result.spec.kind notin ["schedule", "webhook"]: return ("kind is schedule or webhook (a manual start is the :fire call on either)", result.spec)
+  if result.spec.kind notin ["schedule", "webhook", "poll"]: return ("kind is schedule, webhook or poll (a manual start is the :fire call on any)", result.spec)
   if result.spec.concurrency notin ["parallel", "abort_newest", "abort_previous"]: return ("concurrency is parallel, abort_newest or abort_previous", result.spec)
   result.spec.groupPath = normalPath(result.spec.groupPath)
   if result.spec.groupPath.len > 400: return ("group is too long", result.spec)
@@ -88,7 +91,7 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
   if result.spec.kind == "schedule":
     let c = parseCron(result.spec.schedule)
     if not c.ok: return ("schedule: " & c.error, result.spec)
-  elif result.spec.schedule.len > 0: return ("only a schedule trigger has a schedule", result.spec)
+  elif result.spec.schedule.len > 0: return ("only a schedule trigger has a schedule (a poll trigger looks at its ref once a minute)", result.spec)
   let p = checkParams(j{"params"})
   if p.error.len > 0: return ("params: " & p.error, result.spec)
   result.spec.params = p.pairs
@@ -97,13 +100,14 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
 
 const columns = "t.id, t.tenant_id, o.slug, t.name, t.kind, t.schedule, t.secret_hash, t.group_id, t.script, t.concurrency, t.last_run_id, " &
                 "t.last_result, t.params, t.enabled, t.created_at, t.last_fired_at, COALESCE((SELECT g.path FROM groups g WHERE g.id = t.group_id), ''), " &
-                "t.repository, t.ref, t.script_path"
+                "t.repository, t.ref, t.script_path, t.seen_commit, t.last_checked_at"
 
 proc rowOf(v: JsonNode): TriggerRow =
   TriggerRow(id: v[0].getStr, tenantId: v[1].getStr, slug: v[2].getStr, name: v[3].getStr, kind: v[4].getStr, schedule: v[5].getStr,
              secretHash: v[6].getStr, groupId: v[7].getStr, groupPath: v[16].getStr, script: v[8].getStr, concurrency: v[9].getStr, lastRunId: v[10].getStr,
              lastResult: v[11].getStr, params: fromJson(v[12].getStr), enabled: v[13].getInt > 0, createdAt: v[14].getBiggestInt,
-             lastFiredAt: v[15].getBiggestInt, repository: v[17].getStr, ref0: v[18].getStr, scriptPath: v[19].getStr)
+             lastFiredAt: v[15].getBiggestInt, repository: v[17].getStr, ref0: v[18].getStr, scriptPath: v[19].getStr,
+             seenCommit: v[20].getStr, lastCheckedAt: v[21].getBiggestInt)
 
 proc view*(t: TriggerRow): JsonNode =
   ## what the API shows; never the secret or its hash
@@ -112,6 +116,10 @@ proc view*(t: TriggerRow): JsonNode =
   if t.repository.len > 0: result["source"] = %*{"repository": t.repository, "ref": t.ref0, "path": (if t.scriptPath.len > 0: t.scriptPath else: defaultPath)}
   if t.kind == "schedule": result["schedule"] = %t.schedule
   if t.kind == "webhook": result["hook"] = %("/api/v1/hooks/" & t.id)
+  if t.kind == "poll":
+    result["polls_every_seconds"] = %pollEverySeconds
+    result["seen_commit"] = %t.seenCommit
+    result["last_checked_at"] = %t.lastCheckedAt
   if t.params.len > 0: result["params"] = parseJson(toJson(t.params))
   if t.lastRunId.len > 0: result["last_run_id"] = %t.lastRunId
   if t.lastResult.len > 0: result["last_result"] = %t.lastResult
@@ -269,11 +277,48 @@ proc fireSchedules*(co: Core; now: int64): int =
       inc result
       echo "core: trigger ", t.name, " (", t.slug, ") started run ", f.runId
 
+type
+  ResolvedRef* = preflight.ResolvedRef
+  Resolver* = proc (t: TriggerRow): ResolvedRef {.gcsafe.}      ## what the commit of a poll trigger's ref is now (a stand-in in the tests)
+
+proc conductorResolver*(co: Core): Resolver =
+  ## the real one: a conductor of the trigger's organisation reads the ref with git
+  result = proc (t: TriggerRow): ResolvedRef {.gcsafe.} =
+    {.cast(gcsafe).}:
+      resolveCommit(namespaceName(co.orgPrefix, co.orgShard, t.slug), t.repository, t.ref0)
+
+proc pollTriggers*(co: Core; now: int64; resolve: Resolver): int =
+  ## D-76: every enabled poll trigger that has not looked for a minute looks at its ref. A commit that is not the one seen last starts a run on it (the first look has seen none: it starts one on the commit
+  ## the ref is at), the trigger remembers it, and a look that failed (no conductor, a repository that does not answer) starts nothing, keeps what was seen and says why in `last_result`; the next
+  ## look is a minute later. The claim of a look is the compare-and-swap of `last_checked_at`, as for a schedule. Returns how many runs it started.
+  var c = newRq(co.rqliteUrl)
+  var looked = 0
+  for t in c.selectTriggers("WHERE t.kind = 'poll' AND t.enabled = 1 AND t.last_checked_at <= ? ORDER BY t.last_checked_at", @[%(now - pollEverySeconds)]):
+    if looked >= pollsPerPass: break
+    let claim = c.execute(%*[["UPDATE triggers SET last_checked_at = ? WHERE id = ? AND last_checked_at = ?", now, t.id, t.lastCheckedAt]])
+    if claim["results"][0]{"rows_affected"}.getInt == 0: continue
+    inc looked
+    beat(bTriggers)
+    let r = resolve(t)
+    if not r.ok:
+      discard c.execute(%*[["UPDATE triggers SET last_result = ? WHERE id = ?", "not looked at: " & r.code & (if r.message.len > 0: ": " & r.message else: ""), t.id]])
+      continue
+    if r.commit == t.seenCommit: continue
+    # the commit is remembered whatever the firing came to: a script that cannot be read at it is said in `last_result` and not tried again every minute
+    discard c.execute(%*[["UPDATE triggers SET seen_commit = ? WHERE id = ?", r.commit, t.id]])
+    beat(bTriggers)
+    let f = co.fire(t, @[], now, byClock = true, commit = r.commit)
+    if f.started:
+      inc result
+      echo "core: trigger ", t.name, " (", t.slug, ") saw ", r.commit[0 ..< 12], " and started run ", f.runId
+
 proc runTriggerLoop*(a: tuple[co: Core, stop: ptr Atomic[bool]]) {.thread.} =
   {.cast(gcsafe).}:
     while not a.stop[].load:
       beat(bTriggers)
-      try: discard fireSchedules(a.co, getTime().toUnix())
+      try:
+        discard fireSchedules(a.co, getTime().toUnix())
+        discard pollTriggers(a.co, getTime().toUnix(), conductorResolver(a.co))
       except Exception as e: stderr.writeLine "core: triggers: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       for _ in 0 ..< loopEverySeconds * 10:
         if a.stop[].load: break

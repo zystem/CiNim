@@ -121,6 +121,43 @@ proc fetchScript*(s: Source; timeoutSeconds = 40; transports = defaultTransports
   except CatchableError as e:
     Fetched(code: "fetch_failed", message: e.msg)
 
+proc resolveRef*(repository, ref0: string; timeoutSeconds = 30; transports = defaultTransports; schemes: openArray[string] = defaultSchemes): Fetched =
+  ## D-76: the commit that `ref0` (a branch, a tag, HEAD; empty is HEAD) is at in `repository`, by `git ls-remote`: nothing is fetched. A SHA names itself. Never raises: a refusal or a failure is `code` and `message`.
+  let wanted = if ref0.len == 0: "HEAD" else: ref0
+  if not validRepository(repository, schemes): return Fetched(code: "invalid_source", message: "the repository must be an https:// or http:// URL")
+  if not validRef(wanted) and wanted != "HEAD": return Fetched(code: "invalid_source", message: "the ref is a SHA, a branch or a tag name")
+  if wanted.len == 40 and wanted.allCharsInSet({'0' .. '9', 'a' .. 'f'}): return Fetched(ok: true, commit: wanted)
+  randomize()
+  let dir = getTempDir() / ("cinim-script-" & $getCurrentProcessId() & "-" & $rand(high(int32)) & "-" & $(hash(repository & wanted) and 0xffff))
+  try:
+    createDir(dir)
+    defer:
+      try: removeDir dir except OSError: discard
+    let r = git(dir, @["ls-remote", "--", repository, wanted], transports, timeoutSeconds * 1000)
+    if r.timedOut: return Fetched(code: "fetch_failed", message: "the repository did not answer within " & $timeoutSeconds & " s")
+    if r.code != 0: return Fetched(code: "fetch_failed", message: "could not read the refs of the repository: " & r.output.strip.splitLines()[^1])
+    # "<sha>\t<name>" lines: the name asked for beats a name that only ends the same way, a branch beats a tag, and a peeled tag (`^{}`) is the commit of an annotated one
+    var best = ""
+    var bestRank = high(int)
+    for line in r.output.splitLines():
+      let cols = line.split('\t')
+      if cols.len != 2 or cols[0].len != 40: continue
+      let name = cols[1]
+      let rank =
+        if wanted == "HEAD": (if name == "HEAD": 0 else: high(int))
+        elif name == "refs/heads/" & wanted: 0
+        elif name == "refs/tags/" & wanted & "^{}": 1
+        elif name == "refs/tags/" & wanted: 2
+        elif name == wanted: 3
+        else: high(int)
+      if rank < bestRank:
+        bestRank = rank
+        best = cols[0]
+    if best.len == 0: return Fetched(code: "fetch_failed", message: wanted & " is not in the repository")
+    Fetched(ok: true, commit: best)
+  except CatchableError as e:
+    Fetched(code: "fetch_failed", message: e.msg)
+
 const sourceKeys* = ["@source.repository", "@source.commit", "@source.path"]    ## launch-parameter entries that no declared name can be: how `run.source` reaches the script (executor/bootstrap.lua)
 
 func sourceParams*(repository, commit, path: string): seq[(string, string)] =

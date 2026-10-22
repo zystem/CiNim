@@ -40,6 +40,7 @@ message CheckScript {
   string repository = 5;
   string commit = 6;
   string path = 7;
+  bool resolve_only = 8;              // D-76: only say which commit `commit` (a branch, a tag, HEAD) is at: `git ls-remote`, nothing fetched and no script checked; the answer is `resolved_commit`
 }
 
 message CheckResult {

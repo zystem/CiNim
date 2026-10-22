@@ -8,6 +8,13 @@ proc spec(extra: JsonNode = nil): JsonNode =
     for k, v in extra: result[k] = v
 
 suite "TRG-002 trigger definitions":
+  test "D-76 a poll trigger names a repository and a ref, and has no schedule: the core looks at the ref once a minute":
+    let r = parseTriggerSpec(%*{"name": "main-poll", "kind": "poll", "repository": "https://example.test/org/repo.git", "ref": "main", "concurrency": "abort_previous"})
+    check r.error == "" and r.spec.kind == "poll" and r.spec.ref0 == "main" and r.spec.schedule == ""
+    check parseTriggerSpec(%*{"name": "p", "kind": "poll", "repository": "https://example.test/org/repo.git"}).error == ""        # no ref: the head of the repository
+    check "schedule" in parseTriggerSpec(%*{"name": "p", "kind": "poll", "repository": "https://example.test/org/repo.git", "schedule": "* * * * *"}).error
+    check "repository" in parseTriggerSpec(%*{"name": "p", "kind": "poll"}).error
+    check "ref" in parseTriggerSpec(%*{"name": "p", "kind": "poll", "repository": "https://example.test/org/repo.git", "ref": "--x"}).error
   test "TRG-002 a schedule trigger with parameters is accepted":
     let r = parseTriggerSpec(spec(%*{"params": {"BRANCH": "main", "JOBS": 4}, "concurrency": "abort_newest"}))
     check r.error == ""

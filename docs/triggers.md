@@ -79,6 +79,19 @@ POST /api/v1/runs   {"organization": "acme", "repository": "https://…/r.git", 
 POST /api/v1/pipelines:check   {"organization": "acme", "repository": "https://…/r.git", "commit": "main"}        # reads and checks it; the answer names the commit
 ```
 
+### Poll (D-76)
+
+```
+POST /api/v1/organizations/selfci/triggers
+{"name": "main-poll", "kind": "poll", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "abort_previous"}
+```
+
+The core looks at the `ref` (a branch or a tag; the head of the repository when empty) **once a minute** and starts a run when the commit it is at is not the one the trigger saw last. The first look has seen none: it starts a run on the commit the ref is at, so a new poll trigger runs at once. The look is `git ls-remote` by a **conductor of the organisation**, nothing is fetched and no script is read; only when the commit is new does the firing read the script at that commit (the same conductor, as for any run from a repository), so a new Lua in the commit is the one that runs. The run is started on the SHA, not on the name of the branch, and `concurrency` is as for the other triggers (`abort_previous` for a branch that is built at every commit).
+
+* With no conductor connected (`conductor_min` 0 and nothing running), a busy one or a repository that does not answer, the look starts nothing, keeps the commit it saw, and says why in `last_result` (`not looked at: no_conductor`); the next look is a minute later. A commit is remembered whatever its firing came to: a script that cannot be read at it is said in `last_result` and is not tried again every minute.
+* At most four triggers look in one pass of the loop (a look is a git of up to half a minute); the others are taken at the next pass (every 20 seconds). A trigger that is off does not look; switching it on starts from what the ref is at then.
+* The view of the trigger has `seen_commit`, `last_checked_at` and `polls_every_seconds`. Only public https repositories: credentials for a private one are not built (PRJ-002..004).
+
 ### Webhook
 
 ```
