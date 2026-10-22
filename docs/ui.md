@@ -10,8 +10,8 @@ a few kilobytes of CSS. It keeps nothing: every page is made from what the core'
 |---|---|
 | `/login`, `POST /logout` | the login form and the end of the session |
 | `/orgs` | the organisations the user may see, each with a link to its runs |
-| `/orgs/<slug>/runs`, `/runs` | the runs of an organisation, newest first, 50 a page (`?before=<run id>` for older ones, `?state=FAILED` to filter); `/runs` is the runs the token may see in every organisation |
-| `/runs/<id>` | one run: state, organisation, source (repository, commit, path), parameters, the reason of a failure, the steps with their attempts, states and how they ended |
+| `/orgs/<slug>/runs`, `/runs` | the runs of an organisation, newest first, 50 a page (`?before=<run id>` for older ones, `?state=FAILED` to filter); `/runs` is the runs the token may see in every organisation; with the time each took (from the start to the last change of a run that has ended, to now for one that goes on) |
+| `/runs/<id>` | one run: state, organisation, source (repository, commit, path), parameters, the reason of a failure, the steps with their attempts, states, how long each took (from its start to its end, to now while it runs) and how they ended; how long the whole run took |
 | `/runs/<id>/steps/<n>/log` | a **window** of the log of a step (200 lines, `?from=<line>`), numbered, with a way to earlier and later lines (DAT-007: a whole log is never loaded) |
 | `/runs/<id>/log` | the **log of the run**: the steps in the order of their numbers, the lines of a step together (a parallel step grows in its own place, the lines of steps do not interleave), the last 100 lines of each step with a way to the earlier ones, 30 steps to a page (`?after=<step number>` for the next); a step with no log yet is said so (DAT-007: still a window, never a whole log) |
 | `/status` | the components of the shard (`GET /api/v1/components`): the key service, rqlite, the controllers, the conductors, the log circuit |

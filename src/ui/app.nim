@@ -24,7 +24,7 @@ type
   OrgRow = object
     slug, name, state, namespace: string
   RunItem = object
-    id, short, state, organization, source, created, updated, failure: string
+    id, short, state, organization, source, created, updated, failure, took: string
   StateLink = object
     name, link: string
     active: bool
@@ -32,9 +32,9 @@ type
     name, value: string
   StepRow = object
     seq, attempt: int
-    state, exitCode, termination, pod: string
+    state, exitCode, termination, pod, took: string
   RunView = object
-    id, state, organization, group, created, updated, repository, commit, path, waitReason, failureCode, failureMessage: string
+    id, state, organization, group, created, updated, repository, commit, path, waitReason, failureCode, failureMessage, took: string
     params: seq[ParamRow]
     steps: seq[StepRow]
   LogLine = object
@@ -101,6 +101,32 @@ proc timeText(s: string): string =
     try: return fromUnix(parseBiggestInt(whole)).utc.format("yyyy-MM-dd HH:mm:ss")
     except CatchableError: discard
   s
+
+func durationText*(seconds: int64): string =
+  ## "45 s", "1 min 30 s", "1 h 02 min", "1 d 01 h": two units, the first is the biggest that is not zero
+  if seconds < 0: ""
+  elif seconds < 60: $seconds & " s"
+  elif seconds < 3600: $(seconds div 60) & " min " & $(seconds mod 60) & " s"
+  elif seconds < 86400: $(seconds div 3600) & " h " & align($((seconds mod 3600) div 60), 2, '0') & " min"
+  else: $(seconds div 86400) & " d " & align($((seconds mod 86400) div 3600), 2, '0') & " h"
+
+func tookText*(start, stop: int64; ended: bool; now: int64): string =
+  ## How long it took: from `start` to `stop` when it has ended, to `now` while it goes on. Nothing for what has not started or whose end is before its start.
+  if start <= 0: return ""
+  let finish = if ended: stop else: now
+  if finish < start: "" else: durationText(finish - start)
+
+func secondsOf(text: string): int64 =
+  ## the core's times are seconds since the epoch, as text or as a number; 0 for anything else
+  let whole = text.split('.')[0]
+  if whole.len in 1 .. 12 and whole.allCharsInSet({'0' .. '9'}):
+    try: return parseBiggestInt(whole) except ValueError: discard
+
+const finalRunStates = ["SUCCEEDED", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
+
+func runTook(state, created, updated: string; now: int64): string =
+  ## a run ends when it reaches a final state; its `updated_at` is then the moment it did
+  tookText(secondsOf(created), secondsOf(updated), state in finalRunStates, now)
 
 func ago(seconds: float): string =
   if seconds > 3.0e8: "never"                 # the core counts from the epoch for what it has not heard of
@@ -264,7 +290,8 @@ proc runsPage(cfg: UiConfig; api: CoreApi; token, org: string; query: Table[stri
     let commit = x{"source"}{"commit"}.getStr
     let failure = if x.hasKey("failure"): x["failure"]{"code"}.getStr & (if x["failure"]{"message"}.getStr.len > 0: ": " & x["failure"]{"message"}.getStr else: "") else: ""
     runs.add RunItem(id: x{"id"}.getStr, short: shortRunId(x{"id"}.getStr), state: x{"state"}.getStr, organization: x{"organization"}.getStr, source: (if commit.len > 7: commit[0 ..< 7] else: commit),
-                     created: timeText(x{"created_at"}.getStr), updated: timeText(x{"updated_at"}.getStr), failure: failure)
+                     created: timeText(x{"created_at"}.getStr), updated: timeText(x{"updated_at"}.getStr), failure: failure,
+                     took: runTook(x{"state"}.getStr, x{"created_at"}.getStr, x{"updated_at"}.getStr, getTime().toUnix))
   let here = if org.len > 0: cfg.base & "/orgs/" & org & "/runs" else: cfg.base & "/runs"
   var states: seq[StateLink]
   for s in runStates: states.add StateLink(name: s, link: here & "?state=" & s, active: s == state)
@@ -280,6 +307,7 @@ proc runPage(cfg: UiConfig; api: CoreApi; token, id: string): UiResponse =
   var v = RunView(id: j{"id"}.getStr, state: j{"state"}.getStr, organization: j{"organization"}.getStr, group: j{"group"}.getStr,
                   created: timeText(j{"created_at"}.getStr), updated: timeText(j{"updated_at"}.getStr), waitReason: j{"wait_reason"}.getStr,
                   failureCode: j{"failure"}{"code"}.getStr, failureMessage: j{"failure"}{"message"}.getStr,
+                  took: runTook(j{"state"}.getStr, j{"created_at"}.getStr, j{"updated_at"}.getStr, getTime().toUnix),
                   repository: j{"source"}{"repository"}.getStr, commit: j{"source"}{"commit"}.getStr, path: j{"source"}{"path"}.getStr)
   if not isSlug(v.organization): v.organization = ""
   if j{"params"}.isKind(JObject):
@@ -287,7 +315,8 @@ proc runPage(cfg: UiConfig; api: CoreApi; token, id: string): UiResponse =
   for s in j{"steps"}.getElems:
     let reason = s{"pod_reason"}.getStr
     v.steps.add StepRow(seq: s{"seq"}.getInt, attempt: s{"attempt"}.getInt, state: s{"state"}.getStr,
-                        exitCode: (if s{"exit_code"}.isKind(JInt): $s["exit_code"].getInt else: ""), termination: s{"termination"}.getStr, pod: reason)
+                        exitCode: (if s{"exit_code"}.isKind(JInt): $s["exit_code"].getInt else: ""), termination: s{"termination"}.getStr, pod: reason,
+                        took: tookText(s{"started_at"}.getInt(0), s{"finished_at"}.getInt(0), s{"finished_at"}.getInt(0) > 0, getTime().toUnix))
   page(200, renderRun(cfg.base, v))
 
 proc logPage(cfg: UiConfig; api: CoreApi; token, id, stepText: string; query: Table[string, string]): UiResponse =

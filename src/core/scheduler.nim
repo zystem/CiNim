@@ -189,7 +189,7 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if wv != nil and wv.len > 0: result["wait_reason"] = %wv[0][0].getStr
   # the steps with their attempt and the reason the last attempt ended the way it did (lost_never_started was retried,
   # outcome_unknown was not, logs_undelivered = result known but the log is incomplete, ...): visible, not buried in a log
-  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination, pod_reason, pod_message, pod_diag FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
+  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination, pod_reason, pod_message, pod_diag, COALESCE(CAST(started_at AS INTEGER), 0), COALESCE(CAST(finished_at AS INTEGER), 0) FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
   var steps = newJArray()
   let sv = st["results"][0]{"values"}
   if sv != nil:
@@ -197,6 +197,7 @@ proc getRun*(co: Core; runId: string): JsonNode =
       steps.add %*{"seq": r[0].getInt, "attempt": r[1].getInt, "state": r[2].getStr,
                    "exit_code": (if r[3].kind == JNull: newJNull() else: %r[3].getInt), "termination": r[4].getStr,
                    "pod_reason": r[5].getStr, "pod_message": r[6].getStr,
+                   "started_at": r[8].getInt, "finished_at": r[9].getInt,        # epoch seconds; 0: not yet (the UI says how long a step took)
                    "pod_diag": (if r[7].getStr.len > 0: (try: parseJson(r[7].getStr) except CatchableError: newJNull()) else: newJNull())}
   result["steps"] = steps
 

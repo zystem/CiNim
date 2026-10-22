@@ -189,6 +189,24 @@ suite "the pages":
     check handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/x/log", cookie = session)).status == 404
     discard handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/1/log", query = "from=-5%20or%201", cookie = session))
     check calls[^1] == "tok-ann /api/v1/runs/s1_b/steps/1/log?from=0&limit=200"
+  test "UI-001 how long a run or a step took: seconds, minutes, hours; from the start to the end, or to now while it goes on":
+    check durationText(0) == "0 s" and durationText(45) == "45 s" and durationText(90) == "1 min 30 s" and durationText(3725) == "1 h 02 min" and durationText(90000) == "1 d 01 h"
+    check durationText(-5) == ""
+    check tookText(1000, 1125, true, 9999) == "2 min 5 s"          # ended: to its end, whatever the time now
+    check tookText(1000, 0, false, 1040) == "40 s"                  # going on: to now
+    check tookText(0, 0, false, 1040) == "" and tookText(1000, 900, true, 9999) == ""      # not started; an end before the start is nothing to say
+  test "UI-001 the list of runs and the page of a run say how long each took":
+    routes["/api/v1/runs?organization=acme&limit=50"] = %*{"runs": [
+      {"id": "s1_t1", "state": "SUCCEEDED", "organization": "acme", "created_at": "1800000000", "updated_at": "1800000125"},
+      {"id": "s1_t2", "state": "QUEUED", "organization": "acme", "created_at": "1800000000", "updated_at": "1800000000"}]}
+    let l = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", cookie = session))
+    check "<th>Took</th>" in l.body and "2 min 5 s" in l.body
+    routes["/api/v1/runs/s1_t1"] = %*{"id": "s1_t1", "organization": "acme", "state": "SUCCEEDED", "created_at": "1800000000", "updated_at": "1800000125", "steps": [
+      {"seq": 1, "attempt": 1, "state": "SUCCEEDED", "started_at": 1800000010, "finished_at": 1800000070},
+      {"seq": 2, "attempt": 1, "state": "QUEUED", "started_at": 0, "finished_at": 0},
+      {"seq": 3, "attempt": 1, "state": "SUCCEEDED"}]}          # a core that does not say it (an older one): an empty cell, not a crash
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_t1", cookie = session))
+    check r.status == 200 and "<th>Took</th>" in r.body and "1 min 0 s" in r.body and "2 min 5 s" in r.body
   test "DAT-007 the log of a run: the steps in the order of their numbers, the lines of a step together, so that a parallel step grows in its own place":
     routes["/api/v1/runs/s1_c"] = %*{"id": "s1_c", "organization": "acme", "state": "RUNNING", "steps": [
       {"seq": 2097154, "attempt": 1, "state": "RUNNING"}, {"seq": 1048577, "attempt": 1, "state": "SUCCEEDED"}, {"seq": 1048578, "attempt": 1, "state": "SUCCEEDED"}]}
