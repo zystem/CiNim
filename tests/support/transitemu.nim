@@ -1,5 +1,5 @@
 ## A stand-in for a Transit key service (Vault/OpenBao Transit, or hsmgate, docs/hardware-key.md), for testing the core's client (core/transitclient.nim) without one.
-## It speaks the part of the Transit API that the core uses (GET keys/<name>, PUT encrypt/<name>, PUT decrypt/<name>, with a `context`) and answers failures the way
+## It speaks the part of the Transit API that the core uses (GET keys/<name>, PUT encrypt/<name>, PUT decrypt/<name>, PUT rewrap/<name>, with a `context`) and answers failures the way
 ## hsmgate does (`{"errors": [...]}`, the header X-Hsmgate-Retryable). The "token" is a key in memory; the ciphertext is `vault:v1:` and the base64 of the data key sealed under
 ## it. What makes it worth having is what it can be told to do: not answer, be slow, say the token is locked or the rate exceeded, or change the key as if another card had been put in.
 ## It is not a key service: it holds nothing that matters. The real one is run by tests/unit/thsmgate.nim when the binary is there.
@@ -21,8 +21,9 @@ var
   delayMs = 0
   keyNames: seq[string] = @["cinim-shard"]
   retryHeader = true                 ## answer failures with X-Hsmgate-Retryable (hsmgate does; Vault and OpenBao do not)
+  sealFormat = "ecies1"              ## what encrypt and rewrap seal as; both are read. The default is the old one: a test makes the data that has to move
   tokenSeen*: string                 ## the X-Vault-Token of the last request
-  calls*: array[3, int]              ## keys, encrypt, decrypt: how many times the core asked (read by the tests)
+  calls*: array[4, int]              ## keys, encrypt, decrypt, rewrap: how many times the core asked (read by the tests)
 initLock(lock)
 
 func toHex(a: openArray[byte]): string =
@@ -48,6 +49,9 @@ proc setKey*(key: seq[byte]) =
 
 proc newRandomKey*() =
   setKey(randomBytes(keyBytes))
+
+proc setSealFormat*(f: string) =
+  withLock lock: sealFormat = f
 
 proc setFault*(f: Fault; delay = 0) =
   withLock lock:
@@ -86,7 +90,9 @@ proc onRequest() {.raises: [], gcsafe.} =
       var d: int
       var key: seq[byte]
       var names: seq[string]
+      var fmtNow: string
       withLock lock:
+        fmtNow = sealFormat
         f = fault
         d = delayMs
         key = masterKey
@@ -141,10 +147,10 @@ proc onRequest() {.raises: [], gcsafe.} =
           fail(Http400, "invalid plaintext", false)
           return
         let nonce = randomBytes(nonceBytes)
-        let text = "emu1." & fingerprint() & "." & toHex(nonce) & toHex(encrypt(key, nonce, plain, ctx))
+        let text = fmtNow & "." & fingerprint() & "." & toHex(nonce) & toHex(encrypt(key, nonce, plain, ctx))
         replyJson(Http200, %*{"data": {"ciphertext": "vault:v1:" & encode(text), "key_version": 1}})
-      elif op == "decrypt" and meth in ["PUT", "POST"]:
-        withLock lock: inc calls[2]
+      elif op in ["decrypt", "rewrap"] and meth in ["PUT", "POST"]:
+        withLock lock: inc calls[(if op == "decrypt": 2 else: 3)]
         let j = parseJson(getBody())
         let ct = j{"ciphertext"}.getStr.split(':')
         var ctx = ""
@@ -154,7 +160,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           if ct.len == 3: text = decode(ct[2])
         except ValueError: discard
         let parts = text.split('.')
-        if ct.len != 3 or parts.len != 3 or parts[0] != "emu1":
+        if ct.len != 3 or parts.len != 3 or parts[0] notin ["ecies1", "ecies2"]:
           fail(Http400, "invalid ciphertext: cannot be opened with this key", false)
           return
         if parts[1] != fingerprint():
@@ -168,7 +174,12 @@ proc onRequest() {.raises: [], gcsafe.} =
         if not o.ok:
           fail(Http400, "invalid ciphertext: cannot be opened with this key", false)
           return
-        replyJson(Http200, %*{"data": {"plaintext": encode(o.plain)}})
+        if op == "decrypt":
+          replyJson(Http200, %*{"data": {"plaintext": encode(o.plain)}})
+        else:
+          let nonce = randomBytes(nonceBytes)
+          let sealed = fmtNow & "." & fingerprint() & "." & toHex(nonce) & toHex(encrypt(key, nonce, o.plain, ctx))
+          replyJson(Http200, %*{"data": {"ciphertext": "vault:v1:" & encode(sealed), "key_version": 1}})
       else:
         fail(Http404, "unsupported path", false)
     except CatchableError as e:

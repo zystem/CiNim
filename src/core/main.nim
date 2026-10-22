@@ -6,7 +6,7 @@
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
 import health
-import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
+import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub, vaultsetup, secretvault
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -19,6 +19,21 @@ if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
     quit 1
   echo credentialLine(made.cred)
   quit 0
+
+if paramCount() >= 1 and paramStr(1) == "rewrap-keys":
+  # `kubectl -n <ns> exec deploy/cinim-core -- /core rewrap-keys [ecies1|ecies2]`: the key service seals again (Transit `rewrap`) the check text of the vault and the data key of each organisation in the
+  # format asked (ecies2 by default), so that a service moves from ecies1 to ecies2 (hsmgate, docs/hardware-key.md). The secrets themselves are not touched. Safe to run again and while the core works.
+  let format = if paramCount() >= 2: paramStr(2) else: "ecies2"
+  let b = buildKek(getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs"))
+  if not b.ok:
+    stderr.writeLine "core: " & b.error
+    quit 1
+  var rc = newRq(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
+  let rep = rc.rewrapSealed(b.kek, format)
+  echo "key ", b.kek.id, ": moved to ", format, ": ", rep.moved, ", already so: ", rep.already, ", failed: ", rep.failed
+  for e in rep.errors: stderr.writeLine "  " & e
+  if rep.retry: stderr.writeLine "core: the key service did not answer for some rows: run it again"
+  quit (if rep.ok: 0 else: 1)
 
 if paramCount() >= 3 and paramStr(1) == "conductor-credential":
   # `/core conductor-credential <namespace> <conductor id>`: what a conductor of that organisation proves itself with (IAM-003). The controller will

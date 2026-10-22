@@ -5,7 +5,7 @@
 # as the project pins it): the tests thsmgate.nim, thsmgate_tls.nim and tkeyservice.nim run against it when HSMGATE_BIN is set, which the image does (they are skipped on a machine without it).
 # A new version of hsmgate is a change of this ARG: the image is made again, and the tests say whether the core still speaks with it.
 FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS hsmgate
-ARG HSMGATE_REF=v0.1.6
+ARG HSMGATE_REF=v0.3.0
 RUN git clone -q --depth 1 --branch "${HSMGATE_REF}" https://github.com/zystem/hsmgate.git /src \
  && cd /src && CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=${HSMGATE_REF}" -o /out/hsmgate ./cmd/hsmgate
 

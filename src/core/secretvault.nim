@@ -116,6 +116,42 @@ proc ensureKeyCheck*(c: var RqClient; kek: KekProvider): tuple[ok, retry: bool, 
     return (false, false, "the key of the secrets (" & kek.id & ") is not the one that sealed the secrets in this database: restore the key, or the secrets cannot be read")
   (true, false, "")
 
+type RewrapReport* = tuple[ok, retry: bool, moved, already, failed: int, errors: seq[string]]
+
+proc rewrapSealed*(c: var RqClient; kek: KekProvider; format = "ecies2"): RewrapReport =
+  ## Seals again, by the key service (`rewrap`), every text it sealed that is not in `format` yet: the check text of the vault and the data key of each organisation. The data keys and the
+  ## secrets themselves do not change, and the core does not see them. Each row is replaced only if it still holds the text read (another writer or another run of this wins), so a run that
+  ## stops in the middle, or runs twice, harms nothing. `retry`: the service did not answer; run it again.
+  if kek.rewrap == nil:
+    return (false, false, 0, 0, 0, @["this master key cannot rewrap: only a key service can (CINIM_KEYSERVICE_URL)"])
+  result.ok = true
+  type Row = tuple[table, idColumn, id, column, aad: string]
+  var rows: seq[Row]
+  rows.add ("vault_meta", "key", "kek_check", "value", checkAad)
+  let orgs = c.query(%*[["SELECT tenant_id FROM org_keys ORDER BY tenant_id"]])["results"][0]{"values"}
+  if orgs != nil:
+    for o in orgs.elems: rows.add ("org_keys", "tenant_id", o[0].getStr, "wrapped", dekAad(o[0].getStr))
+  for r in rows:
+    let cur = c.query(%*[["SELECT " & r.column & " FROM " & r.table & " WHERE " & r.idColumn & " = ?", r.id]])["results"][0]{"values"}
+    if cur == nil or cur.len == 0: continue
+    let text = cur[0][0].getStr
+    if sealFormat(text) == format:
+      inc result.already
+      continue
+    let w = kek.rewrap(text, r.aad)
+    if not w.ok:
+      inc result.failed
+      result.errors.add r.table & " " & r.id & ": " & w.error
+      if w.retry: result.retry = true
+      continue
+    if sealFormat(w.wrapped) != format:
+      inc result.failed
+      result.errors.add r.table & " " & r.id & ": the service sealed it as \"" & sealFormat(w.wrapped) & "\", not " & format & " (its seal_format?); left as it was"
+      continue
+    discard c.execute(%*[["UPDATE " & r.table & " SET " & r.column & " = ? WHERE " & r.idColumn & " = ? AND " & r.column & " = ?", w.wrapped, r.id, text]])
+    inc result.moved
+  result.ok = result.failed == 0
+
 proc dekFor(c: var RqClient; kek: KekProvider; tenant: string; create: bool): tuple[ok, retry: bool, dek: seq[byte], error: string] =
   let now = epochTime()
   let cached = deks.get(tenant, now)
