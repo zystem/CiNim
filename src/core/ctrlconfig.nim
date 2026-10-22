@@ -13,7 +13,7 @@ type ShardSettings* = object
   buildEnabled*: bool
   buildSeccomp*, buildCaps*, buildMemoryLimit*, buildEphemeralLimit*, buildCpuRequest*, buildCpuLimit*: string     ## "" = the controller's default
   runStorageSize*, runStorageClass*, runStorageAccess*: string
-  collectorAddr*, stepReportAddr*, artifactAddr*: string          ## the core's addresses for the shim; "" = none
+  collectorAddr*, stepReportAddr*, artifactAddr*, statusAddr*: string  ## the core's addresses for the shim; "" = none (statusAddr: D-75, the state of the shim apart from the log)
   logSpoolBytes*: int64
   logHoldTimeout*: int
   podRetentionRead*, podRetentionUnread*: int64                                    ## seconds a finished Pod is kept
@@ -37,7 +37,7 @@ proc shardSettings*(get: proc (name: string): string {.gcsafe.}; shardNamespace 
     buildCpuRequest: get("CINIM_BUILD_CPU_REQUEST"), buildCpuLimit: get("CINIM_BUILD_CPU_LIMIT"),
     runStorageSize: get("CINIM_RUN_STORAGE_SIZE"),
     runStorageClass: get("CINIM_RUN_STORAGE_CLASS"), runStorageAccess: get("CINIM_RUN_STORAGE_ACCESS"),
-    collectorAddr: collector, stepReportAddr: addr("CINIM_STEPREPORT_ADDR", 19742), artifactAddr: addr("CINIM_ARTIFACTINGEST_ADDR", 19744),
+    collectorAddr: collector, stepReportAddr: addr("CINIM_STEPREPORT_ADDR", 19742), artifactAddr: addr("CINIM_ARTIFACTINGEST_ADDR", 19744), statusAddr: addr("CINIM_STATUS_ADDR", 19746),
     logSpoolBytes: number(get("CINIM_LOG_SPOOL_BYTES"), defaultSpoolBytes), logHoldTimeout: int(number(get("CINIM_LOG_HOLD_TIMEOUT"), defaultHoldTimeout)),
     podRetentionRead: number(get("CINIM_POD_RETENTION_READ"), 0), podRetentionUnread: number(get("CINIM_POD_RETENTION_UNREAD"), defaultRetentionUnread))
 

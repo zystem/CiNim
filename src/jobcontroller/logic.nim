@@ -37,6 +37,7 @@ type
 
   Config* = object
     collectorAddr*, stepReportAddr*: string   ## where the shim in the Pod reaches core; both empty = no log streaming
+    statusAddr*: string                       ## D-75: where the shim sends its state apart from the log (empty: it rides on the log batches)
     artifactAddr*: string                     ## the core's ArtifactIngest (DAT-003); empty = the Pod gets no address and a step with artifacts fails
     logSpoolBytes*, logHoldTimeout*: int
     retentionRead*: int                       ## seconds a finished Pod is kept when its result and its log are both read (0: removed at once)
@@ -72,6 +73,7 @@ proc buildRequest*(cfg: Config; r: StartRequest): PodRequest =
               "--run-id", r.runId, "--step-seq", $r.seq, "--step-attempt", $r.attempt,
               "--log-spool-dir", drainDir(r.seq, r.attempt) & "/spool", "--log-spool-bytes", $spool,
               "--log-hold-timeout", $hold]
+  if logging and cfg.statusAddr.len > 0: cmd.add @["--status-addr", cfg.statusAddr]
   if cfg.artifactAddr.len > 0: cmd.add @["--artifact-addr", cfg.artifactAddr]
   cmd.add @["--manifest-dir", drainDir(r.seq, r.attempt)]       # on the volume: a drain Pod can deliver what the shim could not (D-53)
   if r.logMaxBytes > 0: cmd.add @["--log-max-bytes", $r.logMaxBytes]

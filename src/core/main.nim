@@ -35,6 +35,7 @@ let
   certs = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
   apiPort = parseInt(getEnv("CINIM_API_PORT", "18081"))
   stepReportPort = parseInt(getEnv("CINIM_STEPREPORT_PORT", "19742"))
+  statusPort = parseInt(getEnv("CINIM_STATUS_PORT", "19746"))     ## the state of the shims, apart from the log (D-75)
   logIngestPort = parseInt(getEnv("CINIM_LOGINGEST_PORT", "19743"))
   artifactPort = parseInt(getEnv("CINIM_ARTIFACTINGEST_PORT", "19744"))
   streamPort = parseInt(getEnv("CINIM_STREAM_PORT", "19745"))   ## the push channel of the controllers (docs/conductors.md section 12)
@@ -61,6 +62,8 @@ proc runStream(a: Args) {.thread.} = serveStream(a.co, a.port)
 proc runLogIngest(a: tuple[co: Collector, certs: string, port: int]) {.thread.} =
   serveLogIngest(a.co, a.certs, a.port)
 proc runStepReport(a: StepReportArgs) {.thread.} = serveStepReport(a.rqliteUrl, a.certs, a.port, a.profileId)
+proc runStatus(a: tuple[rqliteUrl, certs: string, port: int]) {.thread.} = serveStatus(a.rqliteUrl, a.certs, a.port)
+proc runLogBookkeeping(rqliteUrl: string) {.thread.} = serveBookkeeping(rqliteUrl)
 const
   artifactSweepSeconds = 600.0       ## how often the artifacts are looked at (DAT-006)
 
@@ -154,13 +157,17 @@ proc main() =
   createThread(logIngestThread, runLogIngest,
     (Collector(rqliteUrl: rqliteUrl, vlagentUrl: vlagentUrl), certs, logIngestPort))
   createThread(stepReportThread, runStepReport, (rqliteUrl, certs, stepReportPort, profileId))
+  var statusThread: Thread[tuple[rqliteUrl, certs: string, port: int]]
+  createThread(statusThread, runStatus, (rqliteUrl, certs, statusPort))
+  var bookkeepingThread: Thread[string]
+  createThread(bookkeepingThread, runLogBookkeeping, rqliteUrl)
   var artifactThread: Thread[tuple[rqliteUrl, certs: string, port: int]]
   createThread(artifactThread, runArtifactIngest, (rqliteUrl, certs, artifactPort))
   var triggerThread: Thread[tuple[co: Core, stop: ptr Atomic[bool]]]
   createThread(triggerThread, runTriggerLoop, (co, addr stopServers))
   var watchdogThread: Thread[tuple[rqliteUrl, profileId: string, startedAt: int64]]
   createThread(watchdogThread, runWatchdog, (rqliteUrl, profileId, getTime().toUnix()))
-  echo "core: LogIngest on ", logIngestPort, ", ArtifactIngest on ", artifactPort, ", the push channel on ", streamPort, ", StepReport on ", stepReportPort, ", API on ", apiPort
+  echo "core: LogIngest on ", logIngestPort, ", ArtifactIngest on ", artifactPort, ", the push channel on ", streamPort, ", StepReport on ", stepReportPort, ", Status on ", statusPort, ", API on ", apiPort
   serveApi(co, apiPort)   # returns immediately: GuildenStern runs its own thread pool (D-25)
   # GuildenStern installs its own SIGTERM/SIGINT handler that only stops *its* threads, and the loop that
   # used to sit here (`while true: sleep`) never noticed - so the process ignored SIGTERM and a supervisor
@@ -172,6 +179,8 @@ proc main() =
   while not stopServers.load: sleep(100)
   echo "core: stopping"
   joinThread(stepReportThread)
+  joinThread(statusThread)
+  joinThread(bookkeepingThread)
   joinThread(logIngestThread)
   joinThread(watchdogThread)
   joinThread(triggerThread)

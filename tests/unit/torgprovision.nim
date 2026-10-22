@@ -177,6 +177,7 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
           if r["to"][0]{"podSelector"}{"matchLabels"}{"app.kubernetes.io/name"}.getStr == "cinim-core":
             for p in r["ports"]: ports.add p["port"].getInt
     check 19744 in ports and 19742 in ports and 19743 in ports
+    check 19746 in ports                 # D-75: the status channel of the shim
     check not toStore
   test "D-61 with the port of the storage module for shims a step Pod may reach that port of the module and no other":
     var cfgDirect = buildCfg()

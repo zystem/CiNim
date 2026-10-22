@@ -232,6 +232,7 @@ proc main() =
       cfg.collectorAddr = c.collector_addr
       cfg.stepReportAddr = c.step_report_addr
       cfg.artifactAddr = c.artifact_addr
+      cfg.statusAddr = c.status_addr
       cfg.logSpoolBytes = int(c.log_spool_bytes)
       cfg.logHoldTimeout = int(c.log_hold_timeout_seconds)
       cfg.retentionRead = int(c.pod_retention_read_seconds)

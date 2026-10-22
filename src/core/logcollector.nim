@@ -17,7 +17,7 @@
 ## it does not touch `steps.state` (job-controller's Pod polling stays the source of truth for step completion).
 ##
 ## SEC-010 (job_token) is deferred: accepted but not checked.
-import std/[json, tables, strutils, httpclient, locks, atomics, times, options, sequtils]
+import std/[json, tables, strutils, httpclient, locks, atomics, times, options, sequtils, os]
 import health
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
@@ -39,6 +39,7 @@ type
     jobId, stepId: string  ## resolved once from (run_id, seq) via `steps`, cached for log_streams writes
     stale: bool            ## the step has moved on to a later attempt: this stream is a ghost (see freshness)
     checkedAt: float       ## when `stale` was last verified against `steps.attempt`
+    queued, opened: bool   ## D-75: the row of log_streams is written apart from the log (`serveBookkeeping`); opened = it was written
 
   Collector* = object
     rqliteUrl*: string
@@ -50,6 +51,7 @@ type
 var
   streamsLock: Lock
   streams {.guard: streamsLock.}: Table[StreamKey, StreamState]
+  bookQueue {.guard: streamsLock.}: seq[StreamKey]      ## the streams whose row of log_streams is yet to be written
 initLock(streamsLock)
 
 func verifyChunk*(chunk: LogChunk): bool =
@@ -112,27 +114,40 @@ proc freshness(c: var RqClient; key: StreamKey; open = false): StreamState =
           streams[key].stale = result.stale
           streams[key].checkedAt = now
 
+proc applyStatus(c: var RqClient; step: StepRef; status: ShimStatus) =
+  ## The shim's state, recorded through the one function that reconciles it with what the Pod log said (D-29). It comes on the status channel (D-75) or, from a shim of an older controller, in a batch of
+  ## the log. The database is asked here and nowhere on the path of the log.
+  let rec = recordShimState(c, step.run_id, int(step.seq), int(step.attempt), status.state_json, "zmq")
+  if rec.judgement == jInconsistent:
+    stderr.writeLine "core: inconsistent shim state for " & step.run_id & "/" & $step.seq & " (zmq): " & status.state_json
+  # the state is the shim's heartbeat (D-29): a shim that stops sending it shows up as a component that went down
+  if rec.state.isSome and rec.judgement in {jApply, jStale}:
+    discard registryTouch("shim", step.run_id & "/" & $step.seq & "/" & $step.attempt, epochTime(),
+                          @[("phase", $rec.state.get.phase), ("event", $rec.state.get.event)])
+    var ms: seq[tuple[name: string, value: float]]
+    for m in status.metrics: ms.add (m.name, m.value)
+    if ms.len > 0: stepmetrics.update(step.run_id & "/" & $step.seq & "/" & $step.attempt, ms)
+
+proc noteStream(key: StreamKey) =
+  ## The stream of the log in memory, at the first batch, and a note for `serveBookkeeping` to write its row of log_streams: no call to the database on the path of the log (D-75).
+  {.cast(gcsafe).}:
+    withLock streamsLock:
+      if key notin streams: streams[key] = StreamState()
+      if not streams[key].opened and not streams[key].queued:
+        streams[key].queued = true
+        bookQueue.add key
+
 proc handleBatch(c: var RqClient; co: Collector; req: LogBatch): LogAck =
   let key: StreamKey = (req.step.run_id, req.step.seq, req.step.attempt)
-  # the shim's state rides on every batch (a batch without chunks is its heartbeat): recorded through the one function
-  # that reconciles it with what the Pod log said (D-29)
-  if req.status.state_json.len > 0:
-    let rec = recordShimState(c, req.step.run_id, int(req.step.seq), int(req.step.attempt), req.status.state_json, "zmq")
-    if rec.judgement == jInconsistent:
-      stderr.writeLine "core: inconsistent shim state for " & req.step.run_id & "/" & $req.step.seq & " (zmq): " & req.status.state_json
-    # the batch is the shim's heartbeat (D-29): a shim that stops sending them shows up as a component that went down
-    if rec.state.isSome and rec.judgement in {jApply, jStale}:
-      discard registryTouch("shim", req.step.run_id & "/" & $req.step.seq & "/" & $req.step.attempt, epochTime(),
-                            @[("phase", $rec.state.get.phase), ("event", $rec.state.get.event)])
-      var ms: seq[tuple[name: string, value: float]]
-      for m in req.status.metrics: ms.add (m.name, m.value)
-      if ms.len > 0: stepmetrics.update(req.step.run_id & "/" & $req.step.seq & "/" & $req.step.attempt, ms)
+  # A shim of an older controller still sends its state in the batch (a batch without chunks was its heartbeat): recorded first, as it was. A shim that has the status channel (D-75) sends none here,
+  # and the log below does not touch the database.
+  if req.status.state_json.len > 0: applyStatus(c, req.step, req.status)
   if req.chunks.len == 0: return ack(req.step, 0)
   # A shim that outlived its Pod's verdict (a "ghost") is not fenced off here: its attempt number is part of the stream key
   # and of the VictoriaLogs `job` label, so whatever it still delivers lands in *its own* (earlier) attempt's log - the
   # restart is a new attempt with its own label and cannot be polluted. Late lines complete the old attempt's log, which is
   # what a reader of that attempt wants. Only the bookkeeping of a current attempt is fresh-checked (see handleStepReport).
-  discard freshness(c, key, open = true)
+  noteStream(key)
   for chunk in req.chunks:
     if not verifyChunk(chunk): return ack(req.step, 0, "corrupt_chunk")   # shim re-reads the block from its spool and resends
   # Idempotent: vlagent already has every block up to `forwarded`. When an acknowledgement was lost (the shim's receive timed
@@ -218,11 +233,14 @@ proc handleStepReport(c: var RqClient; req: StepReport; profileId: string): Step
       if parsed.isSome and parsed.get.phase == spDone:
         finalizeFromShim(c, profileId, req.step.run_id, int(req.step.seq), int(req.step.attempt), req.state_json, parsed.get)
     var lines = 0
+    var rowMissing = false
     {.cast(gcsafe).}:
       withLock streamsLock:
         if key in streams:
           lines = int(streams[key].lines)
+          rowMissing = not streams[key].opened         # the bookkeeping has not written the row yet (D-75): it is written now, once (idempotent)
           streams.del(key)
+    if rowMissing: c.openLogStream(jobId, stepId, int(key.attempt), podName(key.runId, key.seq, key.attempt))
     c.closeLogStream(jobId, stepId, int(key.attempt), lines)
     registryRemove("shim", req.step.run_id & "/" & $req.step.seq & "/" & $req.step.attempt)     # finished: not a component to watch
     stepmetrics.finish(req.step.run_id & "/" & $req.step.seq & "/" & $req.step.attempt)
@@ -240,6 +258,8 @@ proc encodeLogBatch*(r: LogBatch): string = wireString(Protobuf.encode(r))
 proc decodeLogAck*(s: string): LogAck = Protobuf.decode(cast[seq[byte]](s), LogAck)
 proc encodeStepReport*(r: StepReport): string = wireString(Protobuf.encode(r))
 proc decodeStepReportAck*(s: string): StepReportAck = Protobuf.decode(cast[seq[byte]](s), StepReportAck)
+proc encodeStatusReport*(r: StatusReport): string = wireString(Protobuf.encode(r))
+proc decodeStatusAck*(s: string): StatusAck = Protobuf.decode(cast[seq[byte]](s), StatusAck)
 
 proc answerLogBatch*(c: var RqClient; co: Collector; body: string): string =
   ## The answer to one request of LogIngest, encoded. An error in one request is the answer to that request and never the end of the thread, which would be the end of the core: the
@@ -264,6 +284,63 @@ proc answerStepReport*(c: var RqClient; master, profileId, body: string): string
       stderr.writeLine "core: step report: " & $e.name & ": " & e.msg
       StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: false, disposition: "retry_later", failure: Failure(code: "unavailable", detail: e.msg))
   wireString(Protobuf.encode(ack))
+
+proc answerStatus*(c: var RqClient; body: string): string =
+  ## The answer to one status report (D-75), encoded: recorded, or `retry_later` (the database does not answer; the next report carries the newer state), or `rejected` (not a report).
+  let ack =
+    try:
+      let req = try: some(Protobuf.decode(cast[seq[byte]](body), StatusReport)) except CatchableError: none(StatusReport)
+      if req.isNone or req.get.status.state_json.len == 0:
+        StatusAck(header: Header(protocol: 1), failure: Failure(code: "rejected", detail: "not a report of the shim's state"))
+      else:
+        applyStatus(c, req.get.step, req.get.status)
+        StatusAck(header: Header(protocol: 1))
+    except Exception as e:
+      stderr.writeLine "core: status: " & $e.name & ": " & e.msg
+      StatusAck(header: Header(protocol: 1), failure: Failure(code: "retry_later", detail: e.msg))
+  wireString(Protobuf.encode(ack))
+
+proc serveStatus*(rqliteUrl, certs: string; port: int) {.thread.} =
+  ## D-75: the state, the heartbeat and the metrics of the shims, on a port and a thread of their own, so that a database that is slow delays these and not the log.
+  {.cast(gcsafe).}:
+    var c = newRq(rqliteUrl)
+    let (_, secretKey) = loadKeypair(certs, "core")
+    let conn = listenRep(port, secretKey)
+    while not stopServers.load:
+      beat(bStatus)
+      let body = conn.receive()
+      if body.len == 0: continue
+      conn.send(answerStatus(c, body))
+    conn.close()
+
+proc serveBookkeeping*(rqliteUrl: string) {.thread.} =
+  ## D-75: writes the row of log_streams of each stream the log has opened (the first batch only notes it), apart from the log. A database that does not answer is tried again a second later;
+  ## the final report of the step writes the row itself if this has not (`handleStepReport`).
+  {.cast(gcsafe).}:
+    var c = newRq(rqliteUrl)
+    while not stopServers.load:
+      beat(bLogBook)
+      var key: StreamKey
+      var have = false
+      withLock streamsLock:
+        if bookQueue.len > 0:
+          key = bookQueue[0]
+          bookQueue.delete(0)
+          have = true
+      if not have:
+        sleep 100
+        continue
+      var live = false
+      withLock streamsLock: live = key in streams and not streams[key].opened
+      if not live: continue
+      try:
+        discard freshness(c, key, open = true)     # resolves the step and writes the row of log_streams (unless this is a ghost)
+        withLock streamsLock:
+          if key in streams: streams[key].opened = true
+      except CatchableError as e:
+        stderr.writeLine "core: log stream " & key.runId & "/" & $key.seq & ": " & e.msg
+        withLock streamsLock: bookQueue.add key       # tried again
+        sleep 1000
 
 proc serveLogIngest*(co: Collector; certs: string; port: int) {.thread.} =
   {.cast(gcsafe).}:

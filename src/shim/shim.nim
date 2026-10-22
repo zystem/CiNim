@@ -353,6 +353,7 @@ proc main(): int =
   var secretsFile = ""
   var collectorAddr = ""
   var coreAddr = ""
+  var statusAddr = ""
   var certsDir = ""
   var spoolDir = "/cicd/spool"
   var manifestDir = ""                     # where the manifest of the artifacts to deliver is kept: on the run's volume when the Pod has one (a reader Pod can reach it after the
@@ -402,6 +403,9 @@ proc main(): int =
     of "--core-addr":
       inc i
       coreAddr = args[i]
+    of "--status-addr":
+      inc i
+      statusAddr = args[i]
     of "--certs-dir":
       inc i
       certsDir = args[i]
@@ -634,7 +638,7 @@ proc main(): int =
   var lp: LogPipeline
   when defined(shimLogging):
     if logging:
-      lp = newLogPipeline(LogCfg(collectorAddr: collectorAddr, coreAddr: coreAddr, certs: certsDir, spoolDir: spoolDir,
+      lp = newLogPipeline(LogCfg(collectorAddr: collectorAddr, coreAddr: coreAddr, statusAddr: statusAddr, certs: certsDir, spoolDir: spoolDir,
                                  step: step, spoolCap: spoolBytes.int64, holdSeconds: holdSeconds, secrets: secrets,
                                  maskVariants: maskVariants, maskMinLen: maskMinLen, logMaxBytes: logMaxBytes))
   # VAR-005: the first step of a run starts its log with the values it was given and their digest (the core names the variables in CICD_VARIABLES for that step only)

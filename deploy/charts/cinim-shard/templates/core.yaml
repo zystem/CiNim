@@ -37,6 +37,7 @@ spec:
             - {name: logingest, containerPort: 19743}
             - {name: artifacts, containerPort: 19744}
             - {name: stream, containerPort: 19745}
+            - {name: status, containerPort: 19746}
           env:
             - {name: CINIM_SHARD, value: {{ .Values.shard | quote }}}
             - {name: CINIM_NAMESPACE_PREFIX, value: {{ .Values.namespacePrefix | quote }}}
@@ -231,3 +232,4 @@ spec:
     - {name: logingest, port: 19743, targetPort: logingest}
     - {name: artifacts, port: 19744, targetPort: artifacts}
     - {name: stream, port: 19745, targetPort: stream}
+    - {name: status, port: 19746, targetPort: status}

@@ -3,6 +3,8 @@ import std/unittest
 import crunchy
 import common/rqlite
 import core/logcollector
+import ../support/fakevlagent
+import std/os
 
 suite "block integrity (checked on the compressed bytes, without decompressing)":
   test "a matching crc32c verifies":
@@ -39,3 +41,44 @@ suite "D-27/D-29 a core whose database does not answer keeps its threads (the an
     let req = StepReport(step: StepRef(run_id: "s1_r", seq: 0, attempt: 1), exit_code: 0, reason: "ok", state_json: """{"v":1,"n":3,"t":1,"ev":"done","run":"s1_r","seq":0,"at":1,"ph":"done"}""")
     let ack = decodeStepReportAck(answerStepReport(c, "master", "default", encodeStepReport(req)))
     check not ack.may_exit and ack.disposition == "retry_later"
+
+suite "D-75 the log and the state of the shim do not wait for each other":
+  # the database is a port that nothing listens on; vlagent is a stand-in that takes everything
+  proc dead(): RqClient = newRq("http://127.0.0.1:1", timeoutMs = 500)
+  let col = Collector(rqliteUrl: "http://127.0.0.1:1", vlagentUrl: "http://127.0.0.1:18795/insert/jsonline")
+  func chunk(seq: uint64): LogChunk =
+    let data = cast[seq[byte]]("\x1f\x8b block " & $seq)
+    LogChunk(seq: seq, data: data, crc32c: crc32c(cast[string](data)), lines: 1)
+  test "setup: the stand-in for vlagent starts":
+    startFakeVlagent(18795)
+    sleep 300
+  test "a batch of the log with no state is acknowledged by vlagent alone, whatever the database does":
+    var c = dead()
+    let req = LogBatch(step: StepRef(run_id: "s1_r1", seq: 0, attempt: 1), chunks: @[chunk(1), chunk(2)])
+    let before = takenCount()
+    let ack = decodeLogAck(answerLogBatch(c, col, encodeLogBatch(req)))
+    check ack.failure.code == "" and ack.acked_seq == 2 and takenCount() == before + 1
+  test "the same blocks sent again are acknowledged and not given to vlagent twice":
+    var c = dead()
+    let req = LogBatch(step: StepRef(run_id: "s1_r1", seq: 0, attempt: 1), chunks: @[chunk(1), chunk(2), chunk(3)])
+    let before = takenCount()
+    let ack = decodeLogAck(answerLogBatch(c, col, encodeLogBatch(req)))
+    check ack.failure.code == "" and ack.acked_seq == 3 and takenCount() == before + 1       # only block 3 went
+  test "the state of a shim with the database away is answered 'retry later' on its own channel, and the log goes on":
+    var c = dead()
+    let rep = StatusReport(step: StepRef(run_id: "s1_r1", seq: 0, attempt: 1), status: ShimStatus(
+      state_json: """{"v":1,"n":3,"t":1,"ev":"done","run":"s1_r1","seq":0,"at":1,"ph":"done"}"""))
+    let ack = decodeStatusAck(answerStatus(c, encodeStatusReport(rep)))
+    check ack.failure.code == "retry_later"
+    let req = LogBatch(step: StepRef(run_id: "s1_r1", seq: 0, attempt: 1), chunks: @[chunk(4)])
+    check decodeLogAck(answerLogBatch(c, col, encodeLogBatch(req))).acked_seq == 4
+  test "a message that is not a status report is refused for good":
+    var c = dead()
+    check decodeStatusAck(answerStatus(c, "\xff\xff not a message")).failure.code == "rejected"
+  test "a shim without the status channel (an older controller) still sends its state in the batch: the state is recorded before the log, as before":
+    var c = dead()
+    let req = LogBatch(step: StepRef(run_id: "s1_r1", seq: 0, attempt: 1), chunks: @[chunk(5)],
+                       status: ShimStatus(state_json: """{"v":1,"n":3,"t":1,"ev":"done","run":"s1_r1","seq":0,"at":1,"ph":"done"}"""))
+    check decodeLogAck(answerLogBatch(c, col, encodeLogBatch(req))).failure.code == "logs_unavailable"
+  test "teardown":
+    stopFakeVlagent()

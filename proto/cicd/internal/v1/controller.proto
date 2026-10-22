@@ -173,6 +173,7 @@ message ControllerConfig {
   uint32 pod_retention_unread_seconds = 18;  // ... when the core could not read it (the log not delivered, the end unknown)
   string build_cpu_request = 19;         // the CPU a build Pod asks for: its share on a node that is busy, and what the scheduler counts ("" = 500m)
   string build_cpu_limit = 20;           // the CPU a build Pod may use: a build or a test run that is not stopped takes every core of its node and starves what shares it ("" = 4)
+  string status_addr = 21;               // the core's status channel (D-75): the shim's state, heartbeat and metrics, apart from the log ("" = they ride on the log batches, as before)
 }
 
 message ConductorCredential {

@@ -79,7 +79,7 @@ An object the store says it does not have is as good as deleted; a store that do
 
 ## Network
 
-A step Pod reaches the core's ports 19742 (report), 19743 (log) and 19744 (artifacts) and DNS, and nothing else: the object store is not reachable from a step Pod and needs no NetworkPolicy of its own. The storage module has to be reachable from the core (plain `http://` or `https://`, the core talks to it with its own HTTP client), and the stores from the module.
+A step Pod reaches the core's ports 19742 (report), 19743 (log), 19744 (artifacts) and 19746 (the shim's state, D-75) and DNS, and nothing else: the object store is not reachable from a step Pod and needs no NetworkPolicy of its own. The storage module has to be reachable from the core (plain `http://` or `https://`, the core talks to it with its own HTTP client), and the stores from the module.
 
 ## The storage module
 

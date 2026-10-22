@@ -49,6 +49,19 @@ message LogBatch {
   ShimStatus status = 5;
 }
 
+// D-75: the shim's state, heartbeat and metrics on a channel of their own, so that the log does not wait for the database that records them. The shim sends one when its state changes and at
+// least every few seconds; a shim without the address (an old controller) still sends `status` in the LogBatch.
+message StatusReport {
+  Header header = 1;
+  StepRef step = 2;
+  ShimStatus status = 3;
+}
+
+message StatusAck {
+  Header header = 1;
+  Failure failure = 2;               // retry_later: the state could not be recorded now; the shim sends the next one
+}
+
 message LogAck {  // failure.code: logs_unavailable = retry the same batch; rejected = vlagent refused it for good, drop it
   Header header = 1;
   StepRef step = 2;

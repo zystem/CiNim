@@ -188,8 +188,9 @@ func networkPolicies(cfg: ProvisionConfig; slug: string): seq[JsonNode] =
          {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
                   "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
           "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
-         # 19744: the artifacts of a step go to the core and come from it (DAT-003); the store itself is not reachable from a step Pod
-         {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}, {"protocol": "TCP", "port": 19744}]}]}},
+         # 19744: the artifacts of a step go to the core and come from it (DAT-003); the store itself is not reachable from a step Pod. 19746: the state of the shim (D-75)
+         {"to": [core], "ports": [{"protocol": "TCP", "port": 19742}, {"protocol": "TCP", "port": 19743}, {"protocol": "TCP", "port": 19744},
+                                {"protocol": "TCP", "port": 19746}]}]}},
     %*{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(cfg, slug, "controller-no-ingress", ns),
        "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": controllerName}}, "policyTypes": ["Ingress"]}}]
   if cfg.storageDirectPort > 0:

@@ -25,6 +25,10 @@ suite "the addresses and the policy that the core sends to a controller":
     check s.collectorAddr == "tcp://cinim-core.cinim-001.svc:19743" and s.stepReportAddr == "tcp://cinim-core.cinim-001.svc:19742"
     check s.artifactAddr == "tcp://cinim-core.cinim-001.svc:19744"
     check s.logSpoolBytes == 10 * 1024 * 1024 and s.logHoldTimeout == 600 and s.podRetentionRead == 0 and s.podRetentionUnread == 14 * 86400
+  test "D-75 the status channel of the shim has an address of its own: the Service's port 19746, or the environment's":
+    check fromTable(initTable[string, string](), "cinim-001").statusAddr == "tcp://cinim-core.cinim-001.svc:19746"
+    check fromTable(initTable[string, string]()).statusAddr == ""
+    check fromTable({"CINIM_STATUS_ADDR": "tcp://host:7"}.toTable).statusAddr == "tcp://host:7"
   test "outside a cluster there are no addresses (no log streaming) unless the core is told them":
     let none = fromTable(initTable[string, string]())
     check none.collectorAddr == "" and none.stepReportAddr == "" and none.artifactAddr == ""

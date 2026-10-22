@@ -6,7 +6,7 @@ import std/[atomics, json, times]
 
 type Beat* = enum
   bStream = "stream", bLogIngest = "log-ingest", bStepReport = "step-report", bArtifactIngest = "artifact-ingest", bWatchdog = "watchdog", bTriggers = "triggers",
-  bReconciler = "reconciler", bLogGate = "log-gate"
+  bReconciler = "reconciler", bLogGate = "log-gate", bStatus = "status", bLogBook = "log-bookkeeping"
 
 const limits: array[Beat, float] = [
   60.0,    # stream: the I/O thread goes round in milliseconds
@@ -16,7 +16,9 @@ const limits: array[Beat, float] = [
   300.0,   # watchdog: a pass is rqlite and the Kubernetes API, every five seconds
   300.0,   # triggers
   900.0,   # reconciler: a pass is the Kubernetes API for every organisation
-  120.0]   # log gate: a poll of the log store
+  120.0,   # log gate: a poll of the log store
+  120.0,   # status: the state of the shims (D-75), a round waits for a message and may take a few database calls
+  120.0]   # log bookkeeping (D-75): the rows of log_streams, written apart from the log
 
 var seen: array[Beat, Atomic[int64]]       ## milliseconds since the epoch of the last round of each thread; 0: not started
 

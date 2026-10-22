@@ -17,6 +17,7 @@ import_proto3 "../../build/nimproto/all.proto"
 type
   LogCfg* = object
     collectorAddr*, coreAddr*, certs*, spoolDir*: string
+    statusAddr*: string       ## D-75: where the state, the heartbeat and the metrics go, on a channel of their own; empty (an older controller): they ride on the log batches
     step*: StepRef
     spoolCap*: int64          ## log_spool_bytes: queued, undelivered compressed bytes at which the shim stops reading
     holdSeconds*: int         ## log_hold_timeout: how long the finished step waits for the log to be delivered
@@ -25,18 +26,21 @@ type
     maskMinLen*: int
     logMaxBytes*: int64       ## 0 = unlimited (profile setting log_max_bytes)
 
-  SenderArgs = tuple[collectorAddr, certs, spoolDir, runId: string, stepSeq, attempt: uint32]
+  SenderArgs = tuple[collectorAddr, certs, spoolDir, runId: string, stepSeq, attempt: uint32, statusApart: bool]
+  StatusArgs = tuple[statusAddr, certs, runId: string, stepSeq, attempt: uint32]
 
   LogPipeline* = object
     cfg: LogCfg
     builder: Builder
     waiting: seq[LogBlock]    ## cut, but the spool is full: held in memory (a few blocks at most, reading stops meanwhile)
     sender: Thread[SenderArgs]
+    statusSender: Thread[StatusArgs]
+    statusStarted: bool
     lastCut: float
     spoolBroken: bool         ## the spool directory cannot be used (created or written): blocks are dropped and counted
 
 var
-  finished, stopSender: Atomic[bool]
+  finished, stopSender, stopStatus: Atomic[bool]
   delivered, dropped: Atomic[int]
 
 func podName(runId: string; seq, attempt: uint32): string =
@@ -75,7 +79,7 @@ proc sendLoop(a: SenderArgs) {.thread.} =
       let queued = peek(a.spoolDir)
       # a batch with no chunks is the heartbeat: sent when the shim's state changed and at least every few seconds, so core
       # always knows the shim is alive and what it is doing - even when the build is silent and the spool is empty
-      let due = currentState().n != lastSentN or epochTime() - lastHeartbeat >= heartbeatSeconds
+      let due = not a.statusApart and (currentState().n != lastSentN or epochTime() - lastHeartbeat >= heartbeatSeconds)
       if queued.len == 0 and not due:
         if finished.load: break
         sleep 50
@@ -87,7 +91,8 @@ proc sendLoop(a: SenderArgs) {.thread.} =
                             recvTimeoutMs = 6000, sendTimeoutMs = 5000)    # a resend after a timeout is harmless (core takes each block once)
           connected = true
         let sentN = currentState().n
-        var batch = LogBatch(step: step, status: currentStatus())
+        var batch = LogBatch(step: step)
+        if not a.statusApart: batch.status = currentStatus()       # D-75: with the status channel the log carries only the log
         for q in queued: batch.chunks.add chunkOf(q)
         let bytes = Protobuf.encode(batch)
         var msg = newString(bytes.len)
@@ -133,6 +138,64 @@ proc sendLoop(a: SenderArgs) {.thread.} =
     if connected:
       try: conn.close() except CatchableError: discard
 
+proc statusLoop(a: StatusArgs) {.thread.} =
+  ## D-75: the shim's state, heartbeat and metrics, to the core's status port, from a thread of their own: a core that is slow to record them delays these and never the log. Sent when the state
+  ## changed and at least every few seconds; a failure is said once in half a minute and tried again, the step never waits for it.
+  {.cast(gcsafe).}:
+    var conn: ZConnection
+    var connected = false
+    var backoff = 300
+    var lastWarn = 0.0
+    var failing = false
+    proc warn(msg: string) =
+      if epochTime() - lastWarn > 30:
+        lastWarn = epochTime()
+        stderr.writeLine "cicd-shim: state delivery: " & msg
+    let step = StepRef(run_id: a.runId, seq: a.stepSeq, attempt: a.attempt)
+    var lastSentN = -1
+    var lastHeartbeat = 0.0
+    while not stopStatus.load:
+      if currentState().n == lastSentN and epochTime() - lastHeartbeat < heartbeatSeconds:
+        sleep 50
+        continue
+      try:
+        if not connected:
+          conn = connectReq(a.statusAddr, loadPublicKey(a.certs, "core"), loadKeypair(a.certs, "client"), recvTimeoutMs = 6000, sendTimeoutMs = 5000)
+          connected = true
+        let sentN = currentState().n
+        let bytes = Protobuf.encode(StatusReport(step: step, status: currentStatus()))
+        var msg = newString(bytes.len)
+        if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
+        conn.send(msg)
+        let (avail, _, body) = waitForReceive(conn.socket)
+        if not avail:
+          warn "no answer from core within the timeout, retrying"
+          failing = true
+        else:
+          let ack = Protobuf.decode(cast[seq[byte]](body), StatusAck)
+          case ack.failure.code
+          of "", "rejected":          # recorded, or refused for good: sending the same again would not help
+            lastSentN = sentN
+            lastHeartbeat = epochTime()
+            backoff = 300
+            if failing:
+              failing = false
+              stderr.writeLine "cicd-shim: state delivery recovered"
+          else:
+            warn "core says " & ack.failure.code & ", retrying"
+            failing = true
+      except CatchableError as e:
+        warn "failed: " & e.msg
+        failing = true
+        if connected:
+          try: conn.close() except CatchableError: discard
+          connected = false
+      if failing:
+        sleep backoff
+        backoff = min(backoff * 2, 5000)
+    if connected:
+      try: conn.close() except CatchableError: discard
+
 # ------------------------------------------------------------------ pipeline API used by shim.nim
 
 proc newLogPipeline*(cfg: LogCfg): LogPipeline =
@@ -143,6 +206,7 @@ proc newLogPipeline*(cfg: LogCfg): LogPipeline =
     stderr.writeLine "cicd-shim: log spool unusable (" & e.msg & "): the step runs, its log is not stored"
   finished.store(false)
   stopSender.store(false)
+  stopStatus.store(false)
   delivered.store(0)
   dropped.store(0)
   result.cfg = cfg
@@ -151,7 +215,10 @@ proc newLogPipeline*(cfg: LogCfg): LogPipeline =
                               minLen = (if cfg.maskMinLen > 0: cfg.maskMinLen else: defaultMinLen), maxBytes = cfg.logMaxBytes)
   result.lastCut = epochTime()
   createThread(result.sender, sendLoop, (cfg.collectorAddr, cfg.certs, cfg.spoolDir, cfg.step.run_id,
-                                          cfg.step.seq, cfg.step.attempt))
+                                          cfg.step.seq, cfg.step.attempt, cfg.statusAddr.len > 0))
+  if cfg.statusAddr.len > 0:
+    createThread(result.statusSender, statusLoop, (cfg.statusAddr, cfg.certs, cfg.step.run_id, cfg.step.seq, cfg.step.attempt))
+    result.statusStarted = true
 
 proc refreshCounters(lp: LogPipeline) =
   ## the delivery counters ride along with the next Pod-log line and with every heartbeat
@@ -209,6 +276,9 @@ proc finish*(lp: var LogPipeline; limitSeconds = 0): bool =
   if ok: finished.store(true) else: stopSender.store(true)
   lp.refreshCounters()
   joinThread(lp.sender)
+  if lp.statusStarted:
+    stopStatus.store(true)
+    joinThread(lp.statusSender)
   ok
 
 proc stats*(): tuple[delivered, dropped: int] = (delivered.load, dropped.load)

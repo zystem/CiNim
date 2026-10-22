@@ -560,7 +560,7 @@ proc controllerConfigOf*(s: ShardSettings): ControllerConfig =
                    build_memory_limit: s.buildMemoryLimit, build_ephemeral_limit: s.buildEphemeralLimit, build_cpu_request: s.buildCpuRequest, build_cpu_limit: s.buildCpuLimit,
                    run_storage_size: s.runStorageSize,
                    run_storage_class: s.runStorageClass, run_storage_access: s.runStorageAccess,
-                   collector_addr: s.collectorAddr, step_report_addr: s.stepReportAddr, artifact_addr: s.artifactAddr,
+                   collector_addr: s.collectorAddr, step_report_addr: s.stepReportAddr, artifact_addr: s.artifactAddr, status_addr: s.statusAddr,
                    log_spool_bytes: uint64(s.logSpoolBytes), log_hold_timeout_seconds: uint32(s.logHoldTimeout),
                    pod_retention_read_seconds: uint32(max(s.podRetentionRead, 0)), pod_retention_unread_seconds: uint32(max(s.podRetentionUnread, 0)))
 

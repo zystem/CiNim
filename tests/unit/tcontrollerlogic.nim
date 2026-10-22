@@ -55,6 +55,14 @@ proc shimLine(n: int; ev: ShimEvent; reason = ""): string =
   let s = ShimState(run: "s1_run", seq: 0, attempt: 1, n: n, event: ev, phase: phaseAfter[ev], cmdStarted: true, reason: reason)
   marker & $toJson(s, 1) & "\n"
 
+suite "D-75 the shim is told where to send its state":
+  test "with a status address the shim gets --status-addr; without one (an older core) it has no such flag and keeps the state in the log batches":
+    var c = cfg
+    check "--status-addr" notin buildRequest(c, req()).cmd
+    c.statusAddr = "tcp://core:3"
+    let cmd = buildRequest(c, req()).cmd
+    check "--status-addr" in cmd and cmd[cmd.find("--status-addr") + 1] == "tcp://core:3"
+
 suite "creating Pods":
   test "the command carries the shim, its flags, the step's options and, after `--`, the command":
     let r = buildRequest(cfg, StartRequest(runId: "s1_a", seq: 3, attempt: 2, image: "x", command: @["sh", "-c", "true"],

@@ -7,7 +7,9 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 *Nothing is left (2026-10-18).* A new line goes into this table when code is written that exists only for something made before a change.
 
 
-*Nothing is left (2026-10-20).*
+| What | Why it is kept | Delete when |
+|---|---|---|
+| `LogBatch.status` read by the collector (`handleBatch` in `core/logcollector.nim`), and the shim's way of putting its state in the batch when it has no `--status-addr` (`statusApart` in `shim/logclient.nim`) | D-75: the state of the shim moved to the status channel; a Pod made by a controller that does not send `status_addr` (or one that runs now) still sends it in the batch | every controller of the shard sends `status_addr` and the step Pods made before have ended (one rollout of the shard and the longest step) |
 
 ## Deleted (2026-10-20)
 
