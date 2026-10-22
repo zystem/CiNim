@@ -35,7 +35,7 @@ func logKey*(tenant, run: string; ordinal, attempt: int): string =
   "heldlogs/" & tenant & "/" & run & "/" & $ordinal & "-" & $attempt & ".log"
 
 func finalSteps(): string =
-  for i, s in [ssSucceeded, ssFailed, ssCanceled, ssTimedOut, ssLost]:
+  for i, s in [ssSucceeded, ssFailed, ssAborted, ssTimedOut, ssLost]:
     result.add (if i == 0: "'" else: ",'") & protoName(s) & "'"
 
 type Candidate = tuple[run, tenant: string; ordinal, attempt: int; endedAt: int64]

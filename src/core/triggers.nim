@@ -7,9 +7,9 @@
 ##   manual    `POST /api/v1/organizations/{slug}/triggers/{id}:fire` by an administrator, for any trigger (and for trying one out).
 ##
 ## A trigger keeps the group, the pipeline script and the launch parameters of the runs it starts (until pipelines are read from repositories,
-## PRJ-003, the script lives here). `concurrency` is `parallel` (every firing starts a run at once; when the organisation has no room, the run waits for it, which is the queue), `cancel_newest` (the new firing is cancelled - no run is started - while an earlier run of the same
+## PRJ-003, the script lives here). `concurrency` is `parallel` (every firing starts a run at once; when the organisation has no room, the run waits for it, which is the queue), `abort_newest` (the new firing is cancelled - no run is started - while an earlier run of the same
 ## trigger has not ended - any run that is not in a final state, not only a RUNNING one: the usual answer to a slow nightly, and "never start a new one while the old one works")
-## or `cancel_previous` (the earlier runs of the trigger that have not ended are cancelled, RUN-006, and the new one is started: the usual answer to a push storm, where
+## or `abort_previous` (the earlier runs of the trigger that have not ended are aborted, RUN-006, and the new one is started: the usual answer to a push storm, where
 ## only the newest commit matters). A run started by a trigger carries `trigger_id`.
 import std/[json, strutils, times, atomics, os, tables]
 import health
@@ -73,7 +73,7 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
   if not validTriggerName(result.spec.name):
     return ("name is 1..64 characters: lowercase letters, digits, - _ .", result.spec)
   if result.spec.kind notin ["schedule", "webhook"]: return ("kind is schedule or webhook (a manual start is the :fire call on either)", result.spec)
-  if result.spec.concurrency notin ["parallel", "cancel_newest", "cancel_previous"]: return ("concurrency is parallel, cancel_newest or cancel_previous", result.spec)
+  if result.spec.concurrency notin ["parallel", "abort_newest", "abort_previous"]: return ("concurrency is parallel, abort_newest or abort_previous", result.spec)
   result.spec.groupPath = normalPath(result.spec.groupPath)
   if result.spec.groupPath.len > 400: return ("group is too long", result.spec)
   if result.spec.repository.len > 0:
@@ -191,10 +191,10 @@ proc authenticateHook*(c: var RqClient; id, bearer: string): tuple[ok: bool, row
 
 # ------------------------------------------------------------------ firing
 
-const finalRunStates = [rsSucceeded, rsFailed, rsCanceled, rsSkipped, rsTimedOut, rsInfrastructureError]
+const finalRunStates = [rsSucceeded, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]
 
 proc unfinishedRuns(c: var RqClient; triggerId: string): seq[string] =
-  ## the runs of the trigger that have not reached a final state (created, queued, running, waiting): they are what `cancel_newest` waits for and `cancel_previous` cancels
+  ## the runs of the trigger that have not reached a final state (created, queued, running, waiting): they are what `abort_newest` waits for and `abort_previous` aborts
   var stmt = %*["SELECT id FROM runs WHERE trigger_id = ? AND state NOT IN (" & "?,".repeat(finalRunStates.len - 1) & "?) ORDER BY created_at", triggerId]
   for s in finalRunStates: stmt.add %protoName(s)
   let vals = c.query(%*[stmt])["results"][0]{"values"}
@@ -213,15 +213,15 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
   if not t.enabled and byClock: return Fired(reason: "disabled")
   # a manual start of a schedule does not move its clock
   let clock = if byClock or t.kind != "schedule": now else: t.lastFiredAt
-  if t.concurrency == "cancel_newest" and c.stillRunning(t.id):
-    discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "cancelled the new firing: the previous run has not ended", t.id]])
+  if t.concurrency == "abort_newest" and c.stillRunning(t.id):
+    discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "aborted the new firing: the previous run has not ended", t.id]])
     return Fired(reason: "still_running")
   var params = initOrderedTable[string, string]()
   for (k, v) in t.params: params[k] = v
   for (k, v) in extra: params[k] = v
   var pairs: seq[(string, string)]
   for k, v in params: pairs.add (k, v)
-  # the script is had before anything is cancelled: a firing that cannot read its repository must not stop the runs that are going
+  # the script is had before anything is aborted: a firing that cannot read its repository must not stop the runs that are going
   var script = t.script
   var source = Source()
   if t.repository.len > 0:
@@ -237,17 +237,17 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
       return Fired(reason: ans.code, status: 400, detail: ans.message)
     script = ans.script
     source = Source(repository: t.repository, commit: ans.commit, path: (if t.scriptPath.len > 0: t.scriptPath else: defaultPath))
-  var cancelled: seq[string]
-  if t.concurrency == "cancel_previous":
+  var aborted: seq[string]
+  if t.concurrency == "abort_previous":
     # the newest commit is the one that matters: the runs of this trigger that have not ended are stopped first (their Pods are removed by the controllers)
     for old in c.unfinishedRuns(t.id):
-      if c.cancelRun(old, now).outcome == coCanceled: cancelled.add old
+      if c.abortRun(old, now).outcome == coAborted: aborted.add old
   let profile = c.ensureOrganizationProfile(t.tenantId, namespaceName(co.orgPrefix, co.orgShard, t.slug))
   if c.queueIsFull(profile):
     discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: the organisation has " & $maxUnfinishedRuns & " runs that have not ended", t.id]])
     return Fired(reason: "queue_full")
   let id = co.createRun(script, t.tenantId, profile, pairs, t.id, t.groupId, source)
-  let result = if cancelled.len == 0: "started" else: "started; cancelled the earlier run" & (if cancelled.len > 1: "s " else: " ") & cancelled.join(", ")
+  let result = if aborted.len == 0: "started" else: "started; aborted the earlier run" & (if aborted.len > 1: "s " else: " ") & aborted.join(", ")
   discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_run_id = ?, last_result = ? WHERE id = ?", clock, id, result, t.id]])
   Fired(started: true, runId: id)
 

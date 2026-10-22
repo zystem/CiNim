@@ -95,7 +95,7 @@ suite "PIP-015 running again only what failed":
       check c.retryRun(ok, now()).outcome == roNotRetryable                 # RUNNING
       setState(ok, "SUCCEEDED")
       check c.retryRun(ok, now()).outcome == roNotRetryable
-      setState(ok, "CANCELED")
+      setState(ok, "ABORTED")
       check c.retryRun(ok, now()).outcome == roNotRetryable                 # a run that was cancelled on purpose is not run again
       let noStep = co.createRun("return 1", "t1", defaultProfile)
       addStep(noStep, 0, "SUCCEEDED")

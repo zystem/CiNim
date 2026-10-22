@@ -239,11 +239,11 @@ in-cluster one of `deploy/registry`: its address is the one the Pods reach it at
 ### By the clock, every night
 
 The same script as a **schedule trigger** of the organisation (docs/triggers.md): the platform then builds its own images every night without anyone starting it. The trigger names the
-repository (the conductor reads `.ci/pipeline.lua` at the `ref` at every firing) and holds the parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (UTC) and `"concurrency": "cancel_newest"`, so that a night is skipped while the last one is still running:
+repository (the conductor reads `.ci/pipeline.lua` at the `ref` at every firing) and holds the parameters (the registry; no `TAG`), `"schedule": "0 2 * * *"` (UTC) and `"concurrency": "abort_newest"`, so that a night is skipped while the last one is still running:
 
 ```bash
 curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "self-build-nightly", "kind": "schedule", "schedule": "0 2 * * *",
-  "concurrency": "cancel_newest", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
+  "concurrency": "abort_newest", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
 ```
 
 With no `TAG` the images are tagged `<date>-<commit>` (`20261009-eefb939`): the clone step writes `IMAGE_TAG` to `$CICD_ENV` and the later steps of the run read it, so a night's images are not the last night's.
@@ -261,13 +261,13 @@ A **webhook trigger** with a repository (D-63) is the push: the git server calls
 4. when `DEPLOY=true`: `helm upgrade --atomic --wait` of both charts at the new tag, a look at what runs, and a rollback of both releases if anything failed (above).
 
 ```bash
-curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "main-push", "kind": "webhook", "concurrency": "cancel_previous",
+curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "main-push", "kind": "webhook", "concurrency": "abort_previous",
   "repository": "https://github.com/zystem/CiNim.git", "ref": "main",
   "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>", "DEPLOY": true}}'
 curl -X POST .../api/v1/hooks/<id> -H "Authorization: Bearer <the secret>" -d '{"commit": "<sha>"}'
 ```
 
-`cancel_previous` makes the newest commit the one that is built when pushes come quickly. The conductors of the organisation must reach the git server: the chart's `conductor.internet` (default: the public internet on ports 80 and 443, the private ranges closed) and `conductor.egress` (a list of NetworkPolicy rules for a git server inside the cluster or the LAN, or `all`). The registry has no TLS and no login here (the plain in-cluster registry above), and a private repository cannot be read (the conductor has no credentials).
+`abort_previous` makes the newest commit the one that is built when pushes come quickly. The conductors of the organisation must reach the git server: the chart's `conductor.internet` (default: the public internet on ports 80 and 443, the private ranges closed) and `conductor.egress` (a list of NetworkPolicy rules for a git server inside the cluster or the LAN, or `all`). The registry has no TLS and no login here (the plain in-cluster registry above), and a private repository cannot be read (the conductor has no credentials).
 
 ## Examples of build Pods
 

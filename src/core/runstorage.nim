@@ -93,7 +93,7 @@ proc releasableRuns*(c: var RqClient; profileId: string; now: int64; keep: Reten
   if profileId.len == 0: return
   let ok = protoName(rsSucceeded)
   var ends: seq[string]
-  for s in [rsSucceeded, rsFailed, rsCanceled, rsSkipped, rsTimedOut, rsInfrastructureError]: ends.add protoName(s)
+  for s in [rsSucceeded, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]: ends.add protoName(s)
   let marks = ends.mapIt("?").join(",")
   var args = %*["SELECT id, state, CAST(updated_at AS INTEGER) FROM runs WHERE profile_id = ? AND storage_released = 0 AND " &
     "NOT EXISTS (SELECT 1 FROM step_drains d WHERE d.run_id = runs.id AND d.state = 'pending') AND NOT " & heldRunSql("runs.id", "runs.tenant_id", "runs.group_id") & " AND state IN (" & marks & ") ORDER BY updated_at LIMIT ?", profileId]

@@ -79,7 +79,7 @@ rows=(
   "GET /api/v1/organizations/no-such-org/locks||404 404 404 404"
   "POST /api/v1/runs|{}|400 400 400 403"
   "DELETE /api/v1/runs/no-such-run||404 404 403 403"
-  "POST /api/v1/runs/no-such-run:cancel||404 404 404 403"
+  "POST /api/v1/runs/no-such-run:abort||404 404 404 403"
   "DELETE /api/v1/organizations/no-such-org||404 404 403 403"
   "POST /api/v1/users|{}|400 403 403 403"
   "DELETE /api/v1/users/admin||403 403 403 403"

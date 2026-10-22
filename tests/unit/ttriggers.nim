@@ -9,9 +9,9 @@ proc spec(extra: JsonNode = nil): JsonNode =
 
 suite "TRG-002 trigger definitions":
   test "TRG-002 a schedule trigger with parameters is accepted":
-    let r = parseTriggerSpec(spec(%*{"params": {"BRANCH": "main", "JOBS": 4}, "concurrency": "cancel_newest"}))
+    let r = parseTriggerSpec(spec(%*{"params": {"BRANCH": "main", "JOBS": 4}, "concurrency": "abort_newest"}))
     check r.error == ""
-    check r.spec.kind == "schedule" and r.spec.concurrency == "cancel_newest" and r.spec.enabled
+    check r.spec.kind == "schedule" and r.spec.concurrency == "abort_newest" and r.spec.enabled
     check r.spec.params == @[("BRANCH", "main"), ("JOBS", "4")]
 
   test "TRG-002 a webhook trigger has no schedule":
@@ -30,10 +30,10 @@ suite "TRG-002 trigger definitions":
     check parseTriggerSpec(spec(%*{"name": ""})).error.contains("name")
     check parseTriggerSpec(spec(%*{"kind": "manual"})).error.contains("kind")
     check parseTriggerSpec(spec(%*{"concurrency": "cancel"})).error.contains("concurrency")
-    for ok in ["parallel", "cancel_newest", "cancel_previous"]:
+    for ok in ["parallel", "abort_newest", "abort_previous"]:
       let r = parseTriggerSpec(spec(%*{"concurrency": ok}))
       check r.error == "" and r.spec.concurrency == ok
-    check parseTriggerSpec(spec(%*{"concurrency": "queue"})).error == "concurrency is parallel, cancel_newest or cancel_previous"
+    check parseTriggerSpec(spec(%*{"concurrency": "queue"})).error == "concurrency is parallel, abort_newest or abort_previous"
     check parseTriggerSpec(spec(%*{"group": "/team//backend/"})).spec.groupPath == "team/backend"         # the group is named by its path; the API looks it up
     check parseTriggerSpec(spec()).spec.groupPath == ""                                                    # none: the organisation itself
     check parseTriggerSpec(spec(%*{"group": 5})).error.contains("string")

@@ -67,7 +67,7 @@ suite "IAM-001 what dev may do":
   test "start a run, directly or by firing a manual trigger; stop a run; start a failed one again":
     check roleMay("dev", "POST", "/api/v1/runs")
     check roleMay("dev", "POST", "/api/v1/organizations/acme/triggers/t1:fire")
-    check roleMay("dev", "POST", "/api/v1/runs/s1_x:cancel")
+    check roleMay("dev", "POST", "/api/v1/runs/s1_x:abort")
     check roleMay("dev", "POST", "/api/v1/runs/s1_x:retry")
   test "delete or change nothing: no delete of a run, no settings, no triggers made or switched, nothing of an administrator":
     for (m, p) in [("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/runs/s1_x"), ("POST", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
@@ -86,7 +86,7 @@ suite "IAM-001 what rw may do":
               "/api/v1/organizations/acme/secrets", "/api/v1/organizations:reconcile"]:
       check roleMay("rw", "GET", p)
   test "everything that is written: runs, settings, organisations, triggers, secrets, the store - delete and edit":
-    for (m, p) in [("POST", "/api/v1/runs"), ("POST", "/api/v1/runs/s1_x:cancel"), ("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
+    for (m, p) in [("POST", "/api/v1/runs"), ("POST", "/api/v1/runs/s1_x:abort"), ("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
                    ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/acme"), ("POST", "/api/v1/organizations/acme/triggers"),
                    ("PUT", "/api/v1/organizations/acme/secrets/TOKEN"), ("POST", "/api/v1/organizations:reconcile")]:
       check roleMay("rw", m, p)

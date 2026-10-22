@@ -8,16 +8,16 @@ proc item(pod, reason: string; seq = 0; reportedAt = 1000'i64): KeptItem =
 
 suite "kept Pods and their alerts":
   test "every kept Pod is an alert with its reason and the time it is kept until":
-    recordKept("cinim-001-acme", 5000, 2, @[item("ci-s1-r-1-1", "outcome_unknown", 1, 2000), item("ci-s1-r-0-1", "logs_undelivered", 0, 1000)])
+    recordKept("cinim-001-acme", 5000, 2, @[item("s1-r-1-1", "outcome_unknown", 1, 2000), item("s1-r-0-1", "logs_undelivered", 0, 1000)])
     let a = keptAlerts()
     check a.len == 2
-    check a[0]["code"].getStr == "pod_unread" and a[0]["namespace"].getStr == "cinim-001-acme" and a[0]["pod"].getStr == "ci-s1-r-1-1"
+    check a[0]["code"].getStr == "pod_unread" and a[0]["namespace"].getStr == "cinim-001-acme" and a[0]["pod"].getStr == "s1-r-1-1"
     check a[0]["reason"].getStr == "outcome_unknown" and a[0]["keep_until"].getBiggestInt == 2000 + 14 * 86400
     check "could not be fully read" in a[0]["detail"].getStr
     check keptCounts() == @[("cinim-001-acme", 2)]
 
   test "what Kubernetes said about the Pod is in the alert":
-    var i = item("ci-s1-r-2-1", "outcome_unknown", 2, 3000)
+    var i = item("s1-r-2-1", "outcome_unknown", 2, 3000)
     i.podReason = "Evicted"
     i.podMessage = "The node was low on resource: ephemeral-storage."
     recordKept("cinim-001-acme", 5050, 1, @[i])
@@ -27,7 +27,7 @@ suite "kept Pods and their alerts":
     recordKept("cinim-001-acme", 5060, 0, @[])
 
   test "the next picture of a namespace replaces the last, an empty one ends the alerts":
-    recordKept("cinim-001-acme", 5100, 1, @[item("ci-s1-r-0-1", "logs_undelivered")])
+    recordKept("cinim-001-acme", 5100, 1, @[item("s1-r-0-1", "logs_undelivered")])
     check keptAlerts().len == 1
     recordKept("cinim-001-acme", 5200, 0, @[])
     check keptAlerts().len == 0 and keptCounts().len == 0

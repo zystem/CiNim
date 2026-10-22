@@ -80,7 +80,7 @@ proc resolveStep(c: var RqClient; runId: string; seq: uint32): tuple[jobId, step
 func podName(runId: string; seq, attempt: uint32): string =
   ## Must match src/jobcontroller/main.nim's podName() and the shim's - the VictoriaLogs `job` label
   ## (log_streams.index_name), so a reader can reconstruct the query from that row alone.
-  "ci-" & runId.replace("_", "-") & "-" & $seq & "-" & $attempt
+  runId.replace("_", "-") & "-" & $seq & "-" & $attempt
 
 proc ack(step: StepRef; acked: uint64; code = ""): LogAck =
   LogAck(step: step, acked_seq: acked, failure: Failure(code: code))

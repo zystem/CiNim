@@ -122,7 +122,7 @@ suite "PIP-014 locks of jobs":
       let l = lockName()
       discard c.acquire(a, defaultProfile, l, "lock#0", l, now())
       discard c.acquire(b, defaultProfile, l, "lock#0", l, now())
-      check c.cancelRun(a, now()).outcome == coCanceled
+      check c.abortRun(a, now()).outcome == coAborted
       check c.holderOf(defaultProfile, l) == b
     test "the sweep: a holder that has ended without saying so (lost, infrastructure error) is let go, a waiter that has ended leaves the list":
       let a = newRun()
@@ -271,7 +271,7 @@ suite "PIP-014 locks of jobs":
       check not c.queueIsFull(profile)
       let again = co.createRun("return 1", "t1", profile)
       check c.queueIsFull(profile)
-      setState(again, "CANCELED")
+      setState(again, "ABORTED")
       check not c.queueIsFull(profile)
     test "the limit is 65000 unless the environment says otherwise":
       check maxUnfinishedRuns == 65000

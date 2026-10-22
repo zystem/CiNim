@@ -28,7 +28,7 @@ suite "PIP-003 the blocks of the table (pure)":
     check blockSize(2) == 10 and blockSize(9) == 10
     check blockSize(10) == 20 and blockSize(19) == 20
     check blockSize(20) == 30
-    check blockSize(199) == 200 and blockSize(200) == 200      # capped at 200
+    check blockSize(199) == 200 and blockSize(999) == 1000 and blockSize(1000) == 1000      # capped at 1000
   test "an instance beyond what was seen but inside the block takes the reserve; beyond the block takes the overflow":
     var t = assignBlocks(@[7, 7])
     check t.numberOf(7, 5) == 5                           # the reserve of the block 0..9
@@ -101,13 +101,13 @@ suite "PIP-003 the table made by a pass of the script":
   test "the same script gives the same table every time":
     check buildTable(sequential).table.blocks == buildTable(sequential).table.blocks
 
-suite "PIP-006 the limit of 200 steps":
-  test "200 steps pass, 201 are an error returned to the user before the run is led":
-    let ok = buildTable("ci.job({image='a'}, function(j) for i = 1, 200 do j:sh('x') end end)")
-    check ok.ok and ok.steps == 200
-    let bad = buildTable("ci.job({image='a'}, function(j) for i = 1, 201 do j:sh('x') end end)")
+suite "PIP-006 the limit of 1000 steps":
+  test "1000 steps pass, 1001 are an error returned to the user before the run is led":
+    let ok = buildTable("ci.job({image='a'}, function(j) for i = 1, 1000 do j:sh('x') end end)")
+    check ok.ok and ok.steps == 1000
+    let bad = buildTable("ci.job({image='a'}, function(j) for i = 1, 1001 do j:sh('x') end end)")
     check not bad.ok and bad.code == "step_limit"
-    check "200" in bad.message
+    check "1000" in bad.message
 
 suite "PIP-018 the id of a job and of a step":
   test "an id is 1 to 8 letters and digits, starting with a letter":
@@ -221,8 +221,8 @@ return ci.pipeline({
   test "a script that breaks after a step has answered is a finding that is not certain: the stub's answer may be the cause":
     let r = preflight("return ci.pipeline({ main = function(run) local r = ci.job({image='a'}, function(j) return j:sh('x') end); error('after ' .. tostring(r)) end })")
     check r.code == "script_error" and not r.certain and r.steps == 1
-  test "more than 200 steps and an id used twice are certain, whatever the steps answered":
-    let many = preflight("return ci.pipeline({ main = function(run) ci.job({image='a'}, function(j) for i = 1, 201 do j:sh('x') end end) end })")
+  test "more than 1000 steps and an id used twice are certain, whatever the steps answered":
+    let many = preflight("return ci.pipeline({ main = function(run) ci.job({image='a'}, function(j) for i = 1, 1001 do j:sh('x') end end) end })")
     check many.code == "step_limit" and many.certain
     let dup = preflight("return ci.pipeline({ main = function(run) ci.job({image='a'}, function(j)\n j:sh('x', {id='same'})\n j:sh('y', {id='same'})\nend) end })")
     check dup.code == "duplicate_id" and dup.certain

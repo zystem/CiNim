@@ -5,7 +5,7 @@ import std/[options, strutils, json, tables, sequtils]
 import sandbox, journal, replay
 
 const
-  maxSteps* = 200
+  maxSteps* = 1000
   overflowBase* = 100_000            ## numbers of the steps of `main` the pass did not foresee: 100 000, 100 001 ...
   branchOverflowBase* = 1_000_000_000   ## ... and those of a branch, which cannot be counted in the order of asking (that is timing): a number of the place alone, below 2 000 000 000
 

@@ -252,7 +252,7 @@ const sleepScript = """
 
 proc podName(runId: string; seq, attempt: int): string =
   ## must match src/jobcontroller/main.nim's podName(): "_" is not valid in a Kubernetes RFC 1123 name.
-  "ci-" & runId.replace("_", "-") & "-" & $seq & "-" & $attempt
+  runId.replace("_", "-") & "-" & $seq & "-" & $attempt
 
 suite "walking skeleton end to end":
   if not ready:

@@ -51,7 +51,7 @@ const
   templateDir = currentSourcePath().parentDir / "templates"
   css = staticRead("ui.css")
   cssVersion = toHex(int64(hash(css)), 8)       # in the link: a new style sheet is a new address, and the day of caching does not hold back a change
-  runStates = ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"]   # the core spells it with one L (RUN_STATE_CANCELED); a filter that says CANCELLED matches nothing
+  runStates = ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "ABORTED"]   # the core's word (RUN_STATE_ABORTED); a state that is spelled two ways is a filter that matches nothing
 
 func isId(s: string): bool =
   ## the id of a run, or the cursor: what the core makes (letters, digits, - and _)

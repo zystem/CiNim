@@ -168,10 +168,10 @@ end
 -- same as `for`/`pcall` are not journaled --- only what a job's steps actually do is (PIP-003).
 -- `use`, `ci.input`, services and `ci.spawn` are not implemented yet (`ci.parallel` and `ci.matrix` are: docs/parallel.md).
 
--- The limit of steps in a run and the ids that the author gives to jobs and steps (docs/parallel.md section 3). A run has at most 200 steps: the 201st is an error
+-- The limit of steps in a run and the ids that the author gives to jobs and steps (docs/parallel.md section 3). A run has at most 1000 steps (D-67): the 1001st is an error
 -- returned to the author (`step_limit`). An id is 1 to 8 letters and digits starting with a letter (so that it cannot be taken for a number), unique in the run, and a repeat
 -- is the author's to resolve: the run fails with `duplicate_id` and the two lines. The script runs again in a fresh state at every replay, so both checks are made again each time.
-local MAX_STEPS = 200
+local MAX_STEPS = 1000
 local step_count = 0
 local ids_seen = {}                      -- id -> the line where it was first used
 
@@ -875,12 +875,74 @@ function b58f(fmt, ...)
   return table.concat(out)
 end
 
+-- `b32f(format, ...)` (D-67): an id built from loop variables in the alphabet of Crockford, lowercase (`0123456789abcdefghjkmnpqrstvwxyz`: the digits and the letters but i l o u, in the
+-- order of their codes, so that results of one width sort like the numbers). `{x}` is one character (0 to 31), `{xx}` two (0 to 1023), `{xxx}` three (0 to 32767), `{xxxx}` four
+-- (0 to 1048575), in any combination, one argument to each: b32f("{x}{x}{x}", i, j, k) is three characters. A letter or a digit of the alphabet in the format stands for itself.
+-- The result is exactly the characters of the format and pads nothing (a short id is padded by the rule of every id), and it is at most 4 characters, the width of a step's id. The format
+-- is checked as a whole before any number is looked at; a number that does not fit its placeholder is an error, never a longer or a shorter result. Pure, not journaled.
+local B32 = "0123456789abcdefghjkmnpqrstvwxyz"
+local function b32_digits(n, width)
+  local out = {}
+  for i = width, 1, -1 do
+    local d = n % 32
+    out[i] = string.sub(B32, d + 1, d + 1)
+    n = n // 32
+  end
+  return table.concat(out)
+end
+
+function b32f(fmt, ...)
+  if type(fmt) ~= "string" then error("b32f: the format is a string, got " .. type(fmt), 2) end
+  if #fmt == 0 then error("b32f: the format is empty", 2) end
+  local parts, size, i = {}, 0, 1
+  while i <= #fmt do
+    local c = string.sub(fmt, i, i)
+    if c == "{" then
+      local close = string.find(fmt, "}", i, true)
+      local name = close and string.sub(fmt, i + 1, close - 1)
+      if not name or not string.find(name, "^x+$") or #name > 4 then
+        error("b32f: at position " .. i .. " of the format only {x}, {xx}, {xxx} and {xxxx} are placeholders" .. (name and (", not {" .. name .. "}") or ""), 2)
+      end
+      parts[#parts + 1] = #name
+      size = size + #name
+      i = close + 1
+    else
+      local l = string.lower(c)
+      if not string.find(B32, l, 1, true) then
+        error("b32f: at position " .. i .. " of the format the character '" .. c .. "' is not in the alphabet of ids (digits and the letters but i, l, o, u)", 2)
+      end
+      parts[#parts + 1] = l
+      size = size + 1
+      i = i + 1
+    end
+  end
+  if size > 4 then error("b32f: the format makes " .. size .. " characters, an id is at most 4 (a step's)", 2) end
+  local slots = 0
+  for _, p in ipairs(parts) do if type(p) == "number" then slots = slots + 1 end end
+  if select("#", ...) ~= slots then error("b32f: the format has " .. slots .. " placeholder(s) and " .. select("#", ...) .. " argument(s)", 2) end
+  local args, out, k = { ... }, {}, 0
+  for _, p in ipairs(parts) do
+    if type(p) == "number" then
+      k = k + 1
+      local given = args[k]
+      if type(given) ~= "number" or given % 1 ~= 0 then error("b32f: argument " .. k .. ": an integer expected, got " .. tostring_(given), 2) end
+      local top = math.tointeger(32 ^ p) - 1
+      local n = math.tointeger(given)
+      if n == nil or n < 0 or n > top then error("b32f: argument " .. k .. ": " .. tostring_(given) .. " does not fit " .. p .. " character(s) (0 to " .. top .. ")", 2) end
+      out[#out + 1] = b32_digits(n, p)
+    else
+      out[#out + 1] = p
+    end
+  end
+  return table.concat(out)
+end
+
 -- `ci.parallel(branches, opts)` (docs/parallel.md sections 2 and 5): each branch is a coroutine of this Lua state, in the order of the names. A branch runs until it ends or makes a host
 -- call; the call is handed up (to Nim, or to the scheduler of the ci.parallel the branch is nested in) and, if it is answered, the branch goes on at once; if it is pending the branch
 -- parks and the next one starts or goes on. Nothing a parked branch waits for can change inside this execution, so it is not asked again: when no branch can go on, the run waits
 -- (`park`) and is led again, by replay, when a step has ended. `max_parallel` is the number of branches started and not ended at a time; the next to start is always the first that has
 -- not, in the order of the names, so the set of calls does not depend on timing either. The result is a table name -> { ok = true, value = ... } or { ok = false, error = "..." }.
-local MAX_BRANCHES, MAX_DEPTH = 200, 200
+local MAX_BRANCHES, MAX_DEPTH = 1000, 10      -- the nesting is 10 levels (D-67): GitHub's reusable workflows go 10 deep, GitLab's child pipelines 2
 local PARALLEL_FIELDS = { max_parallel = true, keep_going = true, fail_fast = true }
 
 local function plain(v, depth)

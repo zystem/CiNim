@@ -112,5 +112,5 @@ two cores hold gives the alert `duplicate_slug` in `GET /api/v1/router`.
 ## Cluster requirements
 
 The job controller assumes that **the namespace for steps is dedicated to it** (by default the organisation's namespace `<prefix>-<shard>-<org>`, for example `cinim-001-acme`; the objects the core creates there, the controller's own Pod, a RoleBinding, a ResourceQuota, a LimitRange and the NetworkPolicies, are left alone). It decides itself which Pods in
-it belong to it: a Pod named `ci-...` that is not in its state is considered orphaned and is deleted. Do not put Pods of that name there. The rights needed are
+it belong to it: a Pod named `s1-...` (the shard's prefix) that is not in its state is considered orphaned and is deleted. Do not put Pods of that name there. The rights needed are
 `pods` (create, get, list, delete), `pods/log` (get), `persistentvolumeclaims` (create, get, list, delete: the run volumes), and `configmaps` (create, get, update) and `secrets` (create, get) for delivering the shim and the CURVE keys; the controller replaces the ConfigMap with its shim at every start, so that a new controller image brings its own shim.

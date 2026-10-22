@@ -203,7 +203,7 @@ suite "RUN-009 the conductor":
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: uint32(b), attempt: 1), state: STEP_STATE_FAILED, exit_code: 3, termination_reason: "failed"))
       check waitState(r, "FAILED")
       check c.query(%*[["SELECT fail_message FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr.contains("parallel: branches failed: b")
-      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ? AND state = 'CANCELED'", r]])["results"][0]["values"][0][0].getInt == 2
+      check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ? AND state = 'ABORTED'", r]])["results"][0]["values"][0][0].getInt == 2
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 3         # a2 was never made
       stop p
     test "RUN-006 ci.finally: the cleanup step is made after a step failed, and the run ends FAILED with the first error":

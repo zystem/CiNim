@@ -6,11 +6,11 @@ import std/[strutils]
 
 type
   RunState* = enum
-    rsCreated, rsCompiling, rsQueued, rsRunning, rsWaiting, rsSucceeded, rsFailed, rsCanceled, rsSkipped,
+    rsCreated, rsCompiling, rsQueued, rsRunning, rsWaiting, rsSucceeded, rsFailed, rsAborted, rsSkipped,
     rsTimedOut, rsInfrastructureError
 
   StepState* = enum
-    ssPending, ssStarting, ssRunning, ssSucceeded, ssFailed, ssCanceled, ssTimedOut, ssLost
+    ssPending, ssStarting, ssRunning, ssSucceeded, ssFailed, ssAborted, ssTimedOut, ssLost
 
   GateState* = enum
     gsClosedUnknown, gsOpen, gsClosed
@@ -19,9 +19,9 @@ type
     isPending, isApproved, isRejected, isExpired, isCanceled
 
 const
-  runProtoNames = ["CREATED", "COMPILING", "QUEUED", "RUNNING", "WAITING", "SUCCEEDED", "FAILED", "CANCELED", "SKIPPED",
+  runProtoNames = ["CREATED", "COMPILING", "QUEUED", "RUNNING", "WAITING", "SUCCEEDED", "FAILED", "ABORTED", "SKIPPED",
                    "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
-  stepProtoNames = ["PENDING", "STARTING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "TIMED_OUT", "LOST"]
+  stepProtoNames = ["PENDING", "STARTING", "RUNNING", "SUCCEEDED", "FAILED", "ABORTED", "TIMED_OUT", "LOST"]
   gateStart* = gsClosedUnknown   ## after a scheduler restart the gate is closed until the state is received (criterion 26)
 
 func protoName*(s: RunState): string = runProtoNames[s.ord]
@@ -30,20 +30,20 @@ func protoName*(s: StepState): string = stepProtoNames[s.ord]
 func runNext*(s: RunState): set[RunState] =
   ## Compare-and-swap transitions (RUN-001). A retry of a finished run is a new run (PIP-015), so terminal states are final.
   case s
-  of rsCreated: {rsCompiling, rsSkipped, rsCanceled, rsInfrastructureError}
-  of rsCompiling: {rsQueued, rsFailed, rsSkipped, rsCanceled, rsInfrastructureError}
-  of rsQueued: {rsRunning, rsCanceled, rsTimedOut, rsInfrastructureError}
-  of rsRunning: {rsWaiting, rsSucceeded, rsFailed, rsCanceled, rsTimedOut, rsInfrastructureError}
-  of rsWaiting: {rsRunning, rsCanceled, rsTimedOut, rsInfrastructureError}
-  of rsSucceeded, rsFailed, rsCanceled, rsSkipped, rsTimedOut, rsInfrastructureError: {}
+  of rsCreated: {rsCompiling, rsSkipped, rsAborted, rsInfrastructureError}
+  of rsCompiling: {rsQueued, rsFailed, rsSkipped, rsAborted, rsInfrastructureError}
+  of rsQueued: {rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
+  of rsRunning: {rsWaiting, rsSucceeded, rsFailed, rsAborted, rsTimedOut, rsInfrastructureError}
+  of rsWaiting: {rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
+  of rsSucceeded, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError: {}
 
 func stepNext*(s: StepState): set[StepState] =
   ## Step states are per attempt; a retry creates a new step attempt in `pending` (RUN-002).
   case s
-  of ssPending: {ssStarting, ssCanceled, ssTimedOut}
-  of ssStarting: {ssPending, ssRunning, ssFailed, ssCanceled, ssTimedOut, ssLost}
-  of ssRunning: {ssSucceeded, ssFailed, ssCanceled, ssTimedOut, ssLost}
-  of ssSucceeded, ssFailed, ssCanceled, ssTimedOut, ssLost: {}
+  of ssPending: {ssStarting, ssAborted, ssTimedOut}
+  of ssStarting: {ssPending, ssRunning, ssFailed, ssAborted, ssTimedOut, ssLost}
+  of ssRunning: {ssSucceeded, ssFailed, ssAborted, ssTimedOut, ssLost}
+  of ssSucceeded, ssFailed, ssAborted, ssTimedOut, ssLost: {}
 
 func gateNext*(s: GateState): set[GateState] =
   case s

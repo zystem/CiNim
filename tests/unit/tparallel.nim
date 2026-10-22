@@ -284,7 +284,7 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
       let r = replay.execute(sb, j, "return ci.pipeline({ main = function(run) ci.parallel({ a = function() end }, { " & opt & " }) end })",
                              proc (seq: int; kind, payload: string): Option[string] = some(""))
       check r.status == esFailed and "ci.parallel" in r.message
-  test "at most 200 branches":
+  test "at most 1000 branches":
     let script = """
       return ci.pipeline({ main = function(run)
         local b = {}
@@ -295,11 +295,11 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
     var sb = newSandbox()
     var j: Journal
     let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some("")
-    check replay.execute(sb, j, script.replace("N", "200"), host).status == esDone
+    check replay.execute(sb, j, script.replace("N", "1000"), host).status == esDone
     var sb2 = newSandbox()
     var j2: Journal
-    let r = replay.execute(sb2, j2, script.replace("N", "201"), host)
-    check r.status == esFailed and "200 branches" in r.message
+    let r = replay.execute(sb2, j2, script.replace("N", "1001"), host)
+    check r.status == esFailed and "1000 branches" in r.message
   test "ci.parallel inside a branch: the steps of the inner branches are keyed by the whole path":
     let nested = """
       return ci.pipeline({ main = function(run)
@@ -333,7 +333,7 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
       check r.result.status == esDone
       results.add r.result.value
     check results == @["PQW", "PQW"]
-  test "the nesting is limited to 200 levels":
+  test "the nesting is limited to 10 levels":
     let script = """
       local function down(n)
         if n == 0 then
@@ -347,12 +347,12 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
     let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] = some("")
     var sb = newSandbox()
     var j: Journal
-    let r = replay.execute(sb, j, script.replace("DEPTH", "199"), host)
+    let r = replay.execute(sb, j, script.replace("DEPTH", "9"), host)
     check r.status == esDone and r.value == "bottom"
     var sb2 = newSandbox()
     var j2: Journal
-    let r2 = replay.execute(sb2, j2, script.replace("DEPTH", "200"), host)
-    check r2.status == esDone and "200 levels" in r2.value
+    let r2 = replay.execute(sb2, j2, script.replace("DEPTH", "10"), host)
+    check r2.status == esDone and "10 levels" in r2.value
   test "host calls other than steps are keyed by branch too: ci.now() in two branches keeps its value for each":
     let script = """
       return ci.pipeline({ main = function(run)
@@ -420,12 +420,12 @@ suite "PIP-003 ci.parallel: the table":
     let a2 = t2.numberOfAt(line, "m.p1[a]", 7)
     check a1 == a2 and b1 == b2 and a1 != b1
     check a1 >= 1_000_000_000 and a1 < 2_000_000_000
-  test "a script with 201 steps in its branches is step_limit":
+  test "a script with 1001 steps in its branches is step_limit":
     let script = """
       return ci.pipeline({ main = function(run)
         ci.parallel({
-          a = function() ci.job({image = "x"}, function(j) for i = 1, 100 do j:sh("a" .. i) end end) end,
-          b = function() ci.job({image = "x"}, function(j) for i = 1, 101 do j:sh("b" .. i) end end) end,
+          a = function() ci.job({image = "x"}, function(j) for i = 1, 500 do j:sh("a" .. i) end end) end,
+          b = function() ci.job({image = "x"}, function(j) for i = 1, 501 do j:sh("b" .. i) end end) end,
         })
       end })"""
     let r = buildTable(script)
@@ -635,15 +635,15 @@ suite "PIP-009 ci.matrix":
         return tostring(m[1].jdk) .. tostring(m[2].jdk) .. tostring(m[2].fast) .. #m
       end })""")
     check r.status == esDone and r.value == "1721true2"
-  test "at most 200 combinations, checked at the call":
+  test "at most 1000 combinations, checked at the call":
     let r = runPure("""
       return ci.pipeline({ main = function(run)
         local a, b = {}, {}
-        for i = 1, 15 do a[i] = "a" .. i end
-        for i = 1, 14 do b[i] = "b" .. i end
+        for i = 1, 40 do a[i] = "a" .. i end
+        for i = 1, 26 do b[i] = "b" .. i end
         ci.matrix { axes = { x = a, y = b } }
       end })""")
-    check r.status == esFailed and "at most 200" in r.message
+    check r.status == esFailed and "at most 1000" in r.message
   test "a matrix that is not well formed is refused with the reason":
     for (spec, why) in [("{}", "axes"), ("{ axes = {} }", "axes"), ("{ axes = { x = {} } }", "x"), ("{ axes = { x = { {} } } }", "x"),
                         ("{ axes = { ['1x'] = { 'a' } } }", "axis name"), ("{ axes = { x = { 'a,b' } } }", "x"), ("{ axes = { x = { 'a' } }, bogus = 1 }", "bogus"),

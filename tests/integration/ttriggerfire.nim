@@ -1,5 +1,5 @@
-## TRG-004: what a firing does when an earlier run of the trigger has not ended (against a real rqlite). `parallel` starts a run anyway, `cancel_newest` cancels the new firing (starts none) while an earlier run
-## has not ended in any state that is not final, `cancel_previous` cancels the earlier runs of the same trigger and starts the new one. Needs CINIM_RQLITE_URL.
+## TRG-004: what a firing does when an earlier run of the trigger has not ended (against a real rqlite). `parallel` starts a run anyway, `abort_newest` cancels the new firing (starts none) while an earlier run
+## has not ended in any state that is not final, `abort_previous` cancels the earlier runs of the same trigger and starts the new one. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, strutils, times]
 import common/rqlite
 import core/[schema, scheduler, triggers]
@@ -35,38 +35,38 @@ suite "TRG-004 concurrency of a trigger":
       let b = co.fire(t, @[], getTime().toUnix())
       check a.started and b.started and a.runId != b.runId
       check stateOf(a.runId) == "RUNNING" and stateOf(b.runId) == "RUNNING"
-    test "cancel_newest starts none while an earlier run of the trigger has not ended, in any state that is not final":
-      let t = newTrigger("cancel_newest")
+    test "abort_newest starts none while an earlier run of the trigger has not ended, in any state that is not final":
+      let t = newTrigger("abort_newest")
       let a = co.fire(t, @[], getTime().toUnix())
       check a.started
       for state in ["CREATED", "COMPILING", "QUEUED", "RUNNING", "WAITING"]:
         setState(a.runId, state)
         let f = co.fire(t, @[], getTime().toUnix())
         check not f.started and f.reason == "still_running"
-      check resultOf(t) == "cancelled the new firing: the previous run has not ended"
-    test "cancel_newest starts the next one when the earlier one has ended, in any final state":
-      for state in ["SUCCEEDED", "FAILED", "CANCELED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]:
-        let t = newTrigger("cancel_newest")
+      check resultOf(t) == "aborted the new firing: the previous run has not ended"
+    test "abort_newest starts the next one when the earlier one has ended, in any final state":
+      for state in ["SUCCEEDED", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]:
+        let t = newTrigger("abort_newest")
         let a = co.fire(t, @[], getTime().toUnix())
         setState(a.runId, state)
         check co.fire(t, @[], getTime().toUnix()).started
-    test "cancel_newest looks at the runs of its own trigger only":
-      let t1 = newTrigger("cancel_newest")
-      let t2 = newTrigger("cancel_newest")
+    test "abort_newest looks at the runs of its own trigger only":
+      let t1 = newTrigger("abort_newest")
+      let t2 = newTrigger("abort_newest")
       check co.fire(t1, @[], getTime().toUnix()).started
       check co.fire(t2, @[], getTime().toUnix()).started
-    test "cancel_previous with no earlier run just starts":
-      let t = newTrigger("cancel_previous")
+    test "abort_previous with no earlier run just starts":
+      let t = newTrigger("abort_previous")
       let f = co.fire(t, @[], getTime().toUnix())
       check f.started and resultOf(t) == "started"
-    test "cancel_previous cancels the earlier run and starts the new one; the result says which":
-      let t = newTrigger("cancel_previous")
+    test "abort_previous cancels the earlier run and starts the new one; the result says which":
+      let t = newTrigger("abort_previous")
       let a = co.fire(t, @[], getTime().toUnix())
       let b = co.fire(t, @[], getTime().toUnix())
-      check b.started and stateOf(a.runId) == "CANCELED" and stateOf(b.runId) == "RUNNING"
-      check resultOf(t) == "started; cancelled the earlier run " & a.runId
-    test "cancel_previous cancels every earlier run that has not ended, and leaves the ended ones and the runs of other triggers as they are":
-      let t = newTrigger("cancel_previous")
+      check b.started and stateOf(a.runId) == "ABORTED" and stateOf(b.runId) == "RUNNING"
+      check resultOf(t) == "started; aborted the earlier run " & a.runId
+    test "abort_previous cancels every earlier run that has not ended, and leaves the ended ones and the runs of other triggers as they are":
+      let t = newTrigger("abort_previous")
       let other = newTrigger("parallel")
       let o = co.fire(other, @[], getTime().toUnix())
       let a = co.fire(t, @[], getTime().toUnix())
@@ -75,7 +75,7 @@ suite "TRG-004 concurrency of a trigger":
       let w = co.fire(t, @[], getTime().toUnix())                # nothing to cancel: done ended
       setState(w.runId, "WAITING")
       let q = co.fire(t, @[], getTime().toUnix())                # cancels the waiting one
-      check stateOf(a.runId) == "CANCELED" and stateOf(done.runId) == "SUCCEEDED" and stateOf(w.runId) == "CANCELED" and stateOf(q.runId) == "RUNNING"
+      check stateOf(a.runId) == "ABORTED" and stateOf(done.runId) == "SUCCEEDED" and stateOf(w.runId) == "ABORTED" and stateOf(q.runId) == "RUNNING"
       check stateOf(o.runId) == "RUNNING"
 
     test "D-63 a trigger with a repository starts no run when the script cannot be had, and says why in its last result":

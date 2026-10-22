@@ -7,7 +7,7 @@ const specNames = ["ci.pipeline", "ci.string", "ci.number", "ci.bool", "ci.choic
   "ci.stage", "ci.job", "ci.parallel", "ci.spawn", "ci.matrix", "ci.input", "ci.deploy", "ci.run", "ci.sleep", "ci.now",
   "ci.random", "ci.finally", "ci.log", "ci.fail", "b58x", "b58xx", "b58f",
   "Job:checkout", "Job:sh", "Job:use", "Job:env", "JobArtifact.upload", "JobArtifact.download", "JobCache.save", "JobCache.restore",
-  "Handle:wait", "Handle:cancel"]
+  "Handle:wait", "Handle:abort"]
 
 proc declaredFunctions(): HashSet[string] =
   for line in readFile("lua/stdlib/cicd.d.lua").splitLines:

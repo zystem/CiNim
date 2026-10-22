@@ -11,31 +11,31 @@ Transitions are compare-and-swap writes in rqlite. Terminal states are final: a 
 stateDiagram-v2
   [*] --> rsCreated
   rsCreated --> rsCompiling
-  rsCreated --> rsCanceled
+  rsCreated --> rsAborted
   rsCreated --> rsSkipped
   rsCreated --> rsInfrastructureError
   rsCompiling --> rsQueued
   rsCompiling --> rsFailed
-  rsCompiling --> rsCanceled
+  rsCompiling --> rsAborted
   rsCompiling --> rsSkipped
   rsCompiling --> rsInfrastructureError
   rsQueued --> rsRunning
-  rsQueued --> rsCanceled
+  rsQueued --> rsAborted
   rsQueued --> rsTimedOut
   rsQueued --> rsInfrastructureError
   rsRunning --> rsWaiting
   rsRunning --> rsSucceeded
   rsRunning --> rsFailed
-  rsRunning --> rsCanceled
+  rsRunning --> rsAborted
   rsRunning --> rsTimedOut
   rsRunning --> rsInfrastructureError
   rsWaiting --> rsRunning
-  rsWaiting --> rsCanceled
+  rsWaiting --> rsAborted
   rsWaiting --> rsTimedOut
   rsWaiting --> rsInfrastructureError
   rsSucceeded --> [*]
   rsFailed --> [*]
-  rsCanceled --> [*]
+  rsAborted --> [*]
   rsSkipped --> [*]
   rsTimedOut --> [*]
   rsInfrastructureError --> [*]
@@ -51,22 +51,22 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> ssPending
   ssPending --> ssStarting
-  ssPending --> ssCanceled
+  ssPending --> ssAborted
   ssPending --> ssTimedOut
   ssStarting --> ssPending
   ssStarting --> ssRunning
   ssStarting --> ssFailed
-  ssStarting --> ssCanceled
+  ssStarting --> ssAborted
   ssStarting --> ssTimedOut
   ssStarting --> ssLost
   ssRunning --> ssSucceeded
   ssRunning --> ssFailed
-  ssRunning --> ssCanceled
+  ssRunning --> ssAborted
   ssRunning --> ssTimedOut
   ssRunning --> ssLost
   ssSucceeded --> [*]
   ssFailed --> [*]
-  ssCanceled --> [*]
+  ssAborted --> [*]
   ssTimedOut --> [*]
   ssLost --> [*]
 ```

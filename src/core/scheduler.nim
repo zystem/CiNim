@@ -86,18 +86,18 @@ var maxUnfinishedRuns* = (try: parseInt(getEnv("CINIM_MAX_UNFINISHED_RUNS", "650
 
 proc queueIsFull*(c: var RqClient; profileId: string): bool =
   ## the organisation (its profile) has `maxUnfinishedRuns` runs that have not ended: no new run is made until some end
-  let r = c.query(%*[["SELECT count(*) FROM runs WHERE profile_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELED', 'SKIPPED', 'TIMED_OUT', 'INFRASTRUCTURE_ERROR')", profileId]])
+  let r = c.query(%*[["SELECT count(*) FROM runs WHERE profile_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED', 'ABORTED', 'SKIPPED', 'TIMED_OUT', 'INFRASTRUCTURE_ERROR')", profileId]])
   r["results"][0]{"values"}[0][0].getBiggestInt >= maxUnfinishedRuns
 
 func stepKeyOf*(ordinal, retries: int): string =
   ## the key of a step's answer in the journal: `s<number>`, and `s<number>~<n>` after the step has been run again n times (docs/parallel.md section 11)
   if retries > 0: "s" & $ordinal & "~" & $retries else: "s" & $ordinal
 
-type CancelOutcome* = enum
-  coNotFound, coCanceled, coAlreadyFinished
+type AbortOutcome* = enum
+  coNotFound, coAborted, coAlreadyFinished
 
-proc cancelRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: CancelOutcome, state: string] =
-  ## RUN-006: the run ends as CANCELED, its steps that have not ended are CANCELED, its lease is given back. The Pods are removed by the controllers: a step that is CANCELED is
+proc abortRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: AbortOutcome, state: string] =
+  ## RUN-006: the run ends as ABORTED, its steps that have not ended are ABORTED, its lease is given back. The Pods are removed by the controllers: a step that is CANCELED is
   ## not wanted, so the next poll of the controller that has its Pod says so at once (`unwantedPods`); the shim gets SIGTERM and the build is asked to stop. A report about such a
   ## step that comes later changes nothing (`applyTransition`). A run that has ended is left as it is.
   let r = c.query(%*[["SELECT state FROM runs WHERE id = ?", runId]])
@@ -107,18 +107,18 @@ proc cancelRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Canc
   var cur = rsCreated
   for s in states.RunState:
     if protoName(s) == was: cur = s
-  if not canRun(cur, rsCanceled): return (coAlreadyFinished, was)
+  if not canRun(cur, rsAborted): return (coAlreadyFinished, was)
   let res = c.execute(%*[
-    ["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0 WHERE id = ? AND state = ?", protoName(rsCanceled), $now, runId, was],
+    ["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0 WHERE id = ? AND state = ?", protoName(rsAborted), $now, runId, was],
     ["UPDATE steps SET state = ?, finished_at = ?, version = version + 1 WHERE run_id = ? AND state IN (?, ?, ?) AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND state = ?)",
-     protoName(ssCanceled), $now, runId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), runId, protoName(rsCanceled)]], transaction = true)
+     protoName(ssAborted), $now, runId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), runId, protoName(rsAborted)]], transaction = true)
   if res["results"][0]{"rows_affected"}.getInt == 0:
     # the run moved on between the read and the write (it ended): say what it is now
     let again = c.query(%*[["SELECT state FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
     return (coAlreadyFinished, if again != nil and again.len > 0: again[0][0].getStr else: was)
   c.releaseRun(runId, now)                       # it holds no lock of a job and waits for none (core/joblocks.nim)
   kickProfile(profileOfRun(c, runId, ""))       # the controllers hear of it now, not at their next poll
-  (coCanceled, protoName(rsCanceled))
+  (coAborted, protoName(rsAborted))
 
 type RetryOutcome* = enum
   roNotFound, roRetried, roNotRetryable, roNothingToRetry, roVolumeGone
@@ -328,7 +328,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let cur = c.query(%*[["SELECT attempt, state FROM steps WHERE run_id = ? AND ordinal = ?", t.step.run_id, int(t.step.seq)]])
   let cv = cur["results"][0]{"values"}
   if cv == nil or cv.len == 0 or cv[0][0].getInt != attempt: return
-  if cv[0][1].getStr in [protoName(ssSucceeded), protoName(ssFailed), protoName(ssLost), protoName(ssCanceled)]:
+  if cv[0][1].getStr in [protoName(ssSucceeded), protoName(ssFailed), protoName(ssLost), protoName(ssAborted)]:
     # Already final, usually because the shim reported the result before the Pod's end was seen: the result stands, but what Kubernetes
     # said about the Pod arrives only now (the events go in an hour) and is kept for the investigation, once.
     if t.pod_diag.len > 0:
@@ -543,7 +543,7 @@ proc unwantedPods*(c: var RqClient; inventory: seq[PodInfo]): seq[StepRef] =
         let attempt = row[2].getInt
         let state = row[3].getStr
         if attempt > int(p.step.attempt): wanted = false
-        elif attempt == int(p.step.attempt) and state in [protoName(ssLost), protoName(ssCanceled)]: wanted = false     # core gave up on it, or it was cancelled: no grace needed
+        elif attempt == int(p.step.attempt) and state in [protoName(ssLost), protoName(ssAborted)]: wanted = false     # core gave up on it, or it was cancelled: no grace needed
         elif attempt == int(p.step.attempt) and state notin [protoName(ssStarting), protoName(ssRunning), protoName(ssPending)] and
              now - row[4].getBiggestInt > 30: wanted = false     # finished by itself: its shim is exiting, leave it a little time
     if not found or not wanted: result.add p.step
@@ -859,7 +859,7 @@ proc giveBackLease(c: var RqClient; runId: string; attempt: int) =
   discard c.execute(%*[["UPDATE runs SET lease_until = 0 WHERE id = ? AND lease_attempt = ?", runId, attempt]])
 
 proc cancelStepByDecision*(c: var RqClient; runId: string; ordinal: int; by: string): bool =
-  ## fail_fast: the step is CANCELED (a step that waits is never handed out, one that runs is told to stop) and its record in the journal, `~canceled:<by>`, is the answer the script
+  ## fail_fast: the step is ABORTED (a step that waits is never handed out, one that runs is told to stop) and its record in the journal, `~canceled:<by>`, is the answer the script
   ## gets. One transaction with the record: if the step has a record already (it ended) nothing is done and false is returned.
   let pl = c.query(%*[["SELECT j.key || char(9) || s.image || char(9) || s.profile || char(9) || s.opts || char(9) || s.command " &
     "FROM steps s JOIN jobs j ON j.id = s.job_id WHERE s.run_id = ? AND s.ordinal = ?", runId, ordinal]])["results"][0]{"values"}
@@ -868,7 +868,7 @@ proc cancelStepByDecision*(c: var RqClient; runId: string; ordinal: int; by: str
   try:
     c.appendRow(runId, stepJournalKey(c, runId, ordinal), "job_sh", pl[0][0].getStr, "~canceled:" & by, alongside = %*[
       ["UPDATE steps SET state = ?, finished_at = ?, version = version + 1 WHERE run_id = ? AND ordinal = ? AND state IN (?, ?, ?)",
-       protoName(ssCanceled), now, runId, ordinal, protoName(ssPending), protoName(ssStarting), protoName(ssRunning)]])
+       protoName(ssAborted), now, runId, ordinal, protoName(ssPending), protoName(ssStarting), protoName(ssRunning)]])
   except RqError as e:
     stderr.writeLine "core: could not cancel step " & runId & "/" & $ordinal & ": " & e.msg
     false
@@ -898,7 +898,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     # The decision of `fail_fast` (docs/parallel.md section 6): a branch of a ci.parallel failed, the steps of the branches still running are cancelled. Each cancelled step is answered in the
     # journal at once (`~canceled:<path of the ci.parallel>`), so the answer is the same in every replay whatever the Pod does meanwhile; a step that has ended already has its record and is
     # left as it is. The decision itself is written under its key; its result is the branches that were not started, which a replay must not start. The Pods are removed by the
-    # controllers (a step that is CANCELED is not wanted, as in `cancelRun`).
+    # controllers (a step that is ABORTED is not wanted, as in `abortRun`).
     if req.key.len == 0:
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a host call without its key in the journal")))

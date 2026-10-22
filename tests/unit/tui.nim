@@ -132,10 +132,10 @@ suite "the pages":
     let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", cookie = session))
     check "href=\"/ui/runs/s1_01a15949-68a3-7db0-acd7-fb1c7c2e6f86\" title=\"s1_01a15949-68a3-7db0-acd7-fb1c7c2e6f86\">…2e6f86</a>" in r.body
     check ">s1_a</a>" in r.body
-  test "the state filter offers the states as the core spells them (CANCELED, one L)":
+  test "the state filter offers the states as the core spells them (ABORTED, which has one spelling)":
     routes["/api/v1/runs?organization=acme&limit=50"] = %*{"runs": []}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", cookie = session))
-    check "state=CANCELED\"" in r.body and "CANCELLED" notin r.body
+    check "state=ABORTED\"" in r.body and "CANCEL" notin r.body
   test "the cursor is passed to the core, and one that is not an id is dropped":
     routes["/api/v1/runs?organization=acme&limit=50&before=s1_a"] = %*{"runs": [], "next": nil}
     check handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", query = "before=s1_a", cookie = session)).status == 200

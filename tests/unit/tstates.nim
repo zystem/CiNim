@@ -38,13 +38,13 @@ suite "RUN-001 run state machine":
   test "RUN-006 cancel and infrastructure_error are possible from every non-terminal state":
     for s in RunState:
       if s.isTerminal: continue
-      check rsCanceled in runNext(s)
+      check rsAborted in runNext(s)
       check rsInfrastructureError in runNext(s)
 
-  test "PIP-013 waiting is entered only from running and leaves to running, canceled, timed_out or infrastructure_error":
+  test "PIP-013 waiting is entered only from running and leaves to running, aborted, timed_out or infrastructure_error":
     for s in RunState:
       if s != rsRunning: check rsWaiting notin runNext(s)
-    check runNext(rsWaiting) == {rsRunning, rsCanceled, rsTimedOut, rsInfrastructureError}
+    check runNext(rsWaiting) == {rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
 
   test "RUN-001 skipped is decided before execution starts; nothing returns to created":
     for s in RunState:
@@ -84,7 +84,7 @@ suite "RUN-001 step state machine":
     check stepGuard(ssStarting, ssPending) == "no Pod exists yet (gate closed before creation)"
 
   test "RUN-006 cancel is possible from pending, starting and running":
-    for s in [ssPending, ssStarting, ssRunning]: check canStep(s, ssCanceled)
+    for s in [ssPending, ssStarting, ssRunning]: check canStep(s, ssAborted)
 
   test "RUN-002 a retry is a new attempt starting at pending, not a transition out of a terminal state":
     for s in StepState:

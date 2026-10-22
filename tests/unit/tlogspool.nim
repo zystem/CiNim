@@ -11,7 +11,7 @@ proc msgs(blocks: seq[LogBlock]): seq[string] =
   for b in blocks:
     for r in records(b): result.add r["_msg"].getStr
 
-proc newB(secrets: seq[string] = @[]): Builder = newBuilder("ci-s1-run-0-1", "s1_run", 1_000_000, secrets)
+proc newB(secrets: seq[string] = @[]): Builder = newBuilder("s1-run-0-1", "s1_run", 1_000_000, secrets)
 
 suite "records and blocks":
   test "lines become jsonline records with the labels, ln and the monotonic _time":
@@ -25,7 +25,7 @@ suite "records and blocks":
     check r[1]["_msg"].getStr == "world" and r[1]["ln"].getInt == 1
     check r[1]["_time"].getInt == 1_000_001            # base + ln
     check r[1]["ts"].getInt == 5000                      # the wall clock is kept separately
-    check r[0]["job"].getStr == "ci-s1-run-0-1" and r[0]["run"].getStr == "s1_run"
+    check r[0]["job"].getStr == "s1-run-0-1" and r[0]["run"].getStr == "s1_run"
     check blocks[0].encoding == "gzip" and blocks[0].lines == 2 and blocks[0].firstLn == 0 and blocks[0].seq == 1
 
   test "empty and whitespace-only lines are left out, the rest keep a gap-free ln and the count of lines is what is stored":

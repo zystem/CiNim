@@ -43,7 +43,7 @@ suite "RUN-006 the decision of fail_fast in the core":
       let resp = decide(r, tok, @[0, 1, 2], @["d", "e"])
       check resp.body.kind == ExecutorResponseBodyKind.result and not resp.body.result.suspended
       check cast[string](resp.body.result.result) == "u:d\te"
-      for n in 0 .. 2: check state(r, n) == "CANCELED"
+      for n in 0 .. 2: check state(r, n) == "ABORTED"
       let rows = journal(r)
       check rows.len == 4
       check ("s0", "job_sh", "~canceled:m.p1") in rows and ("s2", "job_sh", "~canceled:m.p1") in rows
@@ -55,7 +55,7 @@ suite "RUN-006 the decision of fail_fast in the core":
       finish(r, 0)
       let resp = decide(r, tok, @[0, 1])
       check resp.body.kind == ExecutorResponseBodyKind.result
-      check state(r, 0) == "SUCCEEDED" and state(r, 1) == "CANCELED"
+      check state(r, 0) == "SUCCEEDED" and state(r, 1) == "ABORTED"
       let rows = journal(r)
       check ("s0", "job_sh", "0\n") in rows and ("s1", "job_sh", "~canceled:m.p1") in rows
     test "RUN-006 the same decision twice is one decision; a late report about a cancelled step changes nothing":
@@ -65,7 +65,7 @@ suite "RUN-006 the decision of fail_fast in the core":
       discard decide(r, tok, @[0, 1])
       check journal(r).len == 3
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: 0'u32, attempt: 1), state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
-      check state(r, 0) == "CANCELED"
+      check state(r, 0) == "ABORTED"
       check ("s0", "job_sh", "~canceled:m.p1") in journal(r)
     test "RUN-006 a decision needs the lease of the run and a key":
       let (r, tok) = newRunWithLease()

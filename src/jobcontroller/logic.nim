@@ -4,7 +4,7 @@
 ## the shim's state from its log), cancelling Pods core no longer wants, keeping finished Pods for a while and then removing them,
 ## and sweeping orphans out of the (dedicated) step namespace.
 import std/[json, options, strutils, tables, times, sequtils]
-import ../common/[shimstate, stepenv]
+import ../common/[shimstate, stepenv, ids]
 import backend, ctrlstate, podverdict
 
 type
@@ -51,7 +51,9 @@ func defaultConfig*(): Config =
 func podName*(runId: string; seq, attempt: int): string =
   ## run_id is shard-prefixed ("s1_<11 characters of base32>", D-66) - the underscore is not valid in a Kubernetes RFC 1123 name, so it becomes '-'
   ## (run_id is otherwise lowercase letters and digits, so this stays injective). Must equal the shim's and core's podName.
-  "ci-" & runId.replace("_", "-") & "-" & $seq & "-" & $attempt
+  ## The name of a step Pod starts with the shard's prefix and no other Pod of the platform does (`cinim-job-controller-`, `cinim-conductor-`, `cdrain-`):
+  ## that is how the controller tells a step Pod from the rest (the sweep of orphans). A Pod of the platform that gets a name must not start with `<shard>-`.
+  runId.replace("_", "-") & "-" & $seq & "-" & $attempt
 
 func drainDir*(seq, attempt: int): string =
   ## Where a step keeps what a reader Pod may have to fetch after the step's own Pod has ended (docs/artifacts.md): the manifest of its artifacts, and under `spool/` its log
@@ -176,7 +178,7 @@ proc sweep*(be: Backend; st: CtrlState; cfg: Config; now: int64): SweepResult =
   var present = initTable[string, bool]()
   for pod in listed.pods:
     present[pod.name] = true
-    if pod.name.startsWith("ci-") and not st.has(pod.name) and now - pod.createdAt >= cfg.orphanGrace.int64:
+    if pod.name.startsWith(shardId & "-") and not st.has(pod.name) and now - pod.createdAt >= cfg.orphanGrace.int64:
       if be.deletePod(pod.name, 0): result.orphans.add pod.name
   for p in st.reported():                       # a finished Pod that is already gone: nothing left to keep
     if p.name notin present: st.forget(p.name)

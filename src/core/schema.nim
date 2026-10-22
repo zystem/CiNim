@@ -154,7 +154,7 @@ const ddl = [
        profile_id TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS jobs_run_key_attempt ON jobs (run_id, key, attempt)",
   # `ordinal` is the run_journal `seq` of the `job_sh` call this step answers (StepRef.seq, common.proto);
-  # it is how the executor's replay and the job-controller's Pod name (`ci-<run>-<seq>-<attempt>`) line up.
+  # it is how the executor's replay and the job-controller's Pod name (`<run>-<seq>-<attempt>`) line up.
   """CREATE TABLE IF NOT EXISTS steps (
        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, job_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
        type TEXT NOT NULL, state TEXT NOT NULL, wait_reason TEXT, priority INTEGER NOT NULL DEFAULT 0,

@@ -76,7 +76,7 @@ proc step(run: string; seq, attempt: int; state: string; claimed: int64): StepRo
   StepRow(run: run, seq: seq, attempt: attempt, state: state, claimedAt: claimed)
 
 proc pod(run: string; seq, attempt: int; phase = "Running"): PodRef =
-  PodRef(run: run, seq: seq, attempt: attempt, name: "ci-" & run & "-" & $seq & "-" & $attempt, phase: phase)
+  PodRef(run: run, seq: seq, attempt: attempt, name: run & "-" & $seq & "-" & $attempt, phase: phase)
 
 suite "reconciliation with the cluster":
   test "everything matches: nothing to do":

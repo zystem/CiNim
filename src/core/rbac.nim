@@ -6,7 +6,7 @@
 ##          organisations), except what is the shard's own: the management of who may do what - the users, the roles and the API tokens - and the object store
 ##          (its endpoint and keys are infrastructure, as GitLab keeps them in the instance's admin area); the own password every user changes
 ##   dev    what a developer does: reads what `ro` reads, starts runs (POST /api/v1/runs, and a manual trigger of an organisation: POST .../triggers/{id}:fire), stops them
-##          (POST .../runs/{id}:cancel) and starts the failed ones again (POST .../runs/{id}:retry); nothing is deleted or changed
+##          (POST .../runs/{id}:abort) and starts the failed ones again (POST .../runs/{id}:retry); nothing is deleted or changed
 ##   ro     reads runs (state, steps, logs, artifacts), the components, the launch gate, the profile settings, the alerts, the organisations and their triggers
 ##
 ## `dev` and `ro` are allow-lists, so a route added later is closed to them until it is named; `rw` is a deny-list (`adminOnlyPath`), so a route added later is open
@@ -79,7 +79,7 @@ func developerMay(meth, path: string): bool =
   ## what a developer may do besides reading: start a run, directly or by firing a manual trigger of an organisation, stop a run, start a failed one again
   if meth != "POST": return false
   if path == runsBase or path == "/api/v1/pipelines:check": return true
-  if path.startsWith(runsBase & "/") and (path.endsWith(":cancel") or path.endsWith(":retry")): return true
+  if path.startsWith(runsBase & "/") and (path.endsWith(":abort") or path.endsWith(":retry")): return true
   path.startsWith("/api/v1/organizations/") and "/triggers/" in path and path.endsWith(":fire")
 
 func roleMay*(role, meth, path: string): bool =

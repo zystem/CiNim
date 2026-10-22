@@ -41,7 +41,7 @@ suite "RUN-009 the names of conductor Pods":
     check conductorPodName(3) == "cinim-conductor-3"
     check conductorPodNumber("cinim-conductor-3") == some(3)
     check conductorPodNumber("cinim-conductor-0").isNone
-    check conductorPodNumber("ci-s1-abc-0-1").isNone
+    check conductorPodNumber("s1-abc-0-1").isNone
     check conductorPodNumber("cinim-conductor-").isNone
 
 suite "RUN-009 which conductors the controller makes and removes":

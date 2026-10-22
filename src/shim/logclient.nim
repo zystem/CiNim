@@ -41,7 +41,7 @@ var
 
 func podName(runId: string; seq, attempt: uint32): string =
   ## must equal jobcontroller's podName() - it is the VictoriaLogs `job` label and log_streams.index_name
-  "ci-" & runId.replace("_", "-") & "-" & $seq & "-" & $attempt
+  runId.replace("_", "-") & "-" & $seq & "-" & $attempt
 
 # ------------------------------------------------------------------ sender thread
 

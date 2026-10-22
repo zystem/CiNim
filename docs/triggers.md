@@ -62,7 +62,7 @@ All calls are an administrator's: `Authorization: Bearer <admin token>`.
 ```
 POST /api/v1/organizations/acme/triggers
 {"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "group": "team/backend",
- "script": "...", "params": {"TARGET": "staging"}, "concurrency": "cancel_newest"}
+ "script": "...", "params": {"TARGET": "staging"}, "concurrency": "abort_newest"}
 ```
 
 Five fields, **UTC**: minute hour day-of-month month day-of-week. `*`, lists `1,15`, ranges `9-17`, steps `*/15` and `10-50/10`, names (`jan`, `mon`), and `@hourly @daily @weekly @monthly @yearly`. If both day fields are restricted a day matches when either does (as in Vixie cron). Core looks every 20 seconds. A core that was down fires a schedule **once** when it is back. Switching a schedule off and on again starts its clock from that moment.
@@ -73,7 +73,7 @@ A trigger, like a run, may name a repository instead of carrying a script: `"rep
 
 ```
 POST /api/v1/organizations/acme/triggers
-{"name": "main-push", "kind": "webhook", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "cancel_previous"}
+{"name": "main-push", "kind": "webhook", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "abort_previous"}
 POST /api/v1/runs   {"organization": "acme", "repository": "https://…/r.git", "commit": "v1.2", "path": ".ci/pipeline.lua", "params": {…}}      # by hand, no trigger
 POST /api/v1/pipelines:check   {"organization": "acme", "repository": "https://…/r.git", "commit": "main"}        # reads and checks it; the answer names the commit
 ```
@@ -109,8 +109,8 @@ DELETE /api/v1/organizations/acme/triggers/{id}
 What a firing does when an earlier run of the same trigger has not ended (it is in any state that is not final: created, queued, running, waiting):
 
 * `"concurrency": "parallel"` (default) starts a run for every firing at once, whatever the earlier ones are doing; when the organisation has no room for more (its `pod_limit`, RUN-004) the runs wait for room in turn, which is the queue. Jobs that must not run together - one test environment - are held back by a `lock` (see below), not by the trigger.
-* `"cancel_newest"` **cancels the new firing**: no run is started while an earlier run has not ended, and `last_result` says so (`cancelled the new firing: the previous run has not ended`; a manual `:fire` answers 409 `still_running`). A slow nightly never overlaps itself.
-* `"cancel_previous"` **cancels the earlier runs that have not ended** (`POST /api/v1/runs/{id}:cancel`, their Pods are removed) and starts the new one; `last_result` says which runs it cancelled (`started; cancelled the earlier run <id>`). The answer to a push storm: only the newest commit is built.
+* `"abort_newest"` **aborts the new firing**: no run is started while an earlier run has not ended, and `last_result` says so (`aborted the new firing: the previous run has not ended`; a manual `:fire` answers 409 `still_running`). A slow nightly never overlaps itself.
+* `"abort_previous"` **aborts the earlier runs that have not ended** (`POST /api/v1/runs/{id}:abort`, their Pods are removed) and starts the new one; `last_result` says which runs it cancelled (`started; cancelled the earlier run <id>`). The answer to a push storm: only the newest commit is built.
 
 Only the runs of the same trigger count; a run that has ended is never touched.
 
@@ -133,4 +133,4 @@ The **group** (optional: the path of one of the organisation's groups, docs/vari
 
 ## Checked on the TESTING cluster
 
-Parameters (a run with `JOBS=8` and `BRANCH` given: the step printed the given values and the default of `TARGET`; `JOBS=0` ended the run `FAILED` before any step; `PATH` as a parameter was `400`), a webhook (wrong secret, no secret and an administrator token all `404`, the right secret `201` with a parameter, `LD_PRELOAD` as a parameter `400`), a schedule (`* * * * *` started a run in the first minute; switched off afterwards), `:fire`. Not checked: `concurrency = cancel_newest` against a long run, two cores at once, a core that was down over a firing.
+Parameters (a run with `JOBS=8` and `BRANCH` given: the step printed the given values and the default of `TARGET`; `JOBS=0` ended the run `FAILED` before any step; `PATH` as a parameter was `400`), a webhook (wrong secret, no secret and an administrator token all `404`, the right secret `201` with a parameter, `LD_PRELOAD` as a parameter `400`), a schedule (`* * * * *` started a run in the first minute; switched off afterwards), `:fire`. Not checked: `concurrency = abort_newest` against a long run, two cores at once, a core that was down over a firing.

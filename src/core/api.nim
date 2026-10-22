@@ -1366,20 +1366,20 @@ proc onRequest() {.raises: [], gcsafe.} =
           offset += part.data.len
           if part.data.len == 0: break
         reply(Http200, content, ["Content-Type: application/octet-stream", "X-Artifact-Sha256: " & wanted.sha256])
-      elif meth == "POST" and rest.endsWith(":cancel"):
+      elif meth == "POST" and rest.endsWith(":abort"):
         # RUN-006: stop a run. The same people that may read it: another organisation's run is not confirmed (404), as for a read
-        let runId = rest[0 ..< rest.len - ":cancel".len]
+        let runId = rest[0 ..< rest.len - ":abort".len]
         let owner = coreRef.getRun(runId)
         if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
           problem(Http404, "not_found", "no such run")
           return
         var cc = newRq(coreRef.rqliteUrl)
-        let done = cc.cancelRun(runId, getTime().toUnix())
+        let done = cc.abortRun(runId, getTime().toUnix())
         case done.outcome
         of coNotFound: problem(Http404, "not_found", "no such run")
         of coAlreadyFinished: problem(Http409, "run_finished", "the run has ended already (" & done.state & ")")
-        of coCanceled:
-          cc.record(getTime().toUnix(), actorOf(who), "run.cancel", runId, "ok")
+        of coAborted:
+          cc.record(getTime().toUnix(), actorOf(who), "run.abort", runId, "ok")
           jsonOk(Http200, %*{"id": runId, "state": done.state})
       elif meth == "POST" and (rest.endsWith(":hold") or rest.endsWith(":release")):
         # DAT-006: a legal hold on a run - its artifacts and volume are not garbage-collected and its organisation is not deleted for good (core/holds.nim)

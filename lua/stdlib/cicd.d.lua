@@ -31,7 +31,7 @@
 
 ---@class ConcurrencySpec
 ---@field group string
----@field policy "queue"|"cancel-oldest"|"cancel-newest"
+---@field policy "queue"|"abort-oldest"|"abort-newest"
 
 ---@class PipelineSpec
 ---@field name string
@@ -201,7 +201,7 @@ function ci.fail(msg) end
 local Handle = {}
 ---@return any
 function Handle:wait() end
-function Handle:cancel() end
+function Handle:abort() end
 
 ---@class JobArtifact
 local JobArtifact = {}

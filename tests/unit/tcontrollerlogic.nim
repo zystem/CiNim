@@ -1,7 +1,8 @@
 ## The job-controller's decisions against a fake cluster (D-29): no Kubernetes, no ZeroMQ.
 import std/[unittest, json, tables, options, strutils, os, sequtils]
 import common/shimstate
-import jobcontroller/[backend, ctrlstate, logic, podverdict]
+import common/ids
+import jobcontroller/[backend, ctrlstate, logic, podverdict, conductors, drain]
 
 type Fake = ref object
   pods: Table[string, JsonNode]          ## name -> Pod JSON as the API would return it
@@ -58,7 +59,7 @@ suite "creating Pods":
   test "the command carries the shim, its flags, the step's options and, after `--`, the command":
     let r = buildRequest(cfg, StartRequest(runId: "s1_a", seq: 3, attempt: 2, image: "x", command: @["sh", "-c", "true"],
                                            logMaxBytes: 5, optsJson: """{"timeout":9}"""))
-    check r.name == "ci-s1-a-3-2" and r.logging
+    check r.name == "s1-a-3-2" and r.logging
     check r.cmd[0] == "/cicd/shim/cicd-shim"
     let dd = r.cmd.find("--")
     check r.cmd[dd + 1 .. ^1] == @["sh", "-c", "true"]
@@ -112,7 +113,7 @@ suite "the volume the steps of a run share (STO-001, STO-006)":
     var order: seq[string]
     var be = backendOf(newFake())
     be.ensureRunVolume = proc (runId, volume: string): CreateOutcome =
-      order.add "claim " & runId & (if volume.len > 0: "/" & volume else: "") & (if st.has("ci-s1-run-0-1"): " (row exists)" else: "")
+      order.add "claim " & runId & (if volume.len > 0: "/" & volume else: "") & (if st.has("s1-run-0-1"): " (row exists)" else: "")
       CreateOutcome(kind: ckOk)
     be.createPod = proc (r: PodRequest): CreateOutcome =
       order.add "pod"
@@ -141,7 +142,7 @@ suite "the volume the steps of a run share (STO-001, STO-006)":
     be.ensureRunVolume = proc (runId, volume: string): CreateOutcome =
       CreateOutcome(kind: ckQuota, reason: "Forbidden", message: "exceeded quota: persistentvolumeclaims")
     let o = startPod(be, st, volCfg, req(), 100)
-    check o.kind == ckQuota and f.creates.len == 0 and not st.has("ci-s1-run-0-1")
+    check o.kind == ckQuota and f.creates.len == 0 and not st.has("s1-run-0-1")
   test "STO-006 the volumes core names are deleted, and the ones that are gone are reported back":
     var deleted: seq[string]
     var be = backendOf(newFake())
@@ -161,19 +162,19 @@ suite "the poll round":
     check startPod(be, st, cfg, req(), 100).ok
     let r1 = pollRound(be, st, cfg, 100.0)
     check r1.transitions.len == 0 and r1.inventory.len == 1 and not r1.inventory[0].started
-    f.pods["ci-s1-run-0-1"] = running()
+    f.pods["s1-run-0-1"] = running()
     let r2 = pollRound(be, st, cfg, 101.0)
     check r2.inventory[0].started and r2.inventory[0].phase == "Running"
-    check st.get("ci-s1-run-0-1").started                       # remembered
+    check st.get("s1-run-0-1").started                       # remembered
   test "the Pod's end becomes a transition, with the shim's last state from the log":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
+    f.pods["s1-run-0-1"] = running()
     discard pollRound(be, st, cfg, 101.0)
-    f.pods["ci-s1-run-0-1"] = succeeded()
-    f.logs["ci-s1-run-0-1"] = shimLine(1, seStarted) & shimLine(2, seCommandStarted)
+    f.pods["s1-run-0-1"] = succeeded()
+    f.logs["s1-run-0-1"] = shimLine(1, seStarted) & shimLine(2, seCommandStarted)
     let r = pollRound(be, st, cfg, 102.0)
     check r.transitions.len == 1 and r.transitions[0].kind == tkSucceeded
     check parseJson(r.transitions[0].shimJson)["n"].getInt == 2
@@ -183,7 +184,7 @@ suite "the poll round":
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(0), 100)
     discard startPod(be, st, cfg, req(1), 100)
-    f.pods["ci-s1-run-1-1"] = running()
+    f.pods["s1-run-1-1"] = running()
     discard pollRound(be, st, cfg, 101.0)
     f.pods.clear()
     let r = pollRound(be, st, cfg, 102.0)
@@ -208,7 +209,7 @@ suite "the poll round":
       inc reads
       shimLine(2, seCommandStarted)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = running()
+    f.pods["s1-run-0-1"] = running()
     discard pollRound(be, st, cfg, 100.0)
     discard pollRound(be, st, cfg, 101.0)
     discard pollRound(be, st, cfg, 102.0)
@@ -221,7 +222,7 @@ suite "the poll round":
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Failed", "containerStatuses": [{"state": {"terminated":
+    f.pods["s1-run-0-1"] = %*{"status": {"phase": "Failed", "containerStatuses": [{"state": {"terminated":
       {"exitCode": 137, "reason": "OOMKilled", "startedAt": "2026-10-02T10:00:00Z"}}}]}}
     let r = pollRound(be, st, cfg, 101.0)
     check r.transitions[0].kind == tkFailed and r.transitions[0].reason == "oom_killed" and r.transitions[0].exitCode == 137
@@ -231,7 +232,7 @@ suite "the poll round":
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Failed", "containerStatuses": [{"state": {"terminated":
+    f.pods["s1-run-0-1"] = %*{"status": {"phase": "Failed", "containerStatuses": [{"state": {"terminated":
       {"exitCode": 76, "message": $(%*{"exit_code": 76, "reason": "artifacts_undelivered", "command_exit_code": 0}), "startedAt": "2026-10-02T10:00:00Z"}}}]}}
     let r = pollRound(be, st, cfg, 101.0)
     check r.transitions[0].kind == tkSucceeded and r.transitions[0].reason == "artifacts_undelivered" and not r.transitions[0].fullyRead
@@ -240,7 +241,7 @@ suite "the poll round":
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Failed", "reason": "Evicted",
+    f.pods["s1-run-0-1"] = %*{"status": {"phase": "Failed", "reason": "Evicted",
       "message": "Pod ephemeral local storage usage exceeds the total limit of containers 1Gi. ",
       "containerStatuses": [{"state": {"terminated": {"exitCode": 137, "startedAt": "2026-10-02T10:00:00Z"}}}]}}
     let r = pollRound(be, st, cfg, 101.0)
@@ -282,40 +283,40 @@ suite "what the cluster says about a Pod, and a Pod that cannot be made":
     let be = backendOf(f)
     let o = startPod(be, st, cfg, req(), 100)
     check o.kind == ckQuota and not o.ok and "exceeded quota" in o.message
-    check not st.has("ci-s1-run-0-1")                   # nothing to find 404 later: core is told, the step waits
+    check not st.has("s1-run-0-1")                   # nothing to find 404 later: core is told, the step waits
   test "a refusal for good is also not left as a row, and a transport failure is (the next poll finds out)":
     let st = openState(":memory:")
     let f = newFake()
     f.refuse = CreateOutcome(kind: ckRejected, reason: "Forbidden", message: "violates PodSecurity")
-    check startPod(backendOf(f), st, cfg, req(), 100).kind == ckRejected and not st.has("ci-s1-run-0-1")
+    check startPod(backendOf(f), st, cfg, req(), 100).kind == ckRejected and not st.has("s1-run-0-1")
     f.refuse = CreateOutcome(kind: ckTransport, reason: "NoResponse", message: "")
-    check startPod(backendOf(f), st, cfg, req(), 100).ok and st.has("ci-s1-run-0-1")
+    check startPod(backendOf(f), st, cfg, req(), 100).ok and st.has("s1-run-0-1")
   test "a Pod that waits says why: the image cannot be pulled, or no node fits":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Pending", "containerStatuses": [{"state": {"waiting":
+    f.pods["s1-run-0-1"] = %*{"status": {"phase": "Pending", "containerStatuses": [{"state": {"waiting":
       {"reason": "ImagePullBackOff", "message": "Back-off pulling image \"x:1\""}}}]}}
     var r = pollRound(be, st, cfg, 101.0)
     check r.inventory[0].podReason == "ImagePullBackOff" and "Back-off" in r.inventory[0].podMessage
-    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
+    f.pods["s1-run-0-1"] = %*{"status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False",
       "reason": "Unschedulable", "message": "0/6 nodes are available: 6 Insufficient cpu."}]}}
     r = pollRound(be, st, cfg, 102.0)
     check r.inventory[0].podReason == "Unschedulable" and "Insufficient cpu" in r.inventory[0].podMessage
-    f.pods["ci-s1-run-0-1"] = %*{"status": {"phase": "Pending", "containerStatuses": [{"state": {"waiting": {"reason": "ContainerCreating"}}}]}}
+    f.pods["s1-run-0-1"] = %*{"status": {"phase": "Pending", "containerStatuses": [{"state": {"waiting": {"reason": "ContainerCreating"}}}]}}
     check pollRound(be, st, cfg, 103.0).inventory[0].podReason == ""      # the normal wait says nothing
   test "the end of a Pod carries the diagnosis: containers, conditions, node, events":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = %*{"spec": {"nodeName": "node-3", "containers": [{"name": "step", "resources": {"limits": {"memory": "128Mi"}}}]},
+    f.pods["s1-run-0-1"] = %*{"spec": {"nodeName": "node-3", "containers": [{"name": "step", "resources": {"limits": {"memory": "128Mi"}}}]},
       "status": {"phase": "Failed", "reason": "Evicted", "message": "The node was low on resource: ephemeral-storage.", "qosClass": "Burstable",
                  "conditions": [{"type": "DisruptionTarget", "status": "True", "reason": "TerminationByKubelet", "message": "The node was low on resource"}],
                  "containerStatuses": [{"name": "step", "restartCount": 0, "imageID": "docker.io/library/busybox@sha256:abc",
                    "state": {"terminated": {"exitCode": 137, "reason": "Error", "signal": 9, "startedAt": "2026-10-02T10:00:00Z", "finishedAt": "2026-10-02T10:05:00Z"}}}]}}
-    f.events["ci-s1-run-0-1"] = @[%*{"type": "Warning", "reason": "Evicted", "message": "The node was low on resource: ephemeral-storage.", "count": 1}]
+    f.events["s1-run-0-1"] = @[%*{"type": "Warning", "reason": "Evicted", "message": "The node was low on resource: ephemeral-storage.", "count": 1}]
     let r = pollRound(be, st, cfg, 101.0)
     let d = parseJson(r.transitions[0].podDiag)
     check d["node"].getStr == "node-3" and d["qos"].getStr == "Burstable"
@@ -338,10 +339,10 @@ suite "adoption after a restart":
     block:
       let st = openState(path)
       discard startPod(be, st, cfg, req(), 100)
-      f.pods["ci-s1-run-0-1"] = running()
+      f.pods["s1-run-0-1"] = running()
       discard pollRound(be, st, cfg, 101.0)
       st.close()                                           # the controller dies here
-    f.pods["ci-s1-run-0-1"] = succeeded()
+    f.pods["s1-run-0-1"] = succeeded()
     let st2 = openState(path)                              # ... and a new one starts
     let r = pollRound(be, st2, cfg, 200.0)
     check r.transitions.len == 1 and r.transitions[0].kind == tkSucceeded
@@ -352,7 +353,7 @@ suite "adoption after a restart":
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = failed(2)
+    f.pods["s1-run-0-1"] = failed(2)
     check pollRound(be, st, cfg, 101.0).transitions.len == 1
     check pollRound(be, st, cfg, 102.0).transitions.len == 1       # core did not acknowledge (the poll failed): same again
     afterPoll(st, pollRound(be, st, cfg, 103.0).transitions, 103)
@@ -365,18 +366,18 @@ suite "cancel, retention, orphans":
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
     cancelPod(be, st, "s1_run", 0, 1, 5)
-    check f.deleted == @["ci-s1-run-0-1"] and not st.has("ci-s1-run-0-1")
+    check f.deleted == @["s1-run-0-1"] and not st.has("s1-run-0-1")
   test "a Pod whose result core has and whose log was delivered is removed at once, a failed one too":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(0), 100)
     discard startPod(be, st, cfg, req(1), 100)
-    f.pods["ci-s1-run-0-1"] = succeeded()
-    f.pods["ci-s1-run-1-1"] = failed(1)
+    f.pods["s1-run-0-1"] = succeeded()
+    f.pods["s1-run-1-1"] = failed(1)
     afterPoll(st, pollRound(be, st, cfg, 101.0).transitions, 1000)
     check sweep(be, st, cfg, 1000).expired.len == 2                 # nothing is left in them that the platform does not have
-    check f.deleted.len == 2 and not st.has("ci-s1-run-0-1") and not st.has("ci-s1-run-1-1")
+    check f.deleted.len == 2 and not st.has("s1-run-0-1") and not st.has("s1-run-1-1")
   test "a Pod core could not read (log not delivered, end unknown) is kept 14 days, a success or not, and is listed as unread":
     let st = openState(":memory:")
     let f = newFake()
@@ -384,30 +385,30 @@ suite "cancel, retention, orphans":
     discard startPod(be, st, cfg, req(0), 100)
     discard startPod(be, st, cfg, req(1), 100)
     # the end was reported, but the log was not delivered (a success) / the Pod vanished with the command started (unknown, so not a success)
-    st.markReported("ci-s1-run-0-1", ok = true, fullyRead = false, now = 1000, reason = "logs_undelivered")
-    st.markReported("ci-s1-run-1-1", ok = false, fullyRead = false, now = 2000, reason = "outcome_unknown")
-    f.pods["ci-s1-run-0-1"] = succeeded()
-    f.pods["ci-s1-run-1-1"] = failed(1)
+    st.markReported("s1-run-0-1", ok = true, fullyRead = false, now = 1000, reason = "logs_undelivered")
+    st.markReported("s1-run-1-1", ok = false, fullyRead = false, now = 2000, reason = "outcome_unknown")
+    f.pods["s1-run-0-1"] = succeeded()
+    f.pods["s1-run-1-1"] = failed(1)
     check cfg.retentionUnread == 14 * 86400
-    check st.unread().mapIt(it.name) == @["ci-s1-run-1-1", "ci-s1-run-0-1"]            # newest first
+    check st.unread().mapIt(it.name) == @["s1-run-1-1", "s1-run-0-1"]            # newest first
     check st.unread()[0].endReason == "outcome_unknown"
     check sweep(be, st, cfg, 1000 + 14 * 86400 - 1).expired.len == 0
-    check sweep(be, st, cfg, 1000 + 14 * 86400).expired == @["ci-s1-run-0-1"]
-    check sweep(be, st, cfg, 2000 + 14 * 86400).expired == @["ci-s1-run-1-1"]
+    check sweep(be, st, cfg, 1000 + 14 * 86400).expired == @["s1-run-0-1"]
+    check sweep(be, st, cfg, 2000 + 14 * 86400).expired == @["s1-run-1-1"]
     check st.unread().len == 0                                                           # a removed Pod is no longer an alert
   test "DAT-003 a Pod whose leavings a drain delivered has nothing left to show: it goes with the next sweep, and is no longer an alert":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(0), 100)
-    st.markReported("ci-s1-run-0-1", ok = true, fullyRead = false, now = 1000, reason = "artifacts_undelivered")
-    f.pods["ci-s1-run-0-1"] = succeeded()
+    st.markReported("s1-run-0-1", ok = true, fullyRead = false, now = 1000, reason = "artifacts_undelivered")
+    f.pods["s1-run-0-1"] = succeeded()
     check st.unread().len == 1
     check sweep(be, st, cfg, 1001).expired.len == 0                  # not drained yet: kept
-    st.markDrained("ci-s1-run-0-1")
+    st.markDrained("s1-run-0-1")
     check st.unread().len == 0
-    check sweep(be, st, cfg, 1001).expired == @["ci-s1-run-0-1"]
-    st.markDrained("ci-s1-run-nothing-1")                            # a name that is not tracked changes nothing
+    check sweep(be, st, cfg, 1001).expired == @["s1-run-0-1"]
+    st.markDrained("s1-run-nothing-1")                            # a name that is not tracked changes nothing
   test "the time a fully read Pod is kept can be set, to look at it":
     var c = cfg
     c.retentionRead = 300
@@ -415,35 +416,41 @@ suite "cancel, retention, orphans":
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, c, req(0), 100)
-    f.pods["ci-s1-run-0-1"] = failed(2)
+    f.pods["s1-run-0-1"] = failed(2)
     afterPoll(st, pollRound(be, st, c, 101.0).transitions, 1000)
     check sweep(be, st, c, 1299).expired.len == 0
-    check sweep(be, st, c, 1300).expired == @["ci-s1-run-0-1"]
+    check sweep(be, st, c, 1300).expired == @["s1-run-0-1"]
   test "a Pod whose end is not yet reported is never swept":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
     discard startPod(be, st, cfg, req(), 100)
-    f.pods["ci-s1-run-0-1"] = succeeded()
+    f.pods["s1-run-0-1"] = succeeded()
     check sweep(be, st, cfg, 99999).expired.len == 0 and f.deleted.len == 0
-  test "orphans: ci- Pods the controller has no record of are removed after the grace period, other Pods are left alone":
+  test "orphans: step Pods (named from the run id, `s1-...`) the controller has no record of are removed after the grace period, the platform's own and other Pods are left alone":
     let st = openState(":memory:")
     let f = newFake()
     let be = backendOf(f)
-    f.pods["ci-s1-old-0-1"] = running()
-    f.created["ci-s1-old-0-1"] = 1000
-    f.pods["ci-s1-new-0-1"] = running()
-    f.created["ci-s1-new-0-1"] = 1950                                # younger than the grace period
-    f.pods["somebody-elses-pod"] = running()
-    f.created["somebody-elses-pod"] = 10
+    f.pods["s1-old-0-1"] = running()
+    f.created["s1-old-0-1"] = 1000
+    f.pods["s1-new-0-1"] = running()
+    f.created["s1-new-0-1"] = 1950                                # younger than the grace period
+    for other in ["somebody-elses-pod", conductorPodName(1), drainPodName("s1_old", 0, 1), "cinim-job-controller-7"]:
+      f.pods[other] = running()
+      f.created[other] = 10
     let r = sweep(be, st, cfg, 2000)
-    check r.orphans == @["ci-s1-old-0-1"]
-    check "somebody-elses-pod" in f.pods and "ci-s1-new-0-1" in f.pods
+    check r.orphans == @["s1-old-0-1"]
+    check "somebody-elses-pod" in f.pods and "s1-new-0-1" in f.pods
+    check conductorPodName(1) in f.pods and drainPodName("s1_old", 0, 1) in f.pods and "cinim-job-controller-7" in f.pods
+  test "the Pods of the platform other than steps never start with the shard's prefix, which is how a step Pod is told (the name of a step Pod is its run id)":
+    check podName("s1_x", 0, 1).startsWith(shardId & "-")
+    for other in [conductorPodName(1), conductorPodName(20), drainPodName("s1_x", 0, 1), "cinim-job-controller-1"]:
+      check not other.startsWith(shardId & "-")
   test "an unreadable pod list sweeps nothing":
     let st = openState(":memory:")
     let f = newFake()
     f.listOk = false
-    f.pods["ci-s1-old-0-1"] = running()
+    f.pods["s1-old-0-1"] = running()
     check sweep(backendOf(f), st, cfg, 99999).orphans.len == 0
   test "a Pod we track is never an orphan":
     let st = openState(":memory:")

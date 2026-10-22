@@ -47,8 +47,8 @@ suite "SHD-004 the identifiers of a shard (D-66)":
     for n in 0 ..< threads:
       for id in found[n]: all.incl id
     check all.len == threads * each
-  test "SHD-004 an id is good for a Kubernetes name: lowercase letters and digits, with the underscore turned into a dash (a Pod's name)":
-    let name = "ci-" & newId().replace("_", "-") & "-4294967295-99"
+  test "SHD-004 an id is good for a Kubernetes name: lowercase letters and digits, with the underscore turned into a dash (a Pod's name, which starts with the shard's prefix)":
+    let name = newId().replace("_", "-") & "-4294967295-99"
     check name.len <= 63 and name.allIt(it in {'a' .. 'z', '0' .. '9', '-'})
   test "SHD-004 the time of an id can be read back":
     check idTimeUs(idAt(1_792_484_469_123_456'i64)) == 1_792_484_469_123_456'i64

@@ -8,7 +8,6 @@ const
   glueDir = currentSourcePath().parentDir
 
 {.passC: "-I" & luaDir.}
-{.passC: "-DLUAI_MAXCCALLS=400".}          # the nesting of ci.parallel is 200 levels (docs/parallel.md 3.2); each level is a coroutine resumed from C, so the stock 200 would end it at about 190
 {.compile: glueDir / "lua_glue.c".}
 {.compile: luaDir / "lapi.c".}
 {.compile: luaDir / "lauxlib.c".}
