@@ -102,6 +102,21 @@ proc timeText(s: string): string =
     except CatchableError: discard
   s
 
+func plainText*(line: string): string =
+  ## A line of a log without the control sequences that a tool writes for a terminal (colours, moving the cursor): `ESC [ ... final byte`. The log itself is kept as it was written.
+  var i = 0
+  while i < line.len:
+    if line[i] == '\x1b' and i + 1 < line.len and line[i + 1] == '[':
+      i += 2
+      while i < line.len and line[i] in {'0' .. '?'}: inc i          # the parameters
+      while i < line.len and line[i] in {' ' .. '/'}: inc i          # the intermediate bytes
+      if i < line.len: inc i                                          # the final byte
+    elif line[i] == '\x1b':
+      inc i                                                           # a lone escape: nothing to show
+    else:
+      result.add line[i]
+      inc i
+
 func durationText*(seconds: int64): string =
   ## "45 s", "1 min 30 s", "1 h 02 min", "1 d 01 h": two units, the first is the biggest that is not zero
   if seconds < 0: ""
@@ -329,7 +344,7 @@ proc logPage(cfg: UiConfig; api: CoreApi; token, id, stepText: string; query: Ta
   var lines: seq[LogLine]
   var n = r.body{"from"}.getInt(from0)
   for l in r.body{"lines"}.getElems:
-    lines.add LogLine(n: n, text: l.getStr)
+    lines.add LogLine(n: n, text: plainText(l.getStr))
     inc n
   let nextFrom = r.body{"next"}.getInt(n)
   let complete = r.body{"complete"}.getBool
@@ -370,7 +385,7 @@ proc runLogPage(cfg: UiConfig; api: CoreApi; token, id: string; query: Table[str
     b.earlier = n
     if n > 0: b.earlierLink = cfg.base & "/runs/" & id & "/steps/" & $st.seq & "/log?from=0"
     for l in w.body{"lines"}.getElems:
-      b.lines.add LogLine(n: n, text: l.getStr)
+      b.lines.add LogLine(n: n, text: plainText(l.getStr))
       inc n
     blocks.add b
   let later = if more and blocks.len > 0: cfg.base & "/runs/" & id & "/log?after=" & $blocks[^1].seq else: ""

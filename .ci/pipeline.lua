@@ -52,7 +52,7 @@ git -C src -c advice.detachedHead=false -c checkout.workers=0 checkout -q "$SHA"
 local REGISTRY_FLAGS = "--insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull"
 local function kaniko(component, image, tag, extra)
   return "/kaniko/executor --dockerfile=/cicd/workspace/src/tools/image/Dockerfile." .. component .. " --context=dir:///cicd/workspace/src " .. (extra or "") ..
-         " --destination=$REGISTRY/" .. image .. ":" .. tag .. " --cache=true --cache-repo=$REGISTRY/cinim-cache " .. REGISTRY_FLAGS
+         " --destination=$REGISTRY/" .. image .. ":" .. tag .. " --cache=true --cache-repo=$REGISTRY/cinim-cache --log-format=text " .. REGISTRY_FLAGS
 end
 
 -- a job (its id is the first argument, 2 characters, D-67) in a volume of its own with the source of the commit in it; its steps 1 and 2 are the mirror and the clone, the steps of `fn` are 3 on

@@ -177,6 +177,12 @@ suite "the pages":
     check "href=\"/ui/runs/s1_b/steps/1/log?from=203\"" in r.body                              # on
     check "href=\"/ui/runs/s1_b/steps/1/log?from=0\"" in r.body                                # back (200 - 200)
     check "href=\"/ui/runs/s1_b\"" in r.body
+  test "UI-001 the colours that a tool writes into its log (ESC [ 36 m ...) are not shown as text: the page shows the words":
+    routes["/api/v1/runs/s1_b/steps/2/log?from=0&limit=200"] = %*{"run_id": "s1_b", "step_seq": 2, "from": 0, "step_state": "SUCCEEDED", "complete": true, "lines_total": 2, "next": 2,
+      "lines": ["\x1b[36mINFO\x1b[0m[0072] Taking snapshot of files...", "plain \x1b[1;31mred\x1b[0m and \x1b[2K\x1b[Gmoved <b>x</b>"]}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/2/log", cookie = session))
+    check r.status == 200 and "INFO[0072] Taking snapshot of files..." in r.body and "plain red and moved &lt;b&gt;x&lt;/b&gt;" in r.body
+    check '\x1b' notin r.body and "[36m" notin r.body and "[0m" notin r.body
   test "the first window starts at line 0, has no way back, and a finished log has no way on":
     routes["/api/v1/runs/s1_b/steps/0/log?from=0&limit=200"] = %*{"run_id": "s1_b", "step_seq": 0, "from": 0, "lines": ["only line"], "next": 1, "step_state": "SUCCEEDED", "complete": true, "lines_total": 1}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/0/log", cookie = session))
