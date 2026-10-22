@@ -4,7 +4,7 @@
 # image is that of this file and cinim.nimble. It holds the real key service, hsmgate (github.com/zystem/hsmgate), built from the tag HSMGATE_REF with the Go of the project (the base is pinned
 # as the project pins it): the tests thsmgate.nim, thsmgate_tls.nim and tkeyservice.nim run against it when HSMGATE_BIN is set, which the image does (they are skipped on a machine without it).
 # A new version of hsmgate is a change of this ARG: the image is made again, and the tests say whether the core still speaks with it.
-FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS hsmgate
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS hsmgate
 ARG HSMGATE_REF=v0.3.0
 RUN git clone -q --depth 1 --branch "${HSMGATE_REF}" https://github.com/zystem/hsmgate.git /src \
  && cd /src && CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=${HSMGATE_REF}" -o /out/hsmgate ./cmd/hsmgate
