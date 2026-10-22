@@ -86,32 +86,6 @@ suite "a key on another machine (Transit)":
     check not u.ok and u.retry
     setFault(fNone)
 
-  test "D-64: the format a text was sealed in is read from the text; a text of another service has none":
-    let k = httpKek(cfg).kek
-    setSealFormat("ecies1")
-    let old = k.wrap(key(0x61), "a").wrapped
-    setSealFormat("ecies2")
-    let fresh = k.wrap(key(0x61), "a").wrapped
-    check sealFormat(old) == "ecies1" and sealFormat(fresh) == "ecies2"
-    check sealFormat("") == "" and sealFormat("vault:v1:") == "" and sealFormat("vault:v1:aGVsbG8=") == "" and sealFormat("v2.abc") == "" and sealFormat("vault:v1:!!!!") == ""
-
-  test "D-64: rewrap seals the same data key again in the service's current format, for the same context, and without a round trip of the key":
-    let k = httpKek(cfg).kek
-    setSealFormat("ecies1")
-    let dek = key(0x62)
-    let old = k.wrap(dek, "cinim/dek/v1|t1").wrapped
-    setSealFormat("ecies2")
-    let before = calls[3]
-    let r = k.rewrap(old, "cinim/dek/v1|t1")
-    check r.ok and sealFormat(r.wrapped) == "ecies2" and r.wrapped != old and calls[3] == before + 1
-    check k.unwrap(r.wrapped, "cinim/dek/v1|t1").plain == dek
-    check k.unwrap(old, "cinim/dek/v1|t1").plain == dek               # the old text still opens (both formats are read)
-    check not k.rewrap(old, "cinim/dek/v1|t2").ok and not k.rewrap(old, "cinim/dek/v1|t2").retry      # another place: refused for good
-    setFault(fLocked)
-    let l = k.rewrap(old, "cinim/dek/v1|t1")
-    check not l.ok and l.retry
-    setFault(fNone)
-
   test "another card put in: what the old one wrapped is refused for good, and the key's fingerprint differs":
     let before = httpKek(cfg)
     let w = before.kek.wrap(key(0x41), "a")

@@ -118,11 +118,5 @@ proc httpKek*(cfg: TransitConfig): tuple[ok, retry: bool, kek: KekProvider, erro
         if plain.len > 0: return (true, false, "", @(plain.toOpenArrayByte(0, plain.high)))
         return refused("the key service answered with something that is not a key")
       let f = failure(r)
-      (false, f.retry, f.error, @[]),
-    rewrap: proc (wrapped: string; aad: string): WrapResult {.gcsafe.} =
-      let r = call(c, HttpPut, path(c, "rewrap"), %*{"ciphertext": wrapped, "context": encode(aad)})
-      let text = r.body{"data"}{"ciphertext"}.getStr
-      if r.code == 200 and text.len > 0: return (true, false, "", text)
-      let f = failure(r)
-      (false, f.retry, f.error, ""))
+      (false, f.retry, f.error, @[]))
   (true, false, kek, "")
