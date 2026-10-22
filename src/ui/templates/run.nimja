@@ -12,6 +12,7 @@
 </dl>
 {% if run.params.len > 0 %}<h2>Parameters</h2><table><tbody>{% for p in run.params %}<tr><th>{{ h(p.name) }}</th><td>{{ h(p.value) }}</td></tr>{% endfor %}</tbody></table>{% endif %}
 <h2>Steps</h2>
+<p><a href="{{ h(base) }}/runs/{{ h(run.id) }}/log">The log of the whole run</a></p>
 <table><thead><tr><th>Step</th><th>Attempt</th><th>State</th><th>Exit</th><th>Ended as</th><th>Pod</th><th>Log</th></tr></thead><tbody>
 {% for s in run.steps %}<tr id="step-{{ h(s.seq) }}"><td>{{ h(s.seq) }}</td><td>{{ h(s.attempt) }}</td><td class="state-{{ h(s.state) }}">{{ h(s.state) }}</td><td>{{ h(s.exitCode) }}</td><td>{{ h(s.termination) }}</td><td>{{ h(s.pod) }}</td><td><a href="{{ h(base) }}/runs/{{ h(run.id) }}/steps/{{ h(s.seq) }}/log">log</a></td></tr>
 {% endfor %}</tbody></table>

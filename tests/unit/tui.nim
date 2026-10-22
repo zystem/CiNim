@@ -189,6 +189,58 @@ suite "the pages":
     check handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/x/log", cookie = session)).status == 404
     discard handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/1/log", query = "from=-5%20or%201", cookie = session))
     check calls[^1] == "tok-ann /api/v1/runs/s1_b/steps/1/log?from=0&limit=200"
+  test "DAT-007 the log of a run: the steps in the order of their numbers, the lines of a step together, so that a parallel step grows in its own place":
+    routes["/api/v1/runs/s1_c"] = %*{"id": "s1_c", "organization": "acme", "state": "RUNNING", "steps": [
+      {"seq": 2097154, "attempt": 1, "state": "RUNNING"}, {"seq": 1048577, "attempt": 1, "state": "SUCCEEDED"}, {"seq": 1048578, "attempt": 1, "state": "SUCCEEDED"}]}
+    routes["/api/v1/runs/s1_c/steps/1048577/log?from=0&limit=100"] = %*{"from": 0, "lines": ["job-a step-1 line"], "next": 1, "step_state": "SUCCEEDED", "complete": true, "lines_total": 1}
+    routes["/api/v1/runs/s1_c/steps/1048578/log?from=0&limit=100"] = %*{"from": 0, "lines": ["job-a step-2 line", hostile], "next": 2, "step_state": "SUCCEEDED", "complete": true, "lines_total": 2}
+    routes["/api/v1/runs/s1_c/steps/2097154/log?from=0&limit=100"] = %*{"from": 0, "lines": ["job-b line"], "next": 1, "step_state": "RUNNING", "complete": false, "lines_total": 1}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", cookie = session))
+    check r.status == 200
+    let a = r.body.find("job-a step-1 line")
+    let b = r.body.find("job-a step-2 line")
+    let c = r.body.find("job-b line")
+    check a >= 0 and a < b and b < c                               # by the number of the step, not by the order the core listed them
+    check "<script>" notin r.body and "&lt;script&gt;" in r.body
+    check "href=\"/ui/runs/s1_c/steps/1048577/log\"" in r.body and "href=\"/ui/runs/s1_c\"" in r.body
+    check calls.len == 4                                           # the run and one window of each step: no more is asked than is shown
+  test "DAT-007 a step with a long log shows its last lines and says how many earlier ones there are, with the way to them (a whole log is never loaded, DAT-007)":
+    routes["/api/v1/runs/s1_c"] = %*{"id": "s1_c", "organization": "acme", "state": "RUNNING", "steps": [{"seq": 7, "attempt": 1, "state": "RUNNING"}]}
+    var head: seq[string]
+    for i in 0 ..< 100: head.add "head-" & $i
+    var tail: seq[string]
+    for i in 150 ..< 250: tail.add "tail-" & $i
+    routes["/api/v1/runs/s1_c/steps/7/log?from=0&limit=100"] = %*{"from": 0, "lines": head, "next": 100, "step_state": "RUNNING", "complete": false, "lines_total": 250}
+    routes["/api/v1/runs/s1_c/steps/7/log?from=150&limit=100"] = %*{"from": 150, "lines": tail, "next": 250, "step_state": "RUNNING", "complete": false, "lines_total": 250}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", cookie = session))
+    check r.status == 200 and "tail-249" in r.body and "tail-150" in r.body and "head-5" notin r.body
+    check "150 earlier lines" in r.body and "href=\"/ui/runs/s1_c/steps/7/log?from=0\"" in r.body
+  test "DAT-007 a step that has no log yet is a line in its place and the others are shown; a core that refuses or does not answer is the page of that, not a half page":
+    routes["/api/v1/runs/s1_c"] = %*{"id": "s1_c", "organization": "acme", "state": "RUNNING", "steps": [{"seq": 1, "attempt": 1, "state": "SUCCEEDED"}, {"seq": 2, "attempt": 1, "state": "QUEUED"}]}
+    routes["/api/v1/runs/s1_c/steps/1/log?from=0&limit=100"] = %*{"from": 0, "lines": ["done"], "next": 1, "step_state": "SUCCEEDED", "complete": true, "lines_total": 1}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", cookie = session))
+    check r.status == 200 and "done" in r.body and "no log yet" in r.body.toLowerAscii
+    down = true
+    check handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", cookie = session)).status == 503
+    down = false
+    check handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", cookie = "cinim_ui=tok-other")).status == 303
+    check handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_nope/log", cookie = session)).status == 404
+  test "DAT-007 a run of many steps is shown in pages of steps, the next page named by the last number shown":
+    var steps = newJArray()
+    for i in 1 .. 45:
+      steps.add %*{"seq": i, "attempt": 1, "state": "SUCCEEDED"}
+      routes["/api/v1/runs/s1_c/steps/" & $i & "/log?from=0&limit=100"] = %*{"from": 0, "lines": ["line of " & $i], "next": 1, "step_state": "SUCCEEDED", "complete": true, "lines_total": 1}
+    routes["/api/v1/runs/s1_c"] = %*{"id": "s1_c", "organization": "acme", "state": "RUNNING", "steps": steps}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", cookie = session))
+    check "line of 30" in r.body and "line of 31" notin r.body and "href=\"/ui/runs/s1_c/log?after=30\"" in r.body
+    let r2 = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", query = "after=30", cookie = session))
+    check "line of 31" in r2.body and "line of 45" in r2.body and "line of 30" notin r2.body and "after=" notin r2.body.replace("log?after=30", "")
+    calls = @[]
+    discard handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", query = "after=-1%20or%201", cookie = session))
+    check calls[1] == "tok-ann /api/v1/runs/s1_c/steps/1/log?from=0&limit=100"     # what is not a number is not followed: it starts at the first step
+  test "DAT-007 the page of a run has a way to the log of the whole run":
+    routes["/api/v1/runs/s1_c"] = %*{"id": "s1_c", "organization": "acme", "state": "RUNNING", "steps": []}
+    check "href=\"/ui/runs/s1_c/log\"" in handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c", cookie = session)).body
   test "the state of the components of the shard, one row each":
     # the core answers with the array itself, not with an object around it (checked against the running core)
     routes["/api/v1/components"] = %*[{"kind": "keyservice", "id": "master-key", "state": "up", "last_seen_seconds_ago": 3.2, "since": 1792484469.5, "info": {}},
