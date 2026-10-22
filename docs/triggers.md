@@ -29,7 +29,7 @@ Start it with values:
 
 ```
 POST /api/v1/runs
-{"organization": "acme", "group": "team/backend", "script": "...", "params": {"TICKET": "CI-7", "JOBS": 8, "RELEASE": true}}
+{"organization": "acme", "group": "team/backend", "repository": "https://git.example/org/repo.git", "commit": "main", "path": ".ci/pipeline.lua", "params": {"TICKET": "CI-7", "JOBS": 8, "RELEASE": true}}
 ```
 
 What happens:
@@ -43,7 +43,7 @@ Not built: `ci.list`, `ci.map`, `ci.secret` parameters, the log header with the 
 
 ## Checking before the run exists (PIP-016)
 
-`POST /api/v1/runs` (and `POST /api/v1/pipelines:check`, which only checks) hands the script and the parameters to a conductor of the organisation, which runs the script once against a stub host and tells what it found (docs/conductors.md, "The check of a script"). What is **certain** is refused with `400` and the code and words of the failure, as a run would end - `script_error` `parameter JOBS must be at least 1`, a syntax error, a forbidden global, `step_limit`, `duplicate_id` - and no run is made.
+`POST /api/v1/runs` (and `POST /api/v1/pipelines:check`, which only checks) hands the script (read from git; `:check` may also be given a script to look at, since it runs nothing) and the parameters to a conductor of the organisation, which runs the script once against a stub host and tells what it found (docs/conductors.md, "The check of a script"). What is **certain** is refused with `400` and the code and words of the failure, as a run would end - `script_error` `parameter JOBS must be at least 1`, a syntax error, a forbidden global, `step_limit`, `duplicate_id` - and no run is made.
 
 ```
 POST /api/v1/pipelines:check   {"organization": "acme", "script": "...", "params": {"JOBS": 0}}
@@ -63,14 +63,14 @@ All calls are an administrator's: `Authorization: Bearer <admin token>`.
 ```
 POST /api/v1/organizations/acme/triggers
 {"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "group": "team/backend",
- "script": "...", "params": {"TARGET": "staging"}, "concurrency": "abort_newest"}
+ "repository": "https://git.example/org/repo.git", "ref": "main", "params": {"TARGET": "staging"}, "concurrency": "abort_newest"}
 ```
 
 Five fields, **UTC**: minute hour day-of-month month day-of-week. `*`, lists `1,15`, ranges `9-17`, steps `*/15` and `10-50/10`, names (`jan`, `mon`), and `@hourly @daily @weekly @monthly @yearly`. If both day fields are restricted a day matches when either does (as in Vixie cron). Core looks every 20 seconds. A core that was down fires a schedule **once** when it is back. Switching a schedule off and on again starts its clock from that moment.
 
-### The script in a repository (D-63)
+### The script is read from git (D-63, D-73)
 
-A trigger, like a run, may name a repository instead of carrying a script: `"repository": "https://git.example/org/repo.git"`, `"ref": "main"` (a branch, a tag or a SHA; the commit a firing runs when the call names none) and `"path": ".ci/pipeline.lua"` (the default). At every firing a conductor of the organisation reads that one file at that commit (`git fetch --depth 1`, then the one blob; https and http only, no credentials, so a public repository or one the cluster can reach without a login), checks it like any script, and the run keeps the text, the repository, the SHA of the commit and the path (PIP-001, `GET /api/v1/runs/{id}` shows `source`). The script sees them as `run.source.repository`, `run.source.commit`, `run.source.path` (empty strings for a script that came in the request). A change of the pipeline is a commit; a run that was made keeps the script it was made with. The conductors reach the repository where the namespace's NetworkPolicy lets them: `conductor.internet` (the public internet on ports 80 and 443, the private ranges closed) and `conductor.egress` (a git server of the cluster or the LAN) in the chart. A repository that cannot be read starts no run: a webhook answers 502 `fetch_failed`, 400 `script_missing` (no such file at that commit) or `script_too_large` (over 1 MiB), 409 `no_conductor`, 429 `busy` (too many readings at once), and `last_result` of the trigger says why.
+A script comes from git and from nowhere else: a run or a trigger that carries one in its body is refused (`script_not_accepted` for a run, "a script is read from git" for a trigger), so that every run has a history in git. A trigger, like a run, names a repository: `"repository": "https://git.example/org/repo.git"`, `"ref": "main"` (a branch, a tag or a SHA; the commit a firing runs when the call names none) and `"path": ".ci/pipeline.lua"` (the default). At every firing a conductor of the organisation reads that one file at that commit (`git fetch --depth 1`, then the one blob; https and http only, no credentials, so a public repository or one the cluster can reach without a login), checks it like any script, and the run keeps the text, the repository, the SHA of the commit and the path (PIP-001, `GET /api/v1/runs/{id}` shows `source`). The script sees them as `run.source.repository`, `run.source.commit`, `run.source.path` (empty strings for a script that came in the request). A change of the pipeline is a commit; a run that was made keeps the script it was made with. The conductors reach the repository where the namespace's NetworkPolicy lets them: `conductor.internet` (the public internet on ports 80 and 443, the private ranges closed) and `conductor.egress` (a git server of the cluster or the LAN) in the chart. A repository that cannot be read starts no run: a webhook answers 502 `fetch_failed`, 400 `script_missing` (no such file at that commit) or `script_too_large` (over 1 MiB), 409 `no_conductor`, 429 `busy` (too many readings at once), and `last_result` of the trigger says why.
 
 ```
 POST /api/v1/organizations/acme/triggers
@@ -83,7 +83,7 @@ POST /api/v1/pipelines:check   {"organization": "acme", "repository": "https://�
 
 ```
 POST /api/v1/organizations/acme/triggers
-{"name": "on-push", "kind": "webhook", "group": "team/backend", "script": "..."}
+{"name": "on-push", "kind": "webhook", "group": "team/backend", "repository": "https://git.example/org/repo.git", "ref": "main"}
 → 201 {"id": "s1_…", "hook": "/api/v1/hooks/s1_…", "secret": "<shown once>", …}
 
 POST /api/v1/hooks/s1_…
@@ -130,7 +130,7 @@ The jobs of an organisation with the same lock run **one at a time, in turn** (f
 
 ### What a trigger stores
 
-The **group** (optional: the path of one of the organisation's groups, docs/variables.md; none is the organisation itself), the **script** and the parameters (until pipelines are read from repositories). The script is up to 256 KiB. A trigger of an organisation that is switched off starts nothing; deleting the organisation deletes its triggers.
+The **group** (optional: the path of one of the organisation's groups, docs/variables.md; none is the organisation itself), the **repository**, the ref and the path of the script, and the parameters (the script itself is read at every firing, D-73). A trigger of an organisation that is switched off starts nothing; deleting the organisation deletes its triggers.
 
 ## Checked on the TESTING cluster
 

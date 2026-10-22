@@ -76,16 +76,15 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
   if result.spec.concurrency notin ["parallel", "abort_newest", "abort_previous"]: return ("concurrency is parallel, abort_newest or abort_previous", result.spec)
   result.spec.groupPath = normalPath(result.spec.groupPath)
   if result.spec.groupPath.len > 400: return ("group is too long", result.spec)
-  if result.spec.repository.len > 0:
-    # D-63: the script is read from the repository at every firing
-    if result.spec.script.len > 0: return ("give the script or the repository it is read from, not both", result.spec)
+  # D-63, D-73: the script is read from the repository at every firing, and from nowhere else: a script in the definition of a trigger is refused
+  if j.hasKey("script"): return ("a script is read from git: give repository (and ref and path), a script in the trigger is not taken", result.spec)
+  if result.spec.repository.len == 0:
+    if result.spec.ref0.len > 0 or result.spec.scriptPath.len > 0: return ("ref and path belong to a trigger with a repository", result.spec)
+    return ("repository is required: the script is read from git", result.spec)
+  block:
     if not validRepository(result.spec.repository): return ("repository must be an https:// or http:// URL", result.spec)
     if result.spec.ref0.len > 0 and not validRef(result.spec.ref0): return ("ref is a branch or a tag name (or a SHA)", result.spec)
     if result.spec.scriptPath.len > 0 and not validPath(result.spec.scriptPath): return ("path is a relative path inside the repository", result.spec)
-  else:
-    if result.spec.ref0.len > 0 or result.spec.scriptPath.len > 0: return ("ref and path belong to a trigger with a repository", result.spec)
-    if result.spec.script.len == 0: return ("script (or repository) is required", result.spec)
-    if result.spec.script.len > maxScriptBytes: return ("script is longer than " & $maxScriptBytes & " bytes", result.spec)
   if result.spec.kind == "schedule":
     let c = parseCron(result.spec.schedule)
     if not c.ok: return ("schedule: " & c.error, result.spec)

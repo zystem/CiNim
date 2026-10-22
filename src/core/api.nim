@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
 import ../common/scriptsource
-import audit, joblocks, orgvars, pwcheck, runlist, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -1212,23 +1212,16 @@ proc onRequest() {.raises: [], gcsafe.} =
       let meth = getMethod()
       if meth == "POST" and rest == "":
         let j = try: parseJson(getBody()) except JsonParsingError: nil
-        if j == nil or j.kind != JObject or not (j.hasKey("script") or j.hasKey("repository")):
-          problem(Http400, "invalid_request", "script, or repository (with commit and path), is required")
+        let wanted = checkRunRequest(j)
+        if wanted.code.len > 0:
+          problem(Http400, wanted.code, wanted.message)         # D-73: a script is read from git only; one in the request is refused
           return
-        if j.hasKey("script") and j.hasKey("repository"):
-          problem(Http400, "invalid_request", "give the script or the repository it is read from, not both")
+        # D-63: the script is read from a repository by a conductor of the organisation (below)
+        let src = sourceOf(j)
+        if not src.ok:
+          problem(Http400, "invalid_source", src.error)
           return
-        if j.hasKey("script") and j["script"].kind != JString:
-          problem(Http400, "invalid_request", "script must be text")
-          return
-        var fromRepo = Source()
-        if j.hasKey("repository"):
-          # D-63: the script is read from a repository by a conductor of the organisation (below)
-          let src = sourceOf(j)
-          if not src.ok:
-            problem(Http400, "invalid_source", src.error)
-            return
-          fromRepo = src.source
+        let fromRepo = src.source
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
         if not who.acrossOrgs and (not j.hasKey("organization") or j["organization"].getStr != who.org):
@@ -1277,9 +1270,9 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # PIP-016: a conductor of the organisation tries the script and the parameters first, if there is one to ask; a certain finding is the author's to fix, anything else the run decides
         var checked = false
-        var script = j{"script"}.getStr
+        var script = ""
         var source = Source()
-        if fromRepo.repository.len > 0:
+        block fromGit:
           if orgSlug.len == 0:
             problem(Http400, "invalid_request", "a script read from a repository belongs to an organisation: give organization")
             return
@@ -1294,12 +1287,6 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           script = ans.script
           source = Source(repository: fromRepo.repository, commit: ans.commit, path: (if fromRepo.path.len == 0: defaultPath else: fromRepo.path))
-        elif orgSlug.len > 0:
-          let chk = checkScript(namespaceName(orgPrefix, orgShard, orgSlug), script, given.pairs, currentApiVersion)
-          checked = chk.ran
-          if chk.problemOf.len > 0:
-            problem(Http400, chk.code, chk.message)
-            return
         let id = coreRef.createRun(script, tenant, profile, given.pairs, groupId = groupId, source = source)
         var made = %*{"id": id, "organization": orgSlug, "state": "RUNNING", "checked": checked}
         if source.repository.len > 0: made["source"] = %*{"repository": source.repository, "commit": source.commit, "path": source.path}

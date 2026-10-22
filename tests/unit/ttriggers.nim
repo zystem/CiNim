@@ -3,7 +3,7 @@ import std/[unittest, json, strutils]
 import core/triggers
 
 proc spec(extra: JsonNode = nil): JsonNode =
-  result = %*{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "script": "return ci.pipeline({main=function() end})"}
+  result = %*{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "repository": "https://example.test/org/repo.git"}
   if extra != nil:
     for k, v in extra: result[k] = v
 
@@ -37,8 +37,7 @@ suite "TRG-002 trigger definitions":
     check parseTriggerSpec(spec(%*{"group": "/team//backend/"})).spec.groupPath == "team/backend"         # the group is named by its path; the API looks it up
     check parseTriggerSpec(spec()).spec.groupPath == ""                                                    # none: the organisation itself
     check parseTriggerSpec(spec(%*{"group": 5})).error.contains("string")
-    check parseTriggerSpec(spec(%*{"script": ""})).error.contains("script")
-    check parseTriggerSpec(spec(%*{"script": "x".repeat(maxScriptBytes + 1)})).error.contains("longer")
+    check parseTriggerSpec(spec(%*{"repository": ""})).error.contains("repository")
     check parseTriggerSpec(spec(%*{"enabled": "yes"})).error.contains("boolean")
     check parseTriggerSpec(spec(%*{"name": 5})).error.contains("string")
     check parseTriggerSpec(newJArray()).error.len > 0
@@ -62,16 +61,22 @@ suite "D-63 a trigger whose script is in a repository":
     result = %*{"name": "main-push", "kind": "webhook", "repository": "https://example.test/org/repo.git", "ref": "main"}
     if extra != nil:
       for k, v in extra: result[k] = v
-  test "D-63 a repository takes the place of the script; the ref and the path are optional":
+  test "D-63 the repository is what a trigger has; the ref and the path are optional":
     let r = parseTriggerSpec(repoSpec())
     check r.error == "" and r.spec.repository == "https://example.test/org/repo.git" and r.spec.ref0 == "main" and r.spec.script == ""
     check parseTriggerSpec(repoSpec(%*{"path": "ci/p.lua"})).spec.scriptPath == "ci/p.lua"
     check parseTriggerSpec(repoSpec(%*{"ref": ""})).error == ""
-  test "D-63 the script or the repository, not both and not neither; ref and path belong to a repository":
-    check parseTriggerSpec(repoSpec(%*{"script": "return 1"})).error.contains("not both")
-    check parseTriggerSpec(spec(%*{"script": ""})).error.contains("script")
-    check parseTriggerSpec(spec(%*{"ref": "main"})).error.contains("repository")
-    check parseTriggerSpec(spec(%*{"path": "x.lua"})).error.contains("repository")
+  test "D-73 a script is read from git only: a trigger with a script is refused, with or without a repository, and a trigger without a repository too":
+    for body in [repoSpec(%*{"script": "return 1"}), spec(%*{"script": "return 1"}), spec(%*{"script": ""})]:
+      let r = parseTriggerSpec(body)
+      check r.error.contains("script") and r.error.contains("git")
+    var none = spec()
+    none.delete("repository")
+    let r = parseTriggerSpec(none)
+    check r.error.contains("repository") and r.error.contains("git")
+    var refOnly = spec(%*{"ref": "main"})
+    refOnly.delete("repository")
+    check parseTriggerSpec(refOnly).error.contains("repository")
   test "D-63 only https and http repositories, names git cannot take for an option, and paths inside the repository":
     for bad in ["ssh://git@example.test/r.git", "file:///etc", "git://example.test/r", "https://exa mple.test/r", "https://"]:
       check parseTriggerSpec(repoSpec(%*{"repository": bad})).error.contains("repository")
