@@ -22,7 +22,7 @@ type SweepReport* = object
   expired*, abandoned*, orphans*, failed*: int
 
 func finalList(): string =
-  for i, s in [rsSucceeded, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]:
+  for i, s in [rsOk, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]:
     result.add (if i == 0: "'" else: ",'") & protoName(s) & "'"
 
 proc retentionFromEnv*(): int64 =

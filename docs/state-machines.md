@@ -24,7 +24,7 @@ stateDiagram-v2
   rsQueued --> rsTimedOut
   rsQueued --> rsInfrastructureError
   rsRunning --> rsWaiting
-  rsRunning --> rsSucceeded
+  rsRunning --> rsOk
   rsRunning --> rsFailed
   rsRunning --> rsAborted
   rsRunning --> rsTimedOut
@@ -33,7 +33,7 @@ stateDiagram-v2
   rsWaiting --> rsAborted
   rsWaiting --> rsTimedOut
   rsWaiting --> rsInfrastructureError
-  rsSucceeded --> [*]
+  rsOk --> [*]
   rsFailed --> [*]
   rsAborted --> [*]
   rsSkipped --> [*]
@@ -59,12 +59,12 @@ stateDiagram-v2
   ssStarting --> ssAborted
   ssStarting --> ssTimedOut
   ssStarting --> ssLost
-  ssRunning --> ssSucceeded
+  ssRunning --> ssOk
   ssRunning --> ssFailed
   ssRunning --> ssAborted
   ssRunning --> ssTimedOut
   ssRunning --> ssLost
-  ssSucceeded --> [*]
+  ssOk --> [*]
   ssFailed --> [*]
   ssAborted --> [*]
   ssTimedOut --> [*]

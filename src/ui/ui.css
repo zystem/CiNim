@@ -14,7 +14,7 @@ pre.log { overflow: auto; padding: .6rem; border: 1px solid var(--line); white-s
 pre.log a.n { min-width: 10ch; text-align: left; text-decoration: none; }
 pre.log .note { color: var(--muted); }
 pre.log .n { color: var(--muted); user-select: none; display: inline-block; min-width: 4ch; text-align: right; margin-right: .6ch; }
-.state-SUCCEEDED, .state-up, .state-active { color: var(--ok); font-weight: 600; }
+.state-OK, .state-up, .state-active { color: var(--ok); font-weight: 600; }
 .state-FAILED, .state-down, .state-disabled, .error { color: var(--bad); }
 .state-RUNNING, .state-PENDING { color: var(--warn); }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; }

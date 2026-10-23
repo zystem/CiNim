@@ -34,7 +34,7 @@ suite "D-77 the log of a run":
       check "sort by (step desc, attempt desc, ln desc)" in askedFor() and "limit 3" in askedFor() and "run:" & runId in askedFor()
       check j["lines"][0]["job_id"].getStr == "14" and j["lines"][0]["step_id"].getStr == "0003" and j["lines"][0]["step"].getInt == 5
     test "the tail of a finished run whose log fits has no way earlier and none on":
-      setState("SUCCEEDED")
+      setState("OK")
       setBody(rec(5, 1, 0, "x") & rec(6, 1, 0, "z"))
       let j = co.getRunLog(runId, false, RunCursor(), true, 10)
       check j.texts == @["x", "z"] and not j.hasKey("earlier") and not j.hasKey("later")

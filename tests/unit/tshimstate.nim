@@ -70,17 +70,17 @@ suite "mapping to the step state machine (states.nim)":
     check stepStateOf(st(5, seCommandExited, cmdExit = some 0)) == ssRunning       # not final until the verdict: the log may be in flight
     check stepStateOf(st(7, seLogsDelivered, cmdExit = some 0)) == ssRunning
   test "only done gives a final state, by the outcome":
-    check stepStateOf(st(8, seDone, some 0, "ok", some 0)) == ssSucceeded
+    check stepStateOf(st(8, seDone, some 0, "ok", some 0)) == ssOk
     check stepStateOf(st(8, seDone, some 3, "failed", some 3)) == ssFailed
     check stepStateOf(st(8, seDone, some 143, "timeout", some 124)) == ssTimedOut
     check stepStateOf(st(8, seDone, some 143, "terminated", some 143)) == ssLost          # cut off from outside: outcome unknown
     check stepStateOf(st(8, seDone, none(int), "env_rejected", some 70)) == ssFailed
   test "logs_undelivered keeps the command's own result":
-    check stepStateOf(st(8, seDone, some 0, "logs_undelivered", some 72)) == ssSucceeded
+    check stepStateOf(st(8, seDone, some 0, "logs_undelivered", some 72)) == ssOk
     check stepStateOf(st(8, seDone, some 2, "logs_undelivered", some 72)) == ssFailed
   test "every mapped transition is a legal edge of the step state machine":
     check canStep(ssStarting, ssRunning)
-    for fin in [ssSucceeded, ssFailed, ssTimedOut, ssLost]: check canStep(ssRunning, fin)
+    for fin in [ssOk, ssFailed, ssTimedOut, ssLost]: check canStep(ssRunning, fin)
     check canStep(ssStarting, ssFailed) and canStep(ssStarting, ssLost)       # env_rejected / lost before the command ran
 
 suite "wire form and merge":

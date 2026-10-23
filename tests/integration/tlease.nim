@@ -43,7 +43,7 @@ suite "RUN-008 the lease of a run":
       check attemptOf(r) == 1 and untilOf(r) > getTime().toUnix()
     test "a run that is not RUNNING cannot be leased":
       let r = co.createRun("return 1")
-      discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", r]])
+      discard c.execute(%*[["UPDATE runs SET state = 'OK' WHERE id = ?", r]])
       check c.takeRunLease(master, r, "exec-a") == ""
     test "the holder's calls are answered; a made-up token and the token of another run are refused":
       let r = co.createRun("return 1")
@@ -66,7 +66,7 @@ suite "RUN-008 the lease of a run":
       check untilOf(r) == 0
       check params(r, tok).refused                         # given back
       check not leasable(r)                    # a step is in flight: not offered again until it is done
-      discard c.execute(%*[["UPDATE steps SET state = 'SUCCEEDED' WHERE run_id = ?", r]])
+      discard c.execute(%*[["UPDATE steps SET state = 'OK' WHERE run_id = ?", r]])
       check leasable(r)                       # the step is done: the next executor may take it
       let b = c.takeRunLease(master, r, "exec-b")
       check b.startsWith("2.")
@@ -100,10 +100,10 @@ suite "RUN-008 the lease of a run":
       let r = co.createRun("return 1")
       let a = c.takeRunLease(master, r, "exec-a")
       let fin = proc (token: string): ExecutorResponse =
-        handleFinish(c, FinishRun(run_id: r, state: RUN_STATE_SUCCEEDED, lease_token: token), master)
+        handleFinish(c, FinishRun(run_id: r, state: RUN_STATE_OK, lease_token: token), master)
       check fin("").refused
       check fin("1." & "0".repeat(64)).refused
       check c.query(%*[["SELECT state FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "RUNNING"
       check fin(a).answered
-      check c.query(%*[["SELECT state FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "SUCCEEDED"
+      check c.query(%*[["SELECT state FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == "OK"
       check untilOf(r) == 0

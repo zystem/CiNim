@@ -34,7 +34,7 @@ suite "DAT-004 the answer of a cache restore step":
                         reason: "ok", exitCode: some(0), cache: restored), 1000)
     proc ends(r: string; shim: string; exit = 0) =
       discard handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-cr-" & sfx, namespace: ns, free_pod_slots: 0,
-        transitions: @[PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 1), state: (if exit == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED), exit_code: int32(exit),
+        transitions: @[PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 1), state: (if exit == 0: STEP_STATE_OK else: STEP_STATE_FAILED), exit_code: int32(exit),
                                      termination_reason: "ok", shim_state_json: shim)]), push = false)
     proc journalled(r: string): string =
       let v = c.query(%*[["SELECT result FROM run_journal WHERE run_id = ? AND kind = 'job_sh'", r]])["results"][0]{"values"}
@@ -94,7 +94,7 @@ suite "STO-003 the outputs of a step in its answer":
                         reason: "ok", exitCode: some(exit), outputs: outputs), 1000)
     proc ends(r, shim: string; exit = 0) =
       discard handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-so-" & sfx, namespace: ns, free_pod_slots: 0,
-        transitions: @[PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 1), state: (if exit == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED), exit_code: int32(exit),
+        transitions: @[PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 1), state: (if exit == 0: STEP_STATE_OK else: STEP_STATE_FAILED), exit_code: int32(exit),
                                      termination_reason: "ok", shim_state_json: shim)]), push = false)
     proc journalled(r: string): string =
       let v = c.query(%*[["SELECT result FROM run_journal WHERE run_id = ? AND kind = 'job_sh'", r]])["results"][0]{"values"}

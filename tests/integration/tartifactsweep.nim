@@ -33,7 +33,7 @@ suite "DAT-006 the sweep of the artifacts":
     let day = 86400'i64
     let now = getTime().toUnix()
     proc newStore(): MemStore = MemStore(objects: initTable[string, string](), uploads: initTable[string, string]())
-    proc newRun(state = "SUCCEEDED"): string =
+    proc newRun(state = "OK"): string =
       let r = co.createRun("return 1", "t1", defaultProfile)
       discard c.execute(%*[["UPDATE runs SET state = ? WHERE id = ?", state, r]])
       r
@@ -121,7 +121,7 @@ suite "DAT-006 the sweep of the artifacts":
       let r7 = co.createRun("return 1", org7, p7)
       let r90 = co.createRun("return 1", org90, p90)
       let rDefault = newRun()
-      for r in [r7, r90]: discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", r]])
+      for r in [r7, r90]: discard c.execute(%*[["UPDATE runs SET state = 'OK' WHERE id = ?", r]])
       let a7 = be.add(r7, "a.txt", "stored", 10 * day)             # 10 days old: past 7, within 90 and within the shard's 30
       let a90 = be.add(r90, "a.txt", "stored", 40 * day)           # 40 days old: past the shard's 30, within 90
       let aDef = be.add(rDefault, "a.txt", "stored", 40 * day)     # 40 days old, no setting: the shard's 30
@@ -135,7 +135,7 @@ suite "DAT-006 the sweep of the artifacts":
       s.artifactRetentionDays = 5
       co.setProfileSettings(s, p)
       let mine = co.createRun("return 1", org, p)
-      discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", mine]])
+      discard c.execute(%*[["UPDATE runs SET state = 'OK' WHERE id = ?", mine]])
       let other = newRun()
       let a = be.add(mine, "a.txt", "stored", 6 * day)
       let b = be.add(other, "a.txt", "stored", 4000 * day)

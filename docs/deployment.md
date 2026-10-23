@@ -243,7 +243,7 @@ repository (the conductor reads `.ci/pipeline.lua` at the `ref` at every firing)
 
 ```bash
 curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "self-build-nightly", "kind": "schedule", "schedule": "0 2 * * *",
-  "concurrency": "abort_newest", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
+  "concurrency": "abort_newest", "project": "cinim", "ref": "main", "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}'
 ```
 
 With no `TAG` the images are tagged `<date>-<commit>` (`20261009-eefb939`): the clone step writes `IMAGE_TAG` to `$CICD_ENV` and the later steps of the run read it, so a night's images are not the last night's.
@@ -262,7 +262,7 @@ A **webhook trigger** with a repository (D-63) is the push: the git server calls
 
 ```bash
 curl -X POST .../api/v1/organizations/<slug>/triggers -H "Authorization: Bearer $ADMIN" -d '{"name": "main-push", "kind": "webhook", "concurrency": "abort_previous",
-  "repository": "https://github.com/zystem/CiNim.git", "ref": "main",
+  "project": "cinim", "ref": "main",
   "params": {"REGISTRY": "<host:port the Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>", "DEPLOY": true}}'
 curl -X POST .../api/v1/hooks/<id> -H "Authorization: Bearer <the secret>" -d '{"commit": "<sha>"}'
 ```

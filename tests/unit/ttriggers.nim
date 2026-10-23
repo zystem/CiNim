@@ -3,18 +3,29 @@ import std/[unittest, json, strutils]
 import core/triggers
 
 proc spec(extra: JsonNode = nil): JsonNode =
-  result = %*{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "repository": "https://example.test/org/repo.git"}
+  result = %*{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "project": "ci/repo"}
   if extra != nil:
     for k, v in extra: result[k] = v
 
 suite "TRG-002 trigger definitions":
-  test "D-76 a poll trigger names a repository and a ref, and has no schedule: the core looks at the ref once a minute":
-    let r = parseTriggerSpec(%*{"name": "main-poll", "kind": "poll", "repository": "https://example.test/org/repo.git", "ref": "main", "concurrency": "abort_previous"})
-    check r.error == "" and r.spec.kind == "poll" and r.spec.ref0 == "main" and r.spec.schedule == ""
-    check parseTriggerSpec(%*{"name": "p", "kind": "poll", "repository": "https://example.test/org/repo.git"}).error == ""        # no ref: the head of the repository
-    check "schedule" in parseTriggerSpec(%*{"name": "p", "kind": "poll", "repository": "https://example.test/org/repo.git", "schedule": "* * * * *"}).error
-    check "repository" in parseTriggerSpec(%*{"name": "p", "kind": "poll"}).error
-    check "ref" in parseTriggerSpec(%*{"name": "p", "kind": "poll", "repository": "https://example.test/org/repo.git", "ref": "--x"}).error
+  test "D-76 a poll trigger names a project and a ref, and has no schedule: the core looks at the ref once a minute":
+    let r = parseTriggerSpec(%*{"name": "main-poll", "kind": "poll", "project": "ci/cinim", "ref": "main", "concurrency": "abort_previous"})
+    check r.error == "" and r.spec.kind == "poll" and r.spec.ref0 == "main" and r.spec.schedule == "" and r.spec.groupPath == "ci/cinim"
+    check parseTriggerSpec(%*{"name": "p", "kind": "poll", "project": "cinim"}).error == ""        # no ref: the head of the repository
+    check "schedule" in parseTriggerSpec(%*{"name": "p", "kind": "poll", "project": "cinim", "schedule": "* * * * *"}).error
+    check "project" in parseTriggerSpec(%*{"name": "p", "kind": "poll"}).error
+    check "ref" in parseTriggerSpec(%*{"name": "p", "kind": "poll", "project": "cinim", "ref": "--x"}).error
+  test "D-68 a trigger is of a project (the whole path), and the repository and the old word for the project are refused, with the way to do it":
+    check parseTriggerSpec(spec(%*{"project": "/ci//repo/"})).spec.groupPath == "ci/repo"                         # the project is named by its path; the API looks it up
+    check parseTriggerSpec(spec(%*{"project": 5})).error.contains("string")
+    for bad in ["", "/", "  ", "Ci/Repo", "ci/../x", "ci/with space"]:
+      check parseTriggerSpec(spec(%*{"project": bad})).error.contains("project")
+    let withRepo = parseTriggerSpec(spec(%*{"repository": "https://example.test/org/repo.git"}))
+    check withRepo.error.contains("repository") and withRepo.error.contains("project")
+    check parseTriggerSpec(spec(%*{"group": "team"})).error.contains("not group")
+    var none = spec()
+    none.delete("project")
+    check parseTriggerSpec(none).error.contains("project")
   test "TRG-002 a schedule trigger with parameters is accepted":
     let r = parseTriggerSpec(spec(%*{"params": {"BRANCH": "main", "JOBS": 4}, "concurrency": "abort_newest"}))
     check r.error == ""
@@ -41,10 +52,6 @@ suite "TRG-002 trigger definitions":
       let r = parseTriggerSpec(spec(%*{"concurrency": ok}))
       check r.error == "" and r.spec.concurrency == ok
     check parseTriggerSpec(spec(%*{"concurrency": "queue"})).error == "concurrency is parallel, abort_newest or abort_previous"
-    check parseTriggerSpec(spec(%*{"group": "/team//backend/"})).spec.groupPath == "team/backend"         # the group is named by its path; the API looks it up
-    check parseTriggerSpec(spec()).spec.groupPath == ""                                                    # none: the organisation itself
-    check parseTriggerSpec(spec(%*{"group": 5})).error.contains("string")
-    check parseTriggerSpec(spec(%*{"repository": ""})).error.contains("repository")
     check parseTriggerSpec(spec(%*{"enabled": "yes"})).error.contains("boolean")
     check parseTriggerSpec(spec(%*{"name": 5})).error.contains("string")
     check parseTriggerSpec(newJArray()).error.len > 0
@@ -63,39 +70,37 @@ suite "TRG-002 trigger definitions":
     check not v.hasKey("schedule")
     check view(TriggerRow(kind: "schedule", schedule: "@daily"))["schedule"].getStr == "@daily"
 
-suite "D-63 a trigger whose script is in a repository":
+suite "D-63, D-68 a trigger whose script is in the repository of its project":
   proc repoSpec(extra: JsonNode = nil): JsonNode =
-    result = %*{"name": "main-push", "kind": "webhook", "repository": "https://example.test/org/repo.git", "ref": "main"}
+    result = %*{"name": "main-push", "kind": "webhook", "project": "ci/cinim", "ref": "main"}
     if extra != nil:
       for k, v in extra: result[k] = v
-  test "D-63 the repository is what a trigger has; the ref and the path are optional":
+  test "D-68 the project is what a trigger has; the ref and the path are optional":
     let r = parseTriggerSpec(repoSpec())
-    check r.error == "" and r.spec.repository == "https://example.test/org/repo.git" and r.spec.ref0 == "main" and r.spec.script == ""
+    check r.error == "" and r.spec.groupPath == "ci/cinim" and r.spec.ref0 == "main" and r.spec.script == ""
     check parseTriggerSpec(repoSpec(%*{"path": "ci/p.lua"})).spec.scriptPath == "ci/p.lua"
     check parseTriggerSpec(repoSpec(%*{"ref": ""})).error == ""
-  test "D-73 a script is read from git only: a trigger with a script is refused, with or without a repository, and a trigger without a repository too":
+  test "D-73 a script is read from git only: a trigger with a script is refused, and a trigger without a project too":
     for body in [repoSpec(%*{"script": "return 1"}), spec(%*{"script": "return 1"}), spec(%*{"script": ""})]:
       let r = parseTriggerSpec(body)
       check r.error.contains("script") and r.error.contains("git")
     var none = spec()
-    none.delete("repository")
+    none.delete("project")
     let r = parseTriggerSpec(none)
-    check r.error.contains("repository") and r.error.contains("git")
+    check r.error.contains("project")
     var refOnly = spec(%*{"ref": "main"})
-    refOnly.delete("repository")
-    check parseTriggerSpec(refOnly).error.contains("repository")
-  test "D-63 only https and http repositories, names git cannot take for an option, and paths inside the repository":
-    for bad in ["ssh://git@example.test/r.git", "file:///etc", "git://example.test/r", "https://exa mple.test/r", "https://"]:
-      check parseTriggerSpec(repoSpec(%*{"repository": bad})).error.contains("repository")
+    refOnly.delete("project")
+    check parseTriggerSpec(refOnly).error.contains("project")
+  test "D-63 names git cannot take for an option, and paths inside the repository":
     check parseTriggerSpec(repoSpec(%*{"ref": "--upload-pack=x"})).error.contains("ref")
     check parseTriggerSpec(repoSpec(%*{"ref": "a..b"})).error.contains("ref")
     check parseTriggerSpec(repoSpec(%*{"path": "../x"})).error.contains("path")
     check parseTriggerSpec(repoSpec(%*{"path": "/etc/x"})).error.contains("path")
-    check parseTriggerSpec(repoSpec(%*{"repository": 5})).error.contains("string")
   test "D-63 the view shows where the script is read from":
     let t = TriggerRow(id: "s1_x", slug: "acme", name: "hook", kind: "webhook", repository: "https://example.test/r.git", ref0: "main", concurrency: "parallel", enabled: true)
     let v = view(t)
     check v["source"]["repository"].getStr == "https://example.test/r.git" and v["source"]["ref"].getStr == "main" and v["source"]["path"].getStr == ".ci/pipeline.lua"
+    check view(TriggerRow(kind: "poll", groupPath: "ci/cinim", seenCommit: "abc"))["project"].getStr == "ci/cinim"
 
 suite "D-63 what a webhook may say":
   let repoTrigger = TriggerRow(repository: "https://example.test/r.git", ref0: "main")

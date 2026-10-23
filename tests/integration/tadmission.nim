@@ -74,7 +74,7 @@ suite "RUN-004 the limits of an organisation and of a run":
       let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 4: c.addStep(r, o.profile, i, i)
       check poll(o.ns, 100).handedOut.len == 2
-      discard c.execute(%*[["UPDATE steps SET state = 'SUCCEEDED' WHERE run_id = ? AND state = 'STARTING' AND ordinal = 1", r]])
+      discard c.execute(%*[["UPDATE steps SET state = 'OK' WHERE run_id = ? AND state = 'STARTING' AND ordinal = 1", r]])
       check poll(o.ns, 100).handedOut.len == 1
     test "the run with the fewest steps in flight goes first":
       let o = newOrg(10, 100)

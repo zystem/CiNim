@@ -1,7 +1,7 @@
 ## The list of runs (core/runlist.nim, GET /api/v1/runs): newest first, a page at a time with the id of the last one as the cursor, filtered by organisation and by state, and nothing of
 ## another organisation. The page of runs of the UI (docs/ui.md) is made of it. Needs CINIM_RQLITE_URL (the suite makes its own organisations and runs); otherwise it is skipped.
-import std/[unittest, json, os, sets, sequtils, algorithm]
-import common/rqlite
+import std/[unittest, json, os, sets, sequtils, algorithm, strutils]
+import common/rqlite, common/scriptsource
 import core/[schema, scheduler, loggate, logcircuit, runlease, runlist, apiauth]
 
 let url = getEnv("CINIM_RQLITE_URL")
@@ -36,6 +36,12 @@ suite "UI the list of runs":
       check row["organization"].getStr == slugA and row["state"].getStr.len > 0 and row["created_at"].getStr.len > 0
       check not row.hasKey("steps")                                # a list is cheap: the steps are on the page of the run
       check p["runs"].mapIt(it["organization"].getStr).toHashSet == [slugA].toHashSet
+    test "UI-001 the row of a run made from a repository says which pipeline (the path of the script) and where; a run with no repository has no source":
+      let withSource = co.createRun("return 1", orgB, profB, @[], source = Source(repository: "https://example.test/r.git", commit: "a".repeat(40), path: ".ci/03.lua"))
+      idsB.add withSource                                      # it is one of the runs of that organisation for the tests that follow
+      let row = c.listRuns("", "", 200, "")["runs"].elems.filterIt(it["id"].getStr == withSource)[0]
+      check row["source"]["path"].getStr == ".ci/03.lua" and row["source"]["repository"].getStr == "https://example.test/r.git"
+      check not c.listRuns("", "", 200, "")["runs"].elems.filterIt(it["id"].getStr == idsA[0])[0].hasKey("source")
     test "a page at a time: the cursor is the last id of the page, and the pages cover the list once":
       var seen: seq[string]
       var cursor = ""

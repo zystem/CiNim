@@ -796,15 +796,21 @@ proc onRequest() {.raises: [], gcsafe.} =
         for h in hq.listScopeHolds(orgHq.id): scopes.add h.view
         jsonOk(Http200, %*{"organization": slugH, "holds": items, "scopes": scopes})
         return
-      if path.startsWith("/api/v1/organizations/") and "/groups" in path:
+      if path.startsWith("/api/v1/organizations/") and ("/groups" in path or "/projects" in path):
         # PRJ-001, D-54: the groups of an organisation, nested up to 8 levels, and their variables (inherited by the groups below and by the runs in them).
         #   GET /groups                      the groups, by path
         #   PUT|GET|DELETE /groups/{path}    make (the parent has to exist), show, remove (only an empty one) the group at a path such as team/backend
         #   /groups/{path}/variables[/NAME]  the variables of the group
         let restG = path["/api/v1/organizations/".len .. ^1]
-        let slugG = restG.split("/groups")[0]
-        let afterG = restG[slugG.len .. ^1]            # "/groups", "/groups/a/b", "/groups/a/b/variables/NAME"
-        if slugG.len == 0 or not (afterG == "/groups" or afterG.startsWith("/groups/")):
+        # D-68: a group is a folder and a project is a leaf with a repository; two things one makes, `/groups` and `/projects`, both served here (a node is one or the other, and its
+        # variables, settings and hold are under either prefix)
+        let gi = restG.find("/groups")
+        let pi = restG.find("/projects")
+        let onProjects = pi >= 0 and (gi < 0 or pi < gi)
+        let word = if onProjects: "/projects" else: "/groups"
+        let slugG = restG.split(word)[0]
+        let afterG = restG[slugG.len .. ^1]            # "/groups", "/groups/a/b", "/groups/a/b/variables/NAME", "/projects/a/b"
+        if slugG.len == 0 or not (afterG == word or afterG.startsWith(word & "/")):
           problem(Http404, "not_found", "no such route")
           return
         var gc = newRq(coreRef.rqliteUrl)
@@ -812,15 +818,18 @@ proc onRequest() {.raises: [], gcsafe.} =
         if orgG.id.len == 0:
           problem(Http404, "organization_not_found", "this shard has no organisation " & slugG)
           return
-        let gpath = afterG["/groups".len .. ^1].strip(chars = {'/'})
+        let gpath = afterG[word.len .. ^1].strip(chars = {'/'})
         let gmeth = getMethod()
         if gpath.len == 0:
           if gmeth != "GET":
-            problem(Http405, "method_not_allowed", "GET lists the groups; PUT /groups/{path} makes one")
+            problem(Http405, "method_not_allowed", "GET lists; PUT " & word & "/{path} makes one")
             return
           var items = newJArray()
-          for g in gc.listGroups(orgG.id): items.add %*{"path": g.path, "depth": g.depth}
-          jsonOk(Http200, %*{"organization": slugG, "groups": items})
+          for g in gc.listGroups(orgG.id):
+            if (g.repository.len > 0) != onProjects: continue            # /groups lists the folders, /projects the projects
+            if onProjects: items.add %*{"path": g.path, "depth": g.depth, "repository": g.repository}
+            else: items.add %*{"path": g.path, "depth": g.depth}
+          jsonOk(Http200, %*{"organization": slugG, (if onProjects: "projects" else: "groups"): items})
           return
         # a path, and perhaps /variables and a name after it, or /settings ('variables' and 'settings' cannot be the name of a group)
         let segs = gpath.split('/')
@@ -881,17 +890,41 @@ proc onRequest() {.raises: [], gcsafe.} =
                           VarAudit(tenantId: orgG.id, level: "group " & slugG & "/" & normalPath(groupPath), master: coreSecret(coreRef.certs), who: who))
           return
         if gmeth == "PUT":
-          let made = gc.createGroup(orgG.id, groupPath, getTime().toUnix())
-          if made.error.len > 0:
-            problem(Http400, "invalid_group", made.error)
+          let body = getBody()
+          let gj = if body.strip.len > 0: (try: parseJson(body) except JsonParsingError: nil) else: newJObject()
+          if gj == nil or gj.kind != JObject:
+            problem(Http400, "invalid_request", "the body is empty or a JSON object")
             return
-          jsonOk(if made.created: Http201 else: Http200, %*{"organization": slugG, "group": normalPath(groupPath), "created": made.created})
+          if onProjects:
+            # D-68: a project is made with its main repository (a leaf of the tree); the same call again changes the repository
+            if not gj.hasKey("repository") or gj["repository"].kind != JString:
+              problem(Http400, "invalid_request", "a project has a repository: {\"repository\": \"https://...\"}")
+              return
+            let made = gc.createProject(orgG.id, groupPath, gj["repository"].getStr, getTime().toUnix())
+            if made.error.len > 0:
+              problem((if made.code == "already_a_group": Http409 else: Http400), (if made.code.len > 0: made.code else: "invalid_project"), made.error)
+              return
+            jsonOk(if made.created: Http201 else: Http200, %*{"organization": slugG, "project": normalPath(groupPath), "created": made.created, "repository": gj["repository"].getStr})
+          else:
+            # a group is a folder: it has no repository (a project is made with PUT /projects/{path})
+            if gj.hasKey("repository"):
+              problem(Http400, "invalid_request", "a group has no repository, it is a folder: a project is made with PUT /projects/{path}")
+              return
+            if gc.groupKind(orgG.id, groupPath) == gkProject:
+              problem(Http409, "already_a_project", "there is a project at " & normalPath(groupPath) & ", not a group")
+              return
+            let made = gc.createGroup(orgG.id, groupPath, getTime().toUnix())
+            if made.error.len > 0:
+              problem(Http400, "invalid_group", made.error)
+              return
+            jsonOk(if made.created: Http201 else: Http200, %*{"organization": slugG, "group": normalPath(groupPath), "created": made.created})
         elif gmeth == "GET":
           let g = gc.groupIdOf(orgG.id, groupPath)
           if not g.found:
             problem(Http404, "group_not_found", "the organisation " & slugG & " has no group " & groupPath)
             return
-          jsonOk(Http200, %*{"organization": slugG, "group": normalPath(groupPath)})
+          let pr = gc.resolveProject(orgG.id, groupPath)
+          jsonOk(Http200, %*{"organization": slugG, "path": normalPath(groupPath), "kind": (if pr.code == "": "project" else: "group"), "repository": pr.repository})
         elif gmeth == "DELETE":
           let gone = gc.deleteGroup(orgG.id, groupPath)
           if gone.error.len > 0:
@@ -988,9 +1021,9 @@ proc onRequest() {.raises: [], gcsafe.} =
             if c.countTriggers(org.id) >= maxTriggersPerOrg:
               problem(Http409, "too_many_triggers", "at most " & $maxTriggersPerOrg & " triggers per organisation")
               return
-            let tg = c.groupIdOf(org.id, spec.spec.groupPath)
-            if not tg.found:
-              problem(Http404, "group_not_found", "the organisation " & slug & " has no group " & spec.spec.groupPath)
+            let tg = c.resolveProject(org.id, spec.spec.groupPath)
+            if tg.code.len > 0:
+              problem((if tg.code == "project_not_found": Http404 else: Http409), tg.code, tg.message)
               return
             let made = c.createTrigger(org.id, spec.spec, getTime().toUnix(), tg.id)
             let created = c.getTrigger(org.id, made.id)
@@ -1174,8 +1207,11 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http405, "method_not_allowed", "POST")
           return
         let pj = try: parseJson(getBody()) except JsonParsingError: nil
-        if pj == nil or pj.kind != JObject or not (pj.isString("script") or pj.isString("repository")) or not pj.isString("organization"):
-          problem(Http400, "invalid_request", "{\"organization\": \"...\", \"script\": \"...\" or \"repository\": \"https://...\", \"commit\": \"...\", \"params\": {...}} is required")
+        if pj == nil or pj.kind != JObject or not (pj.isString("script") or pj.isString("project")) or not pj.isString("organization"):
+          problem(Http400, "invalid_request", "{\"organization\": \"...\", \"script\": \"...\" or \"project\": \"ci/cinim\", \"commit\": \"...\", \"params\": {...}} is required")
+          return
+        if pj.hasKey("repository"):
+          problem(Http400, "repository_not_accepted", "the repository is the project's: give project, for example cinim or ci/cinim")
           return
         let slugP = pj["organization"].getStr
         if not who.mayUseOrg(slugP):
@@ -1190,9 +1226,13 @@ proc onRequest() {.raises: [], gcsafe.} =
         if givenP.error.len > 0:
           problem(Http400, "invalid_params", givenP.error)
           return
-        if pj.isString("repository"):
-          # D-63: the script is read from the repository by a conductor of the organisation, then checked; the answer says which commit it was
-          let src = sourceOf(pj)
+        if pj.isString("project"):
+          # D-63, D-68: the script is read from the repository of the project by a conductor of the organisation, then checked; the answer says which commit it was
+          let proj = pc.resolveProject(orgP.id, pj["project"].getStr)
+          if proj.code.len > 0:
+            problem((if proj.code == "project_not_found": Http404 else: Http409), proj.code, proj.message)
+            return
+          let src = sourceIn(pj, proj.repository)
           if not src.ok:
             problem(Http400, "invalid_source", src.error)
             return
@@ -1216,12 +1256,6 @@ proc onRequest() {.raises: [], gcsafe.} =
         if wanted.code.len > 0:
           problem(Http400, wanted.code, wanted.message)         # D-73: a script is read from git only; one in the request is refused
           return
-        # D-63: the script is read from a repository by a conductor of the organisation (below)
-        let src = sourceOf(j)
-        if not src.ok:
-          problem(Http400, "invalid_source", src.error)
-          return
-        let fromRepo = src.source
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
         if not who.acrossOrgs and (not j.hasKey("organization") or j["organization"].getStr != who.org):
@@ -1249,21 +1283,21 @@ proc onRequest() {.raises: [], gcsafe.} =
         if given.error.len > 0:
           problem(Http400, "invalid_params", given.error)
           return
-        # PRJ-001, D-54: the run belongs to a group of the organisation (by its path), or to the organisation itself
-        var groupId = ""
-        if j.hasKey("group") and not (j["group"].kind == JString and j["group"].getStr.strip(chars = {'/'}).len == 0):
-          if j["group"].kind != JString:
-            problem(Http400, "invalid_request", "group must be the path of a group, for example team/backend")
-            return
-          if orgSlug.len == 0:
-            problem(Http400, "invalid_request", "a group belongs to an organisation: give organization")
-            return
-          var gq = newRq(coreRef.rqliteUrl)
-          let g = gq.groupIdOf(tenant, j["group"].getStr)
-          if not g.found:
-            problem(Http404, "group_not_found", "the organisation " & orgSlug & " has no group " & normalPath(j["group"].getStr))
-            return
-          groupId = g.id
+        # D-68: the run belongs to a project of the organisation (by its path): a leaf of the tree with a repository, which holds the pipelines
+        if orgSlug.len == 0:
+          problem(Http400, "invalid_request", "a project belongs to an organisation: give organization")
+          return
+        var gq = newRq(coreRef.rqliteUrl)
+        let proj = gq.resolveProject(tenant, j["project"].getStr)
+        if proj.code.len > 0:
+          problem((if proj.code == "project_not_found": Http404 else: Http409), proj.code, proj.message)
+          return
+        let groupId = proj.id
+        let src = sourceIn(j, proj.repository)
+        if not src.ok:
+          problem(Http400, "invalid_source", src.error)
+          return
+        let fromRepo = src.source
         var qc = newRq(coreRef.rqliteUrl)
         if qc.queueIsFull(if profile.len > 0: profile else: coreRef.profileId):
           problem(Http429, "queue_full", "this organisation has " & $maxUnfinishedRuns & " runs that have not ended; try again when some have")
@@ -1288,7 +1322,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           script = ans.script
           source = Source(repository: fromRepo.repository, commit: ans.commit, path: (if fromRepo.path.len == 0: defaultPath else: fromRepo.path))
         let id = coreRef.createRun(script, tenant, profile, given.pairs, groupId = groupId, source = source)
-        var made = %*{"id": id, "organization": orgSlug, "state": "RUNNING", "checked": checked}
+        var made = %*{"id": id, "organization": orgSlug, "project": proj.path, "state": "RUNNING", "checked": checked}
         if source.repository.len > 0: made["source"] = %*{"repository": source.repository, "commit": source.commit, "path": source.path}
         jsonOk(Http201, made)
       elif meth == "GET" and rest.endsWith("/log") and "/steps/" notin rest:

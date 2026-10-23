@@ -31,7 +31,7 @@ suite "DAT-007 the window of a step's log":
     check not logComplete("RUNNING", 10, 10)
     check not logComplete("FAILED", 1201, 1200)          # the step is over and the last line is not readable yet: ask again
     check logComplete("FAILED", 1201, 1201)
-    check logComplete("SUCCEEDED", 0, 0)                 # a step that wrote nothing
+    check logComplete("OK", 0, 0)                 # a step that wrote nothing
     check not logComplete("FAILED", -1, 5)               # the shim has said nothing: unknown, not complete
     check logComplete("TIMED_OUT", 3, 3)
 

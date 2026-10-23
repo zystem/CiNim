@@ -44,7 +44,7 @@ suite "STO-006 pressure on the storage of an organisation":
 suite "STO-006 when a volume may go":
   const keep = Retention(succeeded: 0, failed: 600, pressure: 60)
   test "a run that succeeded releases its volume at once":
-    check volumeDue("SUCCEEDED", ended = 1000, now = 1000, coreStarted = 0, keep = keep, pressure = false)
+    check volumeDue("OK", ended = 1000, now = 1000, coreStarted = 0, keep = keep, pressure = false)
   test "a failed run keeps it for the retention":
     check not volumeDue("FAILED", ended = 1000, now = 1599, coreStarted = 0, keep = keep, pressure = false)
     check volumeDue("FAILED", ended = 1000, now = 1600, coreStarted = 0, keep = keep, pressure = false)
@@ -54,14 +54,14 @@ suite "STO-006 when a volume may go":
     check not volumeDue("FAILED", ended = 1000, now = 5599, coreStarted = 5000, keep = keep, pressure = false)
     check volumeDue("FAILED", ended = 1000, now = 5600, coreStarted = 5000, keep = keep, pressure = false)
   test "that wait does not hold back a run that succeeded":
-    check volumeDue("SUCCEEDED", ended = 4000, now = 5000, coreStarted = 5000, keep = keep, pressure = false)
+    check volumeDue("OK", ended = 4000, now = 5000, coreStarted = 5000, keep = keep, pressure = false)
   test "under pressure a failed run keeps its volume for a minute only, and the wait after a start does not apply":
     check not volumeDue("FAILED", ended = 4990, now = 5000, coreStarted = 5000, keep = keep, pressure = true)
     check volumeDue("FAILED", ended = 4940, now = 5000, coreStarted = 5000, keep = keep, pressure = true)
   test "a retention that is negative keeps the volume for good, pressure or not":
     let forever = Retention(succeeded: -1, failed: -1, pressure: 60)
     check not volumeDue("FAILED", ended = 0, now = 1_000_000, coreStarted = 0, keep = forever, pressure = true)
-    check not volumeDue("SUCCEEDED", ended = 0, now = 1_000_000, coreStarted = 0, keep = forever, pressure = false)
+    check not volumeDue("OK", ended = 0, now = 1_000_000, coreStarted = 0, keep = forever, pressure = false)
   test "pressure never makes the keep longer than the retention":
     let short = Retention(succeeded: 0, failed: 30, pressure: 60)
     check volumeDue("FAILED", ended = 970, now = 1000, coreStarted = 0, keep = short, pressure = true)

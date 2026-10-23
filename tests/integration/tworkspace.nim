@@ -47,7 +47,7 @@ suite "STO-002 the volume of a job in the core":
     test "the drain of a step of an isolated job is ordered with the volume of the job":
       let r = co.createRun("return 1", org, prof)
       let isolated = addStep(r, """{"workspace":"isolated","artifacts":{"upload":["dist/**"]}}""", 0)
-      discard c.execute(%*[["UPDATE steps SET state = 'SUCCEEDED', attempt = 1 WHERE run_id = ? AND ordinal = 0", r]])
+      discard c.execute(%*[["UPDATE steps SET state = 'OK', attempt = 1 WHERE run_id = ? AND ordinal = 0", r]])
       c.noteUndelivered(r, 0, 1, "artifacts_undelivered", 0, getTime().toUnix())
       let resp = poll()
       var found = false

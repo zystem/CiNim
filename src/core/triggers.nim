@@ -26,8 +26,8 @@ const
 
 type
   TriggerSpec* = object
-    name*, kind*, schedule*, groupPath*, script*, concurrency*: string        ## groupPath: the group the runs belong to ("" = the organisation)
-    repository*, ref0*, scriptPath*: string   ## D-63: instead of `script`, a repository (https), the commit / branch / tag a firing runs when the call names none ("" = HEAD), and the path of the script in it
+    name*, kind*, schedule*, groupPath*, script*, concurrency*: string        ## groupPath: the project the runs belong to (D-68: the whole path of a group that has a repository)
+    ref0*, scriptPath*: string   ## D-63, D-68: the project's repository is read (the project is `groupPath`); the commit / branch / tag a firing runs when the call names none ("" = HEAD), and the path of the script in it
     params*: seq[(string, string)]
     enabled*: bool
 
@@ -61,9 +61,8 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
     elif required: return (key & " is required", result.spec)
   str("name", result.spec.name)
   str("kind", result.spec.kind)
-  str("group", result.spec.groupPath, required = false)
+  str("project", result.spec.groupPath, required = false)         # the missing one is told below, after the names that are refused
   str("script", result.spec.script, required = false)
-  str("repository", result.spec.repository, required = false)
   str("ref", result.spec.ref0, required = false)
   str("path", result.spec.scriptPath, required = false)
   str("schedule", result.spec.schedule, required = false)
@@ -77,17 +76,18 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
     return ("name is 1..64 characters: lowercase letters, digits, - _ .", result.spec)
   if result.spec.kind notin ["schedule", "webhook", "poll"]: return ("kind is schedule, webhook or poll (a manual start is the :fire call on any)", result.spec)
   if result.spec.concurrency notin ["parallel", "abort_newest", "abort_previous"]: return ("concurrency is parallel, abort_newest or abort_previous", result.spec)
+  # D-68: a trigger belongs to a project, whose repository holds the pipelines; the repository and the old name of the project are not taken
+  if j.hasKey("repository"): return ("the repository is the project's (a group with a repository): give project, not repository", result.spec)
+  if j.hasKey("group"): return ("a trigger belongs to a project, the whole path of a group that has a repository: give project, not group", result.spec)
+  # D-63, D-73: the script is read from the project's repository at every firing, and from nowhere else: a script in the definition of a trigger is refused
+  if j.hasKey("script"): return ("a script is read from git: give project (and ref and path), a script in the trigger is not taken", result.spec)
   result.spec.groupPath = normalPath(result.spec.groupPath)
-  if result.spec.groupPath.len > 400: return ("group is too long", result.spec)
-  # D-63, D-73: the script is read from the repository at every firing, and from nowhere else: a script in the definition of a trigger is refused
-  if j.hasKey("script"): return ("a script is read from git: give repository (and ref and path), a script in the trigger is not taken", result.spec)
-  if result.spec.repository.len == 0:
-    if result.spec.ref0.len > 0 or result.spec.scriptPath.len > 0: return ("ref and path belong to a trigger with a repository", result.spec)
-    return ("repository is required: the script is read from git", result.spec)
-  block:
-    if not validRepository(result.spec.repository): return ("repository must be an https:// or http:// URL", result.spec)
-    if result.spec.ref0.len > 0 and not validRef(result.spec.ref0): return ("ref is a branch or a tag name (or a SHA)", result.spec)
-    if result.spec.scriptPath.len > 0 and not validPath(result.spec.scriptPath): return ("path is a relative path inside the repository", result.spec)
+  if result.spec.groupPath.len == 0: return ("project is required: the path of the project, for example cinim or ci/cinim", result.spec)
+  if result.spec.groupPath.len > 400: return ("project is too long", result.spec)
+  for part in pathParts(result.spec.groupPath):
+    if not validGroupSlug(part): return ("project is a path of names of groups (lowercase letters, digits and '-'): " & part, result.spec)
+  if result.spec.ref0.len > 0 and not validRef(result.spec.ref0): return ("ref is a branch or a tag name (or a SHA)", result.spec)
+  if result.spec.scriptPath.len > 0 and not validPath(result.spec.scriptPath): return ("path is a relative path inside the repository", result.spec)
   if result.spec.kind == "schedule":
     let c = parseCron(result.spec.schedule)
     if not c.ok: return ("schedule: " & c.error, result.spec)
@@ -100,7 +100,7 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
 
 const columns = "t.id, t.tenant_id, o.slug, t.name, t.kind, t.schedule, t.secret_hash, t.group_id, t.script, t.concurrency, t.last_run_id, " &
                 "t.last_result, t.params, t.enabled, t.created_at, t.last_fired_at, COALESCE((SELECT g.path FROM groups g WHERE g.id = t.group_id), ''), " &
-                "t.repository, t.ref, t.script_path, t.seen_commit, t.last_checked_at"
+                "COALESCE((SELECT g2.repository FROM groups g2 WHERE g2.id = t.group_id), ''), t.ref, t.script_path, t.seen_commit, t.last_checked_at"
 
 proc rowOf(v: JsonNode): TriggerRow =
   TriggerRow(id: v[0].getStr, tenantId: v[1].getStr, slug: v[2].getStr, name: v[3].getStr, kind: v[4].getStr, schedule: v[5].getStr,
@@ -111,7 +111,7 @@ proc rowOf(v: JsonNode): TriggerRow =
 
 proc view*(t: TriggerRow): JsonNode =
   ## what the API shows; never the secret or its hash
-  result = %*{"id": t.id, "organization": t.slug, "name": t.name, "kind": t.kind, "group": t.groupPath, "concurrency": t.concurrency,
+  result = %*{"id": t.id, "organization": t.slug, "name": t.name, "kind": t.kind, "project": t.groupPath, "concurrency": t.concurrency,
               "enabled": t.enabled, "created_at": t.createdAt, "last_fired_at": t.lastFiredAt, "script_bytes": t.script.len}
   if t.repository.len > 0: result["source"] = %*{"repository": t.repository, "ref": t.ref0, "path": (if t.scriptPath.len > 0: t.scriptPath else: defaultPath)}
   if t.kind == "schedule": result["schedule"] = %t.schedule
@@ -173,7 +173,7 @@ proc createTrigger*(c: var RqClient; tenantId: string; s: TriggerSpec; now: int6
     hash = secretHash(result.secret)
   discard c.execute(%*[["INSERT INTO triggers (id, tenant_id, name, kind, schedule, secret_hash, group_id, script, params, concurrency, enabled, created_at, last_fired_at, repository, ref, script_path) " &
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result.id, tenantId, s.name, s.kind, s.schedule, hash, groupId, s.script,
-    (if s.params.len > 0: toJson(s.params) else: ""), s.concurrency, (if s.enabled: 1 else: 0), now, now, s.repository, s.ref0, s.scriptPath]])
+    (if s.params.len > 0: toJson(s.params) else: ""), s.concurrency, (if s.enabled: 1 else: 0), now, now, "", s.ref0, s.scriptPath]])      # the repository is the project's, read at every firing
 
 proc deleteTrigger*(c: var RqClient; tenantId, id: string): bool =
   c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ? AND id = ?", tenantId, id]])["results"][0]{"rows_affected"}.getInt > 0
@@ -198,7 +198,7 @@ proc authenticateHook*(c: var RqClient; id, bearer: string): tuple[ok: bool, row
 
 # ------------------------------------------------------------------ firing
 
-const finalRunStates = [rsSucceeded, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]
+const finalRunStates = [rsOk, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]
 
 proc unfinishedRuns(c: var RqClient; triggerId: string): seq[string] =
   ## the runs of the trigger that have not reached a final state (created, queued, running, waiting): they are what `abort_newest` waits for and `abort_previous` aborts
@@ -218,6 +218,10 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
   if org == nil or org.len == 0 or org[0][0].getStr != "active":
     return Fired(reason: "organization_disabled")
   if not t.enabled and byClock: return Fired(reason: "disabled")
+  if t.script.len == 0 and t.repository.len == 0:
+    # D-68: the repository is the project's, read at every firing; a project that has lost its repository (or a trigger of the time before projects) has nothing to read
+    discard c.execute(%*[["UPDATE triggers SET last_result = ? WHERE id = ?", "not started: the project " & t.groupPath & " has no repository", t.id]])
+    return Fired(reason: "project_has_no_repository", status: 409, detail: "the project " & t.groupPath & " has no repository")
   # a manual start of a schedule does not move its clock
   let clock = if byClock or t.kind != "schedule": now else: t.lastFiredAt
   if t.concurrency == "abort_newest" and c.stillRunning(t.id):
@@ -299,6 +303,9 @@ proc pollTriggers*(co: Core; now: int64; resolve: Resolver): int =
     if claim["results"][0]{"rows_affected"}.getInt == 0: continue
     inc looked
     beat(bTriggers)
+    if t.script.len == 0 and t.repository.len == 0:        # D-68: the project has no repository to look at
+      discard c.execute(%*[["UPDATE triggers SET last_result = ? WHERE id = ?", "not looked at: the project " & t.groupPath & " has no repository", t.id]])
+      continue
     let r = resolve(t)
     if not r.ok:
       discard c.execute(%*[["UPDATE triggers SET last_result = ? WHERE id = ?", "not looked at: " & r.code & (if r.message.len > 0: ": " & r.message else: ""), t.id]])

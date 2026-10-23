@@ -33,6 +33,59 @@ suite "PRJ-001 the groups of an organisation":
       check c.createGroup(org, "ops/db", now).error.contains("create the parent first")
       check c.createGroup(org, "", now).error.len > 0
       check c.listGroups(org).mapIt(it.path) == @["team", "team/backend"]
+    test "D-68 a project is a group with a main repository, named by its whole path (`cinim`, or `ci/cinim` under the group `ci`)":
+      let org = newOrg()
+      check c.createGroup(org, "ci", now).created
+      check c.createGroup(org, "ci/cinim", now).created
+      check c.createGroup(org, "solo", now).created
+      check c.setRepository(org, "ci/cinim", "https://example.test/org/cinim.git") == ""
+      check c.setRepository(org, "solo", "https://example.test/org/solo.git") == ""
+      let p = c.resolveProject(org, "/ci/cinim/")
+      check p.code == "" and p.path == "ci/cinim" and p.repository == "https://example.test/org/cinim.git" and p.id.len > 0
+      check c.resolveProject(org, "solo").repository == "https://example.test/org/solo.git"
+      check c.resolveProject(org, "ci").code == "project_has_no_repository"          # a group without a repository is a folder, not a project
+      check c.resolveProject(org, "nope/x").code == "project_not_found"
+      check c.resolveProject(org, "").code == "project_required"                      # the organisation is not a project: a run belongs to a project
+      check c.listGroups(org).filterIt(it.path == "ci/cinim")[0].repository == "https://example.test/org/cinim.git"
+    test "D-68 a project is a leaf of the tree: a group with groups below it is only a group, and nothing is made below a project":
+      let org = newOrg()
+      check c.createGroup(org, "ci", now).created
+      check c.createGroup(org, "ci/cinim", now).created
+      check c.setRepository(org, "ci", "https://example.test/ci.git").contains("below")           # `ci` has `ci/cinim`: it is a folder
+      check c.setRepository(org, "ci/cinim", "https://example.test/cinim.git") == ""
+      let below = c.createGroup(org, "ci/cinim/tools", now)
+      check below.error.contains("project") and not below.created                                  # `ci/cinim` is a project: nothing below it
+      check c.resolveProject(org, "ci").code == "project_has_no_repository"
+      check c.setRepository(org, "ci/cinim", "") == ""                                             # a project that gives up its repository is a group again
+      check c.createGroup(org, "ci/cinim/tools", now).created
+    test "D-68 two operations, not one: a group is made without a repository, a project is made with one, and neither takes the other's place":
+      let org = newOrg()
+      check c.createGroup(org, "ci", now).created
+      let made = c.createProject(org, "ci/cinim", "https://example.test/cinim.git", now)
+      check made.error == "" and made.created and made.id.len > 0
+      let again = c.createProject(org, "ci/cinim", "https://example.test/cinim2.git", now)       # the same call again changes the repository of the project it finds
+      check again.error == "" and not again.created and again.id == made.id and c.resolveProject(org, "ci/cinim").repository == "https://example.test/cinim2.git"
+      check c.createProject(org, "ci", "https://example.test/x.git", now).code == "already_a_group"       # it has a project below it
+      check c.createGroup(org, "plain", now).created
+      check c.createProject(org, "plain", "https://example.test/x.git", now).code == "already_a_group"     # a group that is there stays a group: a project is made, not converted
+      check c.createProject(org, "ci/cinim/sub", "https://example.test/x.git", now).error.contains("project")   # below a project
+      check c.createProject(org, "nope/x", "https://example.test/x.git", now).error.contains("create the parent first")
+      check c.createProject(org, "newone", "", now).code == "invalid_project"                         # a project has its repository
+      check c.createProject(org, "newone", "ssh://git@example.test/x.git", now).code == "invalid_project"
+      check c.createProject(org, "", "https://example.test/x.git", now).code == "invalid_project"
+      check c.groupKind(org, "ci/cinim") == gkProject and c.groupKind(org, "ci") == gkGroup and c.groupKind(org, "missing") == gkNone
+    test "D-68 the repository of a project is an https or http URL, can be changed, and can be taken away; the organisation has none":
+      let org = newOrg()
+      check c.createGroup(org, "app", now).created
+      for bad in ["ssh://git@example.test/x.git", "file:///etc", "https://exa mple.test/x.git", "-x"]:
+        check c.setRepository(org, "app", bad).len > 0
+      check c.setRepository(org, "app", "https://example.test/a.git") == ""
+      check c.setRepository(org, "app", "https://example.test/b.git") == ""
+      check c.resolveProject(org, "app").repository == "https://example.test/b.git"
+      check c.setRepository(org, "app", "") == ""
+      check c.resolveProject(org, "app").code == "project_has_no_repository"
+      check c.setRepository(org, "", "https://example.test/x.git").len > 0
+      check c.setRepository(org, "missing", "https://example.test/x.git").len > 0
     test "nested up to 8 levels, not 9":
       let org = newOrg()
       var path = ""
@@ -124,13 +177,13 @@ suite "VAR-001 the variables at every level: shard, organisation, group, launch"
       check c.setScopeVariable(vsGroup, c.groupIdOf(org, "a").id, "FROM_A", "1", now) == ""
       let r = co.createRun("return 1", org, prof, groupId = ab)
       let view = co.getRun(r)
-      check view["group"].getStr == "a/b"
+      check view["project"].getStr == "a/b"                  # D-68: the path the run belongs to
       var found = false
       for v in view["variables"]:
         if v["name"].getStr == "FROM_A":
           found = v["source"].getStr == "group" and v["group"].getStr == "a"
       check found
-      check co.getRun(co.createRun("return 1", org, prof))["group"].getStr == ""
+      check co.getRun(co.createRun("return 1", org, prof))["project"].getStr == ""
     test "each level has its own limits: a hundred variables, 64 KiB, the same rules for names":
       inc n
       let org = c.addOrganization("v" & $n & sfx, "V")

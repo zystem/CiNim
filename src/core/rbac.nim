@@ -62,7 +62,7 @@ func readablePath(path: string): bool =
               "/api/v1/organizations:check"]: return true
   if path == "/api/v1/variables": return true
   path.startsWith("/api/v1/organizations/") and (path.endsWith("/triggers") or path.endsWith("/locks") or "/locks/" in path or path.endsWith("/variables") or
-                                                 path.endsWith("/groups") or "/groups/" in path or path.endsWith("/holds") or path.endsWith("/hold") or path.endsWith("/caches") or path.endsWith("/storage"))
+                                                 path.endsWith("/groups") or "/groups/" in path or path.endsWith("/projects") or "/projects/" in path or path.endsWith("/holds") or path.endsWith("/hold") or path.endsWith("/caches") or path.endsWith("/storage"))
 
 func adminOnlyPath(path: string): bool =
   ## what is the shard's own and only an administrator's: the management of who may do what (the users, the roles, the API tokens) and the object store of the shard

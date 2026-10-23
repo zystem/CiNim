@@ -128,7 +128,7 @@ proc waitPushed(p: var Push; ms: int): bool =
 func toProto(t: Transition): PodTransition =
   PodTransition(step: StepRef(run_id: t.runId, seq: uint32(t.seq), attempt: uint32(t.attempt)), pod_name: t.podName,
     state: (case t.kind
-            of tkSucceeded: STEP_STATE_SUCCEEDED
+            of tkSucceeded: STEP_STATE_OK
             of tkFailed: STEP_STATE_FAILED
             of tkLost: STEP_STATE_LOST),
     exit_code: int32(t.exitCode), termination_reason: t.reason, shim_state_json: t.shimJson,

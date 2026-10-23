@@ -31,13 +31,12 @@ proc checkScript*(ns, script: string; given: seq[(string, string)]; apiVersion: 
   if res.code in ["no_conductor", "busy", "timeout"]: return Answer(skipped: res.code)
   Answer(ran: true, code: res.code, message: res.message, paramsJson: res.params, certain: res.certain, steps: int(res.steps))
 
-proc sourceOf*(j: JsonNode): tuple[ok: bool, source: Source, error: string] =
-  ## the `repository`, `commit` and `path` of a request (a run, a check, a trigger), as text and in the forms git can be given; `commit` is a SHA, a branch or a tag ("" is the HEAD of the
-  ## repository), `path` is where the script is (".ci/pipeline.lua" when empty)
-  for k in ["repository", "commit", "path"]:
+proc sourceIn*(j: JsonNode; repository: string): tuple[ok: bool, source: Source, error: string] =
+  ## D-68: the `commit` and `path` of a request (a run, a check) in the repository of its project, as text and in the forms git can be given; `commit` is a SHA, a branch or a tag ("" is the head
+  ## of the repository), `path` is where the script is (".ci/pipeline.lua" when empty). The repository is the project's, not the request's.
+  for k in ["commit", "path"]:
     if j.hasKey(k) and j[k].kind != JString: return (false, Source(), k & " must be text")
-  result.source = Source(repository: j{"repository"}.getStr, commit: j{"commit"}.getStr, path: j{"path"}.getStr)
-  if not validRepository(result.source.repository): return (false, Source(), "repository must be an https:// or http:// URL")
+  result.source = Source(repository: repository, commit: j{"commit"}.getStr, path: j{"path"}.getStr)
   if result.source.commit.len > 0 and not validRef(result.source.commit): return (false, Source(), "commit is a SHA, a branch or a tag name")
   if result.source.path.len > 0 and not validPath(result.source.path): return (false, Source(), "path is a relative path inside the repository")
   result.ok = true

@@ -214,7 +214,7 @@ suite "PIP-014 locks of jobs":
       let ha = leased(a)
       discard ha.call("lock", l, "lock#0")
       discard c.acquire(b, defaultProfile, l, "lock#0", l, now())
-      discard handleFinish(c, FinishRun(run_id: a, state: RUN_STATE_SUCCEEDED, lease_token: ha.token), master)
+      discard handleFinish(c, FinishRun(run_id: a, state: RUN_STATE_OK, lease_token: ha.token), master)
       check c.holderOf(defaultProfile, l) == b
 
     # ---- who is in the locks
@@ -267,7 +267,7 @@ suite "PIP-014 locks of jobs":
       for i in 1 .. 3: runs.add co.createRun("return 1", "t1", profile)
       check c.queueIsFull(profile)
       check not c.queueIsFull("limit-profile-other-" & sfx)
-      setState(runs[0], "SUCCEEDED")
+      setState(runs[0], "OK")
       check not c.queueIsFull(profile)
       let again = co.createRun("return 1", "t1", profile)
       check c.queueIsFull(profile)

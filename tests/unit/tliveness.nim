@@ -21,7 +21,7 @@ suite "liveness_timeout":
     check judge(q, 5000, 4900, T) == lOk
     check judge(q, 5201, 4900, T) == lStartTimeout
   test "steps that are not in flight are never judged":
-    for st in [ssPending, ssSucceeded, ssFailed, ssLost, ssAborted, ssTimedOut]:
+    for st in [ssPending, ssOk, ssFailed, ssLost, ssAborted, ssTimedOut]:
       check judge(StepLiveness(state: st, claimedAt: 1, shimN: 0), 99999, 0, T) == lOk
   test "a running step with no shim record is not a start timeout (the shim was heard from through another route)":
     check judge(StepLiveness(state: ssRunning, claimedAt: 1, shimN: 0), 99999, 0, T) == lOk

@@ -70,7 +70,7 @@ suite "RUN-009 the conductor":
       let p = startConductor(o.ns, "c-t1")
       let ok = co.createRun("return 1", "t1", o.profile)
       let bad = co.createRun("error('boom')", "t1", o.profile)
-      check waitState(ok, "SUCCEEDED")
+      check waitState(ok, "OK")
       check waitState(bad, "FAILED")
       stop p
     test "RUN-009 a run that waits for a step is suspended, and led again when the step is over":
@@ -90,8 +90,8 @@ suite "RUN-009 the conductor":
       let step = c.query(%*[["SELECT ordinal FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt
       discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ?", r]])
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: uint32(step), attempt: 1),
-                                                         state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
-      check waitState(r, "SUCCEEDED")
+                                                         state: STEP_STATE_OK, exit_code: 0, termination_reason: "ok"))
+      check waitState(r, "OK")
       stop p
     test "IAM-003 a conductor with a credential the core does not accept stops with a refusal and leads nothing":
       let o = newOrg()
@@ -105,7 +105,7 @@ suite "RUN-009 the conductor":
       var ids: seq[string]
       for i in 0 ..< 4: ids.add co.createRun("return " & $i, "t1", o.profile)
       let p = startConductor(o.ns, "c-t4", places = 2)
-      for r in ids: check waitState(r, "SUCCEEDED", 40)      # two at a time, the others as places free up
+      for r in ids: check waitState(r, "OK", 40)      # two at a time, the others as places free up
       stop p
     test "RUN-009 a conductor that is told to stop says so, exits with 0":
       let o = newOrg()
@@ -117,7 +117,7 @@ suite "RUN-009 the conductor":
     proc finishStep(run: string; ordinal: int) =
       discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ? AND ordinal = ?", run, ordinal]])
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: run, seq: uint32(ordinal), attempt: 1),
-                                                         state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
+                                                         state: STEP_STATE_OK, exit_code: 0, termination_reason: "ok"))
 
     proc pendingOrdinals(run: string): seq[int] =
       let v = c.query(%*[["SELECT ordinal FROM steps WHERE run_id = ? AND state = 'PENDING' ORDER BY ordinal", run]])["results"][0]{"values"}
@@ -137,7 +137,7 @@ suite "RUN-009 the conductor":
             seen.add n
             finishStep(r, n)
         sleep 200
-      check stateOf(r) == "SUCCEEDED"
+      check stateOf(r) == "OK"
       check seen == @[1048576 + 1, 1048576 + 2, 1048576 + 3, 1048576 + 10]      # D-67: the job 01, the steps 1, 2, 3 of the loop and `a`: a number is job * 2^20 + step
       check c.query(%*[["SELECT step_table FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == ""        # no table is kept with a run any more
       check c.query(%*[["SELECT group_concat(seq) FROM run_journal WHERE run_id = ? AND seq >= 0", r]])["results"][0]["values"][0][0].getStr == "0,1,2,3"
@@ -180,7 +180,7 @@ suite "RUN-009 the conductor":
       finishStep(r, ordinalOf("b2"))
       check waitCommands(@["tail"])
       finishStep(r, ordinalOf("tail"))
-      check waitState(r, "SUCCEEDED")
+      check waitState(r, "OK")
       check c.query(%*[["SELECT COUNT(*) FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getInt == 7
       stop p
     test "RUN-006 ci.parallel with fail_fast: the first failed step cancels the steps of the other branches and the run ends with the failure":
@@ -295,7 +295,7 @@ suite "RUN-009 the conductor":
       check badParam.problemOf.len > 0 and badParam.script.len > 0              # read, and the check found something certain in it
       # the run keeps where it came from and its script sees it
       let r = co.createRun(got.script, "t1", o.profile, @[], source = Source(repository: src.repository, commit: got.commit, path: defaultPath))
-      check waitState(r, "SUCCEEDED")
+      check waitState(r, "OK")
       check co.getRun(r)["source"]["commit"].getStr == sha
       check c.query(%*[["SELECT COUNT(*) FROM runs WHERE profile_id = ?", o.profile]])["results"][0]["values"][0][0].getInt == 1
       # D-76: the conductor says which commit a ref is at, and reads and checks nothing else (a poll trigger asks this once a minute)
@@ -316,7 +316,7 @@ suite "RUN-009 the conductor":
       discard checked(o.ns, "return 1")
       let r = co.createRun("return 1", "t1", o.profile)
       for _ in 0 ..< 3: discard checkScript(o.ns, "return 1", @[], 1)
-      check waitState(r, "SUCCEEDED")
+      check waitState(r, "OK")
       stop p
     stopServers.store(true)
     joinThread(th)

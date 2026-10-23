@@ -2,7 +2,7 @@
 ## has not ended in any state that is not final, `abort_previous` cancels the earlier runs of the same trigger and starts the new one. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, strutils, times]
 import common/rqlite
-import core/[schema, scheduler, triggers]
+import core/[schema, scheduler, triggers, groups]
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -45,7 +45,7 @@ suite "TRG-004 concurrency of a trigger":
         check not f.started and f.reason == "still_running"
       check resultOf(t) == "aborted the new firing: the previous run has not ended"
     test "abort_newest starts the next one when the earlier one has ended, in any final state":
-      for state in ["SUCCEEDED", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]:
+      for state in ["OK", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]:
         let t = newTrigger("abort_newest")
         let a = co.fire(t, @[], getTime().toUnix())
         setState(a.runId, state)
@@ -71,20 +71,33 @@ suite "TRG-004 concurrency of a trigger":
       let o = co.fire(other, @[], getTime().toUnix())
       let a = co.fire(t, @[], getTime().toUnix())
       let done = co.fire(t, @[], getTime().toUnix())             # cancels a; done is the newest
-      setState(done.runId, "SUCCEEDED")
+      setState(done.runId, "OK")
       let w = co.fire(t, @[], getTime().toUnix())                # nothing to cancel: done ended
       setState(w.runId, "WAITING")
       let q = co.fire(t, @[], getTime().toUnix())                # cancels the waiting one
-      check stateOf(a.runId) == "ABORTED" and stateOf(done.runId) == "SUCCEEDED" and stateOf(w.runId) == "ABORTED" and stateOf(q.runId) == "RUNNING"
+      check stateOf(a.runId) == "ABORTED" and stateOf(done.runId) == "OK" and stateOf(w.runId) == "ABORTED" and stateOf(q.runId) == "RUNNING"
       check stateOf(o.runId) == "RUNNING"
 
-    test "D-63 a trigger with a repository starts no run when the script cannot be had, and says why in its last result":
+    test "D-63, D-68 a trigger of a project starts no run when the script cannot be had, and says why in its last result":
       inc n
-      let made = c.createTrigger(orgId, TriggerSpec(name: "repo" & $n, kind: "webhook", repository: "https://example.test/r.git", ref0: "main", concurrency: "parallel", enabled: true), getTime().toUnix())
+      discard c.createGroup(orgId, "ci", getTime().toUnix())               # the folder the projects are in
+      let pg = c.createProject(orgId, "ci/p" & $n, "https://example.test/r.git", getTime().toUnix())
+      check pg.error == ""
+      let made = c.createTrigger(orgId, TriggerSpec(name: "repo" & $n, kind: "webhook", groupPath: "ci/p" & $n, ref0: "main", concurrency: "parallel", enabled: true), getTime().toUnix(), pg.id)
       let t = c.getTriggerById(made.id).row
-      check t.repository == "https://example.test/r.git" and t.ref0 == "main" and t.script == ""
+      check t.repository == "https://example.test/r.git" and t.ref0 == "main" and t.script == "" and t.groupPath == "ci/p" & $n      # the repository is the project's
       let before = c.query(%*[["SELECT COUNT(*) FROM runs WHERE trigger_id = ?", t.id]])["results"][0]["values"][0][0].getInt
       let f = co.fire(t, @[], getTime().toUnix(), commit = "abc123")       # there is no hub in this process: nobody can read the script
       check not f.started and f.status == 503 and f.reason == "script_unavailable"
       check resultOf(t).startsWith("not started: ")
       check c.query(%*[["SELECT COUNT(*) FROM runs WHERE trigger_id = ?", t.id]])["results"][0]["values"][0][0].getInt == before
+    test "D-68 a project that has lost its repository gives its triggers nothing to read: they start nothing and say so":
+      inc n
+      discard c.createGroup(orgId, "ci", getTime().toUnix())
+      let pg = c.createProject(orgId, "ci/q" & $n, "https://example.test/r.git", getTime().toUnix())
+      let made = c.createTrigger(orgId, TriggerSpec(name: "lost" & $n, kind: "webhook", groupPath: "ci/q" & $n, concurrency: "parallel", enabled: true), getTime().toUnix(), pg.id)
+      check c.setRepository(orgId, "ci/q" & $n, "") == ""
+      let t = c.getTriggerById(made.id).row
+      let f = co.fire(t, @[], getTime().toUnix())
+      check not f.started and f.reason == "project_has_no_repository" and f.status == 409
+      check "no repository" in resultOf(t)

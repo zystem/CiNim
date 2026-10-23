@@ -57,7 +57,7 @@ suite "RUN-016 conductors on the push channel":
 
     proc finishReq(runId, token: string): ExecutorRequest =
       ExecutorRequest(header: Header(protocol: 1), body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.finish,
-        finish: FinishRun(run_id: runId, state: RUN_STATE_SUCCEEDED, lease_token: token)))
+        finish: FinishRun(run_id: runId, state: RUN_STATE_OK, lease_token: token)))
 
     proc nextKind(cl: ZConnection; kind: string; ms = 8000): Option[StreamFrame] =
       for _ in 0 ..< 20:
@@ -170,7 +170,7 @@ suite "RUN-016 conductors on the push channel":
       check cl.sendFrame(call(ses, o.ns, 3, finishReq(r, lease.lease_token)))
       let f = cl.nextKind("conductor.reply")
       check f.isSome and f.get.re == 3 and decodeExecResponse(f.get.payload).body.kind == ExecutorResponseBodyKind.result
-      check runState(r) == "SUCCEEDED"
+      check runState(r) == "OK"
       cl.close()
     test "a step call suspends the run, makes the step, and gives the lease back":
       let o = newOrg()

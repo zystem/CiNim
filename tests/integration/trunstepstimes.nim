@@ -19,7 +19,7 @@ suite "UI-001 the times of the steps of a run":
       discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, queued_at, started_at, finished_at) " &
                             "VALUES (?, ?, 'j', ?, 'job_sh', ?, ?, 'img', 'true', '1', ?, ?)", newId(), runId, ordinal, state, profile, started, finished]])
     test "a step that ran has both times, one that goes on has a start and no end, one that has not started has neither":
-      addStep(1, "SUCCEEDED", "1800000010", "1800000070")
+      addStep(1, "OK", "1800000010", "1800000070")
       addStep(2, "RUNNING", "1800000080", "")
       addStep(3, "QUEUED", "", "")
       let steps = co.getRun(runId)["steps"]

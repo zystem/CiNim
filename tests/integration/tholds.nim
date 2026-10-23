@@ -31,7 +31,7 @@ suite "DAT-006 a legal hold on a run":
       inc n
       let id = c.addOrganization("h" & $n & sfx, "H")
       (id, c.ensureOrganizationProfile(id, "cinim-001-h" & $n & sfx))
-    proc endedRun(o: tuple[id, profile: string]; state = "SUCCEEDED"; endedAgo = 40 * day; groupId = ""): string =
+    proc endedRun(o: tuple[id, profile: string]; state = "OK"; endedAgo = 40 * day; groupId = ""): string =
       result = co.createRun("return 1", o.id, o.profile, groupId = groupId)
       discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ? WHERE id = ?", state, $(now - endedAgo), result]])
     proc addArtifact(be: MemStore; tenant, run, path: string; age: int64): string =
@@ -78,7 +78,7 @@ suite "DAT-006 a legal hold on a run":
       putEnv("CINIM_STORAGE_RETENTION_FAILED", "0")
       runstorage.coreStartedAt = 0
       let held = endedRun(o, "FAILED", 100000)
-      let free = endedRun(o, "SUCCEEDED", 5)
+      let free = endedRun(o, "OK", 5)
       check c.placeHold(held, o.id, "audit", "ann", now).placed
       let named = c.releasableRuns(o.profile, now, runstorage.retentionFromEnv())
       check free in named and held notin named

@@ -135,7 +135,7 @@ func stepStateOf*(s: ShimState): StepState =
   of spRunning, spStopping, spDraining: ssRunning
   of spDone:
     case outcomeOf(s)
-    of oSucceeded: ssSucceeded
+    of oSucceeded: ssOk
     of oTimedOut: ssTimedOut
     of oUnknown: ssLost
     else: ssFailed

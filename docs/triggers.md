@@ -29,7 +29,7 @@ Start it with values:
 
 ```
 POST /api/v1/runs
-{"organization": "acme", "group": "team/backend", "repository": "https://git.example/org/repo.git", "commit": "main", "path": ".ci/pipeline.lua", "params": {"TICKET": "CI-7", "JOBS": 8, "RELEASE": true}}
+{"organization": "acme", "project": "team/backend", "commit": "main", "path": ".ci/pipeline.lua", "params": {"TICKET": "CI-7", "JOBS": 8, "RELEASE": true}}
 ```
 
 What happens:
@@ -62,28 +62,28 @@ All calls are an administrator's: `Authorization: Bearer <admin token>`.
 
 ```
 POST /api/v1/organizations/acme/triggers
-{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "group": "team/backend",
- "repository": "https://git.example/org/repo.git", "ref": "main", "params": {"TARGET": "staging"}, "concurrency": "abort_newest"}
+{"name": "nightly", "kind": "schedule", "schedule": "0 2 * * *", "project": "team/backend",
+ "ref": "main", "params": {"TARGET": "staging"}, "concurrency": "abort_newest"}
 ```
 
 Five fields, **UTC**: minute hour day-of-month month day-of-week. `*`, lists `1,15`, ranges `9-17`, steps `*/15` and `10-50/10`, names (`jan`, `mon`), and `@hourly @daily @weekly @monthly @yearly`. If both day fields are restricted a day matches when either does (as in Vixie cron). Core looks every 20 seconds. A core that was down fires a schedule **once** when it is back. Switching a schedule off and on again starts its clock from that moment.
 
 ### The script is read from git (D-63, D-73)
 
-A script comes from git and from nowhere else: a run or a trigger that carries one in its body is refused (`script_not_accepted` for a run, "a script is read from git" for a trigger), so that every run has a history in git. A trigger, like a run, names a repository: `"repository": "https://git.example/org/repo.git"`, `"ref": "main"` (a branch, a tag or a SHA; the commit a firing runs when the call names none) and `"path": ".ci/pipeline.lua"` (the default). At every firing a conductor of the organisation reads that one file at that commit (`git fetch --depth 1`, then the one blob; https and http only, no credentials, so a public repository or one the cluster can reach without a login), checks it like any script, and the run keeps the text, the repository, the SHA of the commit and the path (PIP-001, `GET /api/v1/runs/{id}` shows `source`). The script sees them as `run.source.repository`, `run.source.commit`, `run.source.path` (empty strings for a script that came in the request). A change of the pipeline is a commit; a run that was made keeps the script it was made with. The conductors reach the repository where the namespace's NetworkPolicy lets them: `conductor.internet` (the public internet on ports 80 and 443, the private ranges closed) and `conductor.egress` (a git server of the cluster or the LAN) in the chart. A repository that cannot be read starts no run: a webhook answers 502 `fetch_failed`, 400 `script_missing` (no such file at that commit) or `script_too_large` (over 1 MiB), 409 `no_conductor`, 429 `busy` (too many readings at once), and `last_result` of the trigger says why.
+A script comes from git and from nowhere else: a run or a trigger that carries one in its body is refused (`script_not_accepted` for a run, "a script is read from git" for a trigger), so that every run has a history in git. A run and a trigger are of a **project** (D-68): the path of a leaf of the group tree that has a main repository, for example `cinim` or `ci/cinim` (`ci` is a group, a folder, never a project). The repository is the project's and is read at every firing, so changing it changes what the triggers read; a request that names a `repository` or a `group` is refused (`repository_not_accepted`, `group_not_accepted`). What a run or a trigger gives is the `project`, and the `ref` (a branch, a tag or a SHA; the commit a firing runs when the call names none) and the `path` of the script if not the default. A group and a project are made apart: `PUT /api/v1/organizations/acme/groups/ci` makes a folder, `PUT /api/v1/organizations/acme/projects/ci/cinim {"repository": "https://git.example/org/cinim.git"}` makes a project (the same call again changes its repository; a group that is there stays a group, `already_a_group`; nothing is made below a project).
 
 ```
 POST /api/v1/organizations/acme/triggers
-{"name": "main-push", "kind": "webhook", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "abort_previous"}
-POST /api/v1/runs   {"organization": "acme", "repository": "https://…/r.git", "commit": "v1.2", "path": ".ci/pipeline.lua", "params": {…}}      # by hand, no trigger
-POST /api/v1/pipelines:check   {"organization": "acme", "repository": "https://…/r.git", "commit": "main"}        # reads and checks it; the answer names the commit
+{"name": "main-push", "kind": "webhook", "project": "cinim", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "abort_previous"}
+POST /api/v1/runs   {"organization": "acme", "project": "ci/cinim", "commit": "v1.2", "path": ".ci/pipeline.lua", "params": {…}}      # by hand, no trigger
+POST /api/v1/pipelines:check   {"organization": "acme", "project": "ci/cinim", "commit": "main"}        # reads and checks it; the answer names the commit
 ```
 
 ### Poll (D-76)
 
 ```
 POST /api/v1/organizations/selfci/triggers
-{"name": "main-poll", "kind": "poll", "repository": "https://github.com/zystem/CiNim.git", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "abort_previous"}
+{"name": "main-poll", "kind": "poll", "project": "cinim", "ref": "main", "params": {"REGISTRY": "…"}, "concurrency": "abort_previous"}
 ```
 
 The core looks at the `ref` (a branch or a tag; the head of the repository when empty) **once a minute** and starts a run when the commit it is at is not the one the trigger saw last. The first look has seen none: it starts a run on the commit the ref is at, so a new poll trigger runs at once. The look is `git ls-remote` by a **conductor of the organisation**, nothing is fetched and no script is read; only when the commit is new does the firing read the script at that commit (the same conductor, as for any run from a repository), so a new Lua in the commit is the one that runs. The run is started on the SHA, not on the name of the branch, and `concurrency` is as for the other triggers (`abort_previous` for a branch that is built at every commit).
@@ -96,12 +96,12 @@ The core looks at the `ref` (a branch or a tag; the head of the repository when 
 
 ```
 POST /api/v1/organizations/acme/triggers
-{"name": "on-push", "kind": "webhook", "group": "team/backend", "repository": "https://git.example/org/repo.git", "ref": "main"}
+{"name": "on-push", "kind": "webhook", "project": "team/backend", "ref": "main"}
 → 201 {"id": "s1_…", "hook": "/api/v1/hooks/s1_…", "secret": "<shown once>", …}
 
 POST /api/v1/hooks/s1_…
 Authorization: Bearer <the secret>
-{"commit": "3f2c1a9…"}                 # only for a trigger with a repository; the commit, branch or tag to run (the trigger's `ref` when left out)
+{"commit": "3f2c1a9…"}                 # the commit, branch or tag to run (the trigger's `ref` when left out)
 → 201 {"id": "<run id>", "trigger_id": "s1_…", "state": "RUNNING"}
 ```
 
@@ -143,7 +143,7 @@ The jobs of an organisation with the same lock run **one at a time, in turn** (f
 
 ### What a trigger stores
 
-The **group** (optional: the path of one of the organisation's groups, docs/variables.md; none is the organisation itself), the **repository**, the ref and the path of the script, and the parameters (the script itself is read at every firing, D-73). A trigger of an organisation that is switched off starts nothing; deleting the organisation deletes its triggers.
+The **project** (the path of a leaf of the group tree that has a repository, docs/variables.md; the repository is the project's), the ref and the path of the script, and the parameters (the script itself is read at every firing, D-73). A trigger of an organisation that is switched off starts nothing; deleting the organisation deletes its triggers.
 
 ## Checked on the TESTING cluster
 

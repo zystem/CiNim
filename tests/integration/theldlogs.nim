@@ -74,9 +74,9 @@ suite "DAT-006 the logs of held runs":
     proc runWithStep(o: tuple[id, profile: string]; lines: seq[string]; stored: int; ordinal = 0; endedAgo = 10'i64; groupId = ""): string =
       result = co.createRun("return 1", o.id, o.profile, groupId = groupId)
       let jobId = newId()
-      discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'job-1', 'SUCCEEDED', ?)", jobId, result, o.profile]])
+      discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'job-1', 'OK', ?)", jobId, result, o.profile]])
       discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at, attempt, finished_at) " &
-        "VALUES (?, ?, ?, ?, 'sh', 'SUCCEEDED', ?, 'alpine', 'true', '', '1', 1, ?)", newId(), result, jobId, ordinal, o.profile, $(now - endedAgo)]])
+        "VALUES (?, ?, ?, ?, 'sh', 'OK', ?, 'alpine', 'true', '', '1', 1, ?)", newId(), result, jobId, ordinal, o.profile, $(now - endedAgo)]])
       logs[result & "/" & $ordinal] = (lines, stored)
 
     test "a step of a held run is copied once, lines in order, and not before the hold; an unheld run is left":

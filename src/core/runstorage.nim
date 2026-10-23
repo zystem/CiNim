@@ -82,7 +82,7 @@ proc underPressure*(profileId: string): bool =
 func volumeDue*(state: string; ended, now, coreStarted: int64; keep: Retention; pressure: bool): bool =
   ## May the volume of a run that ended at `ended` go now? A run that succeeded: after `keep.succeeded`. Any other end: after `keep.failed`, counted from the later of its
   ## end and the start of this core; under pressure after `keep.pressure` from its end (never longer than `keep.failed`), whatever the core's age. Negative: never.
-  if state == protoName(rsSucceeded):
+  if state == protoName(rsOk):
     return keep.succeeded >= 0 and ended + keep.succeeded <= now
   if keep.failed < 0: return false
   if pressure: return ended + min(keep.pressure, keep.failed) <= now
@@ -91,9 +91,9 @@ func volumeDue*(state: string; ended, now, coreStarted: int64; keep: Retention; 
 proc releasableRuns*(c: var RqClient; profileId: string; now: int64; keep: Retention): seq[string] =
   ## the runs of this profile (an organisation's namespace) that are over, past their retention and not yet confirmed released
   if profileId.len == 0: return
-  let ok = protoName(rsSucceeded)
+  let ok = protoName(rsOk)
   var ends: seq[string]
-  for s in [rsSucceeded, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]: ends.add protoName(s)
+  for s in [rsOk, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]: ends.add protoName(s)
   let marks = ends.mapIt("?").join(",")
   var args = %*["SELECT id, state, CAST(updated_at AS INTEGER) FROM runs WHERE profile_id = ? AND storage_released = 0 AND " &
     "NOT EXISTS (SELECT 1 FROM step_drains d WHERE d.run_id = runs.id AND d.state = 'pending') AND NOT " & heldRunSql("runs.id", "runs.tenant_id", "runs.group_id") & " AND state IN (" & marks & ") ORDER BY updated_at LIMIT ?", profileId]

@@ -13,7 +13,7 @@ proc listRuns*(c: var RqClient; organization, state: string; limit: int; before:
   ## {"runs": [...], "next": <the id to pass as `before` for the next page, or null at the end>}. `organization` and `state` and `before` are "" for no filter.
   let n = if limit < 1: defaultRunPage else: min(limit, maxRunPage)
   let r = c.query(%*[["SELECT r.id, COALESCE(o.slug, ''), COALESCE(g.path, ''), r.state, r.created_at, r.updated_at, r.fail_code, r.fail_message, " &
-    "r.source_repository, r.source_commit, COALESCE(r.trigger_id, '') " &
+    "r.source_repository, r.source_commit, COALESCE(r.trigger_id, ''), r.source_path " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id LEFT JOIN groups g ON g.id = r.group_id " &
     "WHERE (? = '' OR o.slug = ?) AND (? = '' OR r.state = ?) AND (? = '' OR r.id < ?) ORDER BY r.id DESC LIMIT ?",
     organization, organization, state, state, before, before, n + 1]])
@@ -25,10 +25,10 @@ proc listRuns*(c: var RqClient; organization, state: string; limit: int; before:
       if i == n:
         next = %runs[n - 1]["id"].getStr           # one more than a page was asked for: there is a next page, and it starts after the last row shown
         break
-      var item = %*{"id": row[0].getStr, "organization": row[1].getStr, "group": row[2].getStr, "state": row[3].getStr,
+      var item = %*{"id": row[0].getStr, "organization": row[1].getStr, "project": row[2].getStr, "state": row[3].getStr,
                     "created_at": row[4].getStr, "updated_at": row[5].getStr}
       if row[10].getStr.len > 0: item["trigger_id"] = %row[10].getStr
-      if row[8].getStr.len > 0: item["source"] = %*{"repository": row[8].getStr, "commit": row[9].getStr}
+      if row[8].getStr.len > 0: item["source"] = %*{"repository": row[8].getStr, "commit": row[9].getStr, "path": row[11].getStr}
       if row[6].getStr.len > 0 or row[7].getStr.len > 0: item["failure"] = %*{"code": row[6].getStr, "message": row[7].getStr}
       runs.add item
   %*{"runs": runs, "next": next}

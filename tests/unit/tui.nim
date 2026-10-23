@@ -111,8 +111,8 @@ suite "the pages":
     check "<script>" notin r.body and "&lt;script&gt;" in r.body and "disabled" in r.body
   test "the runs of an organisation: newest first as the core gives them, a link to each, the reason of a failure, and a way to older ones":
     routes["/api/v1/runs?organization=acme&limit=50"] = %*{"runs": [
-      {"id": "s1_b", "organization": "acme", "group": "", "state": "FAILED", "created_at": "1792484469", "updated_at": "1792484999", "failure": {"code": "step_failed", "message": "step 1 exited with 2"}, "source": {"repository": "https://x/r.git", "commit": "e13ccc152d942eadb260c37b1b77e61dbfab4b80"}},
-      {"id": "s1_a", "organization": "acme", "group": "", "state": "SUCCEEDED", "created_at": "1792484000", "updated_at": "1792484100"}], "next": "s1_a"}
+      {"id": "s1_b", "organization": "acme", "project": "", "state": "FAILED", "created_at": "1792484469", "updated_at": "1792484999", "failure": {"code": "step_failed", "message": "step 1 exited with 2"}, "source": {"repository": "https://x/r.git", "commit": "e13ccc152d942eadb260c37b1b77e61dbfab4b80"}},
+      {"id": "s1_a", "organization": "acme", "project": "", "state": "OK", "created_at": "1792484000", "updated_at": "1792484100"}], "next": "s1_a"}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", cookie = session))
     check r.status == 200
     check r.body.find("s1_b") < r.body.find("s1_a")                # the order of the core
@@ -120,6 +120,19 @@ suite "the pages":
     check "step_failed" in r.body and "step 1 exited with 2" in r.body and "e13ccc1" in r.body
     check "href=\"/ui/orgs/acme/runs?before=s1_a\"" in r.body       # the older runs
     check "2026-10-20 08:21:09" in r.body                           # a time a person reads (UTC), not epoch seconds
+  test "UI-001 each run of the list says of which project (the path of its project) and which pipeline (the script of the repository) it is":
+    routes["/api/v1/runs?organization=acme&limit=50"] = %*{"runs": [
+      {"id": "s1_p1", "organization": "acme", "project": "team/backend", "state": "OK", "source": {"repository": "https://x/r.git", "commit": "e13ccc152d942eadb260c37b1b77e61dbfab4b80", "path": ".ci/03.lua"}},
+      {"id": "s1_p2", "organization": "acme", "project": "", "state": "FAILED"}]}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", cookie = session))
+    check "<th>Project</th>" in r.body and "<th>Pipeline</th>" in r.body
+    check "team/backend" in r.body and ".ci/03.lua" in r.body
+    check r.body.find("team/backend") < r.body.find("s1_p2")                        # in the row of the first run
+    check "title=\"https://x/r.git\"" in r.body                                       # where the pipeline is kept
+  test "UI-001 the page of a run names its project and its pipeline in the words of D-68":
+    routes["/api/v1/runs/s1_b"] = %*{"id": "s1_b", "organization": "acme", "project": "g/x", "state": "FAILED", "source": {"repository": "https://x/r.git", "commit": "e13ccc152d942eadb260c37b1b77e61dbfab4b80", "path": ".ci/03.lua"}, "steps": []}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b", cookie = session))
+    check "<dt>Project</dt><dd>g/x</dd>" in r.body and "<dt>Pipeline</dt>" in r.body and ".ci/03.lua" in r.body and "<dt>Group</dt>" notin r.body
   test "the state filter goes to the core, is kept in the link to the older runs, and a state that is not a word is ignored":
     routes["/api/v1/runs?organization=acme&state=FAILED&limit=50"] = %*{"runs": [], "next": "s1_z"}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", query = "state=FAILED", cookie = session))
@@ -128,7 +141,7 @@ suite "the pages":
     check handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", query = "state=FAILED%27%20OR%201%3D1", cookie = session)).status == 200
     check calls[^1] == "tok-ann /api/v1/runs?organization=acme&limit=50"
   test "the list shows the last six characters of a long run id, the whole id is the link and its title; a short id stays whole":
-    routes["/api/v1/runs?organization=acme&limit=50"] = %*{"runs": [{"id": "s1_01a15949-68a3-7db0-acd7-fb1c7c2e6f86", "state": "SUCCEEDED"}, {"id": "s1_a", "state": "FAILED"}]}
+    routes["/api/v1/runs?organization=acme&limit=50"] = %*{"runs": [{"id": "s1_01a15949-68a3-7db0-acd7-fb1c7c2e6f86", "state": "OK"}, {"id": "s1_a", "state": "FAILED"}]}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", cookie = session))
     check "href=\"/ui/runs/s1_01a15949-68a3-7db0-acd7-fb1c7c2e6f86\" title=\"s1_01a15949-68a3-7db0-acd7-fb1c7c2e6f86\">…2e6f86</a>" in r.body
     check ">s1_a</a>" in r.body
@@ -146,10 +159,10 @@ suite "the pages":
     let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme%22%3E%3Cscript%3E/runs", cookie = session))
     check r.status == 404 and calls.len == 0 and "<script>" notin r.body
   test "a run: its state, where it came from, the failure, and the steps, each with a link to its log":
-    routes["/api/v1/runs/s1_b"] = %*{"id": "s1_b", "organization": "acme", "group": "g/x", "state": "FAILED", "created_at": "1792484469", "updated_at": "1792484999",
+    routes["/api/v1/runs/s1_b"] = %*{"id": "s1_b", "organization": "acme", "project": "g/x", "state": "FAILED", "created_at": "1792484469", "updated_at": "1792484999",
       "failure": {"code": "step_failed", "message": hostile}, "source": {"repository": "https://x/r.git", "commit": "e13ccc152d942eadb260c37b1b77e61dbfab4b80", "path": ".ci/pipeline.lua"},
       "params": {"DEPLOY": "false"}, "wait_reason": "",
-      "steps": [{"seq": 0, "attempt": 1, "state": "SUCCEEDED", "exit_code": 0, "termination": "ok", "pod_reason": "", "pod_message": "", "pod_diag": nil},
+      "steps": [{"seq": 0, "attempt": 1, "state": "OK", "exit_code": 0, "termination": "ok", "pod_reason": "", "pod_message": "", "pod_diag": nil},
                 {"seq": 1, "attempt": 2, "state": "FAILED", "exit_code": 2, "termination": "exit", "pod_reason": "Error", "pod_message": "", "pod_diag": nil}]}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b", cookie = session))
     check r.status == 200
@@ -178,13 +191,13 @@ suite "the pages":
     check "href=\"/ui/runs/s1_b/steps/1/log?from=0\"" in r.body                                # back (200 - 200)
     check "href=\"/ui/runs/s1_b\"" in r.body
   test "UI-001 the colours that a tool writes into its log (ESC [ 36 m ...) are not shown as text: the page shows the words":
-    routes["/api/v1/runs/s1_b/steps/2/log?from=0&limit=200"] = %*{"run_id": "s1_b", "step_seq": 2, "from": 0, "step_state": "SUCCEEDED", "complete": true, "lines_total": 2, "next": 2,
+    routes["/api/v1/runs/s1_b/steps/2/log?from=0&limit=200"] = %*{"run_id": "s1_b", "step_seq": 2, "from": 0, "step_state": "OK", "complete": true, "lines_total": 2, "next": 2,
       "lines": ["\x1b[36mINFO\x1b[0m[0072] Taking snapshot of files...", "plain \x1b[1;31mred\x1b[0m and \x1b[2K\x1b[Gmoved <b>x</b>"]}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/2/log", cookie = session))
     check r.status == 200 and "INFO[0072] Taking snapshot of files..." in r.body and "plain red and moved &lt;b&gt;x&lt;/b&gt;" in r.body
     check '\x1b' notin r.body and "[36m" notin r.body and "[0m" notin r.body
   test "the first window starts at line 0, has no way back, and a finished log has no way on":
-    routes["/api/v1/runs/s1_b/steps/0/log?from=0&limit=200"] = %*{"run_id": "s1_b", "step_seq": 0, "from": 0, "lines": ["only line"], "next": 1, "step_state": "SUCCEEDED", "complete": true, "lines_total": 1}
+    routes["/api/v1/runs/s1_b/steps/0/log?from=0&limit=200"] = %*{"run_id": "s1_b", "step_seq": 0, "from": 0, "lines": ["only line"], "next": 1, "step_state": "OK", "complete": true, "lines_total": 1}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/steps/0/log", cookie = session))
     check r.status == 200 and "only line" in r.body and "from=1" notin r.body and "log?from=" notin r.body
   test "a step number of ten digits (the numbers of the steps are hashes) has a log page":
@@ -203,14 +216,14 @@ suite "the pages":
     check tookText(0, 0, false, 1040) == "" and tookText(1000, 900, true, 9999) == ""      # not started; an end before the start is nothing to say
   test "UI-001 the list of runs and the page of a run say how long each took":
     routes["/api/v1/runs?organization=acme&limit=50"] = %*{"runs": [
-      {"id": "s1_t1", "state": "SUCCEEDED", "organization": "acme", "created_at": "1800000000", "updated_at": "1800000125"},
+      {"id": "s1_t1", "state": "OK", "organization": "acme", "created_at": "1800000000", "updated_at": "1800000125"},
       {"id": "s1_t2", "state": "QUEUED", "organization": "acme", "created_at": "1800000000", "updated_at": "1800000000"}]}
     let l = handle(cfg, fakeCore(), req("GET", "/ui/orgs/acme/runs", cookie = session))
     check "<th>Took</th>" in l.body and "2 min 5 s" in l.body
-    routes["/api/v1/runs/s1_t1"] = %*{"id": "s1_t1", "organization": "acme", "state": "SUCCEEDED", "created_at": "1800000000", "updated_at": "1800000125", "steps": [
-      {"seq": 1, "attempt": 1, "state": "SUCCEEDED", "started_at": 1800000010, "finished_at": 1800000070},
+    routes["/api/v1/runs/s1_t1"] = %*{"id": "s1_t1", "organization": "acme", "state": "OK", "created_at": "1800000000", "updated_at": "1800000125", "steps": [
+      {"seq": 1, "attempt": 1, "state": "OK", "started_at": 1800000010, "finished_at": 1800000070},
       {"seq": 2, "attempt": 1, "state": "QUEUED", "started_at": 0, "finished_at": 0},
-      {"seq": 3, "attempt": 1, "state": "SUCCEEDED"}]}          # a core that does not say it (an older one): an empty cell, not a crash
+      {"seq": 3, "attempt": 1, "state": "OK"}]}          # a core that does not say it (an older one): an empty cell, not a crash
     let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_t1", cookie = session))
     check r.status == 200 and "<th>Took</th>" in r.body and "1 min 0 s" in r.body and "2 min 5 s" in r.body
   test "D-77 the log of a run is one window of lines, each starting with the label of its step (job and step ids, `14/0003`), asked of the core in one request":
@@ -226,12 +239,12 @@ suite "the pages":
     check calls.len == 1 or calls[^1] == "tok-ann /api/v1/runs/s1_c/log?limit=200"             # one request for the whole run
     check "href=\"/ui/runs/s1_c/log?from=38797313.1.1\"" in r.body and "earlier" notin r.body.toLowerAscii
   test "D-77 the ways to the lines before and after a window are the cursors the core gave; a window in the middle has the way to the newest":
-    routes["/api/v1/runs/s1_c/log?limit=200&until=5.1.7"] = %*{"run_id": "s1_c", "run_state": "SUCCEEDED", "earlier": "5.1.2", "later": "5.1.7",
+    routes["/api/v1/runs/s1_c/log?limit=200&until=5.1.7"] = %*{"run_id": "s1_c", "run_state": "OK", "earlier": "5.1.2", "later": "5.1.7",
       "lines": [{"step": 5, "job_id": "00", "step_id": "0005", "attempt": 1, "ln": 2, "text": "x"}]}
     let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", query = "until=5.1.7", cookie = session))
     check r.status == 200 and "href=\"/ui/runs/s1_c/log?until=5.1.2\"" in r.body and "href=\"/ui/runs/s1_c/log?from=5.1.7\"" in r.body
     check "href=\"/ui/runs/s1_c/log\">Newest" in r.body
-    routes["/api/v1/runs/s1_c/log?limit=200&from=5.1.7"] = %*{"run_id": "s1_c", "run_state": "SUCCEEDED", "lines": []}
+    routes["/api/v1/runs/s1_c/log?limit=200&from=5.1.7"] = %*{"run_id": "s1_c", "run_state": "OK", "lines": []}
     let e = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_c/log", query = "from=5.1.7", cookie = session))
     check e.status == 200 and "No lines" in e.body
   test "D-77 what is not a cursor is not asked of the core; a run that does not exist is a 404, a core that is away 503, a session the core refuses the login":

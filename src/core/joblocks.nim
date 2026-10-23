@@ -26,7 +26,7 @@ func validLockName*(name: string): bool =
     if ch notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', ':', '-'}: return false
   true
 
-const finalStates = [rsSucceeded, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]
+const finalStates = [rsOk, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError]
 
 proc finalList(): string =
   for i, s in finalStates: result.add (if i == 0: "'" else: ",'") & protoName(s) & "'"

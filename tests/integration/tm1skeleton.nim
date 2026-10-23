@@ -3,7 +3,7 @@
 ## sandbox, real VictoriaLogs and vlagent. Nothing is mocked. The pieces have their own tests (tests/unit: the Lua API, the journal,
 ## the shim, the controller logic on a fake cluster; tests/integration/tk8s*.nim, trqlite.nim: the Kubernetes and rqlite
 ## primitives); this is the suite that proves them wired together. What it covers:
-##   - walking skeleton: a run with one ci.job + Job:sh step becomes a Pod and reaches SUCCEEDED; the Pod's log holds only the shim's
+##   - walking skeleton: a run with one ci.job + Job:sh step becomes a Pod and reaches OK; the Pod's log holds only the shim's
 ##     events, the build's output comes back through the platform's own log API, and rqlite agrees with the Pod log (D-29);
 ##   - D-27: the log pipeline, a closed gate when the log circuit is down (RUN-015), the shim holding a finished step until
 ##     the log is delivered, logs_undelivered, backpressure from a full spool;
@@ -118,7 +118,7 @@ proc waitTerminal(port: int; id: string; timeoutMs = 45000): JsonNode =
   var waited = 0
   while waited < timeoutMs:
     result = getRun(port, id)
-    if result["state"].getStr in ["SUCCEEDED", "FAILED", "INFRASTRUCTURE_ERROR"]: return
+    if result["state"].getStr in ["OK", "FAILED", "INFRASTRUCTURE_ERROR"]: return
     sleep 500
     waited += 500
   doAssert false, "run " & id & " never reached a terminal state, last seen: " & $result
@@ -318,7 +318,7 @@ suite "walking skeleton end to end":
       # gate_stabilize (10 s) - fail-closed after every start - so wait for it instead of racing it
       if remoteCore or logsReady: check waitGate(apiPort, true, 60000) >= 0
 
-    test "RUN-009/RUN-002: a run with one ci.job + Job:sh step reaches SUCCEEDED as a real Pod":
+    test "RUN-009/RUN-002: a run with one ci.job + Job:sh step reaches OK as a real Pod":
       let script = """
         return ci.pipeline({name = "walking-skeleton", main = function(run)
           local r
@@ -330,7 +330,7 @@ suite "walking skeleton end to end":
       check created["state"].getStr == "RUNNING"
 
       let final = waitTerminal(apiPort, runId)
-      check final["state"].getStr == "SUCCEEDED"
+      check final["state"].getStr == "OK"
 
       # the deterministic Pod (RUN-002) really ran on the cluster, not just in core's bookkeeping
       let name = podName(runId, 0, 1)
@@ -346,7 +346,7 @@ suite "walking skeleton end to end":
       var c = newRq(rqliteUrl)
       let r = c.query(%*[["SELECT state, exit_code FROM steps WHERE run_id = ? AND ordinal = 0", runId]])
       let row = r["results"][0]{"values"}[0]
-      check row[0].getStr == "SUCCEEDED"
+      check row[0].getStr == "OK"
       check row[1].getInt == 0
 
       # D-29: the Pod log, ZeroMQ and rqlite tell the same story. The Pod log has every transition; what core stored in
@@ -358,7 +358,7 @@ suite "walking skeleton end to end":
       let sr = cc.query(%*[["SELECT shim_n, shim_phase, shim_json, shim_source, state FROM steps WHERE run_id = ? AND ordinal = 0", runId]])
       let srow = sr["results"][0]{"values"}[0]
       check srow[0].getInt == 6                            # the same event number as the last Pod-log line
-      check srow[1].getStr == "done" and srow[4].getStr == "SUCCEEDED"
+      check srow[1].getStr == "done" and srow[4].getStr == "OK"
       check srow[3].getStr in ["zmq", "pod_log"]
       let stored = parseJson(srow[2].getStr)
       check stored["ev"].getStr == "done" and stored["reason"].getStr == "ok" and stored["exit"].getInt == 0
@@ -457,7 +457,7 @@ suite "walking skeleton end to end":
           scaleLogs(1)
         check waitGate(apiPort, true, 180000) >= 0             # recovered and stable for gate_stabilize -> open again
         let final = waitTerminal(apiPort, runId, 90000)         # the queue resumed by itself
-        check final["state"].getStr == "SUCCEEDED"
+        check final["state"].getStr == "OK"
         check final{"wait_reason"}.getStr == ""
 
     if remoteCore and logsReady:
@@ -575,7 +575,7 @@ suite "walking skeleton end to end":
         finally:
           scaleAgent(1)
         check waitGate(apiPort, true, 180000) >= 0
-        check final["state"].getStr == "SUCCEEDED"                 # exit code 0 is the result
+        check final["state"].getStr == "OK"                 # exit code 0 is the result
         check stepAttempt(runId) == 1                              # ... and the command is not run a second time
         check final["steps"][0]["termination"].getStr == "logs_undelivered"
 
@@ -598,7 +598,7 @@ suite "walking skeleton end to end":
           coreService("start")                                    # the Pod is still Running: the shim is waiting for core's permission
         waitApiUp(apiPort, 60000)
         let final = waitTerminal(apiPort, runId, 120000)
-        check final["state"].getStr == "SUCCEEDED"
+        check final["state"].getStr == "OK"
         check stepAttempt(runId) == 1                              # nothing was repeated
         check waitPodPhase(podName(runId, 0, 1), "Succeeded", 60000)   # the shim got its permission and exited
         var lines: seq[string]
@@ -703,7 +703,7 @@ suite "walking skeleton end to end":
             return "code=" .. tostring(r.code)
           end})"""
         let runId = postRun(apiPort, "", script)["id"].getStr
-        check waitTerminal(apiPort, runId, 120000)["state"].getStr == "SUCCEEDED"
+        check waitTerminal(apiPort, runId, 120000)["state"].getStr == "OK"
         var lines: seq[string]
         for _ in 0 ..< 30:
           lines = stepLogLines(runId)
@@ -723,7 +723,7 @@ suite "walking skeleton end to end":
             end})"""
           let runId = postRun(apiPort, "", script)["id"].getStr
           let final = waitTerminal(apiPort, runId, 180000)
-          check final["state"].getStr == "SUCCEEDED"
+          check final["state"].getStr == "OK"
           var n = 0
           for _ in 0 ..< 30:
             n = storedLines(runId)
@@ -769,7 +769,7 @@ suite "walking skeleton end to end":
         check waitMetric("cinim_inflight_app_metric_sum{source=\"myapp\",metric=\"myapp_requests_total\"} 42.000", 90000)
         check "ignored_thing" notin coreMetrics()                               # `include` filtered it in the shim
         check "cinim_inflight_scrape_up{source=\"myapp\"} 1" in coreMetrics()
-        check waitTerminal(apiPort, runId, 120000)["state"].getStr == "SUCCEEDED"
+        check waitTerminal(apiPort, runId, 120000)["state"].getStr == "OK"
 
       test "docs/metrics.md: a JVM's counters (hsperfdata) are read without any agent":
         let script = """

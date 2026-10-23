@@ -146,7 +146,7 @@ proc runMode() =
       send(pkSuspended, r.message)
   else:
     send(pkFinish, wireString(Protobuf.encode(FinishRun(run_id: runId,
-      state: (if r.status == esDone: RUN_STATE_SUCCEEDED else: RUN_STATE_FAILED), message: r.message, code: r.code, lease_token: token))))
+      state: (if r.status == esDone: RUN_STATE_OK else: RUN_STATE_FAILED), message: r.message, code: r.code, lease_token: token))))
   quit(0)
 
 # ------------------------------------------------------------------ the supervisor

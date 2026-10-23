@@ -32,7 +32,7 @@ suite "PIP-003 the number of a step and its place in the journal":
     proc finish(run: string; ordinal: int) =
       discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ? AND ordinal = ?", run, ordinal]])
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: run, seq: uint32(ordinal), attempt: 1),
-                                                         state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
+                                                         state: STEP_STATE_OK, exit_code: 0, termination_reason: "ok"))
 
     test "a numbered step has the number it was given, and nothing is made at the place number":
       let (r, tok) = newRunWithLease()

@@ -24,7 +24,7 @@ type
   OrgRow = object
     slug, name, state, namespace: string
   RunItem = object
-    id, short, state, organization, source, created, updated, failure, took: string
+    id, short, state, organization, project, pipeline, repository, source, created, updated, failure, took: string
   StateLink = object
     name, link: string
     active: bool
@@ -34,7 +34,7 @@ type
     seq, attempt: int
     state, exitCode, termination, pod, took: string
   RunView = object
-    id, state, organization, group, created, updated, repository, commit, path, waitReason, failureCode, failureMessage, took: string
+    id, state, organization, project, created, updated, repository, commit, path, waitReason, failureCode, failureMessage, took: string
     params: seq[ParamRow]
     steps: seq[StepRow]
   LogLine = object
@@ -55,7 +55,7 @@ const
   templateDir = currentSourcePath().parentDir / "templates"
   css = staticRead("ui.css")
   cssVersion = toHex(int64(hash(css)), 8)       # in the link: a new style sheet is a new address, and the day of caching does not hold back a change
-  runStates = ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "ABORTED"]   # the core's word (RUN_STATE_ABORTED); a state that is spelled two ways is a filter that matches nothing
+  runStates = ["PENDING", "RUNNING", "OK", "FAILED", "ABORTED"]   # the core's word (RUN_STATE_ABORTED); a state that is spelled two ways is a filter that matches nothing
 
 func isId(s: string): bool =
   ## the id of a run, or the cursor: what the core makes (letters, digits, - and _)
@@ -135,7 +135,7 @@ func secondsOf(text: string): int64 =
   if whole.len in 1 .. 12 and whole.allCharsInSet({'0' .. '9'}):
     try: return parseBiggestInt(whole) except ValueError: discard
 
-const finalRunStates = ["SUCCEEDED", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
+const finalRunStates = ["OK", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
 
 func runTook(state, created, updated: string; now: int64): string =
   ## a run ends when it reaches a final state; its `updated_at` is then the moment it did
@@ -302,7 +302,8 @@ proc runsPage(cfg: UiConfig; api: CoreApi; token, org: string; query: Table[stri
   for x in r.body{"runs"}.getElems:
     let commit = x{"source"}{"commit"}.getStr
     let failure = if x.hasKey("failure"): x["failure"]{"code"}.getStr & (if x["failure"]{"message"}.getStr.len > 0: ": " & x["failure"]{"message"}.getStr else: "") else: ""
-    runs.add RunItem(id: x{"id"}.getStr, short: shortRunId(x{"id"}.getStr), state: x{"state"}.getStr, organization: x{"organization"}.getStr, source: (if commit.len > 7: commit[0 ..< 7] else: commit),
+    runs.add RunItem(id: x{"id"}.getStr, short: shortRunId(x{"id"}.getStr), state: x{"state"}.getStr, organization: x{"organization"}.getStr,
+                     project: x{"project"}.getStr, pipeline: x{"source"}{"path"}.getStr, repository: x{"source"}{"repository"}.getStr, source: (if commit.len > 7: commit[0 ..< 7] else: commit),
                      created: timeText(x{"created_at"}.getStr), updated: timeText(x{"updated_at"}.getStr), failure: failure,
                      took: runTook(x{"state"}.getStr, x{"created_at"}.getStr, x{"updated_at"}.getStr, getTime().toUnix))
   let here = if org.len > 0: cfg.base & "/orgs/" & org & "/runs" else: cfg.base & "/runs"
@@ -317,7 +318,7 @@ proc runPage(cfg: UiConfig; api: CoreApi; token, id: string): UiResponse =
   let r = api.get(token, "/api/v1/runs/" & id)
   if r.status != asOk: return failed(cfg, r, "run " & id)
   let j = r.body
-  var v = RunView(id: j{"id"}.getStr, state: j{"state"}.getStr, organization: j{"organization"}.getStr, group: j{"group"}.getStr,
+  var v = RunView(id: j{"id"}.getStr, state: j{"state"}.getStr, organization: j{"organization"}.getStr, project: j{"project"}.getStr,
                   created: timeText(j{"created_at"}.getStr), updated: timeText(j{"updated_at"}.getStr), waitReason: j{"wait_reason"}.getStr,
                   failureCode: j{"failure"}{"code"}.getStr, failureMessage: j{"failure"}{"message"}.getStr,
                   took: runTook(j{"state"}.getStr, j{"created_at"}.getStr, j{"updated_at"}.getStr, getTime().toUnix),

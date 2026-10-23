@@ -93,7 +93,7 @@ suite "reconciliation with the cluster":
   test "a complete but empty inventory does prove it":
     check reconcile([step("r1", 0, 1, "STARTING", 100)], [], true, 10_000, 30).lost.len == 1
   test "queued and finished steps expect no Pod":
-    let steps = [step("a", 0, 1, "PENDING", 0), step("b", 0, 1, "SUCCEEDED", 0), step("c", 0, 1, "LOST", 0)]
+    let steps = [step("a", 0, 1, "PENDING", 0), step("b", 0, 1, "OK", 0), step("c", 0, 1, "LOST", 0)]
     check reconcile(steps, [], true, 10_000, 30).lost.len == 0
   test "the Pod of an attempt core moved on from is an orphan - the zombie of Jenkins and TeamCity - and must be deleted":
     let r = reconcile([step("r1", 0, 2, "STARTING", 100)], [pod("r1", 0, 1), pod("r1", 0, 2)], true, 200, 30)
@@ -103,7 +103,7 @@ suite "reconciliation with the cluster":
     let r = reconcile([], [pod("ghost", 3, 1)], true, 200, 30)
     check r.orphans.len == 1
   test "a finished step's own Pod is left alone (its logs and result may still be wanted)":
-    let r = reconcile([step("r1", 0, 1, "SUCCEEDED", 100)], [pod("r1", 0, 1, "Succeeded")], true, 200, 30)
+    let r = reconcile([step("r1", 0, 1, "OK", 100)], [pod("r1", 0, 1, "Succeeded")], true, 200, 30)
     check r.orphans.len == 0 and r.lost.len == 0
   test "several steps are judged independently":
     let steps = [step("a", 0, 1, "STARTING", 0), step("b", 0, 1, "STARTING", 0), step("c", 1, 3, "STARTING", 0)]

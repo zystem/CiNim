@@ -86,7 +86,7 @@ var maxUnfinishedRuns* = (try: parseInt(getEnv("CINIM_MAX_UNFINISHED_RUNS", "650
 
 proc queueIsFull*(c: var RqClient; profileId: string): bool =
   ## the organisation (its profile) has `maxUnfinishedRuns` runs that have not ended: no new run is made until some end
-  let r = c.query(%*[["SELECT count(*) FROM runs WHERE profile_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED', 'ABORTED', 'SKIPPED', 'TIMED_OUT', 'INFRASTRUCTURE_ERROR')", profileId]])
+  let r = c.query(%*[["SELECT count(*) FROM runs WHERE profile_id = ? AND state NOT IN ('OK', 'FAILED', 'ABORTED', 'SKIPPED', 'TIMED_OUT', 'INFRASTRUCTURE_ERROR')", profileId]])
   r["results"][0]{"values"}[0][0].getBiggestInt >= maxUnfinishedRuns
 
 func stepKeyOf*(ordinal, retries: int): string =
@@ -161,7 +161,7 @@ proc getRun*(co: Core; runId: string): JsonNode =
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
   let row = vals[0]
-  result = %*{"id": row[0].getStr, "organization": row[5].getStr, "group": row[1].getStr, "state": row[2].getStr,
+  result = %*{"id": row[0].getStr, "organization": row[5].getStr, "project": row[1].getStr, "state": row[2].getStr,
               "created_at": row[3].getStr, "updated_at": row[4].getStr}
   if row[7].getStr.len > 0: result["trigger_id"] = %row[7].getStr
   if row[10].getStr.len > 0: result["source"] = %*{"repository": row[10].getStr, "commit": row[11].getStr, "path": row[12].getStr}
@@ -366,7 +366,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
   let cur = c.query(%*[["SELECT attempt, state FROM steps WHERE run_id = ? AND ordinal = ?", t.step.run_id, int(t.step.seq)]])
   let cv = cur["results"][0]{"values"}
   if cv == nil or cv.len == 0 or cv[0][0].getInt != attempt: return
-  if cv[0][1].getStr in [protoName(ssSucceeded), protoName(ssFailed), protoName(ssLost), protoName(ssAborted)]:
+  if cv[0][1].getStr in [protoName(ssOk), protoName(ssFailed), protoName(ssLost), protoName(ssAborted)]:
     # Already final, usually because the shim reported the result before the Pod's end was seen: the result stands, but what Kubernetes
     # said about the Pod arrives only now (the events go in an hour) and is kept for the investigation, once.
     if t.pod_diag.len > 0:
@@ -439,7 +439,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
     if sv != nil and sv.len > 0 and sv[0][0].getStr.len > 0:
       let shim = try: fromJson(parseJson(sv[0][0].getStr)) except CatchableError: none(ShimState)
       if shim.isSome and shim.get.phase == spDone:
-        let podSays = if t.exit_code == 0: ssSucceeded else: ssFailed
+        let podSays = if t.exit_code == 0: ssOk else: ssFailed
         let shimSays = stepStateOf(shim.get)
         if shimSays != podSays and not (shimSays == ssTimedOut and podSays == ssFailed):
           stderr.writeLine "core: step " & t.step.run_id & "/" & $t.step.seq & " attempt " & $attempt & ": the Pod says " &
@@ -459,7 +459,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
         # (a retried poll) nothing is done again
         discard c.appendRow(t.step.run_id, stepJournalKey(c, t.step.run_id, int(t.step.seq)), "job_sh", plv[0][0].getStr, res, alongside = %*[
           ["UPDATE steps SET state = ?, exit_code = ?, termination = ?, pod_reason = ?, pod_message = ?, pod_diag = ?, finished_at = ? WHERE run_id = ? AND ordinal = ? AND attempt = ?",
-           protoName(if t.exit_code == 0: ssSucceeded else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
+           protoName(if t.exit_code == 0: ssOk else: ssFailed), t.exit_code, reason, podReason, podMessage, podDiag, $now,
            t.step.run_id, int(t.step.seq), attempt],
           ["UPDATE runs SET dirty = 1 WHERE id = ?", t.step.run_id]])
         # the shim could not hand over its artifacts or its log: they are on the run's volume, to be fetched when the controller is told to (core/drains.nim)
@@ -494,7 +494,7 @@ proc finalizeFromShim*(c: var RqClient; profileId, runId: string; seq, attempt: 
     # watchdog ends it as `outcome_unknown` if none comes in `terminatedGrace` seconds (the controller is down).
     return
   let reason = s.reason
-  let state = if exitCode == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED
+  let state = if exitCode == 0: STEP_STATE_OK else: STEP_STATE_FAILED
   applyTransition(c, loadPolicy(c, profileOfRun(c, runId, profileId)), PodTransition(
     step: StepRef(run_id: runId, seq: uint32(seq), attempt: uint32(attempt)), state: state, exit_code: int32(exitCode),
     termination_reason: reason, shim_state_json: stateJson))
@@ -1076,11 +1076,11 @@ proc handleFinish*(c: var RqClient; req: FinishRun; master: string): ExecutorRes
   # why a run did not succeed is kept with it (the API shows it as `failure`): the script's error, the parameter that was refused, the limit
   discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = ?, fail_message = ? WHERE id = ?",
     protoName(case req.state
-              of RUN_STATE_SUCCEEDED: rsSucceeded
+              of RUN_STATE_OK: rsOk
               of RUN_STATE_FAILED: rsFailed
               else: rsInfrastructureError), now,
-    (if req.state == RUN_STATE_SUCCEEDED: "" else: req.code[0 ..< min(req.code.len, 64)]),
-    (if req.state == RUN_STATE_SUCCEEDED: "" else: req.message[0 ..< min(req.message.len, maxFailMessage)]), req.run_id]])
+    (if req.state == RUN_STATE_OK: "" else: req.code[0 ..< min(req.code.len, 64)]),
+    (if req.state == RUN_STATE_OK: "" else: req.message[0 ..< min(req.message.len, maxFailMessage)]), req.run_id]])
   giveBackLease(c, req.run_id, caller.attempt)
   c.releaseRun(req.run_id, getTime().toUnix())          # a run that has ended holds no lock of a job (core/joblocks.nim)
   ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.result,

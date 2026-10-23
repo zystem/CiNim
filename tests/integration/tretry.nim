@@ -34,7 +34,7 @@ suite "PIP-015 running again only what failed":
     proc failedRun(): string =
       ## a run whose first step succeeded and whose second failed, and which ended FAILED
       let r = co.createRun("return 1", "t1", defaultProfile)
-      addStep(r, 0, "SUCCEEDED")
+      addStep(r, 0, "OK")
       addStep(r, 1, "FAILED", 1)
       journalStep(r, 0, 0)
       journalStep(r, 1, 1)
@@ -47,7 +47,7 @@ suite "PIP-015 running again only what failed":
       check done.outcome == roRetried and done.state == "RUNNING" and done.steps == @[1]
       check runState(r) == "RUNNING"
       check stepRow(r, 1) == (state: "PENDING", attempt: 2, retries: 1)
-      check stepRow(r, 0) == (state: "SUCCEEDED", attempt: 1, retries: 0)
+      check stepRow(r, 0) == (state: "OK", attempt: 1, retries: 0)
       check c.query(%*[["SELECT fail_code, fail_message FROM runs WHERE id = ?", r]])["results"][0]["values"][0] == %*["", ""]
     test "the journal only grows: the old answers stay, a record of kind retry names the key it supersedes, and the chain holds":
       let r = failedRun()
@@ -60,10 +60,10 @@ suite "PIP-015 running again only what failed":
       let r = failedRun()
       discard c.retryRun(r, now())
       let attempt = stepRow(r, 1).attempt
-      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: 1, attempt: uint32(attempt)), state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
+      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: 1, attempt: uint32(attempt)), state: STEP_STATE_OK, exit_code: 0, termination_reason: "ok"))
       check keys(r) == @["s0", "s1", "retry#0", "s1~1"]
       check c.readRows(r)[3].result == "0\n"
-      check stepRow(r, 1).state == "SUCCEEDED"
+      check stepRow(r, 1).state == "OK"
       check c.verifyJournal(r).check.verdict == cvOk
     test "it can be done again: the second failure is s1~1, the second retry supersedes it, the result is s1~2":
       let r = failedRun()
@@ -75,7 +75,7 @@ suite "PIP-015 running again only what failed":
       check again.outcome == roRetried
       check stepRow(r, 1) == (state: "PENDING", attempt: 3, retries: 2)
       check parseJson(c.readRows(r)[^1].payload) == %*["s1~1"]
-      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: 1, attempt: 3), state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
+      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: 1, attempt: 3), state: STEP_STATE_OK, exit_code: 0, termination_reason: "ok"))
       check keys(r) == @["s0", "s1", "retry#0", "s1~1", "retry#1", "s1~2"]
       check c.verifyJournal(r).check.verdict == cvOk
     test "a step that was lost (no record of its own) is run again too, and the keys still agree":
@@ -84,7 +84,7 @@ suite "PIP-015 running again only what failed":
       setState(r, "INFRASTRUCTURE_ERROR")
       check c.retryRun(r, now()).outcome == roRetried
       check stepRow(r, 0) == (state: "PENDING", attempt: 2, retries: 1)
-      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 2), state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
+      applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 2), state: STEP_STATE_OK, exit_code: 0, termination_reason: "ok"))
       check "s0~1" in keys(r)
     test "asked twice, it is done once; a run that is not failed, one with nothing failed, one whose volume is gone, and one that is not there are refused":
       let r = failedRun()
@@ -93,12 +93,12 @@ suite "PIP-015 running again only what failed":
       check keys(r) == @["s0", "s1", "retry#0"]
       let ok = co.createRun("return 1", "t1", defaultProfile)
       check c.retryRun(ok, now()).outcome == roNotRetryable                 # RUNNING
-      setState(ok, "SUCCEEDED")
+      setState(ok, "OK")
       check c.retryRun(ok, now()).outcome == roNotRetryable
       setState(ok, "ABORTED")
       check c.retryRun(ok, now()).outcome == roNotRetryable                 # a run that was cancelled on purpose is not run again
       let noStep = co.createRun("return 1", "t1", defaultProfile)
-      addStep(noStep, 0, "SUCCEEDED")
+      addStep(noStep, 0, "OK")
       setState(noStep, "FAILED")
       check c.retryRun(noStep, now()).outcome == roNothingToRetry            # the script itself ended it
       let gone = failedRun()

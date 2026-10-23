@@ -62,7 +62,7 @@ suite "RUN-004 leases to a conductor":
       check lease(a, "c-a", 10) == ids[0 .. 1]                  # two places of the organisation
       check c.activeRuns(a) == 2
       check lease(a, "c-a", 10).len == 0                        # both are held (or waiting for a step): the others wait in the queue of runs
-      discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED', lease_until = 0 WHERE id = ?", ids[0]]])
+      discard c.execute(%*[["UPDATE runs SET state = 'OK', lease_until = 0 WHERE id = ?", ids[0]]])
       check lease(a, "c-a", 10) == @[ids[2]]                    # a place is free again
     test "a run that was led and waits for its step goes back to a conductor without a new place":
       let a = newOrg(podLimit = 1)

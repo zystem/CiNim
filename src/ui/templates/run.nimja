@@ -4,9 +4,9 @@
 <dl class="facts">
 <dt>State</dt><dd class="state-{{ h(run.state) }}">{{ h(run.state) }}</dd>
 <dt>Organisation</dt><dd>{% if run.organization.len > 0 %}<a href="{{ h(base) }}/orgs/{{ h(run.organization) }}/runs">{{ h(run.organization) }}</a>{% endif %}</dd>
-{% if run.group.len > 0 %}<dt>Group</dt><dd>{{ h(run.group) }}</dd>{% endif %}
+{% if run.project.len > 0 %}<dt>Project</dt><dd>{{ h(run.project) }}</dd>{% endif %}
 <dt>Started</dt><dd>{{ h(run.created) }}</dd><dt>Updated</dt><dd>{{ h(run.updated) }}</dd>{% if run.took.len > 0 %}<dt>Took</dt><dd>{{ h(run.took) }}</dd>{% endif %}
-{% if run.repository.len > 0 %}<dt>Source</dt><dd>{{ h(run.repository) }} @ <code>{{ h(run.commit) }}</code> {{ h(run.path) }}</dd>{% endif %}
+{% if run.repository.len > 0 %}<dt>Pipeline</dt><dd>{{ h(run.path) }}</dd><dt>Source</dt><dd>{{ h(run.repository) }} @ <code>{{ h(run.commit) }}</code></dd>{% endif %}
 {% if run.waitReason.len > 0 %}<dt>Waiting</dt><dd>{{ h(run.waitReason) }}</dd>{% endif %}
 {% if run.failureCode.len > 0 %}<dt>Failure</dt><dd class="error"><code>{{ h(run.failureCode) }}</code> {{ h(run.failureMessage) }}</dd>{% endif %}
 </dl>

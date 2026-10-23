@@ -24,7 +24,7 @@ suite "T-03 the hash chain of the journal":
     proc finishStep(run: string; ordinal: int) =
       ## what the controller's report does for a step that ended with code 0
       applyTransition(c, defaultPolicy(), PodTransition(step: StepRef(run_id: run, seq: uint32(ordinal), attempt: 1),
-        state: STEP_STATE_SUCCEEDED, exit_code: 0, termination_reason: "ok"))
+        state: STEP_STATE_OK, exit_code: 0, termination_reason: "ok"))
     proc runWithSteps(n: int): string =
       ## a run whose script has asked for `n` steps in turn, each answered: params at 0, then job_sh at 1..n
       let r = co.createRun("return 1")

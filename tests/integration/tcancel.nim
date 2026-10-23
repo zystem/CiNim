@@ -30,7 +30,7 @@ suite "RUN-006 cancelling a run":
 
     test "the run and its steps that have not ended are cancelled, the lease is given back, a step that has ended stays as it was":
       let r = co.createRun("return 1")
-      addStep(r, 0, "SUCCEEDED")
+      addStep(r, 0, "OK")
       addStep(r, 1, "RUNNING")
       addStep(r, 2, "STARTING")
       addStep(r, 3, "PENDING")
@@ -38,7 +38,7 @@ suite "RUN-006 cancelling a run":
       let done = c.abortRun(r, getTime().toUnix())
       check done.outcome == coAborted and done.state == "ABORTED"
       check runState(r) == "ABORTED" and leaseUntil(r) == 0
-      check stepState(r, 0) == "SUCCEEDED"
+      check stepState(r, 0) == "OK"
       for i in 1 .. 3: check stepState(r, i) == "ABORTED"
     test "another run is not touched":
       let a = co.createRun("return 1")
@@ -49,9 +49,9 @@ suite "RUN-006 cancelling a run":
       check runState(b) == "RUNNING" and stepState(b, 0) == "RUNNING"
     test "a run that has ended is left as it is, a run that is not there is not found, and a second cancel says the run has ended":
       let r = co.createRun("return 1")
-      discard c.execute(%*[["UPDATE runs SET state = 'SUCCEEDED' WHERE id = ?", r]])
-      check c.abortRun(r, getTime().toUnix()) == (coAlreadyFinished, "SUCCEEDED")
-      check runState(r) == "SUCCEEDED"
+      discard c.execute(%*[["UPDATE runs SET state = 'OK' WHERE id = ?", r]])
+      check c.abortRun(r, getTime().toUnix()) == (coAlreadyFinished, "OK")
+      check runState(r) == "OK"
       check c.abortRun("no-such-run", getTime().toUnix()).outcome == coNotFound
       let q = co.createRun("return 1")
       check c.abortRun(q, getTime().toUnix()).outcome == coAborted

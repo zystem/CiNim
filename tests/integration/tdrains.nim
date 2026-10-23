@@ -35,7 +35,7 @@ suite "DAT-003 the drain of a step's leavings":
     proc poll(transitions: seq[PodTransition] = @[]; drained: seq[StepDrained] = @[]; released: seq[string] = @[]; push = false): PollResponse =
       handlePoll(c, defaultProfile, "master", PollRequest(session_id: "jc-d-" & sfx, namespace: ns, free_pod_slots: 0, transitions: transitions, steps_drained: drained, storage_released: released), push = push)
     proc ends(r, reason: string; exit = 0; shim = ""): PollResponse =
-      poll(@[PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 1), state: (if exit == 0: STEP_STATE_SUCCEEDED else: STEP_STATE_FAILED), exit_code: int32(exit),
+      poll(@[PodTransition(step: StepRef(run_id: r, seq: 0, attempt: 1), state: (if exit == 0: STEP_STATE_OK else: STEP_STATE_FAILED), exit_code: int32(exit),
                            termination_reason: reason, shim_state_json: shim)])
     proc podLog(run: string; exit: int; reason: string; logs: LogsState; arts: ArtifactsState): string =
       ## the last line of the shim in the Pod's log, which the controller sends when the core never heard the shim (it was away)
@@ -113,7 +113,7 @@ suite "DAT-003 the drain of a step's leavings":
       clean()
       let r = runWithStep(uploads)
       discard ends(r, "artifacts_undelivered")
-      setRun(r, "SUCCEEDED")
+      setRun(r, "OK")
       check r notin poll(released = @["s1_nothing"]).release_storage       # a poll that carries an answer looks at once (see trunstorage)
       discard poll(drained = @[StepDrained(step: StepRef(run_id: r, seq: 0, attempt: 1), ok: true)])
       check r in poll(released = @["s1_nothing"]).release_storage
