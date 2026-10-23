@@ -14,7 +14,8 @@ import ctrlpresence, logwindow, keptpods, stepsecrets, runparams, objectstore, r
 import std/options
 import audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
-import_proto3 "../../build/nimproto/all.proto"
+import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
+export protos
 
 type
   Core* = object
@@ -758,7 +759,7 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
       drainOrders.add DrainStep(step: StepRef(run_id: d.runId, seq: uint32(d.ordinal), attempt: uint32(d.attempt)), image: d.image,
                                 step_token: stepToken(master, d.runId, d.ordinal, d.attempt), artifacts: d.artifacts, logs: d.logs, volume: d.volume)
   PollResponse(header: Header(protocol: 1), commands: commands, drain_steps: drainOrders, release_storage: release, config: controllerConfigOf(shardSettingsFromEnv()),
-               gate: GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000,
+               gate: protos.GateState(open: gate.isOpen, reason: gate.reason), poll_after_ms: 1000,
                conductors: (if push or profileId.len == 0: ConductorPlan() else: conductorPlanOf(c, profileId, master, req.namespace, settings)))
 
 # The payloads of the push channel (core/streamhub.nim). Encoding is done here, in the module that generates the message types: protobuf_serialization

@@ -12,7 +12,7 @@ import std/options
 import common/[zmqcurve, stream, streamstate]
 import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors, drain
 
-import_proto3 "../../build/nimproto/all.proto"
+import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
 
 let
   ns = getEnv("CINIM_NAMESPACE", "cinim")

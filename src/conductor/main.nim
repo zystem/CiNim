@@ -10,7 +10,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, stream, streamstate, runpipe, heartbeat, scriptsource]
 import executor/[sandbox, journal, replay, pass]
 
-import_proto3 "../../build/nimproto/all.proto"
+import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
 
 const healthMaxAgeSeconds = 90         ## the liveness probe fails when the core has not accepted a hello for this long
 

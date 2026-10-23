@@ -22,7 +22,7 @@ import checksums/sha2
 import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts, varsheader, cachepack
 import ../common/[stepenv, cachedecl]
 when defined(shimLogging):
-  import logclient   ## also brings in StepRef (import_proto3-generated) for the calls below
+  import logclient   ## also brings in StepRef (the types of build/nimproto/protos.nim) for the calls below
 else:
   # Default build: no ZeroMQ at all. logclient.nim pulls in zmqcurve -> zmq/bindings.nim, which dlopens
   # libzmq at program start (a version check at import) - an arbitrary step image (busybox, ...) has no

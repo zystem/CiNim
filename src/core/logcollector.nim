@@ -27,7 +27,8 @@ import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepse
 import common/[ctrlauth]
 import scheduler   ## for stopServers*, the shared shutdown flag every core REP-server thread polls
 
-import_proto3 "../../build/nimproto/all.proto"
+import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
+export protos
 
 const attemptRecheckSeconds = 5.0
 

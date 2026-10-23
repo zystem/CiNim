@@ -12,7 +12,8 @@ import protobuf_serialization/files/type_generator
 import crunchy
 import logspool, shimlog, secretmask, artifacts, directclient
 
-import_proto3 "../../build/nimproto/all.proto"
+import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
+export protos
 
 type
   LogCfg* = object
