@@ -168,6 +168,14 @@ secrets:
     mount: ""                          # the Transit mount; empty: transit
     proxy: ""                          # an HTTP proxy that takes CONNECT, http://host:port, when the cluster has no road to the service of its own; the mutual TLS still runs from the core to the service
     tlsSecret: ""
+  # D-80: the key service that the master key MOVES TO (another service, or the same with another key), set only while it moves: the core does not use it, `/core rekey` in the Pod does
+  # (docs/hardware-key.md "Moving to another key service"). The same keys as `keyService`; when the move is done, put these values into `keyService` and empty these.
+  newKeyService:
+    url: ""
+    keyName: cinim-shard
+    mount: ""
+    proxy: ""
+    tlsSecret: ""
 
 # Step Pods (the LimitRange of an organisation's namespace). A Pod that asks for no ephemeral storage gets a request of 64Mi (so it is not the
 # first one the kubelet evicts when the node runs short of it) and this limit; a Pod that uses more than its limit is evicted and the step has failed.

@@ -9,19 +9,30 @@ import ../common/rqlite
 proc exitImmediately(code: cint) {.importc: "_exit", header: "<unistd.h>", noreturn.}
   ## `quit` runs the exit handlers of Nim while the other threads still work, and they crash (exit code 139 and a trace instead of the message); `_exit` does not
 
-proc buildKek*(certs: string): tuple[ok, retry: bool, kek: KekProvider, error: string] =
-  let url = getEnv("CINIM_KEYSERVICE_URL")
+proc buildKekFrom*(servicePrefix, keyFileVar: string; certs: string; derivedIfNone: bool): tuple[ok, retry: bool, kek: KekProvider, error: string] =
+  ## The master key from the environment under the names `<servicePrefix>_URL`, `_MOUNT`, `_KEY_NAME`, `_CA`, `_CERT`, `_KEY`, `_TOKEN_FILE`, `_PROXY`, `_TIMEOUT_MS`, else the file named by `keyFileVar`, else
+  ## (`derivedIfNone`) the key derived from the core's CURVE key. The same function reads the key the core runs with (`CINIM_KEYSERVICE`, `CINIM_SECRETS_KEY_FILE`) and, for `/core rekey`
+  ## (D-80), the key it moves to (`CINIM_NEW_KEYSERVICE`, `CINIM_NEW_SECRETS_KEY_FILE`).
+  let url = getEnv(servicePrefix & "_URL")
   if url.len > 0:
-    let timeout = try: parseInt(getEnv("CINIM_KEYSERVICE_TIMEOUT_MS", "5000")) except ValueError: 5000
-    return httpKek(TransitConfig(url: url, mount: getEnv("CINIM_KEYSERVICE_MOUNT"), keyName: getEnv("CINIM_KEYSERVICE_KEY_NAME", "cinim-shard"),
-                                 ca: getEnv("CINIM_KEYSERVICE_CA"), cert: getEnv("CINIM_KEYSERVICE_CERT"), key: getEnv("CINIM_KEYSERVICE_KEY"),
-                                 tokenFile: getEnv("CINIM_KEYSERVICE_TOKEN_FILE"), proxy: getEnv("CINIM_KEYSERVICE_PROXY"), timeoutMs: timeout))
-  let keyFile = getEnv("CINIM_SECRETS_KEY_FILE")
+    let timeout = try: parseInt(getEnv(servicePrefix & "_TIMEOUT_MS", "5000")) except ValueError: 5000
+    return httpKek(TransitConfig(url: url, mount: getEnv(servicePrefix & "_MOUNT"), keyName: getEnv(servicePrefix & "_KEY_NAME", "cinim-shard"),
+                                 ca: getEnv(servicePrefix & "_CA"), cert: getEnv(servicePrefix & "_CERT"), key: getEnv(servicePrefix & "_KEY"),
+                                 tokenFile: getEnv(servicePrefix & "_TOKEN_FILE"), proxy: getEnv(servicePrefix & "_PROXY"), timeoutMs: timeout))
+  let keyFile = getEnv(keyFileVar)
   if keyFile.len > 0:
     let k = fileKek(keyFile)
     if not k.ok: return (false, false, KekProvider(), "the key of the secrets: " & k.error)
     return (true, false, k.kek, "")
+  if not derivedIfNone: return (false, false, KekProvider(), "no key is given: set " & servicePrefix & "_URL or " & keyFileVar)
   (true, false, derivedKek(coreSecret(certs)), "")
+
+proc buildKek*(certs: string): tuple[ok, retry: bool, kek: KekProvider, error: string] =
+  buildKekFrom("CINIM_KEYSERVICE", "CINIM_SECRETS_KEY_FILE", certs, derivedIfNone = true)
+
+proc buildNewKek*(certs: string): tuple[ok, retry: bool, kek: KekProvider, error: string] =
+  ## the key `/core rekey` moves to: given by `CINIM_NEW_KEYSERVICE_*` or `CINIM_NEW_SECRETS_KEY_FILE`; nothing given is an error (the key derived from the CURVE key is never moved to by accident)
+  buildKekFrom("CINIM_NEW_KEYSERVICE", "CINIM_NEW_SECRETS_KEY_FILE", certs, derivedIfNone = false)
 
 proc tryActivate*(rqliteUrl, certs: string): tuple[ready, retry: bool, error: string] =
   ## one attempt; a key that does not open what the database holds is not "retry": waiting will not make it the right key

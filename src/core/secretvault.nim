@@ -116,6 +116,60 @@ proc ensureKeyCheck*(c: var RqClient; kek: KekProvider): tuple[ok, retry: bool, 
     return (false, false, "the key of the secrets (" & kek.id & ") is not the one that sealed the secrets in this database: restore the key, or the secrets cannot be read")
   (true, false, "")
 
+type RekeyReport* = tuple[ok, retry: bool, moved, already, failed: int, errors: seq[string]]
+
+proc rekeyRow(c: var RqClient; oldKek, newKek: KekProvider; dryRun: bool; table, idColumn, id, column, aad: string; rep: var RekeyReport): bool =
+  ## one text moved from the old key to the new one: true when it is moved or was, false when it is left (and told)
+  let cur = c.query(%*[["SELECT " & column & " FROM " & table & " WHERE " & idColumn & " = ?", id]])["results"][0]{"values"}
+  if cur == nil or cur.len == 0: return true
+  let text = cur[0][0].getStr
+  var u = oldKek.unwrap(text, aad)
+  defer:
+    for i in 0 ..< u.plain.len: u.plain[i] = 0
+  if not u.ok:
+    if u.retry:
+      rep.retry = true
+      rep.errors.add table & " " & id & ": the old key does not answer: " & u.error
+      return false
+    let n = newKek.unwrap(text, aad)
+    if n.ok:
+      inc rep.already
+      return true
+    rep.errors.add table & " " & id & ": neither the old key nor the new one opens it (" & u.error & ")"
+    return false
+  let w = newKek.wrap(u.plain, aad)
+  if not w.ok:
+    if w.retry: rep.retry = true
+    rep.errors.add table & " " & id & ": the new key cannot seal it: " & w.error
+    return false
+  let back = newKek.unwrap(w.wrapped, aad)
+  if not back.ok or back.plain != u.plain:
+    rep.errors.add table & " " & id & ": the new key does not open what it sealed; left as it was"
+    return false
+  if not dryRun:
+    discard c.execute(%*[["UPDATE " & table & " SET " & column & " = ? WHERE " & idColumn & " = ? AND " & column & " = ?", w.wrapped, id, text]])
+  inc rep.moved
+  true
+
+proc rekeySealed*(c: var RqClient; oldKek, newKek: KekProvider; dryRun = false): RekeyReport =
+  ## D-80: the master key moves to another (another key service, a key file, ...). Each data key of an organisation is opened with `oldKek` and sealed with `newKek`, and read back with it, and
+  ## only then does the row change (compare-and-set on the text read, so a writer that came in between wins and the next run finds it); the secrets themselves are not touched. The check text
+  ## of the vault moves last, and only when every data key has: until then the core still starts with the old key. A row that the old key refuses for good but the new key opens has moved already
+  ## (a run that stopped, or was run twice); one that neither opens is told and left. `dryRun` does everything but the change of the rows. `retry`: a key service did not answer; run it again.
+  ## The data key is in the memory of this process while it moves, and is wiped after.
+  var rep: RekeyReport
+  let orgs = c.query(%*[["SELECT tenant_id FROM org_keys ORDER BY tenant_id"]])["results"][0]{"values"}
+  if orgs != nil:
+    for o in orgs.elems:
+      if not c.rekeyRow(oldKek, newKek, dryRun, "org_keys", "tenant_id", o[0].getStr, "wrapped", dekAad(o[0].getStr), rep): inc rep.failed
+  if rep.failed == 0:
+    # the check text last: with it moved the core starts with the new key only
+    if not c.rekeyRow(oldKek, newKek, dryRun, "vault_meta", "key", "kek_check", "value", checkAad, rep): inc rep.failed
+  else:
+    rep.errors.add "the check text of the vault was not moved: not all the data keys are, and the core still starts with the old key"
+  rep.ok = rep.failed == 0
+  rep
+
 proc dekFor(c: var RqClient; kek: KekProvider; tenant: string; create: bool): tuple[ok, retry: bool, dek: seq[byte], error: string] =
   let now = epochTime()
   let cached = deks.get(tenant, now)

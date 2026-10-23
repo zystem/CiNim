@@ -186,6 +186,18 @@ The service that holds the card and answers the core is a project of its own, **
 - Seen earlier on a cluster with the emulator, and expected to hold: a data key opened through the service; a step that starts while the service is down gets its secrets from the cache; a core that starts while it is down answers `secrets_unavailable`, a
   step started then waits in its shim and runs when the service is back; a service with another key than the one that sealed the database is refused.
 
+### Moving to another key service, or to another key (D-80)
+
+`/core rekey` moves the master key: every data key of an organisation and the check text of the vault are opened with the key the core runs with and sealed with the new one, in the same database, with the secrets themselves untouched. The new key is another service (another hsmgate, a Vault or an OpenBao), the same service with another key, or a key file; from a file or the key derived from the CURVE key to a service too. It is not `rewrap`: the data key is opened by the old key and sealed by the new, in this process (it is wiped after), because two services cannot see each other's keys.
+
+1. Make the new key and let the core use it in the new service (the same contexts: `cinim/dek/v1|<tenant>` and `cinim/kek-check/v1`; for hsmgate `encrypt` and `decrypt`).
+2. Give the core the new service next to the old: the chart value `secrets.newKeyService` (`url`, `keyName`, `mount`, `proxy`, `tlsSecret` with `ca.crt`, `tls.crt`, `tls.key`), or `CINIM_NEW_KEYSERVICE_*` / `CINIM_NEW_SECRETS_KEY_FILE` by hand. `helm upgrade` restarts the core, which goes on with the old key.
+3. `kubectl -n <ns> exec deploy/cinim-core -- /core rekey --dry-run`: opens everything with the old key, seals it with the new one and reads it back, and changes nothing. It says how many rows would move and which would not.
+4. `kubectl -n <ns> exec deploy/cinim-core -- /core rekey`: moves them. A row is changed only after the new key has opened what it sealed, and only if it is still the text that was read; the check text goes last and only when every data key has moved, so that until then the core still starts with the old key. A run that stopped can be run again; a row that the new key opens already is counted as moved. A key service that does not answer is "run it again".
+5. `helm upgrade` with the new service in `secrets.keyService` and `newKeyService` emptied: the core starts with the new key. From the moment the check text has moved, the old key opens nothing in this database; **keep the old key until the new core has started and a secret has been read**, and keep a backup of the database taken before step 4.
+
+While step 4 runs, a core that is already running has the data keys it opened in its cache (`CINIM_SECRETS_DEK_CACHE`, 10 minutes) and a step that asks for a data key not in the cache of an organisation that has moved is refused with `secrets_unavailable` until the core is restarted with the new key; to avoid it, scale the core to 0 for the few seconds step 4 takes. Tests: `tests/integration/trekey.nim` (two keys against a real database: the dry run, the move, the second run, a row of a third key, a key that cannot seal), and `tkeyservice.nim` with two real hsmgate services of different keys.
+
 ## 11. Other uses of the same card
 
 The card holds the key of hsmgate (EC P-256, ECDH). Other things can use it through hsmgate's Transit face without another key: OpenBao unsealed by the card (`seal "transit"`, with or without a network between them) and the encryption of Kubernetes' etcd by

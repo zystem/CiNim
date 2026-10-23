@@ -6,7 +6,7 @@
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
 import health
-import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub
+import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub, vaultsetup, secretvault, kekprovider
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -19,6 +19,31 @@ if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
     quit 1
   echo credentialLine(made.cred)
   quit 0
+
+if paramCount() >= 1 and paramStr(1) == "rekey":
+  # `kubectl -n <ns> exec deploy/cinim-core -- /core rekey [--dry-run]` (D-80, docs/hardware-key.md): the master key moves to another, the new one given by CINIM_NEW_KEYSERVICE_* or
+  # CINIM_NEW_SECRETS_KEY_FILE next to the old one that the core runs with. Every data key of an organisation and the check text of the vault are opened with the old key and sealed with the new
+  # one (the secrets themselves are not touched); with --dry-run nothing changes. Then the core is started with the new key. Safe to run again.
+  let dry = paramCount() >= 2 and paramStr(2) == "--dry-run"
+  let certsDir = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
+  let oldK = buildKek(certsDir)
+  if not oldK.ok:
+    stderr.writeLine "core: the old key: " & oldK.error
+    quit 1
+  let newK = buildNewKek(certsDir)
+  if not newK.ok:
+    stderr.writeLine "core: the new key: " & newK.error
+    quit 1
+  if oldK.kek.id == newK.kek.id:
+    stderr.writeLine "core: the new key is the old one (" & oldK.kek.id & "): nothing to move"
+    quit 1
+  var rc = newRq(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
+  let rep = rc.rekeySealed(oldK.kek, newK.kek, dryRun = dry)
+  echo (if dry: "dry run: " else: ""), "from ", oldK.kek.id, " to ", newK.kek.id, ": ", (if dry: "would move " else: "moved "), rep.moved, ", already moved: ", rep.already, ", failed: ", rep.failed
+  for e in rep.errors: stderr.writeLine "  " & e
+  if rep.retry: stderr.writeLine "core: a key service did not answer: run it again"
+  if rep.ok and not dry: echo "core: start the core with the new key now (docs/hardware-key.md); the old key opens nothing in this database any more"
+  quit (if rep.ok: 0 else: 1)
 
 if paramCount() >= 3 and paramStr(1) == "conductor-credential":
   # `/core conductor-credential <namespace> <conductor id>`: what a conductor of that organisation proves itself with (IAM-003). The controller will

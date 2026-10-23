@@ -119,6 +119,22 @@ spec:
             # the master key of the step secrets (core/secretvault.nim); without one it is derived from the CURVE key
             - {name: CINIM_SECRETS_KEY_FILE, value: /etc/cinim-secrets/key}
             {{- end }}
+            {{- if .Values.secrets.newKeyService.url }}
+            # D-80: the key service that the master key moves to, only while it moves (`/core rekey`, docs/hardware-key.md); the core itself does not use it
+            - {name: CINIM_NEW_KEYSERVICE_URL, value: {{ .Values.secrets.newKeyService.url | quote }}}
+            - {name: CINIM_NEW_KEYSERVICE_KEY_NAME, value: {{ .Values.secrets.newKeyService.keyName | quote }}}
+            {{- if .Values.secrets.newKeyService.mount }}
+            - {name: CINIM_NEW_KEYSERVICE_MOUNT, value: {{ .Values.secrets.newKeyService.mount | quote }}}
+            {{- end }}
+            {{- if .Values.secrets.newKeyService.proxy }}
+            - {name: CINIM_NEW_KEYSERVICE_PROXY, value: {{ .Values.secrets.newKeyService.proxy | quote }}}
+            {{- end }}
+            {{- if .Values.secrets.newKeyService.tlsSecret }}
+            - {name: CINIM_NEW_KEYSERVICE_CA, value: /etc/cinim-newkeyservice/ca.crt}
+            - {name: CINIM_NEW_KEYSERVICE_CERT, value: /etc/cinim-newkeyservice/tls.crt}
+            - {name: CINIM_NEW_KEYSERVICE_KEY, value: /etc/cinim-newkeyservice/tls.key}
+            {{- end }}
+            {{- end }}
             {{- if .Values.auth.enabled }}
             # IAM-003: without a token or CINIM_AUTH=on the API is open
             - {name: CINIM_AUTH, value: "on"}
@@ -158,6 +174,9 @@ spec:
             {{- end }}
             {{- if and .Values.secrets.keyService.url .Values.secrets.keyService.tlsSecret }}
             - {name: keyservice-tls, mountPath: /etc/cinim-keyservice, readOnly: true}
+            {{- end }}
+            {{- if and .Values.secrets.newKeyService.url .Values.secrets.newKeyService.tlsSecret }}
+            - {name: newkeyservice-tls, mountPath: /etc/cinim-newkeyservice, readOnly: true}
             {{- end }}
             - {name: tmp, mountPath: /tmp}
           # ready: the database answers (/readyz; not ready leaves the Pod out of the Service and does not restart it). Alive: none of the threads that take the log, the reports and the
@@ -202,6 +221,12 @@ spec:
         - name: keyservice-tls
           secret:
             secretName: {{ .Values.secrets.keyService.tlsSecret }}
+            defaultMode: 0440
+        {{- end }}
+        {{- if and .Values.secrets.newKeyService.url .Values.secrets.newKeyService.tlsSecret }}
+        - name: newkeyservice-tls
+          secret:
+            secretName: {{ .Values.secrets.newKeyService.tlsSecret }}
             defaultMode: 0440
         {{- end }}
         {{- if .Values.secrets.keySecret }}

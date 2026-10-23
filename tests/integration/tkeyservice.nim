@@ -3,7 +3,7 @@
 ## good. Needs CINIM_RQLITE_URL and HSMGATE_BIN=<path of the hsmgate binary> (skipped without either).
 import std/[unittest, os, osproc, strutils, net, times, json]
 import common/rqlite
-import core/[schema, vaultsetup, secretvault]
+import core/[schema, vaultsetup, secretvault, kekprovider, transitclient]
 
 let url = getEnv("CINIM_RQLITE_URL")
 let bin = getEnv("HSMGATE_BIN")
@@ -104,6 +104,54 @@ clients:
       stopService()
       let r = tryActivate(url, "unused-certs")
       check not r.ready and r.retry
+
+  test "D-80 the master key moves from this service to another service with another key: the database opens with the new one only, and the secret reads as before":
+    if not ready: skip()
+    else:
+      stopService()
+      check startService("33".repeat(32))
+      # a second service of its own: another port, another directory, another key
+      let dir2 = getTempDir() / "tkeyservice2"
+      const port2 = 18944
+      removeDir dir2
+      createDir dir2
+      writeFile(dir2 / "m1.key", "77".repeat(32) & "\n")
+      setFilePermissions(dir2 / "m1.key", {fpUserRead, fpUserWrite})
+      writeFile(dir2 / "hsmgate.yaml", readFile(dir / "hsmgate.yaml").replace($port, $port2).replace(dir, dir2))
+      let second = startProcess(bin, args = ["serve", "-config", dir2 / "hsmgate.yaml"], options = {poStdErrToStdOut, poUsePath})
+      defer:
+        second.terminate()
+        discard second.waitForExit(2000)
+        second.close()
+      var up = false
+      for _ in 0 ..< 80:
+        try:
+          let s = newSocket()
+          s.connect("127.0.0.1", Port(port2), 300)
+          s.close()
+          up = true
+          break
+        except CatchableError: sleep 100
+      require up
+      var c = newRq(url)
+      discard c.execute(%*[["DELETE FROM org_keys"], ["DELETE FROM vault_meta WHERE key = 'kek_check'"], ["DELETE FROM step_secrets WHERE tenant_id = 'acme-mv'"]])
+      let oldK = httpKek(TransitConfig(url: "http://127.0.0.1:" & $port, keyName: "cinim-shard", timeoutMs: 3000))
+      let newK = httpKek(TransitConfig(url: "http://127.0.0.1:" & $port2, keyName: "cinim-shard", timeoutMs: 3000))
+      require oldK.ok and newK.ok
+      check oldK.kek.id != newK.kek.id
+      check c.putSecret(oldK.kek, "acme-mv", "TOKEN", "moved-with-the-key", 1).ok
+      check c.ensureKeyCheck(oldK.kek).ok
+      let dry = c.rekeySealed(oldK.kek, newK.kek, dryRun = true)
+      check dry.ok and dry.moved == 2
+      check not c.ensureKeyCheck(newK.kek).ok                     # a dry run changed nothing
+      let r = c.rekeySealed(oldK.kek, newK.kek)
+      check r.ok and r.moved == 2 and r.failed == 0
+      check c.ensureKeyCheck(newK.kek).ok and not c.ensureKeyCheck(oldK.kek).ok
+      check c.getSecrets(newK.kek, "acme-mv", @["TOKEN"]).values == @[("TOKEN", "moved-with-the-key")]
+      check not c.getSecrets(oldK.kek, "acme-mv", @["TOKEN"]).ok
+      check c.rekeySealed(oldK.kek, newK.kek).already == 2          # a second run has nothing to do
+      discard c.execute(%*[["DELETE FROM org_keys WHERE tenant_id = 'acme-mv'"], ["DELETE FROM step_secrets WHERE tenant_id = 'acme-mv'"], ["DELETE FROM vault_meta WHERE key = 'kek_check'"]])
+      removeDir dir2
 
   test "teardown":
     stopService()
