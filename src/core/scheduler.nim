@@ -71,10 +71,16 @@ proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; param
   var c = newRq(co.rqliteUrl)
   result = newId()
   let now = $getTime().toUnix()
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path) " &
-    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, protoName(rsRunning), now, now,
+  # D-82: the commit of the last run of this pipeline (this organisation, project, repository and script) that ended OK: what a pipeline compares the commit with to see what it changed
+  var base = ""
+  if source.repository.len > 0:
+    let last = c.query(%*[["SELECT source_commit FROM runs WHERE tenant_id = ? AND group_id = ? AND source_repository = ? AND source_path = ? AND state = ? AND source_commit <> '' " &
+      "ORDER BY created_at DESC, id DESC LIMIT 1", tenantId, groupId, source.repository, source.path, protoName(rsOk)]])["results"][0]{"values"}
+    if last != nil and last.len > 0: base = last[0][0].getStr
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path, source_base) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, protoName(rsRunning), now, now,
     (if profileId.len > 0: profileId else: co.profileId), (if params.len > 0: toJson(params) else: ""),
-    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path]])
+    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path, base]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
@@ -157,7 +163,7 @@ proc retryRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Retry
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path " &
+  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path, r.source_base " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
@@ -165,7 +171,9 @@ proc getRun*(co: Core; runId: string): JsonNode =
   result = %*{"id": row[0].getStr, "organization": row[5].getStr, "project": row[1].getStr, "state": row[2].getStr,
               "created_at": row[3].getStr, "updated_at": row[4].getStr}
   if row[7].getStr.len > 0: result["trigger_id"] = %row[7].getStr
-  if row[10].getStr.len > 0: result["source"] = %*{"repository": row[10].getStr, "commit": row[11].getStr, "path": row[12].getStr}
+  if row[10].getStr.len > 0:
+    result["source"] = %*{"repository": row[10].getStr, "commit": row[11].getStr, "path": row[12].getStr}
+    if row[13].getStr.len > 0: result["source"]["base"] = %row[13].getStr          # D-82
   if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
   if row[6].getStr.len > 0:
     result["params"] = (try: parseJson(row[6].getStr) except JsonParsingError: newJObject())
@@ -837,10 +845,10 @@ proc grantLease*(c: var RqClient; master, candidate, owner: string; versions: se
     discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = 'journal_corrupt', fail_message = ?, lease_until = 0 " &
       "WHERE id = ? AND state = ?", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsRunning)]])
     return none(LeaseGranted)
-  let vr = c.query(%*[["SELECT api_version, step_table, source_repository, source_commit, source_path FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
+  let vr = c.query(%*[["SELECT api_version, step_table, source_repository, source_commit, source_path, source_base FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
   var given = runParams(c, candidate).mapIt(ParamsEntry(key: it[0], value: it[1]))
   if vr != nil and vr.len > 0 and vr[0][2].getStr.len > 0:
-    for (k, v) in sourceParams(vr[0][2].getStr, vr[0][3].getStr, vr[0][4].getStr): given.add ParamsEntry(key: k, value: v)
+    for (k, v) in sourceParams(vr[0][2].getStr, vr[0][3].getStr, vr[0][4].getStr, vr[0][5].getStr): given.add ParamsEntry(key: k, value: v)
   some LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: candidate,
                     api_version: uint32(if vr != nil and vr.len > 0: vr[0][0].getInt(1) else: 1),
                     step_table: (if vr != nil and vr.len > 0: vr[0][1].getStr else: ""),

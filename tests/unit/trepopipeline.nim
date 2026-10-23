@@ -49,6 +49,22 @@ suite "D-67 the ids written in .ci/pipeline.lua (the pass stops at the first ste
       check checkId(id, jobIdWidth).ok
       check id notin jobs
 
+  test "D-82 the jobs that tag an image of BASE instead of building it (48 + the number of the component) are valid and meet neither the builds (32 + the number) nor the jobs written out":
+    var jobs = initHashSet[string]()
+    for m in script.findAll(re"(?:checked_out|ci\.single)[\(\[]'(\w+)'"):
+      jobs.incl normalizeId(m.split('\'')[1], jobIdWidth)
+    var all = jobs
+    for n in 1 .. 5:                                              # the five images of the pipeline
+      for base in [32, 48]:
+        let id = idOfNumber(base + n, jobIdWidth)
+        check checkId(id, jobIdWidth).ok
+        check id notin all
+        all.incl id
+    check script.contains("48 + number[comp.target]") and script.contains("32 + number[comp.target]")
+  test "D-82 the pipeline decides by what changed since the base the platform tells (run.source.base), and does not take the base as a parameter":
+    check script.contains("run.source.base") and script.contains("local function plan(") and script.contains("RETAGGED")
+    check not script.contains("BASE = ci.string")                    # the base is not a parameter: a trigger does not have to be told to give it
+
 suite "D-63 the caches of .ci/pipeline.lua":
   test "a key that ends in '-' is a prefix, and the first key of a restore is exact: a restore that has a prefix only, as its first and only key, can never hit":
     # the cache of the compiled tests was never restored for this reason (the run took 17 minutes in the Pod instead of the few that a changed file costs)

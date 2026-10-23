@@ -158,7 +158,8 @@ proc resolveRef*(repository, ref0: string; timeoutSeconds = 30; transports = def
   except CatchableError as e:
     Fetched(code: "fetch_failed", message: e.msg)
 
-const sourceKeys* = ["@source.repository", "@source.commit", "@source.path"]    ## launch-parameter entries that no declared name can be: how `run.source` reaches the script (executor/bootstrap.lua)
+const sourceKeys* = ["@source.repository", "@source.commit", "@source.path", "@source.base"]    ## launch-parameter entries that no declared name can be: how `run.source` reaches the script (executor/bootstrap.lua)
 
-func sourceParams*(repository, commit, path: string): seq[(string, string)] =
-  @[(sourceKeys[0], repository), (sourceKeys[1], commit), (sourceKeys[2], path)]
+func sourceParams*(repository, commit, path: string; base = ""): seq[(string, string)] =
+  ## `base` (D-82) is the commit of the last run of the same pipeline that ended OK, "" when there is none (and in a check before the run exists, which knows no history)
+  @[(sourceKeys[0], repository), (sourceKeys[1], commit), (sourceKeys[2], path), (sourceKeys[3], base)]

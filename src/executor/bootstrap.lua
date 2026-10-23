@@ -1415,8 +1415,8 @@ local function run_main(fn, run)
   rawset(run, "__given", nil)
   -- D-63: where the script was read from, if it came from a repository. The core hands it over among the launch parameters under names that no parameter can have; it is not a
   -- parameter, so it leaves `given` here, and `run.source` always exists (empty strings for a script that came in the request).
-  local source = { repository = "", commit = "", path = "" }
-  for _, k in ipairs({ "repository", "commit", "path" }) do
+  local source = { repository = "", commit = "", path = "", base = "" }      -- base (D-82): the commit of the last run of this pipeline that ended OK, "" when there is none
+  for _, k in ipairs({ "repository", "commit", "path", "base" }) do
     local v = given["@source." .. k]
     if v ~= nil then source[k] = v; given["@source." .. k] = nil end
   end

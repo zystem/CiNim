@@ -79,7 +79,7 @@ const ddl = [
        profile_id TEXT NOT NULL DEFAULT '',
        api_version INTEGER NOT NULL DEFAULT 1,
        source_repository TEXT NOT NULL DEFAULT '',
-       source_commit TEXT NOT NULL DEFAULT '',
+       source_commit TEXT NOT NULL DEFAULT '', source_base TEXT NOT NULL DEFAULT '',
        source_path TEXT NOT NULL DEFAULT '',
        journal_tip TEXT NOT NULL DEFAULT '',
        step_table TEXT NOT NULL DEFAULT '',
@@ -225,7 +225,8 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("triggers", "script_path", "TEXT NOT NULL DEFAULT ''"),
   ("triggers", "seen_commit", "TEXT NOT NULL DEFAULT ''"),            # D-76: a poll trigger: the commit its ref was at when it last looked, and when it looked (2026-10-23)
   ("triggers", "last_checked_at", "INTEGER NOT NULL DEFAULT 0"),
-  ("groups", "repository", "TEXT NOT NULL DEFAULT ''")]                   # D-68: a group with a main repository is a project (2026-10-23)
+  ("groups", "repository", "TEXT NOT NULL DEFAULT ''"),
+  ("runs", "source_base", "TEXT NOT NULL DEFAULT ''")]                    # D-82: the commit of the last run of this pipeline that ended OK, when this one was made (2026-10-23)                   # D-68: a group with a main repository is a project (2026-10-23)
   ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
   ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
   ## next fold, here too.

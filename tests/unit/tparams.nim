@@ -188,3 +188,10 @@ return ci.pipeline({
   test "a script that came in the request has empty strings, not nil":
     let x = run1(sourceScript)
     check x.r.status == esDone and x.r.value == "|||none"
+  test "D-82 run.source.base is the commit of the last run of this pipeline that ended OK, from the core among the launch parameters like the rest of the source; empty when there is none":
+    let script = "return ci.pipeline({ main = function(run) return run.source.base .. '|' .. run.source.commit end })"
+    check run1(script, @[("@source.repository", "https://x/r.git"), ("@source.commit", "new"), ("@source.path", ".ci/pipeline.lua"), ("@source.base", "good")]).r.value == "good|new"
+    check run1(script, @[("@source.repository", "https://x/r.git"), ("@source.commit", "new"), ("@source.path", ".ci/pipeline.lua"), ("@source.base", "")]).r.value == "|new"
+    check run1(script).r.value == "|"                                         # a script that came in the request: empty, not nil
+    let x = run1(script, @[("@source.base", "good"), ("@source.commit", "c")])
+    check x.seen.params.len == 0 or "@source" notin x.seen.params[0]          # not a parameter

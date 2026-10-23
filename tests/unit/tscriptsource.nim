@@ -27,6 +27,12 @@ let url = "file://" & repo
 proc get(commit = ""; path = ""; repository = url): Fetched =
   fetchScript(Source(repository: repository, commit: commit, path: path), timeoutSeconds = 20, transports = "file", schemes = ["file://"])
 
+suite "D-82 the entries of the source that the core hands to the script":
+  test "the repository, the commit, the path and the base (the last good commit) are four entries no declared name can be":
+    check sourceParams("https://x/r.git", "c1", ".ci/p.lua", "b0") == @[("@source.repository", "https://x/r.git"), ("@source.commit", "c1"), ("@source.path", ".ci/p.lua"), ("@source.base", "b0")]
+    check sourceParams("https://x/r.git", "c1", ".ci/p.lua").len == 4 and sourceParams("https://x/r.git", "c1", ".ci/p.lua")[3] == ("@source.base", "")
+    check sourceKeys.len == 4 and sourceKeys.allIt(it.startsWith("@source."))
+
 suite "D-63 a script read from a repository":
   test "the default path at a branch: the text and the SHA the branch is at":
     let f = get("main")
