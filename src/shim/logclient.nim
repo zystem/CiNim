@@ -212,7 +212,8 @@ proc newLogPipeline*(cfg: LogCfg): LogPipeline =
   result.cfg = cfg
   result.builder = newBuilder(podName(cfg.step.run_id, cfg.step.seq, cfg.step.attempt), cfg.step.run_id,
                               int64(epochTime() * 1000), cfg.secrets, variants = cfg.maskVariants,
-                              minLen = (if cfg.maskMinLen > 0: cfg.maskMinLen else: defaultMinLen), maxBytes = cfg.logMaxBytes)
+                              minLen = (if cfg.maskMinLen > 0: cfg.maskMinLen else: defaultMinLen), maxBytes = cfg.logMaxBytes,
+                              step = cfg.step.seq, attempt = cfg.step.attempt)
   result.lastCut = epochTime()
   createThread(result.sender, sendLoop, (cfg.collectorAddr, cfg.certs, cfg.spoolDir, cfg.step.run_id,
                                           cfg.step.seq, cfg.step.attempt, cfg.statusAddr.len > 0))

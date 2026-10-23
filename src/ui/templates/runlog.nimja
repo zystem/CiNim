@@ -1,11 +1,8 @@
 {% extends "layout.nimja" %}
 {% block title %}Log of run {{ h(runId) }} - CiNim{% endblock %}
 {% block content %}<h1>Log of run <code>{{ h(runId) }}</code></h1>
-<p><a href="{{ h(base) }}/runs/{{ h(runId) }}">Run <code>{{ h(runId) }}</code></a> - state: <span class="state-{{ h(runState) }}">{{ h(runState) }}</span> - the steps in the order of their numbers, the lines of a step together, the last {{ h(window) }} lines of each</p>
-{% for b in blocks %}<h2 id="step-{{ h(b.seq) }}"><a href="{{ h(base) }}/runs/{{ h(runId) }}/steps/{{ h(b.seq) }}/log">Step {{ h(b.seq) }}</a> <span class="state-{{ h(b.state) }}">{{ h(b.state) }}</span> attempt {{ h(b.attempt) }}</h2>
-{% if b.earlier > 0 %}<p class="pager"><a href="{{ h(b.earlierLink) }}">{{ h(b.earlier) }} earlier lines</a></p>
-{% endif %}{% if b.note.len > 0 %}<p class="empty">{{ h(b.note) }}</p>
-{% else %}<pre class="log">{% for l in b.lines %}<span class="n">{{ h(l.n) }}</span> {{ h(l.text) }}
+<p><a href="{{ h(base) }}/runs/{{ h(runId) }}">Run <code>{{ h(runId) }}</code></a> - state: <span class="state-{{ h(runState) }}">{{ h(runState) }}</span> - one window: every line starts with its step (the job and the step), in the order of the steps</p>
+<p class="pager">{% if earlier.len > 0 %}<a href="{{ h(earlier) }}">Earlier lines</a>{% endif %}{% if later.len > 0 %} <a href="{{ h(later) }}">Later lines</a>{% endif %}{% if newest.len > 0 %} <a href="{{ h(newest) }}">Newest</a>{% endif %}</p>
+<pre class="log">{% for l in lines %}<a class="n" href="{{ h(base) }}/runs/{{ h(runId) }}/steps/{{ h(l.step) }}/log?from={{ h(l.ln) }}">{{ h(l.label) }}</a> {{ h(l.text) }}
 {% endfor %}</pre>
-{% endif %}{% endfor %}{% if blocks.len == 0 %}<p class="empty">No steps yet.</p>{% endif %}
-{% if later.len > 0 %}<p class="pager"><a href="{{ h(later) }}">Later steps</a></p>{% endif %}{% endblock %}
+{% if lines.len == 0 %}<p class="empty">No lines in this window.</p>{% endif %}{% endblock %}

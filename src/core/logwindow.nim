@@ -54,3 +54,70 @@ proc linesReported*(shimJson: string): int =
   if shimJson.len == 0: return -1
   try: parseJson(shimJson){"lines"}.getInt(-1)
   except CatchableError: -1
+
+# ------------------------------------------------------------------ the log of a whole run (D-77)
+# The records carry `step` (the step's number), `job_id` and `step_id` (its two ids, joined as `0v/0004` for a person), and `attempt`, so one query reads the lines of every step of a run in the
+# order of step, attempt and line. A page of it is the lines between two cursors; the cursor is the step, the attempt and the line.
+
+type
+  RunCursor* = object
+    step*, attempt*, ln*: int
+
+  RunLine* = object
+    step*, attempt*, ln*: int
+    jobId*, stepId*, text*: string
+
+func cursorText*(c: RunCursor): string = $c.step & "." & $c.attempt & "." & $c.ln
+
+func parseCursor*(s: string): tuple[ok: bool, c: RunCursor] =
+  ## "<step>.<attempt>.<line>": three numbers and nothing else (it goes into a query)
+  let p = s.split('.')
+  if p.len != 3: return
+  var v: array[3, int]
+  for i in 0 .. 2:
+    if p[i].len == 0 or p[i].len > 12 or not p[i].allCharsInSet({'0' .. '9'}): return
+    try: v[i] = parseInt(p[i])
+    except ValueError: return
+  (true, RunCursor(step: v[0], attempt: v[1], ln: v[2]))
+
+func runIdOk(id: string): bool =
+  id.len in 1 .. 64 and id.allCharsInSet({'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_', '-'})
+
+func runLogQuery*(runId: string; wantCursor: bool; c: RunCursor; backwards: bool; limit: int): string =
+  ## The LogsQL for `limit` lines of a run: after the cursor (forwards, the cursor's line included) or before it (backwards, the cursor's line left out, the nearest first), the whole run
+  ## when there is no cursor (forwards: from its first line; backwards: from its last). "" for a run id that is not one. A record with no `step` (written before D-77) is not in it.
+  if not runIdOk(runId): return ""
+  var cond = "run:" & runId & " AND step:>=0"
+  if wantCursor:
+    let st = $c.step
+    let at = $c.attempt
+    if backwards:
+      cond.add " AND (step:<" & st & " OR (step:=" & st & " AND attempt:<" & at & ") OR (step:=" & st & " AND attempt:=" & at & " AND ln:<" & $c.ln & "))"
+    else:
+      cond.add " AND (step:>" & st & " OR (step:=" & st & " AND attempt:>" & at & ") OR (step:=" & st & " AND attempt:=" & at & " AND ln:>=" & $c.ln & "))"
+  cond & " | sort by " & (if backwards: "(step desc, attempt desc, ln desc)" else: "(step, attempt, ln)") & " | limit " & $limit
+
+proc parseRunRecords*(body: string): seq[RunLine] =
+  ## the records of a `/select/logsql/query` answer as lines of a run, in the order of step, attempt and line; a record without a step is not one, and a line that is no record is nothing
+  for raw in body.splitLines:
+    if raw.len == 0: continue
+    try:
+      let j = parseJson(raw)
+      var l = RunLine(step: -1, ln: -1)
+      try:
+        l.step = parseInt(j{"step"}.getStr)
+        l.attempt = parseInt(j{"attempt"}.getStr)
+        l.ln = parseInt(j{"ln"}.getStr)
+      except ValueError:
+        continue
+      let msg = j{"_msg"}.getStr
+      l.text = if msg.startsWith(vlEmptyMessage): "" else: msg
+      l.jobId = j{"job_id"}.getStr
+      l.stepId = j{"step_id"}.getStr
+      result.add l
+    except CatchableError:
+      discard
+  result.sort(proc (a, b: RunLine): int =
+    result = cmp(a.step, b.step)
+    if result == 0: result = cmp(a.attempt, b.attempt)
+    if result == 0: result = cmp(a.ln, b.ln))

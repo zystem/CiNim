@@ -8,7 +8,7 @@
 ## would mangle ordinary output); a value split across two lines is not recognised.
 import std/[os, strutils, json, algorithm, atomics, unicode]
 import zippy
-import secretmask
+import secretmask, ../common/crockford
 
 const
   blockRawTarget* = 64 * 1024     ## uncompressed bytes at which a block is cut
@@ -26,6 +26,7 @@ type
 
   Builder* = object
     job*, run*: string            ## VictoriaLogs labels of every record
+    step*, attempt*: uint32       ## D-77: the step's number and attempt, and with the number the ids of its job and of the step: fields of every record, so that the log of a run is read in one query (0 step: not told)
     baseMs*: int64                ## `_time` = baseMs + ln (DAT-001: a monotonic key), the wall clock goes into `ts`
     masker: Masker                ## secrets masked before anything leaves the shim (secretmask.nim)
     maxBytes: int64               ## the step's log limit (0 = none): past it lines are counted, not stored
@@ -111,11 +112,12 @@ func charBoundary*(s: string; at: int): int =
 
 func record*(b: Builder; ln: uint64; wallMs: int64; msg: string): string =
   "{\"_msg\":" & escapeJson(msg) & ",\"_time\":" & $(b.baseMs + int64(ln)) & ",\"ln\":" & $ln &
-    ",\"ts\":" & $wallMs & ",\"job\":" & escapeJson(b.job) & ",\"run\":" & escapeJson(b.run) & "}\n"
+    ",\"ts\":" & $wallMs & ",\"job\":" & escapeJson(b.job) & ",\"run\":" & escapeJson(b.run) &
+    (if b.step > 0: ",\"step\":" & $b.step & ",\"job_id\":\"" & jobIdOfStep(int(b.step)) & "\",\"step_id\":\"" & stepIdOfStep(int(b.step)) & "\",\"attempt\":" & $b.attempt else: "") & "}\n"
 
 func newBuilder*(job, run: string; baseMs: int64; secrets: seq[string] = @[]; variants = true;
-                 minLen = defaultMinLen; maxBytes = 0'i64): Builder =
-  result = Builder(job: job, run: run, baseMs: baseMs, masker: newMasker(minLen, variants), maxBytes: maxBytes,
+                 minLen = defaultMinLen; maxBytes = 0'i64; step = 0'u32; attempt = 0'u32): Builder =
+  result = Builder(job: job, run: run, step: step, attempt: attempt, baseMs: baseMs, masker: newMasker(minLen, variants), maxBytes: maxBytes,
                    nextSeq: 1, nextLn: 0, blockFirstLn: 0)
   result.masker.add secrets
 

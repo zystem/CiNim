@@ -40,18 +40,16 @@ type
   LogLine = object
     n: int
     text: string
-  StepLog = object
-    seq, attempt, earlier: int
-    state, earlierLink, note: string
-    lines: seq[LogLine]
+  RunLogLine = object
+    step, ln: int
+    label, text: string
   ComponentRow = object
     kind, id, state, seen: string
 
 const
   cookieName = "cinim_ui"
   logWindow = 200
-  runLogLines = 100          ## the log of a run: the last lines of each step, no more (DAT-007)
-  runLogSteps = 30           ## ... and this many steps to a page
+  runLogWindow = 200         ## the log of a run: this many lines to a window (DAT-007)
   runsPerPage = 50
   sessionMax = 8 * 3600
   templateDir = currentSourcePath().parentDir / "templates"
@@ -210,7 +208,7 @@ proc renderLog(base, runId: string; step: int; stepState: string; complete: bool
   let loggedIn = true
   compileTemplateFile("log.nimja", templateDir)
 
-proc renderRunLog(base, runId, runState: string; window: int; blocks: seq[StepLog]; later: string): string =
+proc renderRunLog(base, runId, runState: string; lines: seq[RunLogLine]; earlier, later, newest: string): string =
   let loggedIn = true
   compileTemplateFile("runlog.nimja", templateDir)
 
@@ -353,43 +351,39 @@ proc logPage(cfg: UiConfig; api: CoreApi; token, id, stepText: string; query: Ta
   let next = if more: here & $nextFrom else: ""
   page(200, renderLog(cfg.base, id, step, r.body{"step_state"}.getStr, complete, prev, next, lines))
 
+func isCursor(s: string): bool =
+  ## "<step>.<attempt>.<line>": three numbers (it goes to the core)
+  let p = s.split('.')
+  if p.len != 3: return false
+  for x in p:
+    if x.len == 0 or x.len > 12 or not x.allCharsInSet({'0' .. '9'}): return false
+  true
+
 proc runLogPage(cfg: UiConfig; api: CoreApi; token, id: string; query: Table[string, string]): UiResponse =
-  ## The log of the whole run (DAT-007: still a window, never the whole log): the steps in the order of their numbers, each with the last lines of its log, one after the other. A step that
-  ## writes while others do stays in its own place, which is why this is not one stream in the order of the time. A page holds `runLogSteps` steps; the next is named by the last number shown.
-  var after = -1
-  if isNumber(query.getOrDefault("after")): after = parseInt(query["after"])
-  let r = api.get(token, "/api/v1/runs/" & id)
-  if r.status != asOk: return failed(cfg, r, "run " & id)
-  var steps: seq[tuple[seq, attempt: int, state: string]]
-  for s in r.body{"steps"}.getElems:
-    if s{"seq"}.isKind(JInt) and s["seq"].getInt > after: steps.add (s["seq"].getInt, s{"attempt"}.getInt, s{"state"}.getStr)
-  steps.sort(proc (x, y: tuple[seq, attempt: int, state: string]): int = cmp(x.seq, y.seq))
-  let more = steps.len > runLogSteps
-  if more: steps.setLen runLogSteps
-  var blocks: seq[StepLog]
-  for st in steps:
-    var b = StepLog(seq: st.seq, attempt: st.attempt, state: st.state)
-    let stepPath = "/api/v1/runs/" & id & "/steps/" & $st.seq & "/log"
-    var w = api.get(token, stepPath & "?from=0&limit=" & $runLogLines)
-    if w.status == asNotFound:
-      b.note = "No log yet."
-      blocks.add b
-      continue
-    if w.status != asOk: return failed(cfg, w, "log of step " & $st.seq & " of run " & id)
-    let total = w.body{"lines_total"}.getInt(0)
-    if total > runLogLines:                      # the last lines are the ones that tell what the step is doing, or how it ended
-      let tail = api.get(token, stepPath & "?from=" & $(total - runLogLines) & "&limit=" & $runLogLines)
-      if tail.status != asOk: return failed(cfg, tail, "log of step " & $st.seq & " of run " & id)
-      w = tail
-    var n = w.body{"from"}.getInt(0)
-    b.earlier = n
-    if n > 0: b.earlierLink = cfg.base & "/runs/" & id & "/steps/" & $st.seq & "/log?from=0"
-    for l in w.body{"lines"}.getElems:
-      b.lines.add LogLine(n: n, text: plainText(l.getStr))
-      inc n
-    blocks.add b
-  let later = if more and blocks.len > 0: cfg.base & "/runs/" & id & "/log?after=" & $blocks[^1].seq else: ""
-  page(200, renderRunLog(cfg.base, id, r.body{"state"}.getStr, runLogLines, blocks, later))
+  ## The log of the whole run (DAT-007: a window, never the whole log; D-77): the lines of all its steps in one request, in the order of step, attempt and line, each starting with the label of its step
+  ## (`14/0003`, the job's id and the step's, which the core keeps in two fields). The last lines of the run, or the window before or after a cursor the core gave.
+  var path = "/api/v1/runs/" & id & "/log?limit=" & $runLogWindow
+  let until = query.getOrDefault("until")
+  let from0 = query.getOrDefault("from")
+  var moved = false
+  if from0.len > 0 and isCursor(from0):
+    path.add "&from=" & from0
+    moved = true
+  elif until.len > 0 and isCursor(until):
+    path.add "&until=" & until
+    moved = true
+  let r = api.get(token, path)
+  if r.status != asOk: return failed(cfg, r, "log of run " & id)
+  var lines: seq[RunLogLine]
+  for l in r.body{"lines"}.getElems:
+    let step = l{"step"}.getInt(0)
+    let label = if l{"job_id"}.getStr.len > 0 and l{"step_id"}.getStr.len > 0: l["job_id"].getStr & "/" & l["step_id"].getStr else: $step
+    lines.add RunLogLine(step: step, ln: l{"ln"}.getInt(0), label: label, text: plainText(l{"text"}.getStr))
+  let here = cfg.base & "/runs/" & id & "/log"
+  var earlier, later: string
+  if r.body{"earlier"}.isKind(JString) and isCursor(r.body["earlier"].getStr): earlier = here & "?until=" & r.body["earlier"].getStr
+  if r.body{"later"}.isKind(JString) and isCursor(r.body["later"].getStr): later = here & "?from=" & r.body["later"].getStr
+  page(200, renderRunLog(cfg.base, id, r.body{"run_state"}.getStr, lines, earlier, later, (if moved: here else: "")))
 
 proc statusPage(cfg: UiConfig; api: CoreApi; token: string): UiResponse =
   let r = api.get(token, "/api/v1/components")

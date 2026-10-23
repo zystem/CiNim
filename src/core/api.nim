@@ -1291,6 +1291,42 @@ proc onRequest() {.raises: [], gcsafe.} =
         var made = %*{"id": id, "organization": orgSlug, "state": "RUNNING", "checked": checked}
         if source.repository.len > 0: made["source"] = %*{"repository": source.repository, "commit": source.commit, "path": source.path}
         jsonOk(Http201, made)
+      elif meth == "GET" and rest.endsWith("/log") and "/steps/" notin rest:
+        # D-77: the log of the whole run, one window: `from=<cursor>` the lines after it, `until=<cursor>` the lines before it, neither the last ones of the run; `limit` at most 500
+        let runId = rest[0 ..< rest.len - "/log".len]
+        var wantCursor, backwards = true
+        var cursor: RunCursor
+        var limit = -1
+        var seenFrom, seenUntil = false
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            if k == "from" or k == "until":
+              let pc = parseCursor(v)
+              if not pc.ok:
+                problem(Http400, "invalid_request", k & " is <step>.<attempt>.<line>")
+                return
+              cursor = pc.c
+              if k == "from": seenFrom = true else: seenUntil = true
+            elif k == "limit":
+              try: limit = parseInt(v)
+              except ValueError:
+                problem(Http400, "invalid_request", "limit must be an integer")
+                return
+        if seenFrom and seenUntil:
+          problem(Http400, "invalid_request", "from and until are not asked together")
+          return
+        wantCursor = seenFrom or seenUntil
+        backwards = not seenFrom
+        if not who.admin:
+          let owner = coreRef.getRun(runId)
+          if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+            problem(Http404, "not_found", "no such run")
+            return
+        let log = coreRef.getRunLog(runId, wantCursor, cursor, backwards, (if limit < 1: defaultRunWindow else: limit))
+        if log == nil:
+          problem(Http404, "not_found", "no such run")
+          return
+        jsonOk(Http200, log)
       elif meth == "GET" and "/steps/" in rest and rest.endsWith("/log"):
         let parts = rest.split("/steps/", maxsplit = 1)
         let seq = try: parseInt(parts[1][0 ..< parts[1].len - "/log".len]) except ValueError: -1

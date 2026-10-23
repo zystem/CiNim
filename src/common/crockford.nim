@@ -53,6 +53,20 @@ func idOfNumber*(n, width: int): string =
     result[i] = crockfordDigits[v and 31]
     v = v shr 5
 
+func jobIdOfStep*(step: int): string =
+  ## the id of the job a step number belongs to (`step` is `job * 2^20 + step id`, D-67); "" for a number that has none
+  if step < 0: return ""
+  try: idOfNumber(step shr 20, jobIdWidth) except ValueError: ""
+
+func stepIdOfStep*(step: int): string =
+  ## the id of the step within its job; "" for a negative number
+  if step < 0: return ""
+  idOfNumber(step and 0xFFFFF, stepIdWidth)
+
+func stepLabel*(jobId, stepId: string): string =
+  ## how a person reads the two together: `0v/0004`; "" when either is missing
+  if jobId.len == 0 or stepId.len == 0: "" else: jobId & "/" & stepId
+
 func numberOfId*(s: string): int =
   ## what `idOfNumber` was given; -1 for what is not an id
   for c in s:

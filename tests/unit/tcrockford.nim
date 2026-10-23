@@ -4,6 +4,16 @@
 import std/[unittest, strutils, algorithm, sequtils]
 import common/crockford
 
+suite "D-77 the two ids of a step, as the log keeps them (the job's and the step's), and the label they make":
+  test "the number of a step is its job and its step: 37748739 is job 14 step 0003, 38797313 is job 15 step 0001":
+    check jobIdOfStep(37748739) == "14" and stepIdOfStep(37748739) == "0003" and jobIdOfStep(38797313) == "15" and stepIdOfStep(38797313) == "0001"
+    check jobIdOfStep(0) == "00" and stepIdOfStep(0) == "0000" and jobIdOfStep((1023 shl 20) or 1048575) == "zz" and stepIdOfStep((1023 shl 20) or 1048575) == "zzzz"
+    check stepLabel("14", "0003") == "14/0003" and stepLabel("", "") == ""
+  test "a number that has no ids (a job above the width of ids, a negative one) has none":
+    check jobIdOfStep(1024 shl 20) == "" and jobIdOfStep(-1) == "" and stepIdOfStep(-1) == ""
+  test "ids of one width sort as text in the order of their numbers (the log is sorted by them)":
+    let ids = (0 .. 2000).mapIt(idOfNumber(it, 4))
+    check ids == ids.sorted
 suite "D-67 the ids in Crockford base32 of a fixed width":
   test "D-67 the alphabet is Crockford's in lowercase":
     check crockfordDigits == "0123456789abcdefghjkmnpqrstvwxyz"

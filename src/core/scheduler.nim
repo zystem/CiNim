@@ -259,6 +259,43 @@ proc getStepLog*(co: Core; runId: string; seq: int; fromLine = 0; limit = maxWin
   %*{"run_id": runId, "step_seq": seq, "from": first, "lines": lines, "next": first + lines.len, "step_state": state,
      "lines_total": total, "lines_stored": stored, "complete": logComplete(state, total, stored)}
 
+const defaultRunWindow* = 200       ## lines in a window of the log of a run when the request says none (DAT-007)
+
+proc getRunLog*(co: Core; runId: string; wantCursor: bool; cursor: RunCursor; backwards: bool; limit = defaultRunWindow): JsonNode =
+  ## D-77: a window of the log of the whole run, the lines of its steps in the order of step, attempt and line, in one query of the store. With no cursor it is the last `limit` lines of the run
+  ## (`backwards`) or the first (not); with a cursor, the lines after it (its own included) or the ones before it (not included, the nearest). `earlier` and `later` are the cursors to ask next, left out when
+  ## there is nothing that way. nil for a run that does not exist. A run logged before the records carried a step has no lines here.
+  var c = newRq(co.rqliteUrl)
+  let st = c.query(%*[["SELECT state FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
+  if st == nil or st.len == 0: return nil
+  let n = min(max(1, limit), maxWindow)
+  let q = runLogQuery(runId, wantCursor, cursor, backwards, n + 1)         # one more than asked: that there is one is how it is known that there is more
+  var lines: seq[RunLine]
+  if q.len > 0:
+    try:
+      var http = newHttpClient(timeout = 5000)
+      defer: http.close()
+      lines = parseRunRecords(http.getContent(co.victoriaLogsUrl & "/select/logsql/query?query=" & encodeUrl(q) & "&limit=" & $(n + 1)))
+    except CatchableError:
+      discard                                                           # the store does not answer: an empty window, not a platform error (as for a step)
+  let more = lines.len > n
+  if more:
+    if backwards: lines.delete(0) else: lines.setLen n                   # the extra one is the farthest from the cursor
+  var arr = newJArray()
+  for l in lines:
+    arr.add %*{"step": l.step, "job_id": l.jobId, "step_id": l.stepId, "attempt": l.attempt, "ln": l.ln, "text": l.text}
+  result = %*{"run_id": runId, "run_state": st[0][0].getStr, "lines": arr}
+  let finished = st[0][0].getStr notin ["CREATED", "COMPILING", "QUEUED", "RUNNING", "WAITING"]
+  if lines.len > 0:
+    let first = RunCursor(step: lines[0].step, attempt: lines[0].attempt, ln: lines[0].ln)
+    let last = RunCursor(step: lines[^1].step, attempt: lines[^1].attempt, ln: lines[^1].ln + 1)
+    if backwards:
+      if more: result["earlier"] = %cursorText(first)
+      if wantCursor or not finished: result["later"] = %cursorText(last)         # a page before a cursor has the lines after it; the last page of a run that goes on may get more
+    else:
+      if wantCursor: result["earlier"] = %cursorText(first)
+      if more: result["later"] = %cursorText(last)
+
 # ------------------------------------------------------------------ components and metrics (D-29)
 
 proc componentsJson*(): JsonNode =

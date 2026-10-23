@@ -14,6 +14,17 @@ proc msgs(blocks: seq[LogBlock]): seq[string] =
 proc newB(secrets: seq[string] = @[]): Builder = newBuilder("s1-run-0-1", "s1_run", 1_000_000, secrets)
 
 suite "records and blocks":
+  test "D-77 every record says which step and attempt it is of (the number, and the ids of its job and of the step in two fields), so that the log of a whole run can be read in one query":
+    var b = newBuilder("s1-run-37748739-2", "s1_run", 1_000_000, step = 37748739'u32, attempt = 2'u32)
+    var blocks = b.feed("hello\n", 5000)
+    blocks.add b.flush(5000)
+    let r = records(blocks[0])
+    check r[0]["step"].getInt == 37748739 and r[0]["job_id"].getStr == "14" and r[0]["step_id"].getStr == "0003" and r[0]["attempt"].getInt == 2
+  test "a builder that is not told the step makes no such fields (the tests of the other things, a drain)":
+    var b = newB()
+    var blocks = b.feed("hello\n", 5000)
+    blocks.add b.flush(5000)
+    check not records(blocks[0])[0].hasKey("step")
   test "lines become jsonline records with the labels, ln and the monotonic _time":
     var b = newB()
     var blocks = b.feed("hello\nworld\n", 5000)

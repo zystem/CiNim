@@ -11,6 +11,8 @@ th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid var(--
 th { color: var(--muted); font-weight: 600; }
 code, pre { font: 13px/1.4 ui-monospace, monospace; }
 pre.log { overflow: auto; padding: .6rem; border: 1px solid var(--line); white-space: pre; }
+pre.log a.n { min-width: 10ch; text-align: left; text-decoration: none; }
+pre.log .note { color: var(--muted); }
 pre.log .n { color: var(--muted); user-select: none; display: inline-block; min-width: 4ch; text-align: right; margin-right: .6ch; }
 .state-SUCCEEDED, .state-up, .state-active { color: var(--ok); font-weight: 600; }
 .state-FAILED, .state-down, .state-disabled, .error { color: var(--bad); }
