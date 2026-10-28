@@ -25,5 +25,7 @@ pre.log .n { color: var(--muted); user-select: none; display: inline-block; min-
 .runid { white-space: nowrap; font-family: ui-monospace, monospace; }
 .empty, .detail { color: var(--muted); }
 .logout { margin: 0; }
+.actions { display: flex; gap: .6rem; margin: .8rem 0; }
+.actions form { margin: 0; }
 button { padding: .35rem .8rem; }
 @media (max-width: 40rem) { th, td { padding: .25rem .35rem; } header { flex-wrap: wrap; } }

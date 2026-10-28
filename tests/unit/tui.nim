@@ -11,6 +11,8 @@ var
   calls: seq[string]                       # "token path" of every GET that reached the stand-in core
   routes: Table[string, JsonNode]          # the path with the query -> the body
   down: bool
+  posted: seq[string]                      # "token path body" of every POST that reached the stand-in core
+  postAnswer: ApiResult                    # what the stand-in core answers to a POST
 
 proc ok(body: JsonNode): ApiResult = ApiResult(status: asOk, code: 200, body: body)
 
@@ -28,6 +30,12 @@ proc fakeCore(): CoreApi =
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if token != "tok-ann": return ApiResult(status: asUnauthorized, code: 401, message: "bad token")
       if path in routes: ok(routes[path]) else: ApiResult(status: asNotFound, code: 404, message: "no such route")
+  result.post = proc (token, path, body: string): ApiResult {.gcsafe.} =
+    {.cast(gcsafe).}:
+      posted.add token & " " & path & " " & body
+      if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
+      if token != "tok-ann": return ApiResult(status: asUnauthorized, code: 401, message: "bad token")
+      postAnswer
 
 let cfg = UiConfig(base: base, secureCookie: false)
 let cfgSecure = UiConfig(base: base, secureCookie: true)
@@ -43,6 +51,8 @@ let session = "cinim_ui=tok-ann"
 
 proc reset() =
   calls = @[]
+  posted = @[]
+  postAnswer = ok(%*{"id": "s1_b", "state": "ABORTED"})
   routes = initTable[string, JsonNode]()
   down = false
 
@@ -273,6 +283,47 @@ suite "the pages":
     routes["/api/v1/components"] = nil
     down = true
     check handle(cfg, fakeCore(), req("GET", "/ui/status", cookie = session)).status == 503
+
+suite "the actions of a run":
+  setup: reset()
+  test "RUN-006 PIP-015 the page of a run has the button that fits its state: stop for a run that goes on, again for one that failed, none for one that is over":
+    for (state, stop, again) in [("RUNNING", true, false), ("PENDING", true, false), ("FAILED", false, true), ("TIMED_OUT", false, true), ("INFRASTRUCTURE_ERROR", false, true),
+                                 ("OK", false, false), ("ABORTED", false, false)]:
+      routes["/api/v1/runs/s1_b"] = %*{"id": "s1_b", "organization": "acme", "state": state, "steps": []}
+      let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b", cookie = session))
+      check r.status == 200
+      check ("action=\"/ui/runs/s1_b/abort\"" in r.body) == stop
+      check ("action=\"/ui/runs/s1_b/retry\"" in r.body) == again
+  test "RUN-006 the stop button asks the core to abort the run with the token of the user, and goes back to the run":
+    let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session, origin = "http://ui.example"))
+    check r.status == 303 and r.header("Location") == "/ui/runs/s1_b"
+    check posted == @["tok-ann /api/v1/runs/s1_b:abort {}"]
+  test "PIP-015 the button of a retry asks the core for a retry":
+    let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/retry", cookie = session))
+    check r.status == 303 and r.header("Location") == "/ui/runs/s1_b"
+    check posted == @["tok-ann /api/v1/runs/s1_b:retry {}"]
+  test "what the core refuses is told in its words and the run is left as it is (it has ended; nothing failed; the role may not)":
+    postAnswer = ApiResult(status: asRefused, code: 409, message: "the run has ended already (OK)")
+    let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session))
+    check r.status == 409 and "the run has ended already (OK)" in r.body and "href=\"/ui/runs/s1_b\"" in r.body
+    postAnswer = ApiResult(status: asForbidden, code: 403, message: "role ro may not")
+    let f = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/retry", cookie = session))
+    check f.status == 403 and "role ro may not" in f.body
+    postAnswer = ApiResult(status: asNotFound, code: 404, message: "no such run")
+    check handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session)).status == 404
+    down = true
+    check handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session)).status == 503
+  test "a form from another site, a request with no session, a GET and an id that is not one never reach the core":
+    check handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session, origin = "http://evil.example")).status == 403
+    var cross = req("POST", "/ui/runs/s1_b/retry", cookie = session)
+    cross.secFetchSite = "cross-site"
+    check handle(cfg, fakeCore(), cross).status == 403
+    let anon = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort"))
+    check anon.status == 303 and anon.header("Location").startsWith("/ui/login")
+    check handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b/abort", cookie = session)).status == 404
+    check handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_x'y/abort", cookie = session)).status == 405
+    check handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/delete", cookie = session)).status == 405
+    check posted.len == 0
 
 suite "the rest of the service":
   setup: reset()

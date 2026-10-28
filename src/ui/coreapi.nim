@@ -1,4 +1,4 @@
-## What the UI knows of the core: two calls, and what they say in the terms of a page (docs/ui.md). `login` is POST /api/v1/login; `get` is a GET of any path of the API with the token of the user.
+## What the UI knows of the core: three calls, and what they say in the terms of a page (docs/ui.md). `login` is POST /api/v1/login; `get` is a GET of any path of the API with the token of the user; `post` is a POST of an action.
 ## They are closures so that the tests give the UI a core that says what the test wants (tests/unit/tui.nim); `httpCoreApi` is the real one, over std/httpclient (plain HTTP inside the cluster).
 import std/[json, httpclient, strutils]
 
@@ -15,6 +15,7 @@ type
   CoreApi* = object
     login*: proc (user, password: string): ApiResult {.gcsafe.}
     get*: proc (token, pathAndQuery: string): ApiResult {.gcsafe.}
+    post*: proc (token, path, body: string): ApiResult {.gcsafe.}      ## a POST of an action (abort, retry) with the token of the user
 
 proc problemText(body: string): string =
   ## the words of a problem+json answer of the core: `detail` first, then `code`
@@ -64,3 +65,5 @@ proc httpCoreApi*(url: string; timeoutMs = 10000): CoreApi =
     call(HttpPost, "/api/v1/login", "", $(%*{"user": user, "password": password}))
   result.get = proc (token, pathAndQuery: string): ApiResult {.gcsafe.} =
     call(HttpGet, pathAndQuery, token, "")
+  result.post = proc (token, path, body: string): ApiResult {.gcsafe.} =
+    call(HttpPost, path, token, body)

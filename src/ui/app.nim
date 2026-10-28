@@ -1,5 +1,6 @@
 ## The UI service (docs/ui.md, UI-001, UI-009): pages rendered on the server from what the core's API says, with the token of the user in a cookie and nothing kept here. `handle` takes a request
 ## and gives a response, and knows the core only as a `CoreApi`: the tests give it one that says what they want, `main.nim` gives it the real one and makes it a server.
+##   POST /runs/<id>/abort and /runs/<id>/retry (the buttons of a run's page).
 ##   /login, /logout, /orgs, /orgs/<slug>/runs, /runs, /runs/<id>, /runs/<id>/steps/<n>/log, /status, /static/ui.css  (all under the prefix `base`), and /healthz outside it.
 ## A page that needs a session sends a visitor without one to the login and brings them back; a token that the core refuses ends the session; what a page puts in a link to the core is checked
 ## first (a slug, an id, a number), so that an address cannot reach further than the page it names.
@@ -35,6 +36,7 @@ type
     state, exitCode, termination, pod, took: string
   RunView = object
     id, state, organization, project, created, updated, repository, commit, path, waitReason, failureCode, failureMessage, took: string
+    canAbort, canRetry: bool         ## the buttons of the page: the core still refuses what the user's role may not do
     params: seq[ParamRow]
     steps: seq[StepRow]
   LogLine = object
@@ -135,7 +137,9 @@ func secondsOf(text: string): int64 =
   if whole.len in 1 .. 12 and whole.allCharsInSet({'0' .. '9'}):
     try: return parseBiggestInt(whole) except ValueError: discard
 
-const finalRunStates = ["OK", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
+const
+  finalRunStates = ["OK", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
+  retryableRunStates = ["FAILED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]   # what `retryRun` of the core accepts (the volume may be gone: the core says so)
 
 func runTook(state, created, updated: string; now: int64): string =
   ## a run ends when it reaches a final state; its `updated_at` is then the moment it did
@@ -324,6 +328,8 @@ proc runPage(cfg: UiConfig; api: CoreApi; token, id: string): UiResponse =
                   took: runTook(j{"state"}.getStr, j{"created_at"}.getStr, j{"updated_at"}.getStr, getTime().toUnix),
                   repository: j{"source"}{"repository"}.getStr, commit: j{"source"}{"commit"}.getStr, path: j{"source"}{"path"}.getStr)
   if not isSlug(v.organization): v.organization = ""
+  v.canAbort = v.state.len > 0 and v.state notin finalRunStates
+  v.canRetry = v.state in retryableRunStates
   if j{"params"}.isKind(JObject):
     for k, x in j["params"]: v.params.add ParamRow(name: k, value: (if x.kind == JString: x.getStr else: $x))
   for s in j{"steps"}.getElems:
@@ -332,6 +338,17 @@ proc runPage(cfg: UiConfig; api: CoreApi; token, id: string): UiResponse =
                         exitCode: (if s{"exit_code"}.isKind(JInt): $s["exit_code"].getInt else: ""), termination: s{"termination"}.getStr, pod: reason,
                         took: tookText(s{"started_at"}.getInt(0), s{"finished_at"}.getInt(0), s{"finished_at"}.getInt(0) > 0, getTime().toUnix))
   page(200, renderRun(cfg.base, v))
+
+proc runAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, id, action: string): UiResponse =
+  ## The buttons of a run's page (RUN-006 abort, PIP-015 retry): a POST that asks the core for `POST /api/v1/runs/<id>:<action>` with the token of the user, and goes back to the run.
+  ## What the core refuses (the run has ended, nothing failed, the volume is gone, the role may not) is told in words, and the run is left as it is.
+  if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
+  let r = api.post(token, "/api/v1/runs/" & id & ":" & action, "{}")
+  let back = cfg.base & "/runs/" & id
+  case r.status
+  of asOk: redirect(back)
+  of asRefused: messagePage(cfg, 409, true, (if action == "abort": "The run was not stopped" else: "The run was not started again"), "The core refused.", r.message, back, "Back to the run")
+  else: failed(cfg, r, "run " & id)
 
 proc logPage(cfg: UiConfig; api: CoreApi; token, id, stepText: string; query: Table[string, string]): UiResponse =
   let step = parseInt(stepText)
@@ -401,11 +418,13 @@ proc parseQuery(q: string): Table[string, string] =
   for k, v in decodeQuery(q): result[k] = v
 
 proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; query: Table[string, string]): UiResponse =
+  let parts = path.strip(chars = {'/'}).split('/')
+  if req.meth == "POST" and parts.len == 3 and parts[0] == "runs" and isId(parts[1]) and parts[2] in ["abort", "retry"]:
+    return runAction(cfg, api, req, token, parts[1], parts[2])
   if req.meth != "GET":
     result = messagePage(cfg, 405, true, "Method not allowed", "GET.")
     result.headers.add ("Allow", "GET")
     return
-  let parts = path.strip(chars = {'/'}).split('/')
   if path == "/" or path == "": return redirect(cfg.base & "/orgs")
   if parts == @["orgs"]: return orgsPage(cfg, api, token)
   if parts == @["runs"]: return runsPage(cfg, api, token, "", query)

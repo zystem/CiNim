@@ -10,6 +10,10 @@
 {% if run.waitReason.len > 0 %}<dt>Waiting</dt><dd>{{ h(run.waitReason) }}</dd>{% endif %}
 {% if run.failureCode.len > 0 %}<dt>Failure</dt><dd class="error"><code>{{ h(run.failureCode) }}</code> {{ h(run.failureMessage) }}</dd>{% endif %}
 </dl>
+{% if run.canAbort or run.canRetry %}<div class="actions">
+{% if run.canAbort %}<form method="post" action="{{ h(base) }}/runs/{{ h(run.id) }}/abort"><button type="submit">Stop the run</button></form>{% endif %}
+{% if run.canRetry %}<form method="post" action="{{ h(base) }}/runs/{{ h(run.id) }}/retry"><button type="submit">Run the failed steps again</button></form>{% endif %}
+</div>{% endif %}
 {% if run.params.len > 0 %}<h2>Parameters</h2><table><tbody>{% for p in run.params %}<tr><th>{{ h(p.name) }}</th><td>{{ h(p.value) }}</td></tr>{% endfor %}</tbody></table>{% endif %}
 <h2>Steps</h2>
 <p><a href="{{ h(base) }}/runs/{{ h(run.id) }}/log">The log of the whole run</a></p>
