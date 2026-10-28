@@ -36,7 +36,7 @@ type
     state, exitCode, termination, pod, took: string
   RunView = object
     id, state, organization, project, created, updated, repository, commit, path, waitReason, failureCode, failureMessage, took: string
-    canAbort, canRetry: bool         ## the buttons of the page: the core still refuses what the user's role may not do
+    canAbort, canRetry: bool         ## the buttons of the page: `actions` of the run, as the core says them
     params: seq[ParamRow]
     steps: seq[StepRow]
   LogLine = object
@@ -137,9 +137,7 @@ func secondsOf(text: string): int64 =
   if whole.len in 1 .. 12 and whole.allCharsInSet({'0' .. '9'}):
     try: return parseBiggestInt(whole) except ValueError: discard
 
-const
-  finalRunStates = ["OK", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
-  retryableRunStates = ["FAILED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]   # what `retryRun` of the core accepts (the volume may be gone: the core says so)
+const finalRunStates = ["OK", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]
 
 func runTook(state, created, updated: string; now: int64): string =
   ## a run ends when it reaches a final state; its `updated_at` is then the moment it did
@@ -328,8 +326,8 @@ proc runPage(cfg: UiConfig; api: CoreApi; token, id: string): UiResponse =
                   took: runTook(j{"state"}.getStr, j{"created_at"}.getStr, j{"updated_at"}.getStr, getTime().toUnix),
                   repository: j{"source"}{"repository"}.getStr, commit: j{"source"}{"commit"}.getStr, path: j{"source"}{"path"}.getStr)
   if not isSlug(v.organization): v.organization = ""
-  v.canAbort = v.state.len > 0 and v.state notin finalRunStates
-  v.canRetry = v.state in retryableRunStates
+  v.canAbort = j{"actions"}{"abort"}.getBool        # the core's word: the state of the run allows it and so do the rights of this user in this organisation
+  v.canRetry = j{"actions"}{"retry"}.getBool
   if j{"params"}.isKind(JObject):
     for k, x in j["params"]: v.params.add ParamRow(name: k, value: (if x.kind == JString: x.getStr else: $x))
   for s in j{"steps"}.getElems:

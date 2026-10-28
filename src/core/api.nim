@@ -332,16 +332,14 @@ proc onRequest() {.raises: [], gcsafe.} =
           ac.record(getTime().toUnix(), actorOf(who), "token.rotate", who.id, "ok", "new " & made.id)
           jsonOk(Http200, %*{"id": made.id, "token": made.token, "replaced": who.id})
           return
-        if not who.admin:
+        if not who.mayCall(getMethod(), path):
           if who.roles.len > 0:
             # IAM-001: the roles of the user (rw, dev, ro) are the shard's, and every organisation inherits them; what each may do is in rbac.nim
-            if not rolesMay(who.roles, getMethod(), path) and not selfService(who.user, getMethod(), path):
-              ac.record(getTime().toUnix(), actorOf(who), "access", getMethod() & " " & path, "denied", "roles " & who.roles.join(","))
-              problem(Http403, "forbidden", "the role of " & who.user & " (" & who.roles.join(", ") & ") does not allow " & getMethod() & " " & path)
-              return
-          elif not path.startsWith(base):
+            ac.record(getTime().toUnix(), actorOf(who), "access", getMethod() & " " & path, "denied", "roles " & who.roles.join(","))
+            problem(Http403, "forbidden", "the role of " & who.user & " (" & who.roles.join(", ") & ") does not allow " & getMethod() & " " & path)
+          else:
             problem(Http403, "forbidden", "this token is for the runs of one organisation only")
-            return
+          return
       if path == "/api/v1/users" or path.startsWith("/api/v1/users/"):
         # IAM-001: the users of the shard and their roles, for an administrator (the gate above lets no one else here)
         var uc = newRq(coreRef.rqliteUrl)
@@ -1514,6 +1512,11 @@ proc onRequest() {.raises: [], gcsafe.} =
         if run == nil:
           problem(Http404, "not_found", "no such run")
           return
+        # what this caller may do with the run now: its state allows it and the caller's rights allow the call (the UI shows a button for what is true here, and nothing else)
+        var ac = newRq(coreRef.rqliteUrl)
+        let can = ac.runActions(rest, run{"state"}.getStr)
+        run["actions"] = %*{"abort": can.abort and who.mayCall("POST", base & "/" & rest & ":abort"),
+                            "retry": can.retry and who.mayCall("POST", base & "/" & rest & ":retry")}
         jsonOk(Http200, run)
       else:
         problem(Http404, "not_found", "no such route")

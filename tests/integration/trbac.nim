@@ -75,6 +75,20 @@ suite "IAM-001 users, roles and their tokens":
       check rolesMay(dev, "POST", "/api/v1/runs") and rolesMay(dev, "POST", "/api/v1/runs/x:abort") and not rolesMay(dev, "DELETE", "/api/v1/runs/x")
       check rolesMay(dev, "GET", "/api/v1/runs/x") and not rolesMay(dev, "PUT", "/api/v1/profile")
       check rolesMay(ro, "GET", "/api/v1/runs/x") and not rolesMay(ro, "POST", "/api/v1/runs")
+    test "IAM-001 the actions the page of a run offers (mayCall of the principal of a real token): ro none, dev and rw stop and run again, an organisation's token the same on its own runs":
+      discard first()
+      let abortPath = "/api/v1/runs/s1_a:abort"
+      let retryPath = "/api/v1/runs/s1_a:retry"
+      let ro = who(makeUser("u-ro", "ro"))
+      check not ro.mayCall("POST", abortPath) and not ro.mayCall("POST", retryPath) and ro.mayCall("GET", "/api/v1/runs/s1_a")
+      for role in ["dev", "rw"]:
+        let p = who(makeUser("u-" & role, role))
+        check p.mayCall("POST", abortPath) and p.mayCall("POST", retryPath)
+      let adm = who(c.createApiToken("t", userScope("admin"), 0, t0).token)
+      check adm.mayCall("POST", abortPath)
+      let org = who(c.createApiToken("acme", "org:acme", 0, t0).token)
+      check org.ok and org.org == "acme" and org.mayCall("POST", abortPath) and org.mayUseOrg("acme") and not org.mayUseOrg("other")
+      check not org.mayCall("POST", "/api/v1/users") and not org.mayCall("PUT", "/api/v1/profile")
     test "a user's role taken away, or the user switched off: the token stops working at once; another user is not touched":
       discard first()
       let a = makeUser("ann", "rw")

@@ -41,6 +41,24 @@ suite "PIP-015 running again only what failed":
       setState(r, "FAILED")
       r
 
+    test "RUN-006 PIP-015 runActions says what the state of the run allows: a failed run with a failed step may be run again and not stopped, one that goes on may be stopped, a finished one neither":
+      let r = failedRun()
+      check c.runActions(r, "FAILED") == (abort: false, retry: true)
+      discard c.retryRun(r, now())
+      check c.runActions(r, "RUNNING") == (abort: true, retry: false)    # RUNNING again: nothing to run again
+      let ok = co.createRun("return 1", "t1", defaultProfile)
+      addStep(ok, 0, "OK")
+      setState(ok, "OK")
+      check c.runActions(ok, "OK") == (abort: false, retry: false)
+      check c.runActions("no-such-run", "RUNNING") == (abort: true, retry: false)       # a run the row does not know can be stopped by its state alone; the call then says not found
+    test "a failed run whose volume is gone, or in which no step failed (the script ended it), is not offered a retry":
+      let gone = failedRun()
+      discard c.execute(%*[["UPDATE runs SET storage_released = 1 WHERE id = ?", gone]])
+      check c.runActions(gone, "FAILED").retry == false
+      let script = co.createRun("return 1", "t1", defaultProfile)
+      addStep(script, 0, "OK")
+      setState(script, "FAILED")
+      check c.runActions(script, "FAILED").retry == false
     test "the run is RUNNING again, the step that failed waits for a new attempt, the one that succeeded is not touched, and the failure is forgotten":
       let r = failedRun()
       let done = c.retryRun(r, now())

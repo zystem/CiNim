@@ -41,3 +41,17 @@ suite "scopes":
     check adm.admin and adm.mayUseOrg("acme") and adm.mayUseOrg("other") and adm.mayUseOrg("")
     check acme.mayUseOrg("acme") and not acme.mayUseOrg("other") and not acme.mayUseOrg("")
     check not principalOf("nonsense").mayUseOrg("acme")
+  test "IAM-001 mayCall is the one answer of the gate and of the page of a run: an administrator any call, a user what the roles allow, an organisation's token the runs routes, a failed token nothing":
+    let abortPath = "/api/v1/runs/s1_a:abort"
+    check principalOf("admin").mayCall("DELETE", "/api/v1/users/ann") and principalOf("admin").mayCall("POST", abortPath)
+    check principalOf("org:acme").mayCall("POST", abortPath) and principalOf("org:acme").mayCall("GET", "/api/v1/runs/s1_a")
+    check not principalOf("org:acme").mayCall("GET", "/api/v1/users") and not principalOf("org:acme").mayCall("POST", "/api/v1/organizations")
+    check not principalOf("nonsense").mayCall("GET", "/api/v1/runs")
+    var user = Principal(ok: true, user: "ann", roles: @["ro"])
+    check user.mayCall("GET", "/api/v1/runs/s1_a") and not user.mayCall("POST", abortPath) and not user.mayCall("POST", "/api/v1/runs/s1_a:retry")
+    user.roles = @["dev"]
+    check user.mayCall("POST", abortPath) and user.mayCall("POST", "/api/v1/runs/s1_a:retry") and not user.mayCall("DELETE", "/api/v1/organizations/acme")
+    user.roles = @["ro", "dev"]                                                   # the rights of the roles add up
+    check user.mayCall("POST", abortPath)
+    check user.mayCall("PUT", "/api/v1/users/ann/password") and not user.mayCall("PUT", "/api/v1/users/bob/password")      # one's own password
+    check not Principal(ok: true, user: "gone").mayCall("GET", "/api/v1/runs")      # a user with no role left, and no organisation, may do nothing

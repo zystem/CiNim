@@ -130,20 +130,39 @@ proc abortRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Abort
 type RetryOutcome* = enum
   roNotFound, roRetried, roNotRetryable, roNothingToRetry, roVolumeGone
 
+proc retryPlan(c: var RqClient; runId: string): tuple[outcome: RetryOutcome, state: string, failed: JsonNode] =
+  ## whether a run may be run again, and the steps that failed (ordinal, retries); `outcome` is roRetried when it may. The same checks answer the call and the page that asks whether to offer the button.
+  let r = c.query(%*[["SELECT state, storage_released FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
+  if r == nil or r.len == 0: return (roNotFound, "", nil)
+  let was = r[0][0].getStr
+  if was notin [protoName(rsFailed), protoName(rsInfrastructureError), protoName(rsTimedOut)]: return (roNotRetryable, was, nil)
+  if r[0][1].getInt != 0: return (roVolumeGone, was, nil)
+  let failed = c.query(%*[["SELECT ordinal, retries FROM steps WHERE run_id = ? AND state IN (?, ?, ?) ORDER BY ordinal", runId,
+                           protoName(ssFailed), protoName(ssLost), protoName(ssTimedOut)]])["results"][0]{"values"}
+  if failed == nil or failed.len == 0: return (roNothingToRetry, was, nil)
+  (roRetried, was, failed)
+
+proc runActions*(c: var RqClient; runId, state: string): tuple[abort, retry: bool] =
+  ## what the state of a run allows, apart from who asks: it can be stopped while it has not ended, and run again when it failed, its volume is there and a step failed.
+  ## The API adds the rights of the caller (`actions` of GET /api/v1/runs/{id}); the calls themselves check again.
+  var cur = rsCreated
+  var known = false
+  for s in states.RunState:
+    if protoName(s) == state:
+      cur = s
+      known = true
+  (known and canRun(cur, rsAborted), c.retryPlan(runId).outcome == roRetried)
+
 proc retryRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: RetryOutcome, state: string, steps: seq[int]] =
   ## Run again only what failed (PIP-015 failed-only, docs/parallel.md section 11): the same run, if its volume is still there. A run that ended FAILED, INFRASTRUCTURE_ERROR
   ## or TIMED_OUT is RUNNING again, its steps that failed (FAILED, LOST, TIMED_OUT) get a new attempt and wait to be handed out, and the steps that succeeded are not run again:
   ## the script is replayed from the journal up to the failed step. The journal is chained and only grows, so the record of a failed step stays; a record of kind `retry`
   ## names the keys it supersedes, and the new result of the step is written under `s<n>~<retries>` (executor/replay.nim finds it there). Everything is one transaction
   ## with the record, so a retry that is asked twice at once is one retry.
-  let r = c.query(%*[["SELECT state, storage_released FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
-  if r == nil or r.len == 0: return (roNotFound, "", @[])
-  let was = r[0][0].getStr
-  if was notin [protoName(rsFailed), protoName(rsInfrastructureError), protoName(rsTimedOut)]: return (roNotRetryable, was, @[])
-  if r[0][1].getInt != 0: return (roVolumeGone, was, @[])
-  let failed = c.query(%*[["SELECT ordinal, retries FROM steps WHERE run_id = ? AND state IN (?, ?, ?) ORDER BY ordinal", runId,
-                           protoName(ssFailed), protoName(ssLost), protoName(ssTimedOut)]])["results"][0]{"values"}
-  if failed == nil or failed.len == 0: return (roNothingToRetry, was, @[])
+  let plan = c.retryPlan(runId)
+  if plan.outcome != roRetried: return (plan.outcome, plan.state, @[])
+  let was = plan.state
+  let failed = plan.failed
   var keys = newJArray()
   var ordinals: seq[int]
   for v in failed:

@@ -286,14 +286,16 @@ suite "the pages":
 
 suite "the actions of a run":
   setup: reset()
-  test "RUN-006 PIP-015 the page of a run has the button that fits its state: stop for a run that goes on, again for one that failed, none for one that is over":
-    for (state, stop, again) in [("RUNNING", true, false), ("PENDING", true, false), ("FAILED", false, true), ("TIMED_OUT", false, true), ("INFRASTRUCTURE_ERROR", false, true),
-                                 ("OK", false, false), ("ABORTED", false, false)]:
-      routes["/api/v1/runs/s1_b"] = %*{"id": "s1_b", "organization": "acme", "state": state, "steps": []}
+  test "RUN-006 PIP-015 the page of a run offers the actions that the core says this user may do with it now, and nothing the core did not say":
+    for (actions, stop, again) in [(%*{"abort": true, "retry": false}, true, false), (%*{"abort": false, "retry": true}, false, true),
+                                   (%*{"abort": true, "retry": true}, true, true), (%*{"abort": false, "retry": false}, false, false), (%*{}, false, false), (newJNull(), false, false)]:
+      routes["/api/v1/runs/s1_b"] = %*{"id": "s1_b", "organization": "acme", "state": "RUNNING", "steps": [], "actions": actions}
       let r = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b", cookie = session))
       check r.status == 200
       check ("action=\"/ui/runs/s1_b/abort\"" in r.body) == stop
       check ("action=\"/ui/runs/s1_b/retry\"" in r.body) == again
+    routes["/api/v1/runs/s1_b"] = %*{"id": "s1_b", "organization": "acme", "state": "FAILED", "steps": []}     # a core that does not say: no button, not a guess from the state
+    check "action=\"/ui/runs/s1_b/" notin handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b", cookie = session)).body
   test "RUN-006 the stop button asks the core to abort the run with the token of the user, and goes back to the run":
     let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session, origin = "http://ui.example"))
     check r.status == 303 and r.header("Location") == "/ui/runs/s1_b"

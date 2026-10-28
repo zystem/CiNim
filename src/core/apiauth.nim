@@ -97,6 +97,15 @@ func mayUseOrg*(p: Principal; org: string): bool =
   ## whether this principal may touch the runs of this organisation: an administrator or a shard-level role any, an organisation's token its own
   p.acrossOrgs or (p.ok and p.org.len > 0 and p.org == org)
 
+func mayCall*(p: Principal; meth, path: string): bool =
+  ## The one answer to "may this caller make this call": the gate of the API asks it, and so does the page of a run that says which actions to offer (`actions`).
+  ## An administrator any; a user, what the roles allow (rbac.nim) and the change of their own password; a token of an organisation, the routes under `runsBase`
+  ## (which of the organisation's runs is checked where the run is known: `mayUseOrg`).
+  if not p.ok: return false
+  if p.admin: return true
+  if p.roles.len > 0: return rolesMay(p.roles, meth, path) or selfService(p.user, meth, path)
+  p.org.len > 0 and path.startsWith(runsBase)
+
 # ------------------------------------------------------------------ the rows
 
 proc createApiToken*(c: var RqClient; name, scope: string; expiresAt, now: int64): tuple[id, token: string] =

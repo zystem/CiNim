@@ -21,7 +21,7 @@ const
   shardRoles* = [roleAdmin, roleRw, roleDev, roleRo]
   shardScope* = "shard"               ## a binding of this scope applies to every organisation of the shard
   userScopePrefix* = "user:"          ## the scope of an API token that stands for a user: its rights are the user's roles as they are when the request comes
-  runsBase = "/api/v1/runs"
+  runsBase* = "/api/v1/runs"
   minPasswordLength* = 16             ## characters (not bytes)
   maxPasswordBytes* = 256
 
