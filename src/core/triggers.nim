@@ -14,7 +14,7 @@
 import std/[json, strutils, times, atomics, os, tables]
 import health
 import ../common/[rqlite, states, cron, ctrlauth, luaapi]
-import schema, scheduler, runparams, orgrules, apiauth, groups, preflight
+import schema, scheduler, runparams, orgrules, apiauth, groups, preflight, projectpolicy
 from ../common/scriptsource import Source, defaultPath, validRepository, validRef, validPath
 
 const
@@ -247,7 +247,7 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
       discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: " & ans.message, t.id]])
       return Fired(reason: ans.code, status: 400, detail: ans.message)
     script = ans.script
-    source = Source(repository: t.repository, commit: ans.commit, path: (if t.scriptPath.len > 0: t.scriptPath else: defaultPath))
+    source = Source(repository: t.repository, commit: ans.commit, path: (if t.scriptPath.len > 0: t.scriptPath else: defaultPath), refName: refNameOf(ask.commit))
   var aborted: seq[string]
   if t.concurrency == "abort_previous":
     # the newest commit is the one that matters: the runs of this trigger that have not ended are stopped first (their Pods are removed by the controllers)

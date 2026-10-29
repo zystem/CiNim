@@ -66,7 +66,7 @@ ci.single['01']{ image = "alpine", secrets = { "REGISTRY_PASSWORD" }, body = fun
  end }
 ```
 
-The administrator sets the value for the organisation (`PUT /api/v1/organizations/{slug}/secrets/{NAME}` with `{"value": "..."}`; `GET .../secrets` lists the
+(D-86: a secret may belong to a group or a project, `PUT .../groups|projects/{path}/secrets/{NAME}`; a run sees the nearest one by name up the tree, and one set with `"protected": true` only when it is on a protected ref of its project.) The administrator sets the value for the organisation (`PUT /api/v1/organizations/{slug}/secrets/{NAME}` with `{"value": "..."}`; `GET .../secrets` lists the
 names and versions, `DELETE .../secrets/{NAME}` removes one). The value is sealed in the shard's database (XChaCha20-Poly1305, a data key per organisation
 wrapped by a master key that is not in the database, D-45), so it is backed up and restored with the database; Lua sees the name only. When the step starts, its
 shim asks core for the values over the authenticated channel, with a credential bound to that run, step and attempt, and puts them into the environment of the

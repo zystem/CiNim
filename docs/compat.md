@@ -10,6 +10,7 @@ Found by reading the code on 2026-10-11 (`grep` for "legacy", "from before", "wi
 | What | Why it is kept | Delete when |
 |---|---|---|
 | The rows of `runs` and `steps` in the state `SUCCEEDED`, named `OK` by `migrate` (`core/schema.nim`) | D-78: the state was renamed; a shard that has runs from before has rows of the old name, which the code does not know (a run in `SUCCEEDED` would count as not ended) | every shard has been started once with this version (the statement does nothing when no row has the old name) |
+| The rebuild of `step_secrets` in `migrate` (`core/schema.nim`): a table without `group_id` is renamed, made anew with the group in the key, and its rows copied as the organisation's | D-86: a secret may belong to a group, so the key of the table changed; a shard made before has the old table | every shard has been started once with this version (the statement does nothing when the column is there) |
 | `LogBatch.status` read by the collector (`handleBatch` in `core/logcollector.nim`), and the shim's way of putting its state in the batch when it has no `--status-addr` (`statusApart` in `shim/logclient.nim`) | D-75: the state of the shim moved to the status channel; a Pod made by a controller that does not send `status_addr` (or one that runs now) still sends it in the batch | every controller of the shard sends `status_addr` and the step Pods made before have ended (one rollout of the shard and the longest step) |
 
 ## Deleted (2026-10-20)

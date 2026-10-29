@@ -31,8 +31,8 @@ const
     ("trigger.fire", lvGroup, "fire a manual trigger"),
     ("variable.read", lvGroup, "read variables"),
     ("variable.write", lvGroup, "write and delete variables of an organisation or of a group"),
-    ("secret.read", lvOrg, "see the names of the secrets of an organisation"),
-    ("secret.write", lvOrg, "set and delete secrets"),
+    ("secret.read", lvGroup, "see the names of the secrets of an organisation"),
+    ("secret.write", lvGroup, "set and delete secrets"),
     ("group.read", lvGroup, "see groups and projects"),
     ("group.write", lvGroup, "make and delete groups and projects"),
     ("hold.read", lvGroup, "see legal holds"),
@@ -43,6 +43,9 @@ const
     ("lock.write", lvOrg, "change the locks of an organisation"),
     ("storage.read", lvOrg, "see which store an organisation uses"),
     ("org.read", lvGroup, "see organisations"),
+    ("run.start.protected", lvGroup, "start a run on a protected ref of a project (the secrets marked protected go to such runs only)"),
+    ("ref.protect", lvGroup, "choose which refs of a project are protected"),
+    ("profile.grant", lvGroup, "choose which privileged profiles (build, deploy) the pipelines of a project may use"),
     ("access.read", lvGroup, "see who has which role in an organisation, and the roles and permissions"),
     ("access.write", lvGroup, "give and take away roles in an organisation"),
     ("shard.read", lvShard, "see the components, the launch gate, the alerts, the router, the profile and the checks of the shard"),
@@ -61,6 +64,7 @@ const
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
+  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
 
 func isPermission*(name: string): bool =
   for p in catalogue:
@@ -113,7 +117,7 @@ func groupPathOf(afterWord: string): string =
   var segs: seq[string]
   for seg in afterWord.strip(chars = {'/'}).split('/'):
     if seg.len == 0: continue                            # as `normalPath` of groups.nim reads a path
-    if seg in ["variables", "settings", "hold", "members"]: break
+    if seg in ["variables", "settings", "hold", "members", "secrets"]: break
     segs.add seg
   segs.join("/")
 
@@ -129,6 +133,7 @@ func orgNeed(meth, org, rest: string): Need =
   if rest.endsWith("/storage"): return (if write: need("storage.write", nsShard) else: need("storage.read", nsOrg, org))
   # a hold is placed on the organisation or on a group, and read; `/holds` lists them
   if rest == "/hold" or rest == "/holds": return need(if write: "hold.write" else: "hold.read", nsOrg, org)       # the holds of the whole organisation: not for a binding on a group
+  if onTree() and ("/secrets/" in rest or rest.endsWith("/secrets")): return treeNeed(if write: "secret.write" else: "secret.read")
   if onTree() and rest.endsWith("/hold"): return treeNeed(if write: "hold.write" else: "hold.read")
   if onTree() and ("/members/" in rest or rest.endsWith("/members")): return treeNeed(if write: "access.write" else: "access.read")      # the roles on a group or project
   if rest.startsWith("/triggers"):

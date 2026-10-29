@@ -10,7 +10,7 @@ import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, table
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource]
-import ctrlpresence, logwindow, keptpods, stepsecrets, runparams, objectstore, runstorage, ctrlconfig
+import ctrlpresence, logwindow, keptpods, stepsecrets, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
@@ -77,10 +77,12 @@ proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; param
     let last = c.query(%*[["SELECT source_commit FROM runs WHERE tenant_id = ? AND group_id = ? AND source_repository = ? AND source_path = ? AND state = ? AND source_commit <> '' " &
       "ORDER BY created_at DESC, id DESC LIMIT 1", tenantId, groupId, source.repository, source.path, protoName(rsOk)]])["results"][0]{"values"}
     if last != nil and last.len > 0: base = last[0][0].getStr
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path, source_base) " &
-    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, protoName(rsRunning), now, now,
+  # D-86: a run on a protected ref of its project is trusted (its protected secrets, the profile deploy)
+  let trusted = source.refName.len > 0 and c.isProtectedRef(groupId, source.refName)
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path, source_base, source_ref, trusted) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, protoName(rsRunning), now, now,
     (if profileId.len > 0: profileId else: co.profileId), (if params.len > 0: toJson(params) else: ""),
-    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path, base]])
+    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path, base, source.refName, (if trusted: 1 else: 0)]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
@@ -182,7 +184,7 @@ proc retryRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Retry
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path, r.source_base " &
+  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path, r.source_base, r.source_ref, r.trusted " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
@@ -193,6 +195,8 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if row[10].getStr.len > 0:
     result["source"] = %*{"repository": row[10].getStr, "commit": row[11].getStr, "path": row[12].getStr}
     if row[13].getStr.len > 0: result["source"]["base"] = %row[13].getStr          # D-82
+    if row[14].getStr.len > 0: result["source"]["ref"] = %row[14].getStr           # D-86
+  result["trusted"] = %(row[15].getInt > 0)                                          # D-86: a run on a protected ref of its project
   if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
   if row[6].getStr.len > 0:
     result["params"] = (try: parseJson(row[6].getStr) except JsonParsingError: newJObject())
@@ -1054,6 +1058,11 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("profile \"" & profile & "\" needs a run that belongs to an organisation")
+    # D-86: a pipeline may use a privileged profile only if its project allows it, and deploy only on a protected ref
+    let rr = c.query(%*[["SELECT group_id, trusted FROM runs WHERE id = ?", req.run_id]])["results"][0]{"values"}
+    if rr != nil and rr.len > 0:
+      let why = c.profileProblem(rr[0][0].getStr, profile, rr[0][1].getInt > 0)
+      if why.len > 0: return fail(why)
   if (hasArtifacts(opts) or cacheDecls(opts).len > 0) and not storesReady():
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",
@@ -1073,11 +1082,12 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
       ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
     if wantedSecrets.len > maxSecretsPerStep: return fail("a step may ask for at most " & $maxSecretsPerStep & " secrets")
-    let o = c.query(%*[["SELECT tenant_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
+    let o = c.query(%*[["SELECT tenant_id, group_id, trusted FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("secrets need a run that belongs to an organisation")
-    let missing = missingSecrets(c.secretVersions(ov[0][0].getStr), wantedSecrets)
-    if missing.len > 0: return fail("the organisation has no secret " & missing.join(", ") & " (PUT /api/v1/organizations/{slug}/secrets/{NAME})")
+    # D-86: the secrets of the project, of the groups above it and of the organisation, the nearest by name; a protected one only for a run on a protected ref
+    let missing = missingSecrets(c.visibleSecrets(ov[0][0].getStr, ov[0][1].getStr), wantedSecrets, trusted = ov[0][2].getInt > 0)
+    if missing.len > 0: return fail("this run has no secret " & missing.join(", ") & ": it is not set for the project, the groups above it or the organisation (PUT /api/v1/organizations/{slug}/secrets/{NAME}, or .../projects/{path}/secrets/{NAME}), or it is protected and the run is not on a protected ref")
   try:
     discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, ?, ?, ?)",
       schema.newId(), req.run_id, jobKey, protoName(ssRunning), profileId]])

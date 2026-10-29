@@ -194,7 +194,7 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
     StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: false, disposition: "refused", failure: Failure(code: code, detail: detail))
   if req.job_token.len == 0 or not constantTimeEqual(req.job_token, stepToken(master, req.step.run_id, int(req.step.seq), int(req.step.attempt))):
     return refuse("bad_token", "the step's credential is not right")
-  let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id FROM steps s JOIN runs ru ON ru.id = s.run_id " &
+  let r = c.query(%*[["SELECT s.state, s.opts, ru.tenant_id, ru.group_id, ru.trusted FROM steps s JOIN runs ru ON ru.id = s.run_id " &
                       "WHERE s.run_id = ? AND s.ordinal = ? AND s.attempt = ?", req.step.run_id, int(req.step.seq), int(req.step.attempt)]])
   let v = r["results"][0]{"values"}
   if v == nil or v.len == 0 or v[0][0].getStr notin [protoName(ssStarting), protoName(ssRunning)]:
@@ -202,7 +202,7 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
   let names = secretNamesOf(v[0][1].getStr)
   let vk = vaultKek()
   if names.len > 0 and not vk.ready: return refuse("secrets_unavailable", "core's secrets are not available")
-  let got = c.getSecrets(vk.kek, v[0][2].getStr, names)
+  let got = c.getSecrets(vk.kek, v[0][2].getStr, names, v[0][3].getStr, v[0][4].getInt > 0)       # D-86: the run's project and whether its ref is protected
   if not got.ok: return refuse(if got.retry: "secrets_unavailable" else: "unknown_secret", got.error)
   result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
   for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)

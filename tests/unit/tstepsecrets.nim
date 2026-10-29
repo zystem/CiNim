@@ -24,7 +24,13 @@ suite "what a step asked for":
     check secretNamesOf("""{"mask":{"min_length":4},"secrets":["A","B"],"timeout":60}""") == @["A", "B"]
     check secretNamesOf("").len == 0 and secretNamesOf("""{"timeout":5}""").len == 0 and secretNamesOf("{oops").len == 0
   test "a name that was never defined is missing":
-    var have = initTable[string, int]()
-    have["A"] = 3
+    var have = initTable[string, SecretInfo]()
+    have["A"] = SecretInfo(version: 3)
     check missingSecrets(have, @["A", "B"]) == @["B"]
     check missingSecrets(have, @["A"]).len == 0
+  test "D-86 a protected secret is missing for a run that is not on a protected ref, and not for one that is":
+    var have = initTable[string, SecretInfo]()
+    have["PLAIN"] = SecretInfo(version: 1)
+    have["PROD"] = SecretInfo(version: 1, protected: true)
+    check missingSecrets(have, @["PLAIN", "PROD"], trusted = false) == @["PROD"]
+    check missingSecrets(have, @["PLAIN", "PROD"], trusted = true).len == 0

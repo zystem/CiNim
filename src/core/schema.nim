@@ -21,10 +21,11 @@ const ddl = [
        disabled_at INTEGER NOT NULL DEFAULT 0)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug ON organizations (slug)",
   # the step secrets of an organisation (VAR-002, 6.7), each sealed with the organisation's data key (core/secretvault.nim); the data key is
-  # wrapped by the master key, which is not in the database
+  # wrapped by the master key, which is not in the database. A secret belongs to the organisation (`group_id` '') or to a group or project (D-86), and may be `protected`: given
+  # to the runs on a protected ref of the project only
   """CREATE TABLE IF NOT EXISTS step_secrets (
-       tenant_id TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, value_enc TEXT NOT NULL DEFAULT '',
-       PRIMARY KEY (tenant_id, name))""",
+       tenant_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL, value_enc TEXT NOT NULL DEFAULT '',
+       protected INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, group_id, name))""",
   """CREATE TABLE IF NOT EXISTS org_keys (tenant_id TEXT PRIMARY KEY, wrapped TEXT NOT NULL, created_at INTEGER NOT NULL)""",
   """CREATE TABLE IF NOT EXISTS vault_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)""",
   # the API tokens (IAM-003, core/apiauth.nim): only the SHA-256 of the secret is kept; scope is `admin` or `org:<slug>`; 0 means never / not yet
@@ -82,7 +83,7 @@ const ddl = [
        api_version INTEGER NOT NULL DEFAULT 1,
        source_repository TEXT NOT NULL DEFAULT '',
        source_commit TEXT NOT NULL DEFAULT '', source_base TEXT NOT NULL DEFAULT '',
-       source_path TEXT NOT NULL DEFAULT '',
+       source_path TEXT NOT NULL DEFAULT '', source_ref TEXT NOT NULL DEFAULT '', trusted INTEGER NOT NULL DEFAULT 0,
        journal_tip TEXT NOT NULL DEFAULT '',
        step_table TEXT NOT NULL DEFAULT '',
        lease_attempt INTEGER NOT NULL DEFAULT 0,
@@ -112,7 +113,7 @@ const ddl = [
   # belongs to it). `path` is the slugs from the top joined by '/'; the variables of a group (VAR-001) are inherited by the groups below it and by its runs
   """CREATE TABLE IF NOT EXISTS groups (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL,
-       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '')""",
+       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS groups_tenant_path ON groups (tenant_id, path)",
   "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
   """CREATE TABLE IF NOT EXISTS group_variables (
@@ -228,6 +229,10 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("triggers", "seen_commit", "TEXT NOT NULL DEFAULT ''"),            # D-76: a poll trigger: the commit its ref was at when it last looked, and when it looked (2026-10-23)
   ("triggers", "last_checked_at", "INTEGER NOT NULL DEFAULT 0"),
   ("groups", "repository", "TEXT NOT NULL DEFAULT ''"),
+  ("groups", "protected_refs", "TEXT NOT NULL DEFAULT ''"),               # D-86: the refs of a project whose runs are trusted, and the privileged profiles its pipelines may use (2026-10-29)
+  ("groups", "allowed_profiles", "TEXT NOT NULL DEFAULT ''"),
+  ("runs", "source_ref", "TEXT NOT NULL DEFAULT ''"),                      # D-86: the name the commit was asked by (a branch or a tag; "" for a SHA), and whether it is a protected ref of the project
+  ("runs", "trusted", "INTEGER NOT NULL DEFAULT 0"),
   ("runs", "source_base", "TEXT NOT NULL DEFAULT ''")]                    # D-82: the commit of the last run of this pipeline that ended OK, when this one was made (2026-10-23)                   # D-68: a group with a main repository is a project (2026-10-23)
   ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
   ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
@@ -240,6 +245,14 @@ proc migrate*(c: var RqClient) =
   for (table, column, definition) in columnsAdded:
     if not c.hasColumn(table, column):
       discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
+  # D-86: a secret may belong to a group, so the key of the table has the group in it (2026-10-29; docs/compat.md): the table is made anew, the old rows are the organisation's
+  if not c.hasColumn("step_secrets", "group_id"):
+    discard c.execute(%*[
+      ["ALTER TABLE step_secrets RENAME TO step_secrets_old"],
+      ["""CREATE TABLE step_secrets (tenant_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+          value_enc TEXT NOT NULL DEFAULT '', protected INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, group_id, name))"""],
+      ["INSERT INTO step_secrets (tenant_id, group_id, name, version, updated_at, value_enc, protected) SELECT tenant_id, '', name, version, updated_at, value_enc, 0 FROM step_secrets_old"],
+      ["DROP TABLE step_secrets_old"]], transaction = true)
   # the state of a run or a step that went well is OK (2026-10-23; it was SUCCEEDED): the rows made before are named anew (docs/compat.md)
   discard c.execute(%*[["UPDATE runs SET state = 'OK' WHERE state = 'SUCCEEDED'"], ["UPDATE steps SET state = 'OK' WHERE state = 'SUCCEEDED'"]], transaction = true)
 

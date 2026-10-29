@@ -3,6 +3,7 @@
 import std/[unittest, json, os]
 import common/rqlite
 import std/times
+import core/[groups, projectpolicy]
 import common/ctrlauth
 import core/[schema, scheduler, loggate, logcircuit, runlease]
 
@@ -123,7 +124,9 @@ suite "SHD-007 runs and controllers per organisation":
       let orgD = c.addOrganization("d-" & sfx, "D")
       let nsD = "cinim-001-d-" & sfx
       let profD = c.ensureOrganizationProfile(orgD, nsD)
-      let rd = co.createRun("return 1", orgD, profD)
+      let projD = c.createProject(orgD, "app", "https://example.test/app.git", 1)
+      check projD.error.len == 0 and c.setAllowedProfiles(projD.id, @["build"]) == ""      # D-86: a pipeline uses build when its project allows it
+      let rd = co.createRun("return 1", orgD, profD, groupId = projD.id)
       var withBuild = co
       withBuild.orgPrefix = "cinim"
       withBuild.orgShard = "001"

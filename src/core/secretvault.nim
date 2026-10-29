@@ -9,11 +9,11 @@
 ##
 ## `KekProvider` is the seam for a key that lives elsewhere (a PKCS#11 token behind p11-kit or a YubiHSM connector, Vault or OpenBao Transit, a cloud KMS):
 ## the vault only asks it to wrap and unwrap a data key. Built so far: `fileKek` and `derivedKek`.
-import std/[strutils, json, atomics, locks]
+import std/[strutils, json, atomics, locks, tables]
 import std/times
 import crunchy
 import ../common/[rqlite, ctrlauth, sodiumaead]
-import kekprovider, dekcache
+import kekprovider, dekcache, stepsecrets
 export kekprovider
 
 const formatTag = "v2."      ## the format of a sealed text: the algorithm is named by it, so that another can follow
@@ -77,7 +77,10 @@ proc derivedKek*(coreSecretKey: string): KekProvider =
 # ------------------------------------------------------------------ the rows
 
 func dekAad(tenant: string): string = "cinim/dek/v1|" & tenant
-func valueAad(tenant, name: string; version: int): string = "cinim/secret/v1|" & tenant & "|" & name & "|" & $version
+func valueAad(tenant, name: string; version: int; groupId = ""): string =
+  ## the organisation's secret keeps the form it was sealed in (v1); one of a group has the group in it, so that a value moved to another group's row does not open
+  if groupId.len == 0: "cinim/secret/v1|" & tenant & "|" & name & "|" & $version
+  else: "cinim/secret/v2|" & tenant & "|" & groupId & "|" & name & "|" & $version
 const checkAad = "cinim/kek-check/v1"
 const checkText = "cinim secrets key check"
 
@@ -195,29 +198,34 @@ proc dekFor(c: var RqClient; kek: KekProvider; tenant: string; create: bool): tu
   deks.put(tenant, u.plain, now)
   (true, false, u.plain, "")
 
-proc putSecret*(c: var RqClient; kek: KekProvider; tenant, name, value: string; now: int64): tuple[ok, retry: bool, version: int, error: string] =
-  ## a new value is a new version of the secret
+proc putSecret*(c: var RqClient; kek: KekProvider; tenant, name, value: string; now: int64; groupId = ""; protected = false): tuple[ok, retry: bool, version: int, error: string] =
+  ## a new value is a new version of the secret; `groupId` is the group that holds it ("" for the organisation)
   let d = dekFor(c, kek, tenant, create = true)
   if not d.ok: return (false, d.retry, 0, d.error)
-  let cur = c.query(%*[["SELECT version FROM step_secrets WHERE tenant_id = ? AND name = ?", tenant, name]])
+  let cur = c.query(%*[["SELECT version FROM step_secrets WHERE tenant_id = ? AND group_id = ? AND name = ?", tenant, groupId, name]])
   let cv = cur["results"][0]{"values"}
   let version = (if cv != nil and cv.len > 0: cv[0][0].getInt else: 0) + 1
-  let sealed = seal(d.dek, value, valueAad(tenant, name, version))
-  discard c.execute(%*[["INSERT INTO step_secrets (tenant_id, name, version, updated_at, value_enc) VALUES (?, ?, ?, ?, ?) " &
-                        "ON CONFLICT(tenant_id, name) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at, value_enc = excluded.value_enc",
-                        tenant, name, version, now, sealed]])
+  let sealed = seal(d.dek, value, valueAad(tenant, name, version, groupId))
+  discard c.execute(%*[["INSERT INTO step_secrets (tenant_id, group_id, name, version, updated_at, value_enc, protected) VALUES (?, ?, ?, ?, ?, ?, ?) " &
+                        "ON CONFLICT(tenant_id, group_id, name) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at, value_enc = excluded.value_enc, protected = excluded.protected",
+                        tenant, groupId, name, version, now, sealed, (if protected: 1 else: 0)]])
   (true, false, version, "")
 
-proc getSecrets*(c: var RqClient; kek: KekProvider; tenant: string; names: seq[string]): tuple[ok, retry: bool, values: seq[(string, string)], error: string] =
-  ## the current values of the named secrets of an organisation, decrypted; `retry` when the master key does not answer now
+proc getSecrets*(c: var RqClient; kek: KekProvider; tenant: string; names: seq[string]; groupId = ""; trusted = false): tuple[ok, retry: bool, values: seq[(string, string)], error: string] =
+  ## the current values of the named secrets, decrypted, for a run of this group (D-86): the nearest holder of each name up the tree, and a protected one only when `trusted`;
+  ## `retry` when the master key does not answer now
   if names.len == 0: return (true, false, @[], "")
   let d = dekFor(c, kek, tenant, create = false)
   if not d.ok: return (false, d.retry, @[], d.error)
+  let seen = c.visibleSecrets(tenant, groupId)
   for n in names:
-    let r = c.query(%*[["SELECT version, value_enc FROM step_secrets WHERE tenant_id = ? AND name = ?", tenant, n]])
+    if n notin seen: return (false, false, @[], "there is no secret " & n & " for this project")
+    if seen[n].protected and not trusted: return (false, false, @[], "the secret " & n & " is protected: it goes to runs on a protected ref of the project only")
+    let holder = seen[n].groupId
+    let r = c.query(%*[["SELECT version, value_enc FROM step_secrets WHERE tenant_id = ? AND group_id = ? AND name = ?", tenant, holder, n]])
     let v = r["results"][0]{"values"}
     if v == nil or v.len == 0 or v[0][1].getStr.len == 0: return (false, false, @[], "the organisation has no secret " & n)
-    let u = unseal(d.dek, v[0][1].getStr, valueAad(tenant, n, v[0][0].getInt))
+    let u = unseal(d.dek, v[0][1].getStr, valueAad(tenant, n, v[0][0].getInt, holder))
     if not u.ok: return (false, false, @[], "the secret " & n & " cannot be read")
     result.values.add (n, u.plain)
   result.ok = true

@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
 import ../common/scriptsource
-import audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -906,6 +906,92 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem(Http405, "method_not_allowed", "GET on /members, PUT and DELETE on /members/{user}")
         return
+      if path.startsWith("/api/v1/organizations/") and "/secrets" in path:
+        # the secrets that steps may ask for (core/stepsecrets.nim): names and versions are in the database, the values sealed there. The value is read from the body and is not logged
+        # or answered. D-86: a secret is the organisation's or a group's or a project's (its runs see the nearest one by name), and may be `protected`:
+        #   /organizations/{slug}/secrets[/NAME]                          the organisation's
+        #   /organizations/{slug}/groups|projects/{path}/secrets[/NAME]   a group's or project's; GET ...?effective=true lists what a run of it can ask for, and from where
+        let rest = path["/api/v1/organizations/".len .. ^1]
+        let segsS = rest.split('/')
+        let secAt = segsS.find("secrets")
+        var slug, secGroup, secName = ""
+        var secShape = segsS.len >= 2 and secAt >= 1 and secAt >= segsS.len - 2
+        if secShape:
+          slug = segsS[0]
+          if secAt > 1:
+            secShape = segsS[1] in ["groups", "projects"] and secAt > 2
+            secGroup = normalPath(segsS[2 ..< secAt].join("/"))
+          if secAt < segsS.len - 1: secName = segsS[secAt + 1]
+        if not secShape or slug.len == 0:
+          problem(Http404, "not_found", "no such route")
+          return
+        var c = newRq(coreRef.rqliteUrl)
+        let org = c.organizationRow(slug)
+        if org.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
+          return
+        var secGroupId = ""
+        if secGroup.len > 0:
+          let sg = c.groupIdOf(org.id, secGroup)
+          if not sg.found or sg.id.len == 0:
+            problem(Http404, "group_not_found", "the organisation " & slug & " has no group or project " & secGroup)
+            return
+          secGroupId = sg.id
+        let smeth = getMethod()
+        if smeth == "GET" and secName.len == 0:
+          var asked = false
+          if qpos >= 0:
+            for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+              if k == "effective": asked = v == "true"
+          if asked: jsonOk(Http200, %*{"organization": slug, "project": secGroup, "secrets": c.effectiveSecrets(org.id, secGroupId)})
+          else: jsonOk(Http200, %*{"organization": slug, "group": secGroup, "secrets": c.listStepSecrets(org.id, secGroupId)})
+          return
+        if secName.len == 0:
+          problem(Http405, "method_not_allowed", "GET lists, PUT and DELETE name a secret: /secrets/{NAME}")
+          return
+        let nameProblem = checkName(secName)
+        if nameProblem.len > 0:
+          problem(Http400, "invalid_name", nameProblem)
+          return
+        let vk = vaultKek()
+        if not vk.ready:
+          reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": vaultError()}),
+                ["Content-Type: application/problem+json", "Retry-After: 15"])
+          return
+        if smeth == "PUT":
+          if org.state != "active":
+            problem(Http409, "organization_disabled", "the organisation " & slug & " is switched off")
+            return
+          let j = try: parseJson(getBody()) except JsonParsingError: nil
+          if j == nil or j.kind != JObject or not j.hasKey("value") or j["value"].kind != JString:
+            problem(Http400, "invalid_request", "the body is {\"value\": \"...\"}")
+            return
+          let value = j["value"].getStr
+          let valueProblem = checkValue(value)
+          if valueProblem.len > 0:
+            problem(Http400, "invalid_value", valueProblem)
+            return
+          let makeProtected = j{"protected"}.getBool
+          let put = c.putSecret(vk.kek, org.id, secName, value, getTime().toUnix(), secGroupId, makeProtected)
+          if not put.ok:
+            if put.retry:
+              reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": put.error}),
+                    ["Content-Type: application/problem+json", "Retry-After: 15"])
+            else:
+              problem(Http500, "secrets_error", put.error)
+            return
+          let auditName = (if secGroup.len > 0: secGroup & ":" else: "") & secName
+          c.recordSecret(c.variableAuditMode(org.id), coreSecret(coreRef.certs), org.id, getTime().toUnix(), who, slug, auditName, put.version, some(value))
+          jsonOk(Http200, %*{"organization": slug, "group": secGroup, "name": secName, "version": put.version, "protected": makeProtected})
+        elif smeth == "DELETE":
+          if not c.forgetStepSecret(org.id, secName, secGroupId):
+            problem(Http404, "not_found", "no such secret")
+            return
+          c.recordSecret(c.variableAuditMode(org.id), coreSecret(coreRef.certs), org.id, getTime().toUnix(), who, slug, (if secGroup.len > 0: secGroup & ":" else: "") & secName, 0, none(string))
+          jsonOk(Http200, %*{"organization": slug, "group": secGroup, "name": secName, "deleted": true})
+        else:
+          problem(Http405, "method_not_allowed", "PUT or DELETE")
+        return
       if path.startsWith("/api/v1/organizations/") and ("/groups" in path or "/projects" in path):
         # PRJ-001, D-54: the groups of an organisation, nested up to 8 levels, and their variables (inherited by the groups below and by the runs in them).
         #   GET /groups                      the groups, by path
@@ -963,7 +1049,30 @@ proc onRequest() {.raises: [], gcsafe.} =
           if gmeth == "PUT":
             let sj = try: parseJson(getBody()) except JsonParsingError: nil
             if sj == nil or sj.kind != JObject:
-              problem(Http400, "invalid_request", "a JSON object with cache_quota_bytes and/or cache_retention_days is required")
+              problem(Http400, "invalid_request", "a JSON object with cache_quota_bytes, cache_retention_days, protected_refs and/or allowed_profiles is required")
+              return
+            # D-86: the refs that are protected (a project's) and the privileged profiles its pipelines may use are security settings, each with a permission of its own
+            var newRefs, newProfiles: seq[string]
+            for k in ["protected_refs", "allowed_profiles"]:
+              if not sj.hasKey(k): continue
+              if sj[k].kind != JArray:
+                problem(Http400, "invalid_request", k & " must be a list of strings")
+                return
+              for x in sj[k].elems:
+                if x.kind != JString:
+                  problem(Http400, "invalid_request", k & " must be a list of strings")
+                  return
+                if k == "protected_refs": newRefs.add x.getStr
+                else: newProfiles.add x.getStr
+            if sj.hasKey("protected_refs"):
+              if not who.mayIn("ref.protect", slugG, sp):
+                problem(Http403, "forbidden", "protected_refs needs ref.protect on " & normalPath(sp))
+                return
+              if gc.resolveProject(orgG.id, sp).code.len > 0:
+                problem(Http409, "not_a_project", "protected refs belong to a project (a group with a repository), and " & normalPath(sp) & " is not one")
+                return
+            if sj.hasKey("allowed_profiles") and not who.mayIn("profile.grant", slugG, sp):
+              problem(Http403, "forbidden", "allowed_profiles needs profile.grant on " & normalPath(sp))
               return
             let cur = gc.groupLimit(sg.id)
             var q = cur.quota
@@ -978,13 +1087,26 @@ proc onRequest() {.raises: [], gcsafe.} =
             if bad.len > 0:
               problem(Http400, "invalid_request", bad)
               return
+            if sj.hasKey("protected_refs"):
+              let bad = gc.setProtectedRefs(sg.id, newRefs)
+              if bad.len > 0:
+                problem(Http400, "invalid_request", bad)
+                return
+              gc.record(getTime().toUnix(), actorOf(who), "project.protected_refs", slugG & "/" & normalPath(sp), "ok", newRefs.join(","))
+            if sj.hasKey("allowed_profiles"):
+              let bad = gc.setAllowedProfiles(sg.id, newProfiles)
+              if bad.len > 0:
+                problem(Http400, "invalid_request", bad)
+                return
+              gc.record(getTime().toUnix(), actorOf(who), "project.allowed_profiles", slugG & "/" & normalPath(sp), "ok", newProfiles.join(","))
             gc.setGroupLimit(sg.id, q, d)
           elif gmeth != "GET":
             problem(Http405, "method_not_allowed", "GET or PUT")
             return
           let lim = gc.groupLimit(sg.id)
           jsonOk(Http200, %*{"organization": slugG, "group": normalPath(sp), "cache_quota_bytes": lim.quota, "cache_retention_days": lim.retentionDays,
-                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv())})
+                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()),
+                             "protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id)})
           return
         let vpos = segs.find("variables")
         let groupPath = if vpos >= 0: segs[0 ..< vpos].join("/") else: gpath
@@ -1183,6 +1305,10 @@ proc onRequest() {.raises: [], gcsafe.} =
           if wanted.len > 0 and not scriptsource.validRef(wanted):
             problem(Http400, "invalid_source", "commit is a SHA, a branch or a tag name")
             return
+          # D-86: a manual firing that names another ref than the trigger's own, and a protected one, is for those who hold run.start.protected
+          if wanted.len > 0 and refNameOf(wanted).len > 0 and c.isProtectedRef(found.row.groupId, refNameOf(wanted)) and not who.mayIn("run.start.protected", slug, found.row.groupPath):
+            problem(Http403, "protected_ref", "\"" & wanted & "\" is a protected ref of the project " & found.row.groupPath & ": firing a trigger on it needs run.start.protected there")
+            return
           let fired = coreRef.fire(found.row, given.pairs, getTime().toUnix(), commit = wanted)
           if fired.started:
             jsonOk(Http201, %*{"id": fired.runId, "organization": slug, "trigger_id": tid, "state": "RUNNING"})
@@ -1192,69 +1318,6 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         else:
           problem(Http405, "method_not_allowed", "GET, DELETE, or POST :enable :disable :rotate-secret :fire")
-        return
-      if path.startsWith("/api/v1/organizations/") and "/secrets" in path:
-        # the secrets of an organisation that its steps may ask for (core/stepsecrets.nim): names and versions are in the database, the values only in
-        # Kubernetes Secrets of the organisation's namespace. An administrator's call; the value is read from the body and is not logged or answered.
-        let rest = path["/api/v1/organizations/".len .. ^1]
-        let parts = rest.split("/secrets")
-        let slug = parts[0]
-        let secName = if parts.len > 1: parts[1].strip(chars = {'/'}) else: ""
-        if parts.len != 2 or (parts[1].len > 0 and not parts[1].startsWith("/")) or slug.len == 0:
-          problem(Http404, "not_found", "no such route")
-          return
-        var c = newRq(coreRef.rqliteUrl)
-        let org = c.organizationRow(slug)
-        if org.id.len == 0:
-          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
-          return
-        let smeth = getMethod()
-        if smeth == "GET" and secName.len == 0:
-          jsonOk(Http200, %*{"organization": slug, "secrets": c.listStepSecrets(org.id)})
-          return
-        if secName.len == 0:
-          problem(Http405, "method_not_allowed", "GET lists, PUT and DELETE name a secret: /secrets/{NAME}")
-          return
-        let nameProblem = checkName(secName)
-        if nameProblem.len > 0:
-          problem(Http400, "invalid_name", nameProblem)
-          return
-        let vk = vaultKek()
-        if not vk.ready:
-          reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": vaultError()}),
-                ["Content-Type: application/problem+json", "Retry-After: 15"])
-          return
-        if smeth == "PUT":
-          if org.state != "active":
-            problem(Http409, "organization_disabled", "the organisation " & slug & " is switched off")
-            return
-          let j = try: parseJson(getBody()) except JsonParsingError: nil
-          if j == nil or j.kind != JObject or not j.hasKey("value") or j["value"].kind != JString:
-            problem(Http400, "invalid_request", "the body is {\"value\": \"...\"}")
-            return
-          let value = j["value"].getStr
-          let valueProblem = checkValue(value)
-          if valueProblem.len > 0:
-            problem(Http400, "invalid_value", valueProblem)
-            return
-          let put = c.putSecret(vk.kek, org.id, secName, value, getTime().toUnix())
-          if not put.ok:
-            if put.retry:
-              reply(Http503, $(%*{"type": "about:blank", "status": 503, "code": "secrets_unavailable", "detail": put.error}),
-                    ["Content-Type: application/problem+json", "Retry-After: 15"])
-            else:
-              problem(Http500, "secrets_error", put.error)
-            return
-          c.recordSecret(c.variableAuditMode(org.id), coreSecret(coreRef.certs), org.id, getTime().toUnix(), who, slug, secName, put.version, some(value))
-          jsonOk(Http200, %*{"organization": slug, "name": secName, "version": put.version})
-        elif smeth == "DELETE":
-          if not c.forgetStepSecret(org.id, secName):
-            problem(Http404, "not_found", "no such secret")
-            return
-          c.recordSecret(c.variableAuditMode(org.id), coreSecret(coreRef.certs), org.id, getTime().toUnix(), who, slug, secName, 0, none(string))
-          jsonOk(Http200, %*{"organization": slug, "name": secName, "deleted": true})
-        else:
-          problem(Http405, "method_not_allowed", "PUT or DELETE")
         return
       if path.startsWith("/api/v1/organizations/"):
         # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)
@@ -1413,6 +1476,11 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http400, "invalid_source", src.error)
           return
         let fromRepo = src.source
+        # D-86: a run on a protected ref of the project is for those who hold run.start.protected; asked by a hash it is on no ref
+        let askedRef = refNameOf(fromRepo.commit)
+        if askedRef.len > 0 and gq.isProtectedRef(groupId, askedRef) and not who.mayIn("run.start.protected", orgSlug, proj.path):
+          problem(Http403, "protected_ref", "\"" & askedRef & "\" is a protected ref of the project " & proj.path & ": starting a run on it needs run.start.protected there")
+          return
         var qc = newRq(coreRef.rqliteUrl)
         if qc.queueIsFull(if profile.len > 0: profile else: coreRef.profileId):
           problem(Http429, "queue_full", "this organisation has " & $maxUnfinishedRuns & " runs that have not ended; try again when some have")
@@ -1435,10 +1503,10 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem(Http400, ans.code, ans.message)
             return
           script = ans.script
-          source = Source(repository: fromRepo.repository, commit: ans.commit, path: (if fromRepo.path.len == 0: defaultPath else: fromRepo.path))
+          source = Source(repository: fromRepo.repository, commit: ans.commit, path: (if fromRepo.path.len == 0: defaultPath else: fromRepo.path), refName: askedRef)
         let id = coreRef.createRun(script, tenant, profile, given.pairs, groupId = groupId, source = source)
         var made = %*{"id": id, "organization": orgSlug, "project": proj.path, "state": "RUNNING", "checked": checked}
-        if source.repository.len > 0: made["source"] = %*{"repository": source.repository, "commit": source.commit, "path": source.path}
+        if source.repository.len > 0: made["source"] = %*{"repository": source.repository, "commit": source.commit, "path": source.path, "ref": source.refName}
         jsonOk(Http201, made)
       elif meth == "GET" and rest.endsWith("/log") and "/steps/" notin rest:
         # D-77: the log of the whole run, one window: `from=<cursor>` the lines after it, `until=<cursor>` the lines before it, neither the last ones of the run; `limit` at most 500

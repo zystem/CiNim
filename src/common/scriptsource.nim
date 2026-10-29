@@ -13,6 +13,7 @@ const
 type
   Source* = object
     repository*, commit*, path*: string        ## what was asked: the repository URL, a commit / branch / tag, the path of the script in it
+    refName*: string                           ## D-86: for a run, the name (a branch or a tag) the commit was asked by; "" when it was asked by its hash or by nothing
 
   Fetched* = object
     ok*: bool
