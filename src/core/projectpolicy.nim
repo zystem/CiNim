@@ -39,6 +39,10 @@ func refNameOf*(asked: string): string =
   ## the ref of what a run was asked for: the name itself, or "" for a hash or for nothing (the head of the repository)
   if isFullSha(asked): "" else: asked
 
+func runRefOf*(asRef, asked: string): string =
+  ## the ref a run is on: the one it was found at when it is asked for by its hash (a poll looked at the ref and found the commit), otherwise the name it was asked for by ("" for a hash or nothing)
+  if asRef.len > 0: asRef else: refNameOf(asked)
+
 func protectedBy*(patterns: seq[string]; name: string): bool =
   for p in patterns:
     if refMatches(p, name): return true

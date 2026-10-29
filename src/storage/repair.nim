@@ -53,18 +53,20 @@ proc pendingRepairs*(c: var RqClient; store = ""): int =
   if store.len == 0: c.query(%*[["SELECT count(*) FROM storage_repair"]])["results"][0]{"values"}[0][0].getInt
   else: c.query(%*[["SELECT count(*) FROM storage_repair WHERE store = ?", store]])["results"][0]{"values"}[0][0].getInt
 
-proc settle(c: var RqClient; store, key, node: string; done: bool; attempts: int; now: int64; err: string) =
+const defaultRetrySeconds* = 30      ## the pause after a repair that failed; it doubles with each failure, up to an hour
+
+proc settle(c: var RqClient; store, key, node: string; done: bool; attempts: int; now: int64; err: string; retryBase = defaultRetrySeconds) =
   if done:
     discard c.execute(%*[["DELETE FROM storage_repair WHERE store = ? AND key = ? AND node = ?", store, key, node]])
   else:
-    let pause = min(maxPause, 30 * (1 shl min(attempts, 7)))
+    let pause = min(maxPause, retryBase * (1 shl min(attempts, 7)))
     discard c.execute(%*[["UPDATE storage_repair SET attempts = attempts + 1, next_at = ?, last_error = ? WHERE store = ? AND key = ? AND node = ?",
                           now + pause, err[0 ..< min(err.len, 200)], store, key, node]])
 
 type RepairReport* = object
   copied*, deleted*, dropped*, failed*: int
 
-proc repairPass*(c: var RqClient; store: string; b: ReplicaBackend; now: int64; batch = 50): RepairReport =
+proc repairPass*(c: var RqClient; store: string; b: ReplicaBackend; now: int64; batch = 50; retryBase = defaultRetrySeconds): RepairReport =
   ## the due tasks of the store, at most `batch`
   let rows = c.query(%*[["SELECT key, node, op, attempts FROM storage_repair WHERE store = ? AND next_at <= ? ORDER BY since LIMIT ?", store, now, batch]])["results"][0]{"values"}
   if rows == nil: return
@@ -74,17 +76,17 @@ proc repairPass*(c: var RqClient; store: string; b: ReplicaBackend; now: int64; 
     let attempts = row[3].getInt
     let target = b.indexOf(node)
     if target < 0:                                      # the node is not in the settings any more
-      c.settle(store, key, node, true, attempts, now, "")
+      c.settle(store, key, node, true, attempts, now, "", retryBase = retryBase)
       inc result.dropped
       continue
     if row[2].getStr == "delete":
       let r = b.deleteOn(target, key)
-      c.settle(store, key, node, r.ok, attempts, now, r.error)
+      c.settle(store, key, node, r.ok, attempts, now, r.error, retryBase = retryBase)
       if r.ok: inc result.deleted else: inc result.failed
       continue
     if not c.inInventory(store, key):
       # the object is gone from the inventory meanwhile (deleted, or the write never became an object): there is nothing to give the node
-      c.settle(store, key, node, true, attempts, now, "")
+      c.settle(store, key, node, true, attempts, now, "", retryBase = retryBase)
       inc result.dropped
       continue
     var source = -1
@@ -94,11 +96,11 @@ proc repairPass*(c: var RqClient; store: string; b: ReplicaBackend; now: int64; 
         source = i
         break
     if source < 0:
-      c.settle(store, key, node, false, attempts, now, "no other node has the object")
+      c.settle(store, key, node, false, attempts, now, "no other node has the object", retryBase = retryBase)
       inc result.failed
       continue
     let r = b.copyBetween(source, target, key)
-    c.settle(store, key, node, r.ok, attempts, now, r.error)
+    c.settle(store, key, node, r.ok, attempts, now, r.error, retryBase = retryBase)
     if r.ok: inc result.copied else: inc result.failed
 
 proc checkNodes*(c: var RqClient; store: string; b: ReplicaBackend; cursor: var string; now: int64; slice = checkSlice): int =

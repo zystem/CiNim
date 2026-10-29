@@ -18,6 +18,10 @@ suite "D-86 the refs of a project":
     check refNameOf("0123456789abcdef0123456789abcdef01234567") == "" and refNameOf("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") == ""
     check refNameOf("0123456789abcdef0123456789abcdef0123456") == "0123456789abcdef0123456789abcdef0123456"       # 39 digits: a name, not a hash
     check refNameOf("0123456789abcdef0123456789abcdef0123456g") == "0123456789abcdef0123456789abcdef0123456g"
+  test "a run found by a poll at a ref is on that ref, though it is asked for by the hash; a hash from elsewhere is on none":
+    let sha = "0123456789abcdef0123456789abcdef01234567"
+    check runRefOf("main", sha) == "main" and runRefOf("", sha) == "" and runRefOf("", "feature/x") == "feature/x" and runRefOf("", "") == ""
+    check runRefOf("release/1", "main") == "release/1"                       # the ref the poll looked at, not what the commit is asked for by
   test "a ref is protected if any pattern holds it":
     check protectedBy(@["main", "release/*"], "release/2") and protectedBy(@["main", "release/*"], "main")
     check not protectedBy(@["main", "release/*"], "feature/x") and not protectedBy(@[], "main") and not protectedBy(@["main"], "")

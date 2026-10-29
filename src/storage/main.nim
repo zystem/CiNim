@@ -7,6 +7,7 @@
 ##   CINIM_STORAGE_SHIM_PORT, CINIM_STORAGE_SHIM_THREADS  the port for shims (18091, 0: none) and its threads (8): the direct transfer of D-61
 ##   CINIM_STORAGE_THREADS     the threads of the HTTP server (16); each holds a receive buffer of 10 MiB, so memory is about 20 MiB a thread at the busiest
 ##   CINIM_STORAGE_REPAIR_SECONDS, CINIM_STORAGE_CHECK_SECONDS  how often the repair queue is worked (60) and a slice of the inventory is checked against the nodes (600)
+##   CINIM_STORAGE_REPAIR_RETRY_SECONDS  the first pause after a repair that failed (30; it doubles with each failure, up to an hour)
 ##   CINIM_STORAGE_SEAL_KEY    the key the stores' secrets are sealed under in the database (at least 16 characters; keep it apart from the database)
 import std/[os, strutils, tables, atomics, posix, times, json, sequtils]
 import ../common/[rqlite, httpsrv]
@@ -35,7 +36,8 @@ proc main() =
   let sealText = getEnv("CINIM_STORAGE_SEAL_KEY")
   if sealText.len < 16: fatal("CINIM_STORAGE_SEAL_KEY is shorter than 16 characters")
   cfg = ServiceConfig(rqliteUrl: url, shardSecrets: secrets, adminToken: admin, key: sealKey(sealText), replicaId: getEnv("HOSTNAME", "storage") & "-" & $getCurrentProcessId(),
-                      repairEvery: parseInt(getEnv("CINIM_STORAGE_REPAIR_SECONDS", "60")), checkEvery: parseInt(getEnv("CINIM_STORAGE_CHECK_SECONDS", "600")))
+                      repairEvery: parseInt(getEnv("CINIM_STORAGE_REPAIR_SECONDS", "60")), checkEvery: parseInt(getEnv("CINIM_STORAGE_CHECK_SECONDS", "600")),
+                      repairRetry: parseInt(getEnv("CINIM_STORAGE_REPAIR_RETRY_SECONDS", "30")))
   # the tables: the database may come up after the module does
   var c = newRq(url)
   var tries = 0

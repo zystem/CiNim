@@ -210,9 +210,9 @@ proc unfinishedRuns(c: var RqClient; triggerId: string): seq[string] =
 
 proc stillRunning(c: var RqClient; triggerId: string): bool = c.unfinishedRuns(triggerId).len > 0
 
-proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; byClock = false; commit = ""): Fired =
+proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; byClock = false; commit = ""; asRef = ""): Fired =
   ## Starts the trigger's run (or says why not). `extra` are launch parameters of this call; they replace the trigger's own of the same name. `commit` (a webhook's, D-63) is the commit of a trigger
-  ## that reads its script from a repository; without one the trigger's `ref` is run.
+  ## that reads its script from a repository; without one the trigger's `ref` is run. `asRef` is the ref the run is on when the commit is given by its hash (a poll found it at the ref).
   var c = newRq(co.rqliteUrl)
   let org = c.query(%*[["SELECT state FROM organizations WHERE id = ?", t.tenantId]])["results"][0]{"values"}
   if org == nil or org.len == 0 or org[0][0].getStr != "active":
@@ -247,7 +247,7 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
       discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: " & ans.message, t.id]])
       return Fired(reason: ans.code, status: 400, detail: ans.message)
     script = ans.script
-    source = Source(repository: t.repository, commit: ans.commit, path: (if t.scriptPath.len > 0: t.scriptPath else: defaultPath), refName: refNameOf(ask.commit))
+    source = Source(repository: t.repository, commit: ans.commit, path: (if t.scriptPath.len > 0: t.scriptPath else: defaultPath), refName: runRefOf(asRef, ask.commit))
   var aborted: seq[string]
   if t.concurrency == "abort_previous":
     # the newest commit is the one that matters: the runs of this trigger that have not ended are stopped first (their Pods are removed by the controllers)
@@ -314,7 +314,8 @@ proc pollTriggers*(co: Core; now: int64; resolve: Resolver): int =
     # the commit is remembered whatever the firing came to: a script that cannot be read at it is said in `last_result` and not tried again every minute
     discard c.execute(%*[["UPDATE triggers SET seen_commit = ? WHERE id = ?", r.commit, t.id]])
     beat(bTriggers)
-    let f = co.fire(t, @[], now, byClock = true, commit = r.commit)
+    # the poll looked at the ref `t.ref0` and found `r.commit`: the run is on that ref, though it is asked for by the hash (so that it reads exactly what the poll saw)
+    let f = co.fire(t, @[], now, byClock = true, commit = r.commit, asRef = t.ref0)
     if f.started:
       inc result
       echo "core: trigger ", t.name, " (", t.slug, ") saw ", r.commit[0 ..< 12], " and started run ", f.runId

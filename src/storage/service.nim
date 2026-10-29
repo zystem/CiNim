@@ -35,6 +35,7 @@ type
     replicaId*: string                       ## who holds the lease of the repair pass
     makeBackend*: BackendMaker               ## nil: `registry.backend`; the tests put their own
     repairEvery*, checkEvery*: int           ## seconds between the repair passes and between the checks of a slice of the inventory (0: 60 and 600)
+    repairRetry*: int                        ## seconds of the first pause after a repair that failed, doubling with each failure (0: 30)
 
 const
   maxKeyLen = 1024
@@ -445,7 +446,7 @@ proc repairLoop*() {.thread.} =
             let l = c.loadStore(cfg.key, e.name)
             if not l.ok: continue
             let mir = ReplicaBackend(maker()(l, nil))
-            let rep = c.repairPass(e.name, mir, now)
+            let rep = c.repairPass(e.name, mir, now, retryBase = (if cfg.repairRetry > 0: cfg.repairRetry else: defaultRetrySeconds))
             if rep.copied + rep.deleted + rep.dropped + rep.failed > 0:
               echo "storage: store ", e.name, " repair: ", rep.copied, " copied, ", rep.deleted, " deleted, ", rep.dropped, " dropped, ", rep.failed, " left for later"
             if due:

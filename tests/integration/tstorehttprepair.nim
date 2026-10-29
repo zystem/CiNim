@@ -136,6 +136,18 @@ suite "D-57 the repair of the HTTP store (the module)":
       check c.repairPass(store, bothNodes, t + 100).failed >= 1
       check a2.putObject(key, "12345").ok                                      # the object appears on a node: the next try gives it to the other
       check c.repairPass(store, bothNodes, t + 10000).copied >= 1 and b2.objectSize(key).size == 5 and taskOf(key).len == 0
+    test "the first pause after a failed repair is a setting (CINIM_STORAGE_REPAIR_RETRY_SECONDS) and doubles with each failure":
+      let key = "t/rp-" & sfx & "/slow-retry"
+      addArtifact(key, 5)
+      c.noteMissed(store, key, b.name, "copy", now)
+      let t = now + 5000
+      check c.repairPass(store, bothNodes, t, retryBase = 2).failed >= 1
+      let first = taskOf(key)
+      check parseInt(first[2]) >= t + 2 and parseInt(first[2]) < t + 30
+      check c.repairPass(store, bothNodes, t + 1, retryBase = 2).failed == 0                 # not due yet
+      check c.repairPass(store, bothNodes, t + 2, retryBase = 2).failed >= 1                 # due: tried, failed again
+      let second = taskOf(key)
+      check second[1] == "2" and parseInt(second[2]) >= t + 2 + 4 and parseInt(second[2]) < t + 2 + 30       # twice the first pause
     test "the check of the rows makes a copy task for what a node lacks or has with another size, and for nothing else":
       let pre = "t/rc-" & sfx & "/"
       for (name, onA, onB) in [("both", "same", "same"), ("only-a", "from a", ""), ("short-on-b", "full size", "short"), ("only-b", "", "from b")]:

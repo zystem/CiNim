@@ -65,6 +65,7 @@ suite "D-60 the storage module as a process":
       env["CINIM_STORAGE_ADMIN_TOKEN"] = adminTok
       env["CINIM_STORAGE_SEAL_KEY"] = "a-seal-key-for-the-end-to-end-test"
       env["CINIM_STORAGE_REPAIR_SECONDS"] = "1"
+      env["CINIM_STORAGE_REPAIR_RETRY_SECONDS"] = "1"          # a repair tried while a node is still down is tried again in a second, not in half a minute: the test does not depend on which side of its restart the tick falls
       result = startProcess("/bin/sh", args = ["-c", "exec " & getCurrentDir() / "build" / "storage" & " > " & base / "storage.log" & " 2>&1"], env = env)
       for _ in 0 ..< 100:
         if listening(modulePort): return
