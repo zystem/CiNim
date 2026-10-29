@@ -45,6 +45,8 @@ const
     ("lock.write", lvOrg, "change the locks of an organisation"),
     ("storage.read", lvOrg, "see which store an organisation uses"),
     ("org.read", lvGroup, "see organisations"),
+    ("status.configure", lvGroup, "choose where the state of the runs of a project is told (the status of the commit in the host of its repository)"),
+    ("caller.allow", lvGroup, "choose which other projects may start runs of a project with ci.trigger"),
     ("run.approve", lvGroup, "approve or reject a run that waits for approval (not the one who started it)"),
     ("approval.configure", lvGroup, "choose how many approvals the runs of a project that wait for approval need"),
     ("run.start.protected", lvGroup, "start a run on a protected ref of a project (the secrets marked protected go to such runs only)"),
@@ -71,7 +73,7 @@ const
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
-  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "approval.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
+  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "approval.configure", "caller.allow", "status.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
 
 func isPermission*(name: string): bool =
   for p in catalogue:

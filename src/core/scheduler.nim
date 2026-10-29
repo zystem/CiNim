@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource]
 import ctrlpresence, logwindow, keptpods, stepsecrets, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
+import groups, apiauth, approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
 export protos
@@ -64,11 +64,12 @@ proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
 
 # ------------------------------------------------------------------ run creation and lookup (REST API)
 
-proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; params: seq[(string, string)] = @[]; triggerId = ""; groupId = ""; source = Source(); actor = ""; approval = ApprovalSpec()): string =
+proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; params: seq[(string, string)] = @[]; triggerId = ""; groupId = ""; source = Source(); actor = ""; approval = ApprovalSpec(); parentRunId = ""; parentKey = ""; scriptPending = false): string =
   ## `tenantId` is the organisation's id and `profileId` its execution profile (SHD-007); without them the run belongs to the
   ## shard's default tenant and profile (single-tenant setups and tests). `groupId` is the group the run belongs to (PRJ-001, D-54; "" = the organisation itself).
   ## `actor` is who started it (`actorOf`: `user:<name>`, `token:<id>`, `trigger:<id>` for a trigger that fired by itself; D-92 "only their own runs" asks for it).
   ## `approval` (D-93) makes the run wait, in the state WAITING, for that many approvals before it starts: it is ABORTED at once when fewer people than that could give them.
+  ## `parentRunId` and `parentKey` say which `ci.trigger` call of which run made this one; `scriptPending` that `script` is not read yet (it is empty, and the run is not led until `fillScripts` has read it).
   ## `source` says where `script` was read from when it was read from a repository (D-63): the repository, the SHA of the commit, the path; the run keeps it (PIP-001) and the script sees it as `run.source`.
   var c = newRq(co.rqliteUrl)
   result = newId()
@@ -93,10 +94,11 @@ proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; param
       initial = protoName(rsAborted)
       failCode = "no_approvers"
       failMessage = "the run needs " & $approval.required & " approval" & (if approval.required > 1: "s" else: "") & ", and " & (if could.len == 0: "nobody" else: "only " & $could.len) & " besides its author holds run.approve for this project"
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path, source_base, source_ref, trusted, actor_id, approval_required, approval_deadline, fail_code, fail_message) " &
-    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, initial, now, now,
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path, source_base, source_ref, trusted, actor_id, approval_required, approval_deadline, fail_code, fail_message, parent_run_id, parent_key, script_pending) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, initial, now, now,
     (if profileId.len > 0: profileId else: co.profileId), (if params.len > 0: toJson(params) else: ""),
-    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path, base, source.refName, (if trusted: 1 else: 0), actor, approval.required, deadline, failCode, failMessage]])
+    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path, base, source.refName, (if trusted: 1 else: 0), actor, approval.required, deadline, failCode, failMessage,
+    (if parentRunId.len > 0: %parentRunId else: newJNull()), parentKey, (if scriptPending: 1 else: 0)]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
@@ -951,7 +953,7 @@ proc takeRunLease*(c: var RqClient; master, runId, owner: string; versions: seq[
   if not canTake(st, now): return ""
   let r = c.execute(%*[["UPDATE runs SET lease_attempt = lease_attempt + 1, lease_until = ?, lease_owner = ?, dirty = 0, " &
     "state = '" & protoName(rsRunning) & "', updated_at = CASE WHEN state = '" & protoName(rsQueued) & "' THEN '" & $now & "' ELSE updated_at END, version = version + 1 " &
-    "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state IN (?, ?) " &
+    "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state IN (?, ?) AND script_pending = 0 " &
     (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "RETURNING lease_attempt",
     now + leaseTtlSeconds, owner, runId, st.attempt, now, protoName(rsQueued), protoName(rsRunning)]])
   let vals = r["results"][0]{"values"}
@@ -992,7 +994,7 @@ proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versi
   ## organisation's own runs, only of the host API versions the conductor can run.
   if places <= 0: return
   # one look at what is free: the runs that were led before come first. When nothing is free (the usual case) that is the only query.
-  let r = c.query(%*[["SELECT id, lease_attempt FROM runs WHERE state IN (?, ?) AND (lease_until = 0 OR lease_until < ?) AND profile_id = ? " &
+  let r = c.query(%*[["SELECT id, lease_attempt FROM runs WHERE state IN (?, ?) AND script_pending = 0 AND (lease_until = 0 OR lease_until < ?) AND profile_id = ? " &
     (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND (dirty = 1 OR id NOT IN " &
     "(SELECT run_id FROM steps WHERE state IN (?, ?, ?))) AND id NOT IN (SELECT run_id FROM lock_waiters) ORDER BY (lease_attempt > 0) DESC, created_at LIMIT ?",
     protoName(rsQueued), protoName(rsRunning), getTime().toUnix(), profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), places]])
@@ -1050,6 +1052,81 @@ proc cancelStepByDecision*(c: var RqClient; runId: string; ordinal: int; by: str
   except RqError as e:
     stderr.writeLine "core: could not cancel step " & runId & "/" & $ordinal & ": " & e.msg
     false
+
+const
+  triggerKind* = "trigger"
+  maxChildrenOfRun* = 50          ## the pipelines one run starts with ci.trigger
+  maxRunDepth* = 5                ## ... and how deep: a run started by a run started by a run
+
+proc startChildRun*(c: var RqClient; co: Core; parent, key, payload: string): tuple[id, error: string] =
+  ## D-93, `ci.trigger{project, path, ref, approval, params}`: a pipeline as a run of its own that the parent does not wait for. Without `project` (or with the parent\'s own) it is the pipeline at
+  ## `path` of the parent\'s repository, at its commit and ref unless `ref` says another; with another `project` of the organisation (as Jenkins names a job) it is that project\'s repository at `ref`
+  ## (the head when none), and then the project must allow the call: its `allowed_callers` name the parent\'s project, or the person who started the parent may start runs there (`run.start`, and
+  ## `run.start.protected` on a protected ref). The script is read afterwards (`fillScripts`), the run is not led before. The run was started by whoever started the parent (so the person who started the
+  ## build does not approve the deploy). A call that was made already (a replay of the parent) finds its run by `key`, it does not make another.
+  let j = try: parseJson(payload) except JsonParsingError: nil
+  if j == nil or j.kind != JObject:
+    return ("", "ci.trigger: {project, path, ref, approval, params} is expected")
+  let path = if j.isString("path"): j["path"].getStr else: ""
+  if path.len > 0 and not validPath(path): return ("", "ci.trigger: the path of a pipeline in the repository, for example .ci/deploy.lua")
+  let askedRef = if j.isString("ref"): j["ref"].getStr else: ""
+  if askedRef.len > 0 and not validRef(askedRef): return ("", "ci.trigger: ref is a SHA, a branch or a tag name")
+  let had = c.query(%*[["SELECT id FROM runs WHERE parent_run_id = ? AND parent_key = ?", parent, key]])["results"][0]{"values"}
+  if had != nil and had.len > 0: return (had[0][0].getStr, "")
+  let given = checkParams(j{"params"})
+  if given.error.len > 0: return ("", "ci.trigger: " & given.error)
+  let pr = c.query(%*[["SELECT tenant_id, group_id, source_repository, source_commit, source_ref, profile_id, COALESCE(actor_id, ''), " &
+    "(SELECT count(*) FROM runs WHERE parent_run_id = ?), COALESCE((SELECT path FROM groups WHERE id = r.group_id), ''), COALESCE((SELECT slug FROM organizations WHERE id = r.tenant_id), '') " &
+    "FROM runs r WHERE r.id = ?", parent, parent]])["results"][0]{"values"}
+  if pr == nil or pr.len == 0: return ("", "ci.trigger: the run is not there")
+  if pr[0][2].getStr.len == 0: return ("", "ci.trigger: the run was not read from a repository, so there is no repository to read the pipeline from")
+  if pr[0][7].getInt >= maxChildrenOfRun: return ("", "ci.trigger: one run starts at most " & $maxChildrenOfRun & " pipelines")
+  var depth = 1
+  var up = parent
+  while depth < maxRunDepth:
+    let pv = c.query(%*[["SELECT COALESCE(parent_run_id, '') FROM runs WHERE id = ?", up]])["results"][0]{"values"}
+    if pv == nil or pv.len == 0 or pv[0][0].getStr.len == 0: break
+    up = pv[0][0].getStr
+    inc depth
+  if depth >= maxRunDepth: return ("", "ci.trigger: pipelines started by pipelines go " & $maxRunDepth & " deep at most")
+  let tenant = pr[0][0].getStr
+  let profile = pr[0][5].getStr
+  let parentGroup = pr[0][1].getStr
+  let parentPath = pr[0][8].getStr
+  let actor = pr[0][6].getStr
+  var targetGroup = parentGroup
+  var targetPath = parentPath
+  var src = Source(repository: pr[0][2].getStr, commit: pr[0][3].getStr, path: path, refName: pr[0][4].getStr)
+  let other = if j.isString("project"): normalPath(j["project"].getStr) else: ""
+  if other.len > 0 and other != parentPath:
+    # another project of the organisation: its repository, at `ref`
+    let proj = c.resolveProject(tenant, other)
+    if proj.code.len > 0: return ("", "ci.trigger: " & proj.message)
+    targetGroup = proj.id
+    targetPath = proj.path
+    src = Source(repository: proj.repository, commit: askedRef, path: (if path.len > 0: path else: defaultPath), refName: refNameOf(askedRef))
+    var allowed = actor == "operator" or c.callerAllowed(targetGroup, parentPath)
+    if not allowed and actor.startsWith("user:"):
+      let u = c.userRoles(actor[5 .. ^1])
+      if u.found and not u.disabled:
+        let facts = RunFacts(own: true, ref0: src.refName)
+        allowed = u.grants.holdsRun("run.start", pr[0][9].getStr, targetPath, facts)
+        if allowed and src.refName.len > 0 and c.isProtectedRef(targetGroup, src.refName):
+          allowed = u.grants.holdsRun("run.start.protected", pr[0][9].getStr, targetPath, facts)
+    if not allowed:
+      return ("", "ci.trigger: the project " & targetPath & " does not allow pipelines of " & parentPath & " to start its runs (allowed_callers of that project, set with caller.allow), and the person who started this run may not start them there")
+  else:
+    if path.len == 0: return ("", "ci.trigger: the path of a pipeline in the repository is expected")
+    if askedRef.len > 0: src = Source(repository: src.repository, commit: askedRef, path: path, refName: refNameOf(askedRef))
+  if c.queueIsFull(profile): return ("", "ci.trigger: the organisation has " & $maxUnfinishedRuns & " runs that have not ended")
+  var spec = ApprovalSpec()
+  if j.hasKey("approval") and j["approval"].kind == JBool and j["approval"].getBool:
+    var secs = defaultApprovalSeconds
+    if j.hasKey("timeout_seconds"):
+      secs = j["timeout_seconds"].getBiggestInt
+      if secs < minApprovalSeconds or secs > maxApprovalSeconds: return ("", "ci.trigger: the time to approve is between " & $minApprovalSeconds & " s and 30 days")
+    spec = ApprovalSpec(required: c.requiredApprovals(targetGroup), timeoutSeconds: secs)
+  (co.createRun("", tenant, profile, given.pairs, groupId = targetGroup, source = src, actor = actor, approval = spec, parentRunId = parent, parentKey = key, scriptPending = true), "")
 
 proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): ExecutorResponse =
   ## Every host call becomes a step and the run suspends: the step's result (from a job-controller's
@@ -1141,6 +1218,18 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
       discard c.appendRow(req.run_id, req.key, unlockKind, name, "")
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
+  if req.kind == triggerKind:
+    # D-93: the pipeline that follows this one, as a run of its own; its id is the answer, kept in the journal under the key of the call
+    if req.key.len == 0:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a host call without its key in the journal")))
+    let made = c.startChildRun(co, req.run_id, req.key, cast[string](req.payload))
+    if made.error.len > 0:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: made.error)))
+    discard c.appendRow(req.run_id, req.key, triggerKind, cast[string](req.payload), made.id)
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]](made.id), suspended: false)))
   if req.kind != "job_sh":
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "unknown host call " & req.kind)))

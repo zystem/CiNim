@@ -32,9 +32,9 @@ func runNext*(s: RunState): set[RunState] =
   case s
   of rsCreated: {rsCompiling, rsWaiting, rsSkipped, rsAborted, rsInfrastructureError}          # waiting: D-93, a run that waits for approval before it starts
   of rsCompiling: {rsQueued, rsFailed, rsSkipped, rsAborted, rsInfrastructureError}
-  of rsQueued: {rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
+  of rsQueued: {rsRunning, rsFailed, rsAborted, rsTimedOut, rsInfrastructureError}          # failed: D-93, the script of a run started by ci.trigger could not be read or did not pass the check
   of rsRunning: {rsWaiting, rsOk, rsFailed, rsAborted, rsTimedOut, rsInfrastructureError}
-  of rsWaiting: {rsQueued, rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
+  of rsWaiting: {rsQueued, rsRunning, rsFailed, rsAborted, rsTimedOut, rsInfrastructureError}
   of rsOk, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError: {}
 
 func stepNext*(s: StepState): set[StepState] =

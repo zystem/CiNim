@@ -110,7 +110,7 @@ const ddl = [
        source_repository TEXT NOT NULL DEFAULT '',
        source_commit TEXT NOT NULL DEFAULT '', source_base TEXT NOT NULL DEFAULT '',
        source_path TEXT NOT NULL DEFAULT '', source_ref TEXT NOT NULL DEFAULT '', trusted INTEGER NOT NULL DEFAULT 0,
-       journal_tip TEXT NOT NULL DEFAULT '',
+       journal_tip TEXT NOT NULL DEFAULT '', parent_key TEXT NOT NULL DEFAULT '', script_pending INTEGER NOT NULL DEFAULT 0, status_sent TEXT NOT NULL DEFAULT '',
        step_table TEXT NOT NULL DEFAULT '',
        lease_attempt INTEGER NOT NULL DEFAULT 0,
        lease_until INTEGER NOT NULL DEFAULT 0,
@@ -139,7 +139,7 @@ const ddl = [
   # belongs to it). `path` is the slugs from the top joined by '/'; the variables of a group (VAR-001) are inherited by the groups below it and by its runs
   """CREATE TABLE IF NOT EXISTS groups (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL,
-       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1)""",
+       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1, allowed_callers TEXT NOT NULL DEFAULT '', status_target TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS groups_tenant_path ON groups (tenant_id, path)",
   "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
   """CREATE TABLE IF NOT EXISTS group_variables (
@@ -264,8 +264,13 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("role_bindings", "only_own", "INTEGER NOT NULL DEFAULT 0"),
   ("role_bindings", "refs", "TEXT NOT NULL DEFAULT ''"),
   ("runs", "approval_required", "INTEGER NOT NULL DEFAULT 0"),             # D-93: a run that waits (state WAITING) until this many people have approved it; 0 = it needs none
+  ("runs", "parent_key", "TEXT NOT NULL DEFAULT ''"),                       # D-93: the key of the ci.trigger call of the parent that made this run (so a replay finds it, not makes it again)
+  ("runs", "script_pending", "INTEGER NOT NULL DEFAULT 0"),                # ... and its script is not read yet (the core reads it from the repository; the run is not led until it is)
   ("runs", "approval_deadline", "INTEGER NOT NULL DEFAULT 0"),             # ... and the time (unix seconds) after which it is TIMED_OUT
-  ("groups", "required_approvals", "INTEGER NOT NULL DEFAULT 1"),          # D-93: how many approvals the runs of a project that ask for approval need
+  ("groups", "required_approvals", "INTEGER NOT NULL DEFAULT 1"),
+  ("groups", "status_target", "TEXT NOT NULL DEFAULT ''"),               # D-96: where the state of the runs of a project is told (the host of its repository: github or gitlab), as JSON
+  ("runs", "status_sent", "TEXT NOT NULL DEFAULT ''"),                     # ... and the state that was told last
+  ("groups", "allowed_callers", "TEXT NOT NULL DEFAULT ''"),              # D-93: the projects (or groups of them) whose pipelines may start runs of this project with ci.trigger, one path to a line          # D-93: how many approvals the runs of a project that ask for approval need
   ("groups", "protected_refs", "TEXT NOT NULL DEFAULT ''"),               # D-86: the refs of a project whose runs are trusted, and the privileged profiles its pipelines may use (2026-10-29)
   ("groups", "allowed_profiles", "TEXT NOT NULL DEFAULT ''"),
   ("runs", "source_ref", "TEXT NOT NULL DEFAULT ''"),                      # D-86: the name the commit was asked by (a branch or a tag; "" for a SHA), and whether it is a protected ref of the project

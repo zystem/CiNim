@@ -14,7 +14,7 @@
 import std/[json, strutils, times, atomics, os, tables]
 import health
 import ../common/[rqlite, states, cron, ctrlauth, luaapi]
-import schema, scheduler, runparams, orgrules, apiauth, groups, preflight, projectpolicy
+import prstatus, workkick, schema, scheduler, runparams, orgrules, apiauth, groups, preflight, projectpolicy
 from ../common/scriptsource import Source, defaultPath, validRepository, validRef, validPath
 
 const
@@ -321,6 +321,39 @@ proc pollTriggers*(co: Core; now: int64; resolve: Resolver): int =
       inc result
       echo "core: trigger ", t.name, " (", t.slug, ") saw ", r.commit[0 ..< 12], " and started run ", f.runId
 
+proc fillScripts*(co: Core; now: int64): int =
+  ## D-93: a run started by `ci.trigger` is made at once and its script is read afterwards, from the repository, by a conductor of its organisation (as for a trigger). Until it is read the run is
+  ## not led (`script_pending`); it may be waiting for approval meanwhile, and the script is read all the same, so that a script that is not there is told early. A script that is not
+  ## there or does not pass the check ends the run FAILED; no conductor to read it is waited for a quarter of an hour. Returns how many runs were filled in.
+  var c = newRq(co.rqliteUrl)
+  let rows = c.query(%*[["SELECT r.id, COALESCE(o.slug, ''), r.source_repository, r.source_commit, r.source_path, r.created_at FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id " &
+    "WHERE r.script_pending = 1 AND r.state IN (?, ?)", protoName(rsWaiting), protoName(rsQueued)]])["results"][0]{"values"}
+  if rows == nil: return
+  for v in rows:
+    let id = v[0].getStr
+    var pairs: seq[(string, string)]
+    for kv in runParams(c, id): pairs.add (kv[0], kv[1])
+    let ans = checkSource(namespaceName(co.orgPrefix, co.orgShard, v[1].getStr), Source(repository: v[2].getStr, commit: v[3].getStr, path: v[4].getStr), pairs, currentApiVersion)
+    let fp = ans.fetchProblem
+    var failCode, failMessage = ""
+    if fp.status != 0 and ans.script.len == 0:
+      let age = now - (try: parseBiggestInt(v[5].getStr) except ValueError: now)
+      if age < 900: continue
+      failCode = "script_unavailable"
+      failMessage = "the script could not be read: " & fp.message
+    elif ans.problemOf.len > 0:
+      failCode = ans.code
+      failMessage = ans.message
+    if failCode.len > 0:
+      discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, script_pending = 0, fail_code = ?, fail_message = ? WHERE id = ? AND state IN (?, ?)",
+                            protoName(rsFailed), $now, failCode, failMessage, id, protoName(rsWaiting), protoName(rsQueued)]])
+      continue
+    discard c.execute(%*[["UPDATE run_journal SET payload = ? WHERE run_id = ? AND seq = -1 AND kind = 'script'", ans.script, id],
+                         ["UPDATE runs SET script_pending = 0, source_commit = ? WHERE id = ?", (if ans.commit.len > 0: ans.commit else: v[3].getStr), id]], transaction = true)
+    let pv = c.query(%*[["SELECT profile_id FROM runs WHERE id = ?", id]])["results"][0]{"values"}
+    if pv != nil and pv.len > 0: kickProfile(pv[0][0].getStr)
+    inc result
+
 proc runTriggerLoop*(a: tuple[co: Core, stop: ptr Atomic[bool]]) {.thread.} =
   {.cast(gcsafe).}:
     while not a.stop[].load:
@@ -329,7 +362,9 @@ proc runTriggerLoop*(a: tuple[co: Core, stop: ptr Atomic[bool]]) {.thread.} =
         discard fireSchedules(a.co, getTime().toUnix())
         block approvals:
           var ac = newRq(a.co.rqliteUrl)
-          discard ac.sweepApprovals(getTime().toUnix())          # D-93: runs that wait for approval past their time, or with nobody left to approve
+          discard ac.sweepApprovals(getTime().toUnix())
+          discard fillScripts(a.co, getTime().toUnix())
+          discard syncStatuses(a.co.rqliteUrl, getTime().toUnix())          # D-96: the state of the runs, told to the host of the repository          # D-93: the scripts of runs started by ci.trigger          # D-93: runs that wait for approval past their time, or with nobody left to approve
         discard pollTriggers(a.co, getTime().toUnix(), conductorResolver(a.co))
       except Exception as e: stderr.writeLine "core: triggers: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       for _ in 0 ..< loopEverySeconds * 10:

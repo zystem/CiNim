@@ -21,6 +21,7 @@ stateDiagram-v2
   rsCompiling --> rsSkipped
   rsCompiling --> rsInfrastructureError
   rsQueued --> rsRunning
+  rsQueued --> rsFailed
   rsQueued --> rsAborted
   rsQueued --> rsTimedOut
   rsQueued --> rsInfrastructureError
@@ -32,6 +33,7 @@ stateDiagram-v2
   rsRunning --> rsInfrastructureError
   rsWaiting --> rsQueued
   rsWaiting --> rsRunning
+  rsWaiting --> rsFailed
   rsWaiting --> rsAborted
   rsWaiting --> rsTimedOut
   rsWaiting --> rsInfrastructureError

@@ -105,6 +105,9 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_ORG_RECONCILE_INTERVAL` | 300 | seconds between two passes of the reconciliation (SHD-008; the Helm value `organizations.reconcileInterval`, at least 10); a pass also runs at start |
 | `CINIM_ORG_RETENTION` | 1209600 (14 days) | seconds a switched-off organisation is kept before it is deleted for good with its namespace (the Helm value `organizations.retention`); `0` deletes it at once, a negative value never |
 | `CINIM_LDAP_SYNC_SECONDS` | 900 | seconds between two looks at the accounts that the directories (LDAP) of the organisations vouch for: one gone from its directory is switched off, the roles from its groups are made what the groups give (D-87; the Helm value `auth.ldapSyncSeconds`); `0` does not sync by the clock |
+| `CINIM_UI_URL` | empty | the address of the UI that the statuses told to the host of a repository link to (`<address>/runs/<id>`; the Helm value `status.uiUrl`; D-96) |
+| `CINIM_STATUS_API_URLS` | `https://api.github.com,https://gitlab.com/api/v4` | the addresses of the APIs of hosts that a project may name in its `status` setting, comma separated: the core sends a token to the address, so a project cannot choose one the shard does not allow (`status.apiUrls`; D-96) |
+| `CINIM_STATUS_PROXY` | empty | an HTTP proxy (`http://host:port`, CONNECT) for the calls to the host of a repository (`status.proxy`) |
 | `CINIM_CONTROLLER_BOOTSTRAP_TTL` | 86400 | seconds that the bootstrap token of an organisation's controller stays good (IAM-003) |
 | `CINIM_INGRESS_CLASS`, `CINIM_INGRESS_TLS_SECRET`, `CINIM_INGRESS_ANNOTATIONS` | empty | the Ingress of an organisation in the `multi` mode: the class, the TLS Secret (for the host of `CINIM_PUBLIC_URL`) and the annotations as a JSON object |
 

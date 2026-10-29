@@ -155,6 +155,13 @@ auth:
   # what the groups give now. 0 does not sync by the clock (a login still brings the roles up to date). The directories are set per organisation through the API, not here.
   ldapSyncSeconds: 900
 
+# D-96: the state of a run is told to the host of its repository as a status of the commit (a project says where, with a secret that holds the token). `uiUrl` is the address of the UI that the status
+# links to (empty: no link); `apiUrls` the addresses of hosts' APIs a project may name, because the core sends a token there (empty: api.github.com and gitlab.com); `proxy` an HTTP proxy that takes CONNECT.
+status:
+  uiUrl: ""
+  apiUrls: ""
+  proxy: ""
+
 # The step secrets (6.7): sealed in the database with XChaCha20-Poly1305, a data key per organisation, wrapped by a master key that is NOT in the database.
 # `keySecret` names a Secret whose key `key` holds 64 hexadecimal digits (32 bytes; `openssl rand -hex 32`): keep it apart from the database backup. A database
 # restored without it holds nothing readable. Without `keySecret` the master key is derived from the core's CURVE key (curve.secretName), which you keep

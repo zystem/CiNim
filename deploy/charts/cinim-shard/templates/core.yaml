@@ -135,6 +135,15 @@ spec:
             - {name: CINIM_NEW_KEYSERVICE_KEY, value: /etc/cinim-newkeyservice/tls.key}
             {{- end }}
             {{- end }}
+            {{- if .Values.status.uiUrl }}
+            - {name: CINIM_UI_URL, value: {{ .Values.status.uiUrl | quote }}}
+            {{- end }}
+            {{- if .Values.status.apiUrls }}
+            - {name: CINIM_STATUS_API_URLS, value: {{ .Values.status.apiUrls | quote }}}
+            {{- end }}
+            {{- if .Values.status.proxy }}
+            - {name: CINIM_STATUS_PROXY, value: {{ .Values.status.proxy | quote }}}
+            {{- end }}
             {{- if .Values.auth.enabled }}
             # IAM-003: without a token or CINIM_AUTH=on the API is open
             - {name: CINIM_AUTH, value: "on"}

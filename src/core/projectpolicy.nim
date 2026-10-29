@@ -44,6 +44,29 @@ proc isProtectedRef*(c: var RqClient; groupId, name: string): bool =
   ## whether a run of this project asked for `name` is on a protected ref
   name.len > 0 and protectedBy(c.protectedPatterns(groupId), name)
 
+proc allowedCallers*(c: var RqClient; groupId: string): seq[string] =
+  ## D-93: the projects (a path of a project, or of a group: all the projects under it) whose pipelines may start runs of this project with ci.trigger, whoever started them
+  if groupId.len == 0: return
+  let v = c.query(%*[["SELECT allowed_callers FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
+  if v != nil and v.len > 0: return entries(v[0][0].getStr)
+
+proc setAllowedCallers*(c: var RqClient; groupId: string; paths: seq[string]): string =
+  ## "" when saved, otherwise why not
+  if paths.len > maxRefPatterns: return "at most " & $maxRefPatterns & " projects"
+  var clean: seq[string]
+  for p in paths:
+    let n = normalPath(p)
+    if n.len == 0 or n.len > 200 or n.split('/').len > 8: return "a caller is the path of a project or of a group (" & p & ")"
+    for ch in n:
+      if ch notin {'a' .. 'z', '0' .. '9', '-', '/'}: return "a caller is the path of a project or of a group (" & p & ")"
+    clean.add n
+  discard c.execute(%*[["UPDATE groups SET allowed_callers = ? WHERE id = ?", clean.join("\n"), groupId]])
+
+proc callerAllowed*(c: var RqClient; groupId, callerPath: string): bool =
+  ## whether the pipelines of the project at `callerPath` may start runs of this project
+  for e in c.allowedCallers(groupId):
+    if callerPath == e or callerPath.startsWith(e & "/"): return true
+
 proc requiredApprovals*(c: var RqClient; groupId: string): int =
   ## D-93: how many approvals a run of this project that waits for approval needs (1 unless the project says more)
   if groupId.len == 0: return 1

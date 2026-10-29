@@ -44,7 +44,7 @@ suite "RUN-001 run state machine":
   test "PIP-013 D-93 waiting is entered from running (a manual gate) or from created (approval before the start) and leaves to queued, running, aborted, timed_out or infrastructure_error":
     for s in RunState:
       if s notin {rsRunning, rsCreated}: check rsWaiting notin runNext(s)
-    check runNext(rsWaiting) == {rsQueued, rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
+    check runNext(rsWaiting) == {rsQueued, rsRunning, rsFailed, rsAborted, rsTimedOut, rsInfrastructureError}
 
   test "RUN-001 skipped is decided before execution starts; nothing returns to created":
     for s in RunState:

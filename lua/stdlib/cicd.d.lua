@@ -115,6 +115,13 @@
 ---@field wait? boolean                    # default true
 ---@field project? string
 
+---@class TriggerOpts
+---@field project? string                  # a project of the organisation (D-95); this run's own when left out
+---@field path? string                     # the pipeline in that project's repository
+---@field ref? string                      # a branch, a tag or a commit; this run's own commit when the project is this run's own
+---@field approval? boolean|{timeout?: Duration}   # the run waits, holding nothing, for the approvals its project asks for (D-93)
+---@field params? table<string,string|number|boolean>
+
 local ci = {}
 local step = {}                          -- the global `step` of the sandbox (D-67); `ci.step` is the same table
 
@@ -193,6 +200,10 @@ function ci.input(spec) end
 ---@param opts? RunOpts
 ---@return RunResult
 function ci.run(ref, params, opts) end
+---@param path string                      # the pipeline in the repository of this run; or a table { project, path, ref, approval, params }
+---@param opts? TriggerOpts
+---@return string                          # the id of the run that was started
+function ci.trigger(path, opts) end
 ---@param fn fun()
 function ci.finally(fn) end
 ---@param seconds number

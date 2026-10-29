@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import prstatus, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -1338,6 +1338,41 @@ proc onRequest() {.raises: [], gcsafe.} =
             if sj.hasKey("allowed_profiles") and not who.mayIn("profile.grant", slugG, sp):
               problem(Http403, "forbidden", "allowed_profiles needs profile.grant on " & normalPath(sp))
               return
+            if sj.hasKey("status"):
+              # D-96: where the state of the runs of this project is told
+              if not who.mayIn("status.configure", slugG, sp):
+                problem(Http403, "forbidden", "status needs status.configure on " & normalPath(sp))
+                return
+              if gc.resolveProject(orgG.id, sp).code.len > 0:
+                problem(Http409, "not_a_project", "a status belongs to a project (a group with a repository), and " & normalPath(sp) & " is not one")
+                return
+              let badStatus = gc.setStatusTarget(sg.id, sj["status"])
+              if badStatus.len > 0:
+                problem(Http400, "invalid_request", badStatus)
+                return
+              gc.record(getTime().toUnix(), actorOf(who), "project.status", slugG & "/" & normalPath(sp), "ok", (if sj["status"].kind == JObject: sj["status"]{"repository"}.getStr else: "cleared"))
+            if sj.hasKey("allowed_callers"):
+              # D-95: the projects whose pipelines may start runs of this project with ci.trigger
+              if sj["allowed_callers"].kind != JArray:
+                problem(Http400, "invalid_request", "allowed_callers must be a list of project or group paths")
+                return
+              var callers: seq[string]
+              for x in sj["allowed_callers"].elems:
+                if x.kind != JString:
+                  problem(Http400, "invalid_request", "allowed_callers must be a list of project or group paths")
+                  return
+                callers.add x.getStr
+              if not who.mayIn("caller.allow", slugG, sp):
+                problem(Http403, "forbidden", "allowed_callers needs caller.allow on " & normalPath(sp))
+                return
+              if gc.resolveProject(orgG.id, sp).code.len > 0:
+                problem(Http409, "not_a_project", "callers belong to a project (a group with a repository), and " & normalPath(sp) & " is not one")
+                return
+              let badCallers = gc.setAllowedCallers(sg.id, callers)
+              if badCallers.len > 0:
+                problem(Http400, "invalid_request", badCallers)
+                return
+              gc.record(getTime().toUnix(), actorOf(who), "project.allowed_callers", slugG & "/" & normalPath(sp), "ok", callers.join(","))
             if sj.hasKey("required_approvals"):
               # D-93: how many approvals the runs of this project that wait for approval need
               if sj["required_approvals"].kind != JInt or sj["required_approvals"].getInt < 1 or sj["required_approvals"].getInt > maxRequiredApprovals:
@@ -1382,7 +1417,7 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           let lim = gc.groupLimit(sg.id)
           jsonOk(Http200, %*{"organization": slugG, "group": normalPath(sp), "cache_quota_bytes": lim.quota, "cache_retention_days": lim.retentionDays,
-                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.requiredApprovals(sg.id),
+                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.requiredApprovals(sg.id), "allowed_callers": gc.allowedCallers(sg.id), "status": gc.statusTargetOf(sg.id).viewOf,
                              "protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id)})
           return
         let vpos = segs.find("variables")

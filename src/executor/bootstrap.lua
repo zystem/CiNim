@@ -8,7 +8,7 @@ G.__ci_line = nil
 local type, error, rawget, rawset, rawlen, rawnext = type, error, rawget, rawset, rawlen, next
 local getmetatable, setmetatable, tostring_ = getmetatable, setmetatable, tostring
 local mtype = math.type
-local tsort = table.sort
+local tsort, tconcat = table.sort, table.concat
 local load_, collect_ = load, collectgarbage
 local format_ = string.format
 
@@ -1334,7 +1334,58 @@ end
 
 local JOB_FIELDS = { name = true, image = true, profile = true, metrics = true, mask = true, timeout = true, workspace = true, shm = true, secrets = true, artifacts = true, env = true, cache = true, lock = true, steps = true, body = true }
 local finals = {}                       -- the cleanups of `ci.finally`, in the order registered
+-- ci.trigger(path, opts) or ci.trigger{ project, path, ref, approval, params } (D-93): starts a pipeline as a run of its own and returns its id at once (it does not wait): the one at `path` of this run's
+-- repository, at this run's commit and ref, or, with `project` (a project of the organisation, as Jenkins names a job), that project's repository at `ref`.
+-- `opts.approval = true | { timeout = "24h" }` makes that run wait, holding nothing, for the approvals its project asks for; `opts.params` are its launch parameters.
+local function trigger_timeout(v)
+  if mtype(v) == "integer" or (type(v) == "number" and v == v // 1) then return math.tointeger(v) end
+  if type(v) == "string" then
+    local n, unit = v:match("^(%d+)([smhd])$")
+    if n then return tonumber(n) * ({ s = 1, m = 60, h = 3600, d = 86400 })[unit] end
+  end
+  error("ci.trigger: approval.timeout is whole seconds or a string like \"30m\", \"24h\", \"2d\"", 3)
+end
+local function trigger(first, opts)
+  local path
+  if type(first) == "table" and opts == nil then opts, path = first, first.path
+  else path = first end
+  if opts == nil then opts = {} end
+  if type(opts) ~= "table" then error("ci.trigger: the options are a table { project = ..., path = ..., ref = ..., approval = ..., params = ... }", 2) end
+  for k in stable_pairs(opts) do
+    if k ~= "approval" and k ~= "params" and k ~= "project" and k ~= "path" and k ~= "ref" then error("ci.trigger: unknown option '" .. tostring_(k) .. "' (project, path, ref, approval, params)", 2) end
+  end
+  if path ~= nil and (type(path) ~= "string" or path == "") then error("ci.trigger: path is the path of a pipeline in the repository, for example \".ci/deploy.lua\"", 2) end
+  if opts.project ~= nil and (type(opts.project) ~= "string" or opts.project == "") then error("ci.trigger: project is the path of a project of the organisation, for example \"team/deploy\"", 2) end
+  if opts.ref ~= nil and (type(opts.ref) ~= "string" or opts.ref == "") then error("ci.trigger: ref is a branch, a tag or a commit", 2) end
+  if path == nil and opts.project == nil then error("ci.trigger: the path of a pipeline in this repository, or a project, is expected, for example ci.trigger(\".ci/deploy.lua\")", 2) end
+  local out = { "{" }
+  local first_field = true
+  local function field(text) out[#out + 1] = (first_field and "" or ",") .. text; first_field = false end
+  if path ~= nil then field('"path":' .. jstr(path)) end
+  if opts.project ~= nil then field('"project":' .. jstr(opts.project)) end
+  if opts.ref ~= nil then field('"ref":' .. jstr(opts.ref)) end
+  local a = opts.approval
+  if a == true then field('"approval":true')
+  elseif type(a) == "table" then
+    field('"approval":true')
+    if a.timeout ~= nil then field('"timeout_seconds":' .. format_("%d", trigger_timeout(a.timeout))) end
+  elseif a ~= nil and a ~= false then error("ci.trigger: approval is true or { timeout = \"24h\" }", 2) end
+  if opts.params ~= nil then
+    if type(opts.params) ~= "table" then error("ci.trigger: params is a table of names and values", 2) end
+    local ps = {}
+    for k, v in stable_pairs(opts.params) do
+      if type(k) ~= "string" then error("ci.trigger: a parameter is named by a string", 2) end
+      if type(v) ~= "string" and type(v) ~= "number" and type(v) ~= "boolean" then error("ci.trigger: parameter " .. k .. " is a string, a number or a boolean", 2) end
+      ps[#ps + 1] = jstr(k) .. ":" .. jstr(tostring_(v))
+    end
+    field('"params":{' .. tconcat(ps, ",") .. "}")
+  end
+  out[#out + 1] = "}"
+  return call("trigger", tconcat(out))
+end
+
 G.ci = {
+  trigger = trigger,
   now = function() return tonumber(call("now", "")) end,
   random = function() return tonumber(call("random", "")) end,
   sleep = function(seconds)
