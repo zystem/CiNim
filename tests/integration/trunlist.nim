@@ -98,11 +98,10 @@ suite "UI who may list which runs":
     ## the answer as one line: ok, the organisation asked, the organisations, the groups
     let r = runListScope(w, asked)
     $r.ok & " " & r.organization & " " & r.only.join(",") & " " & r.groups.mapIt(it.org & "/" & it.path).join(",")
-  test "an administrator and a role at the shard: any organisation, or all of them":
+  test "D-90 an administrator: any organisation, or all of them":
     let admin = principalOf("admin")
     check scopeOf(admin, "") == "true   "
     check scopeOf(admin, "acme") == "true acme  "
-    check scopeOf(Principal(ok: true, user: "x", shardWide: true, grants: grantsOfRoles(["ro"])), "acme") == "true acme  "
   test "a token of an organisation: its own runs, whether it names the organisation or not; another's is refused":
     let t = principalOf("org:acme")
     check scopeOf(t, "") == "true  acme "

@@ -13,12 +13,20 @@ suite "IAM-001 the roles of the shard":
       check not roleMay("boss", m, p)
 
 suite "IAM-001 what ro may do":
-  test "read runs, steps, logs, artifacts, and the plain facts of the shard":
-    for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/components", "/api/v1/launch-gate",
-              "/api/v1/profile", "/api/v1/alerts", "/api/v1/router", "/api/v1/organizations", "/api/v1/organizations:check",
+  test "read runs, steps, logs, artifacts, and what an organisation has":
+    for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/organizations",
               "/api/v1/organizations/acme/triggers", "/api/v1/organizations/acme/locks", "/api/v1/organizations/acme/locks/stand", "/api/v1/organizations/acme/variables"]:
       check roleMay("ro", "GET", p)
       check roleMay("ro", "HEAD", p)
+  test "D-90 the shard is the super administrator\'s: its components, launch gate, profile, alerts, router, checks, variables, organisations and reconciliation are the administrator\'s alone":
+    for (m, p) in [("GET", "/api/v1/components"), ("GET", "/api/v1/launch-gate"), ("PUT", "/api/v1/launch-gate"), ("GET", "/api/v1/profile"), ("PUT", "/api/v1/profile"), ("GET", "/api/v1/alerts"),
+                   ("GET", "/api/v1/router"), ("GET", "/api/v1/organizations:check"), ("POST", "/api/v1/organizations:reconcile"), ("GET", "/api/v1/variables"), ("PUT", "/api/v1/variables/URL"),
+                   ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/acme"), ("PUT", "/api/v1/organizations/acme/storage")]:
+      check roleMay("admin", m, p)
+      for role in ["rw", "dev", "ro"]: check not roleMay(role, m, p)
+    for role in ["rw", "dev", "ro"]:
+      for perm in builtinPermissions(role): check levelOf(perm) != lvShard             # a role that is not admin has nothing of the shard\'s own in it
+    check allowedAtShard("admin") and not allowedAtShard("rw") and not allowedAtShard("dev") and not allowedAtShard("ro") and not allowedAtShard("deployer")
   test "variables of an organisation are plain, so every role that reads sees them, and only rw and admin change them":
     check roleMay("ro", "GET", "/api/v1/organizations/acme/variables") and roleMay("dev", "GET", "/api/v1/organizations/acme/variables")
     for role in ["ro", "dev"]:
@@ -26,8 +34,9 @@ suite "IAM-001 what ro may do":
     check roleMay("rw", "PUT", "/api/v1/organizations/acme/variables/URL") and roleMay("rw", "DELETE", "/api/v1/organizations/acme/variables/URL")
   test "D-54 groups and their variables are read by every role that reads, made and changed by rw and admin; the shard's variables are written by an administrator only":
     for p in ["/api/v1/organizations/acme/groups", "/api/v1/organizations/acme/groups/team/backend", "/api/v1/organizations/acme/groups/team/variables",
-              "/api/v1/organizations/acme/groups/team/backend/variables", "/api/v1/variables"]:
+              "/api/v1/organizations/acme/groups/team/backend/variables"]:
       for role in ["ro", "dev", "rw", "admin"]: check roleMay(role, "GET", p)
+    check roleMay("admin", "GET", "/api/v1/variables") and not roleMay("rw", "GET", "/api/v1/variables")           # the shard\'s variables are the shard\'s
     for p in ["/api/v1/organizations/acme/groups/team", "/api/v1/organizations/acme/groups/team/variables/URL"]:
       for m in ["PUT", "DELETE"]:
         check roleMay("rw", m, p) and roleMay("admin", m, p) and not roleMay("ro", m, p) and not roleMay("dev", m, p)
@@ -61,7 +70,7 @@ suite "IAM-001 what ro may do":
 
 suite "IAM-001 what dev may do":
   test "everything ro reads":
-    for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/components", "/api/v1/organizations",
+    for p in ["/api/v1/runs/s1_x", "/api/v1/runs/s1_x/steps/0/log", "/api/v1/runs/s1_x/artifacts", "/api/v1/organizations",
               "/api/v1/organizations/acme/triggers"]:
       check roleMay("dev", "GET", p)
   test "start a run, directly or by firing a manual trigger; stop a run; start a failed one again":
@@ -82,13 +91,11 @@ suite "IAM-001 what dev may do":
 
 suite "IAM-001 what rw may do":
   test "everything that is read, also what ro and dev do not see":
-    for p in ["/api/v1/runs/s1_x", "/api/v1/components", "/api/v1/organizations", "/api/v1/organizations/acme/triggers",
-              "/api/v1/organizations/acme/secrets", "/api/v1/organizations:reconcile"]:
+    for p in ["/api/v1/runs/s1_x", "/api/v1/organizations", "/api/v1/organizations/acme/triggers", "/api/v1/organizations/acme/secrets"]:
       check roleMay("rw", "GET", p)
-  test "everything that is written: runs, settings, organisations, triggers, secrets, the store - delete and edit":
-    for (m, p) in [("POST", "/api/v1/runs"), ("POST", "/api/v1/runs/s1_x:abort"), ("DELETE", "/api/v1/runs/s1_x"), ("PUT", "/api/v1/profile"),
-                   ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/acme"), ("POST", "/api/v1/organizations/acme/triggers"),
-                   ("PUT", "/api/v1/organizations/acme/secrets/TOKEN"), ("POST", "/api/v1/organizations:reconcile")]:
+  test "everything that is written in an organisation: runs, triggers, secrets, variables, caches - delete and edit":
+    for (m, p) in [("POST", "/api/v1/runs"), ("POST", "/api/v1/runs/s1_x:abort"), ("DELETE", "/api/v1/runs/s1_x"), ("POST", "/api/v1/organizations/acme/triggers"),
+                   ("PUT", "/api/v1/organizations/acme/secrets/TOKEN"), ("PUT", "/api/v1/organizations/acme/variables/URL"), ("DELETE", "/api/v1/organizations/acme/caches")]:
       check roleMay("rw", m, p)
   test "but not what is the shard's own: who may do what (the users, the roles, the API tokens) and the object store":
     for (m, p) in [("GET", "/api/v1/stores"), ("PUT", "/api/v1/stores"), ("POST", "/api/v1/stores:check"), ("GET", "/api/v1/users"), ("POST", "/api/v1/users"), ("DELETE", "/api/v1/users/ann"), ("PUT", "/api/v1/users/ann/password"),

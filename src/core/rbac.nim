@@ -76,6 +76,7 @@ func roleMay*(role, meth, path: string): bool =
   ## also a route that is not named; every other role, only the named ones.
   if role == roleAdmin: return true
   let n = needOf(meth, path)
+  if n.scope == nsShard: return false           # D-90: what is held at the shard is the administrator\'s alone
   n.permission.len > 0 and n.permission in builtinPermissions(role)
 
 func rolesMay*(roles: openArray[string]; meth, path: string): bool =

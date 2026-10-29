@@ -63,7 +63,7 @@ const
     ("token.manage", lvShard, "make, list and revoke API tokens"),
     ("audit.read", lvShard, "read the audit log")]
 
-  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read", "shard.read"]
+  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read"]
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
@@ -79,18 +79,22 @@ func levelOf*(name: string): Level =
   lvShard
 
 func builtinPermissions*(role: string): seq[string] =
-  ## what a role of the shard has in it; "" for a word that is not one
+  ## what a built-in role has in it; nothing for a word that is not one. The shard is the super administrator's (D-90): only `admin` has the permissions of the shard's own, and the other
+  ## three are for an organisation and below, where those would do nothing.
   case role
   of "admin":
     for p in catalogue: result.add p.name
   of "rw":
     for p in catalogue:
-      if p.name notin rwNot: result.add p.name
+      if p.name notin rwNot and p.level != lvShard: result.add p.name
   of "dev": result = @roAdds & @devAdds
   of "ro": result = @roAdds
   else: discard
 
 func isBuiltin*(role: string): bool = role in builtinRoles
+
+func allowedAtShard*(role: string): bool = role == "admin"
+  ## D-90: the shard has no users but its administrators; every other role is given in an organisation or below
 
 func validRoleName*(name: string): bool =
   ## the name of a role an administrator makes: lowercase letters, digits, `-` and `_`, starting with a letter, at most 32, and not one of the four

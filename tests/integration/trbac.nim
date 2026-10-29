@@ -23,8 +23,13 @@ suite "IAM-001 users, roles and their tokens":
       doAssert made.len == 1
       made[0]
     proc makeUser(name, role: string): string =
-      ## what an administrator does with POST /api/v1/users; a token for the user is what a login would give
-      doAssert c.createUser(name, role, pwOf & name, t0)
+      ## what an administrator does with POST /api/v1/users: a person of the organisation `acme` (D-90: the shard has no users but its administrators); a token for the user is what a login would give
+      doAssert c.createUser(name, role, pwOf & name, t0, "org:acme")
+      c.createApiToken("test " & name, userScope(name), 0, t0).token
+
+    proc baseUser(name, role: string): string =
+      ## a person whose role is in an organisation of its own (`base`), so that a test can take the roles of `acme` away and see what is left
+      doAssert c.createUser(name, role, pwOf & name, t0, "org:base")
       c.createApiToken("test " & name, userScope(name), 0, t0).token
 
     test "the first start makes the user admin, with a password and a token, and a second start makes nothing; the roles are made too":
@@ -57,20 +62,35 @@ suite "IAM-001 users, roles and their tokens":
       discard first()
       discard makeUser("ann", "rw")
       let li = c.login("ann", pwOf & "ann", t0 + 1)
-      check li.ok and li.roles == @["rw"] and not li.mustChange
-    test "a token stands for the roles of its user: admin is an administrator, rw, dev and ro are shard-wide and in every organisation":
+      check li.ok and li.roles.len == 0 and not li.mustChange
+    test "D-90 a token stands for the roles of its user: admin is the shard\'s administrator and sees every organisation; rw, dev and ro are an organisation\'s and see that one only":
       discard first()
       let a = who(c.createApiToken("t", userScope("admin"), 0, t0).token)
-      check a.ok and a.admin and a.roles == @["admin"] and not a.shardWide and a.mayUseOrg("acme") and a.mayUseOrg("other")
+      check a.ok and a.admin and a.roles == @["admin"] and a.mayUseOrg("acme") and a.mayUseOrg("other")
       for role in ["rw", "dev", "ro"]:
         let p = who(makeUser("u-" & role, role))
-        check p.ok and not p.admin and p.roles == @[role] and p.shardWide and p.user == "u-" & role and p.mayUseOrg("acme") and p.mayUseOrg("other")
+        check p.ok and not p.admin and p.roles.len == 0 and p.user == "u-" & role and p.mayUseOrg("acme") and not p.mayUseOrg("other")
+    test "D-90 the shard has no users but its administrators: a role other than admin given there is no right, the user is listed with it ignored, and the start warns":
+      discard first()
+      discard c.execute(%*[["INSERT INTO users (name, password_hash, created_at) VALUES ('legacy', ?, ?)", passwordHash(pwOf & "legacy"), t0], ["INSERT INTO role_bindings (user_name, role, scope) VALUES ('legacy', 'rw', 'shard')"]])
+      let token = c.createApiToken("t", userScope("legacy"), 0, t0).token
+      let gone = who(token)
+      check not gone.ok and gone.why == "revoked"                                                         # nothing is left of them: the user has no right at all
+      check c.legacyShardBindings() == @[("legacy", "rw")]
+      check c.listUsers().filterIt(it["name"].getStr == "legacy")[0]["ignored_shard_roles"] == %*["rw"] and c.listUsers().filterIt(it["name"].getStr == "legacy")[0]["roles"].len == 0
+      check not c.login("legacy", pwOf & "legacy", t0).ok
+      # given a role in an organisation the same user is a person of that organisation, and the shard role stays ignored
+      check c.setMember("org:acme", "legacy", @["dev"]) == ""
+      let p = who(token)
+      check p.ok and p.roles.len == 0 and p.mayIn("run.start", "acme") and not p.mayCall("GET", "/api/v1/components") and not p.mayCall("GET", "/api/v1/variables")
+      check c.login("legacy", pwOf & "legacy", t0).ok
+      check allowedAtShard("admin") and not allowedAtShard("dev")
     test "what a user's token may do is what its role may (the gate of the API asks rolesMay)":
       discard first()
-      let rw = who(makeUser("u-rw", "rw")).roles
-      let dev = who(makeUser("u-dev", "dev")).roles
-      let ro = who(makeUser("u-ro", "ro")).roles
-      check rolesMay(rw, "POST", "/api/v1/runs") and rolesMay(rw, "DELETE", "/api/v1/runs/x") and rolesMay(rw, "PUT", "/api/v1/profile")
+      let rw = @["rw"]
+      let dev = @["dev"]
+      let ro = @["ro"]
+      check rolesMay(rw, "POST", "/api/v1/runs") and rolesMay(rw, "DELETE", "/api/v1/runs/x") and not rolesMay(rw, "PUT", "/api/v1/profile")
       check not rolesMay(rw, "POST", "/api/v1/users") and not rolesMay(rw, "GET", "/api/v1/tokens")
       check rolesMay(dev, "POST", "/api/v1/runs") and rolesMay(dev, "POST", "/api/v1/runs/x:abort") and not rolesMay(dev, "DELETE", "/api/v1/runs/x")
       check rolesMay(dev, "GET", "/api/v1/runs/x") and not rolesMay(dev, "PUT", "/api/v1/profile")
@@ -106,7 +126,7 @@ suite "IAM-001 users, roles and their tokens":
       check c.createUser("olga", "dev", pwOf & "olga", t0, "org:acme")
       let token = c.createApiToken("t", userScope("olga"), 0, t0).token
       let p = who(token)
-      check p.ok and p.user == "olga" and p.roles.len == 0 and not p.admin and not p.shardWide
+      check p.ok and p.user == "olga" and p.roles.len == 0 and not p.admin
       check p.mayIn("run.start", "acme") and not p.mayIn("run.start", "beta") and not p.mayIn("run.start", "")
       check p.mayCall("POST", "/api/v1/runs") and p.mayCall("POST", "/api/v1/runs/s1_x:abort") and p.mayCall("GET", "/api/v1/organizations/acme/triggers")
       check not p.mayCall("GET", "/api/v1/organizations/beta/triggers") and not p.mayCall("GET", "/api/v1/components") and not p.mayCall("GET", "/api/v1/users")
@@ -116,7 +136,7 @@ suite "IAM-001 users, roles and their tokens":
       check c.listUsers().filterIt(it["name"].getStr == "olga")[0]["organizations"]["acme"] == %*["dev"]
     test "D-84 the roles in an organisation are replaced and taken away by its members routes; the others' are not touched; an unknown user or role is refused":
       discard first()
-      discard makeUser("ann", "ro")
+      discard baseUser("ann", "ro")
       check c.createUser("olga", "ro", pwOf & "olga", t0, "org:acme")
       check c.setMember("org:acme", "ann", @["dev", "ro"]) == ""
       check c.setMember("org:beta", "ann", @["ro"]) == ""
@@ -128,10 +148,10 @@ suite "IAM-001 users, roles and their tokens":
       check c.setMember("org:acme", "ann", @[]) == ""
       check c.listMembers("org:acme").mapIt(it["user"].getStr) == @["olga"]
       let ann = who(c.createApiToken("t", userScope("ann"), 0, t0).token)
-      check ann.roles == @["ro"] and ann.mayIn("run.read", "acme") and not ann.mayIn("run.start", "acme")       # the shard's ro, and nothing more
+      check ann.roles.len == 0 and ann.mayIn("run.read", "base") and not ann.mayIn("run.start", "base") and not ann.mayIn("run.read", "acme")       # what is left is the ro of the other organisation
     test "D-84 a role on a group or a project: held for that node and under it, listed and replaced at exactly that scope, and the other scopes of the user are not touched":
       discard first()
-      discard makeUser("ann", "ro")
+      discard baseUser("ann", "ro")
       check c.setMember("org:acme/ci", "ann", @["dev"]) == ""
       check c.setMember("org:acme", "ann", @["ro"]) == ""
       check c.listMembers("org:acme/ci") == %*[{"user": "ann", "roles": ["dev"]}] and c.listMembers("org:acme") == %*[{"user": "ann", "roles": ["ro"]}]
@@ -143,7 +163,7 @@ suite "IAM-001 users, roles and their tokens":
       check c.setMember("org:acme/ci", "ann", @[]) == ""
       check c.listMembers("org:acme/ci").len == 0 and c.listMembers("org:acme").len == 1
       check not who(c.createApiToken("t", userScope("ann"), 0, t0).token).mayIn("run.start", "acme", "ci")
-      check c.userRoles("ann").bindings.len == 2          # the shard's ro and the organisation's
+      check c.userRoles("ann").bindings.len == 2          # the ro of base and the ro of acme
     test "GET /api/v1/me: who, the roles with where they are given, what they come to at the shard, in organisations and on groups, and which organisations are seen":
       discard first()
       let adm = who(c.createApiToken("t", userScope("admin"), 0, t0).token)
@@ -151,8 +171,9 @@ suite "IAM-001 users, roles and their tokens":
       check am["kind"].getStr == "user" and am["administrator"].getBool and am["permissions"]["shard"].len == catalogue.len and am["organizations"]["all"].getBool
       let ro = who(makeUser("rita", "ro"))
       let rm = c.whoAmI(ro, @["acme", "beta"])
-      check rm["user"].getStr == "rita" and not rm["administrator"].getBool and rm["bindings"] == %*[{"role": "ro", "scope": "shard", "source": ""}]
-      check "run.read" in $rm["permissions"]["shard"] and "run.start" notin $rm["permissions"]["shard"] and rm["organizations"]["slugs"] == %*["acme", "beta"]
+      check rm["user"].getStr == "rita" and not rm["administrator"].getBool and rm["bindings"] == %*[{"role": "ro", "scope": "org:acme", "source": ""}]
+      check rm["permissions"]["shard"].len == 0 and "run.read" in $rm["permissions"]["organizations"]["acme"] and "run.start" notin $rm["permissions"]["organizations"]["acme"]
+      check rm["organizations"]["all"].getBool == false and rm["organizations"]["slugs"] == %*["acme"]
       check c.createUser("olga", "dev", pwOf & "olga", t0, "org:acme")
       check c.setMember("org:acme/ci", "olga", @["ro"]) == ""
       check c.setMember("org:beta/qa/web", "olga", @["admin"]) == ""
@@ -170,10 +191,10 @@ suite "IAM-001 users, roles and their tokens":
       let ro = who(c.createApiToken("t", userScope("rita"), 0, t0).token)
       let dev = who(c.createApiToken("t", userScope("dan"), 0, t0).token)
       let abortPath = "/api/v1/runs/s1_x:abort"
-      let no = c.explainCall(ro, "POST", abortPath, "", "")
+      let no = c.explainCall(ro, "POST", abortPath, "acme", "")
       check not no["allowed"].getBool and no["permission"].getStr == "run.abort" and no["granted_by"].len == 0 and "run.abort" in no["reason"].getStr
       let yes = c.explainCall(dev, "post".toUpperAscii, abortPath, "acme", "ci")
-      check yes["allowed"].getBool and yes["granted_by"] == %*[{"role": "dev", "scope": "shard"}]
+      check yes["allowed"].getBool and yes["granted_by"] == %*[{"role": "dev", "scope": "org:acme"}]
       check c.explainCall(ro, "GET", "/api/v1/runs/s1_x", "", "")["allowed"].getBool
       # a role in an organisation, a thing in another one, and a thing of the shard
       check c.createUser("olga", "dev", pwOf & "olga", t0, "org:acme")
@@ -192,16 +213,16 @@ suite "IAM-001 users, roles and their tokens":
     test "D-84 a role of one's own works in the token of a user, at the shard and in an organisation, and cannot be deleted while it is given":
       discard first()
       check c.putRole("deployer", "", @["run.read", "run.start", "trigger.fire"]) == ""
-      check c.createUser("dan", "deployer", pwOf & "dan", t0)
+      check c.createUser("dan", "deployer", pwOf & "dan", t0, "org:acme")
       let dan = who(c.createApiToken("t", userScope("dan"), 0, t0).token)
-      check dan.roles == @["deployer"] and dan.mayCall("POST", "/api/v1/runs") and dan.mayCall("POST", "/api/v1/organizations/acme/triggers/t1:fire")
+      check dan.roles.len == 0 and dan.mayCall("POST", "/api/v1/runs") and dan.mayCall("POST", "/api/v1/organizations/acme/triggers/t1:fire")
       check not dan.mayCall("POST", "/api/v1/runs/s1_x:abort") and not dan.mayCall("GET", "/api/v1/runs/s1_x/log")
       check c.deleteRole("deployer") == rdInUse and c.deleteRole("ro") == rdBuiltin and c.deleteRole("nope") == rdNotFound
       check c.deleteUser("dan", t0 + 1)
       check c.deleteRole("deployer") == rdDeleted and c.rolePermissions("deployer").len == 0
       # a role changed later changes what the token of its user may do at once
       check c.putRole("qa", "", @["run.read"]) == ""
-      discard c.createUser("quinn", "qa", pwOf & "quinn", t0)
+      discard c.createUser("quinn", "qa", pwOf & "quinn", t0, "org:acme")
       let quinnToken = c.createApiToken("t", userScope("quinn"), 0, t0).token
       check not who(quinnToken).mayCall("POST", "/api/v1/runs")
       check c.putRole("qa", "", @["run.read", "run.start"]) == ""
@@ -225,10 +246,10 @@ suite "IAM-001 users, roles and their tokens":
       check who(d).ok
     test "a user is made once, with one role; a name that is taken is refused":
       discard first()
-      check c.createUser("ann", "rw", pwOf & "ann", t0)
-      check not c.createUser("ann", "ro", pwOf & "ann", t0)
-      check not c.createUser("admin", "ro", pwOf & "admin", t0)
-      check c.userRoles("ann").roles == @["rw"] and c.userRoles("admin").roles == @["admin"]
+      check c.createUser("ann", "rw", pwOf & "ann", t0, "org:acme")
+      check not c.createUser("ann", "ro", pwOf & "ann", t0, "org:acme")
+      check not c.createUser("admin", "ro", pwOf & "admin", t0, "org:acme")
+      check c.userRoles("ann").bindings == @[(role: "rw", scope: "org:acme", source: "")] and c.userRoles("admin").roles == @["admin"]
     test "a user deleted: the user, the roles, every token and every session are gone":
       discard first()
       let tok = makeUser("ann", "rw")
@@ -242,9 +263,9 @@ suite "IAM-001 users, roles and their tokens":
       discard first()
       discard makeUser("ann", "dev")
       let li = c.login("ann", pwOf & "ann", t0 + 10)
-      check li.ok and li.roles == @["dev"] and li.expiresAt == t0 + 10 + sessionSeconds
+      check li.ok and li.roles.len == 0 and li.expiresAt == t0 + 10 + sessionSeconds
       let p = who(li.token, t0 + 20)
-      check p.ok and p.user == "ann" and p.roles == @["dev"] and p.shardWide
+      check p.ok and p.user == "ann" and p.roles.len == 0 and p.mayIn("run.start", "acme")
       check who(li.token, t0 + 10 + sessionSeconds + 1).why == "expired"
     test "login: a wrong password, an unknown user, another user's password and a switched-off user are all refused":
       discard first()
@@ -289,7 +310,8 @@ suite "IAM-001 users, roles and their tokens":
       let l = c.listUsers()
       check l.mapIt(it["name"].getStr) == @["admin", "ann"]
       check l.mapIt(it["password_change_required"].getBool) == @[true, false]
-      check l.allIt(it["roles"].len == 1 and it["scope"].getStr == "shard" and not it.hasKey("password_hash") and not it.hasKey("password"))
+      check l[0]["roles"] == %*["admin"] and l[1]["roles"].len == 0 and l[1]["organizations"]["acme"] == %*["rw"]            # the administrator\'s role is the shard\'s, the person\'s is an organisation\'s
+      check l.allIt(it["scope"].getStr == "shard" and not it.hasKey("password_hash") and not it.hasKey("password"))
       check "password_hash" notin $l
     test "a token of a scope user:<name> is a valid scope; others stay as they were":
       check validScope("user:rw") and validScope("admin") and validScope("org:acme")

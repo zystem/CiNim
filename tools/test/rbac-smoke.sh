@@ -49,22 +49,28 @@ ADMIN=$(login admin "$ADMINPW" | field token)
 check "admin after the change: users" 200 "$(code "$ADMIN" GET /api/v1/users)"
 check "admin: roles" 200 "$(code "$ADMIN" GET /api/v1/roles)"
 
+# --- the organisation the test users belong to (D-90: the shard has no users but its administrators; every other person belongs to an organisation)
+ORG=${SMOKE_ORG:-$(curl -s -H "Authorization: Bearer $ADMIN" "$base/api/v1/organizations" | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p' | head -1)}
+[ -n "$ORG" ] || { echo "FAIL  no organisation to put the test users in: make one, or name it in SMOKE_ORG"; exit 1; }
+echo "note  the test users belong to the organisation $ORG"
+check "a person who is not an administrator has to belong to an organisation" 400 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-x\",\"role\":\"ro\",\"password\":\"$(rand)\"}")"
+
 # --- the users, made by the administrator
 cleanup() { for u in rw dev ro; do code "$ADMIN" DELETE "/api/v1/users/smoke-$u" >/dev/null; done; }
 trap cleanup EXIT
 cleanup
 for u in rw dev ro; do
   PASS[$u]=$(rand)
-  check "admin makes smoke-$u ($u)" 201 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-$u\",\"role\":\"$u\",\"password\":\"${PASS[$u]}\"}")"
+  check "admin makes smoke-$u ($u)" 201 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-$u\",\"role\":\"$u\",\"organization\":\"$ORG\",\"password\":\"${PASS[$u]}\"}")"
   r=$(login "smoke-$u" "${PASS[$u]}")
   TOKEN[$u]=$(echo "$r" | field token)
   [[ $r == *'"password_change_required":false'* ]] || { echo "FAIL  smoke-$u is asked to change the password"; fails=$((fails + 1)); }
 done
 TOKEN[admin]=$ADMIN
-check "a made user with a short password" 400 "$(code "$ADMIN" POST /api/v1/users '{"name":"smoke-x","role":"ro","password":"short"}')"
-check "a made user with a role that does not exist" 400 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-x\",\"role\":\"root\",\"password\":\"$(rand)\"}")"
-check "a made user with a simple password" 400 "$(code "$ADMIN" POST /api/v1/users '{"name":"smoke-x","role":"ro","password":"1111111111111111"}')"
-check "a user that exists" 409 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-ro\",\"role\":\"ro\",\"password\":\"$(rand)\"}")"
+check "a made user with a short password" 400 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-x\",\"role\":\"ro\",\"organization\":\"$ORG\",\"password\":\"short\"}")"
+check "a made user with a role that does not exist" 400 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-x\",\"role\":\"root\",\"organization\":\"$ORG\",\"password\":\"$(rand)\"}")"
+check "a made user with a simple password" 400 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-x\",\"role\":\"ro\",\"organization\":\"$ORG\",\"password\":\"1111111111111111\"}")"
+check "a user that exists" 409 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-ro\",\"role\":\"ro\",\"organization\":\"$ORG\",\"password\":\"$(rand)\"}")"
 
 #        method path|body|admin rw dev ro
 rows=(
@@ -73,14 +79,14 @@ rows=(
   "GET /api/v1/audit||200 403 403 403"
   "GET /api/v1/tokens||200 403 403 403"
   "GET /api/v1/stores||200 403 403 403"
-  "GET /api/v1/components||200 200 200 200"
-  "GET /api/v1/launch-gate||200 200 200 200"
+  "GET /api/v1/components||200 403 403 403"
+  "GET /api/v1/launch-gate||200 403 403 403"
   "GET /api/v1/organizations||200 200 200 200"
-  "GET /api/v1/organizations/no-such-org/locks||404 404 404 404"
+  "GET /api/v1/organizations/no-such-org/locks||404 403 403 403"
   "POST /api/v1/runs|{}|400 400 400 403"
   "DELETE /api/v1/runs/no-such-run||404 404 403 403"
   "POST /api/v1/runs/no-such-run:abort||404 404 404 403"
-  "DELETE /api/v1/organizations/no-such-org||404 404 403 403"
+  "DELETE /api/v1/organizations/no-such-org||404 403 403 403"
   "POST /api/v1/users|{}|400 403 403 403"
   "DELETE /api/v1/users/admin||403 403 403 403"
   "DELETE /api/v1/users/no-such-user||404 403 403 403"

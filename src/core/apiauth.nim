@@ -29,7 +29,6 @@ type
     operator*: bool          ## the token of `CINIM_ADMIN_TOKEN`, which is not a row
     user*: string            ## the user a `user:<name>` token stands for (IAM-001)
     roles*: seq[string]      ## that user's roles at the shard level, read when the request came
-    shardWide*: bool         ## a role of the shard that is not `admin`: the rights of `rw` or `ro` hold in every organisation
     grants*: Grants          ## what the user's roles give, at the shard and in each organisation (D-84)
     bindings*: seq[tuple[role, scope, source: string]]       ## the roles themselves, for GET /api/v1/me
     need*: Need              ## what the request being served needs, set by the gate: `mayUseOrg` asks it for the organisation the handler finds
@@ -93,17 +92,15 @@ func principalOf*(scope: string): Principal =
   elif scope.startsWith("org:"): Principal(ok: true, org: scope[4 .. ^1])
   else: Principal(why: "unknown")
 
-func acrossOrgs*(p: Principal): bool = p.ok and (p.admin or p.shardWide)
-  ## the rights hold in every organisation: an administrator's, and the shard-level roles (which every organisation inherits)
 
 func mayUseOrg*(p: Principal; org: string): bool =
   ## whether this principal may touch the runs of this organisation: an administrator any; a user, the organisations where the permission the request needs is held (at the shard
-  ## it holds in every one); an organisation's token its own
+  ## it holds in every one - only an administrator has anything at the shard, D-90); an organisation's token its own
   if not p.ok: return false
   if p.admin: return true
   if p.user.len > 0:
     if p.need.permission.len > 0: return p.grants.holds(p.need.permission, org)
-    return p.shardWide or org in p.grants.orgs
+    return org in p.grants.orgs
   p.org.len > 0 and p.org == org
 
 func mayUseIn*(p: Principal; org, group: string): bool =
@@ -192,7 +189,13 @@ proc rolePermissions*(c: var RqClient; role: string): seq[string] =
   if r != nil:
     for v in r: result.add v[0].getStr
 
-proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope, source: string]], grants: Grants] =
+proc legacyShardBindings*(c: var RqClient): seq[tuple[user, role: string]] =
+  ## roles other than `admin` given at the shard before D-90: they are not rights any more, and this lists them so that they can be seen and the users moved into an organisation or deleted
+  let v = c.query(%*[["SELECT user_name, role FROM role_bindings WHERE scope = ? AND role != ? ORDER BY user_name", shardScope, roleAdmin]])["results"][0]{"values"}
+  if v != nil:
+    for r in v: result.add (r[0].getStr, r[1].getStr)
+
+proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope, source: string]], grants: Grants, ignored: seq[string]] =
   ## the user; the roles it has at the shard level (the ones every organisation inherits); every binding, at the shard and in an organisation; and what they give (D-84)
   let r = c.query(%*[["SELECT disabled, must_change FROM users WHERE name = ?", name], ["SELECT role, scope, source FROM role_bindings WHERE user_name = ? ORDER BY scope, role", name]])
   let u = r["results"][0]{"values"}
@@ -206,6 +209,9 @@ proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChang
     for v in rs:
       let role = v[0].getStr
       let scope = v[1].getStr
+      if scope == shardScope and not allowedAtShard(role):
+        result.ignored.add role                       # D-90: the shard has no users but administrators; a role of another kind given there before is not a right any more
+        continue
       result.bindings.add (role, scope, v[2].getStr)
       if scope == shardScope: result.roles.add role
       if role notin known: known[role] = c.rolePermissions(role)
@@ -333,7 +339,7 @@ proc listUsers*(c: var RqClient): JsonNode =
         if isOrgScope(b.scope):
           if not inOrgs.hasKey(b.scope[4 .. ^1]): inOrgs[b.scope[4 .. ^1]] = newJArray()
           inOrgs[b.scope[4 .. ^1]].add %b.role
-      result.add %*{"name": v[0].getStr, "roles": u.roles, "organizations": inOrgs, "source": v[4].getStr, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
+      result.add %*{"name": v[0].getStr, "roles": u.roles, "ignored_shard_roles": u.ignored, "organizations": inOrgs, "source": v[4].getStr, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
 
 proc passwordIs*(c: var RqClient; user, password: string): bool =
   ## whether this is the user's password. For a user who does not exist the same work is done (a hash is made), so that the time does not tell.
@@ -490,7 +496,7 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
     # a token of a user: the rights are the user's roles now, so that taking a role away or switching the user off works at once
     let u = c.userRoles(userName)
     if not u.found or u.disabled or u.bindings.len == 0: return Principal(why: "revoked")
-    result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, shardWide: u.roles.len > 0 and roleAdmin notin u.roles, mustChange: u.mustChange,
+    result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, mustChange: u.mustChange,
                        grants: u.grants, bindings: u.bindings)
   else:
     result = principalOf(row[1].getStr)

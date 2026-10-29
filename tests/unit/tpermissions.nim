@@ -16,12 +16,15 @@ suite "D-84 the catalogue and the roles built in code":
     check builtinPermissions("admin").len == catalogue.len
     let rw = builtinPermissions("rw")
     for p in ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write"]: check p notin rw
-    for p in ["run.start", "run.delete", "trigger.write", "secret.write", "org.create", "org.delete", "hold.write", "shard.write"]: check p in rw
+    for p in ["run.start", "run.delete", "trigger.write", "secret.write", "hold.write"]: check p in rw
+    for p in ["org.create", "org.delete", "shard.write", "shard.read"]: check p notin rw                           # D-90: the shard\'s own things are the administrator\'s
     let dev = builtinPermissions("dev")
     for p in ["run.read", "run.start", "run.check", "run.abort", "run.retry", "trigger.fire", "log.read"]: check p in dev
     for p in ["trigger.write", "run.delete", "secret.read", "variable.write", "hold.write", "shard.write"]: check p notin dev
     let ro = builtinPermissions("ro")
-    check ro.allIt(it.endsWith(".read")) and "run.start" notin ro and "secret.read" notin ro
+    check ro.allIt(it.endsWith(".read")) and "run.start" notin ro and "secret.read" notin ro and "shard.read" notin ro
+    for r in ["rw", "dev", "ro"]:
+      for p in builtinPermissions(r): check levelOf(p) != lvShard
   test "a role of one's own has a plain name, and not one of the four":
     check validRoleName("deployer") and validRoleName("qa-team_2")
     check not validRoleName("admin") and not validRoleName("") and not validRoleName("Deployer") and not validRoleName("1x") and not validRoleName("a b")

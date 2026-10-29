@@ -442,6 +442,10 @@ proc onRequest() {.raises: [], gcsafe.} =
           if orgOfUser.len > 0 and uc.organizationState(orgOfUser).len == 0:
             problem(Http404, "organization_not_found", "this shard has no organisation " & orgOfUser)
             return
+          if orgOfUser.len == 0 and not allowedAtShard(nj["role"].getStr):
+            # D-90: the shard is the super administrator's; the only users it has are administrators, every other person belongs to an organisation
+            problem(Http400, "invalid_request", "a user of the shard is an administrator (role admin); any other user belongs to an organisation: give \"organization\"")
+            return
           let lenBad = passwordProblem(nj["password"].getStr)
           if lenBad.len > 0:
             problem(Http400, "invalid_password", lenBad)
@@ -1910,6 +1914,12 @@ proc serveApi*(co: Core; port: int) =
   if authOn:
     # IAM-001: the user `admin` at the first start; the password and the token are written once, in a line that a test can parse. The password has to be changed first.
     var uc = newRq(co.rqliteUrl)
+    let legacy = uc.legacyShardBindings()
+    if legacy.len > 0:
+      var names: seq[string]
+      for l in legacy: names.add l.user & ":" & l.role
+      stderr.writeLine "core: WARNING - these users have a role at the shard that is not admin, which is no right any more (the shard has no users but its administrators; D-90): " & names[0 ..< min(20, names.len)].join(", ") &
+        (if names.len > 20: " and " & $(names.len - 20) & " more" else: "") & ". Give them a role in an organisation (PUT /api/v1/organizations/{slug}/members/{user}) or delete them."
     let made = uc.bootstrapAdminUser(getTime().toUnix())
     if made.len > 0:
       echo "core: FIRST START. The administrator (shown only now): the password is for POST /api/v1/login, the token for 'Authorization: Bearer'; the password has to be changed first,"
