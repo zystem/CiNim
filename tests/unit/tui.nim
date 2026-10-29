@@ -13,6 +13,8 @@ var
   down: bool
   posted: seq[string]                      # "token path body" of every POST that reached the stand-in core
   loginCalls: seq[string]                  # the user names the stand-in core was asked to log in
+  sent: seq[string]                        # "METHOD path body" of every call made with `send` (PUT, DELETE, POST of the access pages)
+  sendAnswer: ApiResult                    # what the stand-in core answers to it
   directoryOrgs: JsonNode                  # what GET /api/v1/login/options says
   postAnswer: ApiResult                    # what the stand-in core answers to a POST
 
@@ -37,6 +39,12 @@ proc fakeCore(): CoreApi =
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if token != "tok-ann": return ApiResult(status: asUnauthorized, code: 401, message: "bad token")
       if path in routes: ok(routes[path]) else: ApiResult(status: asNotFound, code: 404, message: "no such route")
+  result.send = proc (meth, token, path, body: string): ApiResult {.gcsafe.} =
+    {.cast(gcsafe).}:
+      sent.add meth & " " & path & " " & body
+      if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
+      if token != "tok-ann": return ApiResult(status: asUnauthorized, code: 401, message: "bad token")
+      sendAnswer
   result.post = proc (token, path, body: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
       posted.add token & " " & path & " " & body
@@ -47,8 +55,10 @@ proc fakeCore(): CoreApi =
 let cfg = UiConfig(base: base, secureCookie: false)
 let cfgSecure = UiConfig(base: base, secureCookie: true)
 
-proc req(meth, path: string; query = ""; cookie = ""; form: Table[string, string] = initTable[string, string](); origin = ""; host = "ui.example"): UiRequest =
-  UiRequest(meth: meth, path: path, query: query, cookie: cookie, form: form, origin: origin, host: host)
+proc req(meth, path: string; query = ""; cookie = ""; form: Table[string, string] = initTable[string, string](); origin = ""; host = "ui.example"; pairs: seq[(string, string)] = @[]): UiRequest =
+  result = UiRequest(meth: meth, path: path, query: query, cookie: cookie, form: form, origin: origin, host: host, formPairs: pairs)
+  if pairs.len > 0 and form.len == 0:
+    for (k, v) in pairs: result.form[k] = v
 
 proc header(r: UiResponse; name: string): string =
   for (k, v) in r.headers:
@@ -60,6 +70,8 @@ proc reset() =
   calls = @[]
   posted = @[]
   loginCalls = @[]
+  sent = @[]
+  sendAnswer = ok(%*{"ok": true})
   directoryOrgs = newJArray()
   postAnswer = ok(%*{"id": "s1_b", "state": "ABORTED"})
   routes = initTable[string, JsonNode]()
@@ -318,6 +330,138 @@ suite "D-84 the menu follows what the core says the caller comes to (GET /api/v1
     check menuOf(nil) == "ORC"                                  # no route: the stand-in says 404
     check menuOf(%*[1, 2]) == "ORC"
     check menuOf(%*{"permissions": "none"}) == "ORC"
+
+suite "D-84 D-85 D-87 the pages of roles, members and directories":
+  setup: reset()
+  let adminMe = %*{"administrator": true, "permissions": {"shard": []}}
+  let orgAdminMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["access.read", "access.write", "ldap.read", "ldap.map"]}, "groups": {}}}
+  let readerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["access.read", "ldap.read"]}, "groups": {}}}
+  let roleList = %*{"roles": [{"name": "admin", "description": "every route", "builtin": true, "permissions": ["run.read", "run.start"]},
+                              {"name": "deployer", "description": "starts <b>runs</b>", "builtin": false, "permissions": ["run.read"]}]}
+  let catalogue = %*{"permissions": [{"name": "run.read", "level": "group", "description": "see runs"}, {"name": "run.start", "level": "group", "description": "start <i>a</i> run"}]}
+  proc seed(me: JsonNode) =
+    routes["/api/v1/me"] = me
+    routes["/api/v1/roles"] = roleList
+    routes["/api/v1/permissions"] = catalogue
+  proc get(path: string): UiResponse = handle(cfg, fakeCore(), req("GET", path, cookie = session))
+  proc post(path: string; pairs: seq[(string, string)]; origin = ""): UiResponse = handle(cfg, fakeCore(), req("POST", path, cookie = session, pairs = pairs, origin = origin))
+
+  test "the list of roles: built in or custom, how many permissions, the description as text; the way to a new role only for whoever may make one":
+    seed(adminMe)
+    let r = get("/ui/roles")
+    check r.status == 200 and "href=\"/ui/roles/admin\"" in r.body and "built in" in r.body and "custom" in r.body and "href=\"/ui/new-role\"" in r.body
+    check "starts &lt;b&gt;runs&lt;/b&gt;" in r.body and "<b>runs</b>" notin r.body
+    seed(readerMe)
+    check "new-role" notin get("/ui/roles").body
+  test "a built-in role is shown and cannot be edited; a custom one has the boxes, the held ones ticked, and a delete button, for whoever may make roles":
+    seed(adminMe)
+    let b = get("/ui/roles/admin")
+    check b.status == 200 and "<form method=\"post\" action=\"/ui/roles/admin\"" notin b.body and "type=\"checkbox\"" notin b.body and "<b>(yes)</b>" in b.body
+    let c = get("/ui/roles/deployer")
+    check "<form method=\"post\" action=\"/ui/roles/deployer\"" in c.body and "<input type=\"checkbox\" name=\"perm\" value=\"run.read\" checked>" in c.body
+    check "<input type=\"checkbox\" name=\"perm\" value=\"run.start\">" in c.body and "action=\"/ui/roles/deployer/delete\"" in c.body and "start &lt;i&gt;a&lt;/i&gt; run" in c.body
+    seed(readerMe)
+    check "type=\"checkbox\"" notin get("/ui/roles/deployer").body
+    check get("/ui/roles/nope").status == 404 and get("/ui/roles/Bad%20Name").status == 404
+  test "a new role: the name and the boxes":
+    seed(adminMe)
+    let r = get("/ui/new-role")
+    check r.status == 200 and "name=\"name\"" in r.body and "action=\"/ui/new-role\"" in r.body and r.body.count("type=\"checkbox\"") == 2
+  test "saving a role sends the name, the description and every box that is ticked, and drops what is not a permission":
+    seed(adminMe)
+    let r = post("/ui/roles/deployer", @[("description", "d"), ("perm", "run.read"), ("perm", "run.start"), ("perm", "run.start"), ("perm", "Bad Perm"), ("perm", "x;y")])
+    check r.status == 303 and r.header("Location") == "/ui/roles/deployer"
+    check sent == @["PUT /api/v1/roles/deployer {\"description\":\"d\",\"permissions\":[\"run.read\",\"run.start\"]}"]
+    reset(); seed(adminMe)
+    let n = post("/ui/new-role", @[("name", "qa-team"), ("description", ""), ("perm", "run.read")])
+    check n.status == 303 and n.header("Location") == "/ui/roles/qa-team" and sent == @["PUT /api/v1/roles/qa-team {\"description\":\"\",\"permissions\":[\"run.read\"]}"]
+    reset(); seed(adminMe)
+    check post("/ui/new-role", @[("name", "Bad Name")]).status == 400 and post("/ui/new-role", @[("name", "../x")]).status == 400 and sent.len == 0
+  test "deleting a role, and what the core says when it refuses":
+    seed(adminMe)
+    check post("/ui/roles/deployer/delete", @[]).header("Location") == "/ui/roles" and sent == @["DELETE /api/v1/roles/deployer "]
+    sendAnswer = ApiResult(status: asRefused, code: 409, message: "this role is given to a user; take it away first")
+    let r = post("/ui/roles/deployer/delete", @[])
+    check r.status == 409 and "this role is given to a user" in r.body and "href=\"/ui/roles\"" in r.body
+  test "a refusal for want of a right says why, in the words of /me/can":
+    seed(readerMe)
+    sendAnswer = ApiResult(status: asForbidden, code: 403, message: "the roles of ann do not allow")
+    routes["/api/v1/me/can?method=PUT&path=%2Fapi%2Fv1%2Froles%2Fdeployer"] = %*{"permission": "role.manage", "needs": "at the shard", "reason": "this needs a role at the shard, and a role in an organisation does not count"}
+    let r = post("/ui/roles/deployer", @[("perm", "run.read")])
+    check r.status == 403 and "needs role.manage at the shard" in r.body and "does not count" in r.body
+  test "a form from another site, or with no session, never reaches the core":
+    seed(adminMe)
+    check post("/ui/roles/deployer", @[("perm", "run.read")], origin = "http://evil.example").status == 403 and sent.len == 0
+    check handle(cfg, fakeCore(), req("POST", "/ui/new-role")).status == 303 and sent.len == 0
+  test "the members of an organisation and of a group; the forms only for whoever may give roles":
+    seed(orgAdminMe)
+    routes["/api/v1/organizations/acme/members"] = %*{"members": [{"user": "ann@acme", "roles": ["dev", "ro"]}, {"user": "<x>", "roles": []}]}
+    routes["/api/v1/organizations/acme/groups/ci/cinim/members"] = %*{"members": [{"user": "gina", "roles": ["dev"]}]}
+    let o = get("/ui/orgs/acme/members")
+    check o.status == 200 and "<code>ann@acme</code>" in o.body and "dev, ro" in o.body and "action=\"/ui/orgs/acme/members/set\"" in o.body and "<x>" notin o.body
+    check "name=\"role\" value=\"deployer\"" in o.body and "action=\"/ui/orgs/acme/members/remove\"" in o.body
+    let g = get("/ui/orgs/acme/groups/ci/cinim/members")
+    check g.status == 200 and "gina" in g.body and "action=\"/ui/orgs/acme/groups/ci/cinim/members/set\"" in g.body and "members of the organisation" in g.body
+    seed(readerMe)
+    check "action=\"/ui/orgs/acme/members/set\"" notin get("/ui/orgs/acme/members").body
+    check get("/ui/orgs/Acme/members").status == 404 and get("/ui/orgs/acme/groups/Bad/members").status == 404 and get("/ui/orgs/acme/other/ci/members").status == 404
+  test "giving roles sends all the boxes that are ticked to the right place, taking all away is a delete, and a bad name is refused before the core is asked":
+    seed(orgAdminMe)
+    let r = post("/ui/orgs/acme/members/set", @[("user", "ann@acme"), ("role", "dev"), ("role", "deployer"), ("role", "Bad Role")])
+    check r.status == 303 and r.header("Location") == "/ui/orgs/acme/members" and sent == @["PUT /api/v1/organizations/acme/members/ann@acme {\"roles\":[\"dev\",\"deployer\"]}"]
+    reset(); seed(orgAdminMe)
+    check post("/ui/orgs/acme/groups/ci/cinim/members/remove", @[("user", "gina")]).header("Location") == "/ui/orgs/acme/groups/ci/cinim/members"
+    check sent == @["DELETE /api/v1/organizations/acme/groups/ci/cinim/members/gina "]
+    reset(); seed(orgAdminMe)
+    check post("/ui/orgs/acme/members/set", @[("user", "../x"), ("role", "dev")]).status == 400 and post("/ui/orgs/acme/members/set", @[("role", "dev")]).status == 400 and sent.len == 0
+  test "the directories of an organisation: the settings, the warnings, the groups, the accounts; forms for whoever may map groups; the check only for the shard":
+    seed(orgAdminMe)
+    routes["/api/v1/organizations/acme/ldap"] = %*{"directories": [{"name": "corp", "url": "ldap://dc.example", "priority": 0, "start_tls": false, "enabled": true, "auto_create": false, "last_sync_at": 1793292000, "last_sync_result": "ok: 3 accounts",
+      "warnings": ["the connection is not encrypted"]}], "mappings": [{"id": "m1", "directory": "", "group_dn": "cn=<ci>,dc=x", "role": "dev"}],
+      "accounts": [{"account": "ann@acme", "directory": "corp", "dn": "uid=ann,dc=x", "switched_off": true, "roles_from_directory": ["dev"]}]}
+    let r = get("/ui/orgs/acme/ldap")
+    check r.status == 200 and "<code>corp</code>" in r.body and "not encrypted" in r.body and "made by hand" in r.body and "ok: 3 accounts" in r.body
+    check "cn=&lt;ci&gt;,dc=x" in r.body and "<ci>" notin r.body and "switched off" in r.body
+    check "action=\"/ui/orgs/acme/ldap/mappings/m1/delete\"" in r.body and "action=\"/ui/orgs/acme/ldap/servers/corp/sync\"" in r.body and "action=\"/ui/orgs/acme/ldap/accounts/remove\"" in r.body
+    check "action=\"/ui/orgs/acme/ldap/check\"" notin r.body                                    # ldap.write is the shard\'s
+    seed(adminMe)
+    check "action=\"/ui/orgs/acme/ldap/check\"" in get("/ui/orgs/acme/ldap").body
+    seed(readerMe)
+    let ro = get("/ui/orgs/acme/ldap")
+    check ro.status == 200 and "<form" notin ro.body.replace("<form class=\"logout\"", "") .replace("class=\"logout\" method=\"post\"", "")
+  test "the forms of the directory page ask the core for what they say and go back to the page":
+    seed(orgAdminMe)
+    check post("/ui/orgs/acme/ldap/mappings", @[("group_dn", "cn=ci,dc=x"), ("role", "dev"), ("directory", "corp")]).header("Location") == "/ui/orgs/acme/ldap"
+    check sent == @["POST /api/v1/organizations/acme/ldap/mappings {\"group_dn\":\"cn=ci,dc=x\",\"role\":\"dev\",\"directory\":\"corp\"}"]
+    reset(); seed(orgAdminMe)
+    discard post("/ui/orgs/acme/ldap/mappings/m1/delete", @[])
+    discard post("/ui/orgs/acme/ldap/accounts", @[("login", "ann"), ("directory", "")])
+    discard post("/ui/orgs/acme/ldap/accounts/remove", @[("login", "ann@acme")])
+    discard post("/ui/orgs/acme/ldap/servers/corp/sync", @[])
+    check sent == @["DELETE /api/v1/organizations/acme/ldap/mappings/m1 ", "PUT /api/v1/organizations/acme/ldap/accounts/ann {\"directory\":\"\"}",
+                    "DELETE /api/v1/organizations/acme/ldap/accounts/ann ", "POST /api/v1/organizations/acme/ldap/servers/corp:sync {}"]
+  test "the check of a person shows what the core found and changes nothing":
+    seed(adminMe)
+    sendAnswer = ok(%*{"directory": "corp", "connected": true, "person": {"found": true, "dn": "uid=ann,dc=x", "groups": ["cn=ci,dc=x"], "roles": ["dev"], "account": "ann@acme"}})
+    let r = post("/ui/orgs/acme/ldap/check", @[("directory", "corp"), ("user", "ann")])
+    check r.status == 200 and "connected and bound" in r.body and "found uid=ann,dc=x (account ann@acme)" in r.body and "roles here: dev" in r.body
+    sendAnswer = ok(%*{"connected": false, "error": "cannot connect <here>"})
+    check "not connected: cannot connect &lt;here&gt;" in post("/ui/orgs/acme/ldap/check", @[("directory", "corp"), ("user", "")]).body
+  test "bad input to the directory forms is refused before the core is asked":
+    seed(orgAdminMe)
+    for (path, pairs) in [("/ui/orgs/acme/ldap/mappings", @[("group_dn", "x"), ("role", "dev")]), ("/ui/orgs/acme/ldap/mappings", @[("group_dn", "cn=a,dc=b"), ("role", "Bad Role")]),
+                          ("/ui/orgs/acme/ldap/accounts", @[("login", "an*")]), ("/ui/orgs/acme/ldap/accounts/remove", @[("login", "../x")]), ("/ui/orgs/acme/ldap/check", @[("directory", "x y")])]:
+      check post(path, pairs).status == 400
+    check post("/ui/orgs/acme/ldap/servers/Bad/sync", @[]).status == 404 and post("/ui/orgs/acme/ldap/nothing", @[]).status == 404
+    check sent.len == 0
+  test "the menu has Roles for whoever can read access, and the list of organisations links to the pages":
+    seed(adminMe)
+    routes["/api/v1/organizations"] = %*{"organizations": [{"id": "o1", "slug": "acme", "name": "A", "state": "active", "namespace": "n"}]}
+    let o = get("/ui/orgs")
+    check "href=\"/ui/roles\"" in o.body and "href=\"/ui/orgs/acme/members\"" in o.body and "href=\"/ui/orgs/acme/ldap\"" in o.body
+    seed(%*{"administrator": false, "permissions": {"shard": ["run.read"], "organizations": {}, "groups": {}}})
+    let n = get("/ui/orgs")
+    check "href=\"/ui/roles\"" notin n.body and "href=\"/ui/orgs/acme/ldap\"" notin n.body
 
 suite "D-87 the organisation in the login form":
   setup: reset()

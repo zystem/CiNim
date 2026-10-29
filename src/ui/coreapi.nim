@@ -17,6 +17,7 @@ type
     loginOptions*: proc (): ApiResult {.gcsafe.}                       ## GET /api/v1/login/options: the organisations a person can choose at the login (D-87), asked with no token
     get*: proc (token, pathAndQuery: string): ApiResult {.gcsafe.}
     post*: proc (token, path, body: string): ApiResult {.gcsafe.}      ## a POST of an action (abort, retry) with the token of the user
+    send*: proc (meth, token, path, body: string): ApiResult {.gcsafe.}   ## any call of the API with the token of the user: PUT and DELETE of roles, members, mappings
 
 proc problemText(body: string): string =
   ## the words of a problem+json answer of the core: `detail` first, then `code`
@@ -70,3 +71,9 @@ proc httpCoreApi*(url: string; timeoutMs = 10000): CoreApi =
     call(HttpGet, pathAndQuery, token, "")
   result.post = proc (token, path, body: string): ApiResult {.gcsafe.} =
     call(HttpPost, path, token, body)
+  result.send = proc (meth, token, path, body: string): ApiResult {.gcsafe.} =
+    case meth
+    of "PUT": call(HttpPut, path, token, body)
+    of "DELETE": call(HttpDelete, path, token, body)
+    of "POST": call(HttpPost, path, token, body)
+    else: call(HttpGet, path, token, "")

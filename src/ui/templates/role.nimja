@@ -1,0 +1,14 @@
+{% extends "layout.nimja" %}
+{% block title %}Role - CiNim{% endblock %}
+{% block content %}<h1>{% if role.isNew %}New role{% else %}Role <code>{{ h(role.name) }}</code>{% endif %}</h1>
+<p><a href="{{ h(base) }}/roles">All roles</a>{% if role.builtin %} - built in: made in code, it cannot be changed{% endif %}</p>
+{% if role.editable %}<form method="post" action="{{ h(base) }}/{% if role.isNew %}new-role{% else %}roles/{{ h(role.name) }}{% endif %}" class="stack">
+{% if role.isNew %}<label>Name <input type="text" name="name" required maxlength="32" pattern="[a-z][a-z0-9_-]*" autofocus></label>{% endif %}
+<label>Description <input type="text" name="description" value="{{ h(role.description) }}" maxlength="200"></label>
+{% else %}<p>{{ h(role.description) }}</p>{% endif %}
+<table><thead><tr>{% if role.editable %}<th></th>{% endif %}<th>Permission</th><th>Given</th><th>What it allows</th></tr></thead><tbody>
+{% for p in role.perms %}<tr>{% if role.editable %}<td><input type="checkbox" name="perm" value="{{ h(p.name) }}"{% if p.held %} checked{% endif %}></td>{% endif %}<td><code>{{ h(p.name) }}</code></td><td>{{ h(p.level) }}</td><td>{{ h(p.text) }}{% if not role.editable and p.held %} <b>(yes)</b>{% endif %}</td></tr>
+{% endfor %}</tbody></table>
+<p class="detail">Given: <b>group</b> - may be given at the shard, in an organisation, or on a group or project; <b>organization</b> - at the shard or in an organisation; <b>shard</b> - only at the shard (it does nothing elsewhere).</p>
+{% if role.editable %}<div class="actions"><button type="submit">Save</button></div></form>
+{% if not role.isNew %}<form method="post" action="{{ h(base) }}/roles/{{ h(role.name) }}/delete" class="actions"><button type="submit">Delete the role</button></form>{% endif %}{% endif %}{% endblock %}

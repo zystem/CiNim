@@ -29,3 +29,8 @@ pre.log .n { color: var(--muted); user-select: none; display: inline-block; min-
 .actions form { margin: 0; }
 button { padding: .35rem .8rem; }
 @media (max-width: 40rem) { th, td { padding: .25rem .35rem; } header { flex-wrap: wrap; } }
+.stack { display: grid; gap: .6rem; max-width: 36rem; margin: .8rem 0; }
+.stack input[type=text], .stack select { width: 100%; box-sizing: border-box; padding: .35rem; }
+form.inline { display: inline; margin: 0; }
+fieldset { border: 1px solid var(--line); padding: .5rem .8rem; }
+label.check { display: inline-block; margin-right: 1rem; }

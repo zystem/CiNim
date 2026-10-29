@@ -34,7 +34,9 @@ proc onRequest() {.gcsafe, nimcall, raises: [].} =
       req.origin = headerOf(raw, "origin")
       req.secFetchSite = headerOf(raw, "sec-fetch-site")
       if req.meth == "POST":
-        for k, v in decodeQuery(getBody()): req.form[k] = v
+        for k, v in decodeQuery(getBody()):
+          req.form[k] = v
+          req.formPairs.add (k, v)
       let r = handle(cfg, api, req)
       var headers: seq[string]
       for (k, v) in r.headers: headers.add k & ": " & v

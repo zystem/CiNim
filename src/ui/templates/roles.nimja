@@ -1,0 +1,9 @@
+{% extends "layout.nimja" %}
+{% block title %}Roles - CiNim{% endblock %}
+{% block content %}<h1>Roles</h1>
+<p class="detail">A role is a set of permissions. It is given to a person at the shard, in an organisation or on a group or a project (the Members page of each).</p>
+{% if canManage %}<p><a href="{{ h(base) }}/new-role">New role</a></p>{% endif %}
+<table><thead><tr><th>Role</th><th>Kind</th><th>Permissions</th><th>Description</th></tr></thead><tbody>
+{% for r in roles %}<tr id="role-{{ h(r.name) }}"><td><a href="{{ h(base) }}/roles/{{ h(r.name) }}">{{ h(r.name) }}</a></td><td>{% if r.builtin %}built in{% else %}custom{% endif %}</td><td>{{ h(r.count) }}</td><td>{{ h(r.description) }}</td></tr>
+{% endfor %}</tbody></table>
+{% if roles.len == 0 %}<p class="empty">No roles.</p>{% endif %}{% endblock %}

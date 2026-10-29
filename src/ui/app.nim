@@ -16,6 +16,7 @@ type
   UiRequest* = object
     meth*, path*, query*, cookie*, host*, origin*, secFetchSite*: string
     form*: Table[string, string]
+    formPairs*: seq[(string, string)]                  ## every name and value of a form, in order: a field that is there several times (the boxes of a list) keeps all its values
 
   UiResponse* = object
     status*: int
@@ -47,6 +48,28 @@ type
     label, text: string
   ComponentRow = object
     kind, id, state, seen: string
+  RoleRow = object
+    name, description: string
+    builtin: bool
+    count: int
+  PermRow = object
+    name, level, text: string
+    held: bool
+  RoleView = object
+    name, description: string
+    builtin, isNew, editable: bool
+    perms: seq[PermRow]
+  MemberRow = object
+    user, roles: string
+  MapRow = object
+    id, directory, groupDn, role: string
+  AccountRow = object
+    account, directory, dn, roles: string
+    off: bool
+  DirRow = object
+    name, url, warnings, lastSync: string
+    priority: int
+    autoCreate, enabled, startTls: bool
 
 const
   cookieName = "cinim_ui"
@@ -59,6 +82,12 @@ const
   css = staticRead("ui.css")
   cssVersion = toHex(int64(hash(css)), 8)       # in the link: a new style sheet is a new address, and the day of caching does not hold back a change
   runStates = ["PENDING", "RUNNING", "OK", "FAILED", "ABORTED"]   # the core's word (RUN_STATE_ABORTED); a state that is spelled two ways is a filter that matches nothing
+
+func isDirName(s: string): bool =
+  if s.len < 1 or s.len > 40 or s[0] notin {'a' .. 'z'}: return false
+  for c in s:
+    if c notin {'a' .. 'z', '0' .. '9', '_', '-'}: return false
+  true
 
 func isId(s: string): bool =
   ## the id of a run, or the cursor: what the core makes (letters, digits, - and _)
@@ -196,30 +225,59 @@ func tokenOf(cookie: string): string =
 var
   hideRuns {.threadvar.}: bool        ## the menu of the request being served: what the core says the caller cannot use is not shown (D-84; the core refuses it all the same)
   hideStatus {.threadvar.}: bool
+  hideAccess {.threadvar.}: bool
+  meNode {.threadvar.}: JsonNode      ## GET /api/v1/me of the request being served, for the pages that show a form only to those who may use it
+
+func listHas(n: JsonNode; name: string): bool =
+  if not n.isKind(JArray): return false
+  for x in n.elems:
+    if x.kind == JString and x.getStr == name: return true
+
+func covers(bound, group: string): bool = bound.len > 0 and (group == bound or group.startsWith(bound & "/"))
+
+func holdsAnywhere(me: JsonNode; perm: string): bool =
+  ## whether /me says the caller holds `perm` at the shard, in some organisation or on some group
+  if me.isNil or not me.isKind(JObject): return false
+  if me{"administrator"}.getBool: return true
+  let perms = me{"permissions"}
+  if not perms.isKind(JObject): return false
+  if listHas(perms{"shard"}, perm): return true
+  if perms{"organizations"}.isKind(JObject):
+    for _, l in perms["organizations"]:
+      if listHas(l, perm): return true
+  if perms{"groups"}.isKind(JObject):
+    for _, arr in perms["groups"]:
+      if arr.isKind(JArray):
+        for g in arr.elems:
+          if listHas(g{"permissions"}, perm): return true
+
+proc can(perm, org, group: string): bool =
+  ## whether /me says the caller holds `perm` here: at the shard, in the organisation, or on the group (or above it). False when the core did not say.
+  let me = meNode
+  if me.isNil or not me.isKind(JObject): return false
+  if me{"administrator"}.getBool: return true
+  let perms = me{"permissions"}
+  if not perms.isKind(JObject): return false
+  if listHas(perms{"shard"}, perm): return true
+  if org.len == 0: return false
+  if perms{"organizations"}.isKind(JObject) and listHas(perms["organizations"]{org}, perm): return true
+  if group.len > 0 and perms{"groups"}.isKind(JObject) and perms["groups"]{org}.isKind(JArray):
+    for g in perms["groups"][org].elems:
+      if covers(g{"path"}.getStr, group) and listHas(g{"permissions"}, perm): return true
 
 proc setMenu(api: CoreApi; token: string) =
   ## asks GET /api/v1/me what the caller comes to, and hides the entries of the menu that would only be a 403. If the core does not say, everything is shown.
   hideRuns = false
   hideStatus = false
+  hideAccess = false
+  meNode = nil
   let r = api.get(token, "/api/v1/me")
   if r.status != asOk or not r.body.isKind(JObject): return
-  let perms = r.body{"permissions"}
-  if r.body{"administrator"}.getBool or not perms.isKind(JObject): return
-  func listHas(n: JsonNode; name: string): bool =
-    if not n.isKind(JArray): return false
-    for x in n.elems:
-      if x.kind == JString and x.getStr == name: return true
-  var canRuns = listHas(perms{"shard"}, "run.read")
-  if perms{"organizations"}.isKind(JObject):
-    for _, l in perms["organizations"]:
-      if listHas(l, "run.read"): canRuns = true
-  if perms{"groups"}.isKind(JObject):
-    for _, arr in perms["groups"]:
-      if arr.isKind(JArray):
-        for g in arr.elems:
-          if listHas(g{"permissions"}, "run.read"): canRuns = true
-  hideRuns = not canRuns
-  hideStatus = not listHas(perms{"shard"}, "shard.read")
+  meNode = r.body
+  if r.body{"administrator"}.getBool or not r.body{"permissions"}.isKind(JObject): return
+  hideRuns = not holdsAnywhere(r.body, "run.read")
+  hideStatus = not listHas(r.body{"permissions"}{"shard"}, "shard.read")
+  hideAccess = not (holdsAnywhere(r.body, "access.read") or holdsAnywhere(r.body, "ldap.read") or holdsAnywhere(r.body, "role.manage"))
 
 # ------------------------------------------------------------------ the pages (templates/*.nimja: every expression through h() or raw(), tests/unit/ttemplates.nim)
 
@@ -253,6 +311,22 @@ proc renderRunLog(base, runId, runState: string; lines: seq[RunLogLine]; earlier
 proc renderStatus(base: string; components: seq[ComponentRow]): string =
   let loggedIn = true
   compileTemplateFile("status.nimja", templateDir)
+
+proc renderRoles(base: string; roles: seq[RoleRow]; canManage: bool): string =
+  let loggedIn = true
+  compileTemplateFile("roles.nimja", templateDir)
+
+proc renderRole(base: string; role: RoleView): string =
+  let loggedIn = true
+  compileTemplateFile("role.nimja", templateDir)
+
+proc renderMembers(base, scopeText, group, here, orgMembers: string; members: seq[MemberRow]; roleNames: seq[string]; canEdit: bool): string =
+  let loggedIn = true
+  compileTemplateFile("members.nimja", templateDir)
+
+proc renderLdap(base, org, here: string; dirs: seq[DirRow]; maps: seq[MapRow]; accounts: seq[AccountRow]; roleNames: seq[string]; canMap, canWrite: bool): string =
+  let loggedIn = true
+  compileTemplateFile("ldap.nimja", templateDir)
 
 # ------------------------------------------------------------------ the handlers
 
@@ -407,6 +481,234 @@ proc runAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, id, action: s
   of asRefused: messagePage(cfg, 409, true, (if action == "abort": "The run was not stopped" else: "The run was not started again"), "The core refused.", r.message, back, "Back to the run")
   else: failed(cfg, r, "run " & id)
 
+# ------------------------------------------------------------------ roles, members, directories (D-84, D-85, D-87, D-88)
+
+func isRoleName(s: string): bool =
+  if s.len < 1 or s.len > 32 or s[0] notin {'a' .. 'z'}: return false
+  for c in s:
+    if c notin {'a' .. 'z', '0' .. '9', '_', '-'}: return false
+  true
+
+func isAccountName(s: string): bool =
+  ## a local user or `login@slug`: lowercase letters, digits and . _ - @
+  if s.len < 1 or s.len > 100: return false
+  for c in s:
+    if c notin {'a' .. 'z', '0' .. '9', '.', '_', '-', '@'}: return false
+  true
+
+func isLogin(s: string): bool =
+  if s.len < 1 or s.len > 64: return false
+  for c in s:
+    if c notin {'a' .. 'z', '0' .. '9', '.', '_', '-'}: return false
+  true
+
+func isPermName(s: string): bool =
+  if s.len < 3 or s.len > 40: return false
+  for c in s:
+    if c notin {'a' .. 'z', '.'}: return false
+  true
+
+func isGroupPath(s: string): bool =
+  let segs = s.split('/')
+  if segs.len < 1 or segs.len > 8: return false
+  for seg in segs:
+    if not isSlug(seg): return false
+  true
+
+func formAll(req: UiRequest; key: string): seq[string] =
+  for (k, v) in req.formPairs:
+    if k == key and v notin result: result.add v
+
+proc explained(cfg: UiConfig; api: CoreApi; token: string; r: ApiResult; what, meth, apiPath: string): UiResponse =
+  ## like `failed`, and for a 403 says why, in the words of GET /api/v1/me/can: which permission the call needs, where, and what the caller has
+  if r.status != asForbidden: return failed(cfg, r, what)
+  let e = api.get(token, "/api/v1/me/can?method=" & meth & "&path=" & encodeUrl(apiPath, usePlus = false))
+  var detail = r.message
+  if e.status == asOk:
+    let need = e.body{"permission"}.getStr
+    detail = (if need.len > 0: "needs " & need & " " & e.body{"needs"}.getStr & ". " else: "") & e.body{"reason"}.getStr
+  messagePage(cfg, 403, true, "Not allowed", "Your user may not do this: " & what & ".", detail)
+
+proc afterAction(cfg: UiConfig; api: CoreApi; token: string; r: ApiResult; goTo, title, what, meth, apiPath: string): UiResponse =
+  ## the end of a form: back to the page on success, the core's words when it refused, the reason when the right is missing
+  case r.status
+  of asOk: redirect(goTo)
+  of asRefused: messagePage(cfg, 409, true, title, "The core refused.", r.message, goTo, "Back")
+  else: explained(cfg, api, token, r, what, meth, apiPath)
+
+proc roleNamesOf(api: CoreApi; token: string): seq[string] =
+  let r = api.get(token, "/api/v1/roles")
+  if r.status == asOk:
+    for x in r.body{"roles"}.getElems:
+      if isRoleName(x{"name"}.getStr): result.add x{"name"}.getStr
+
+proc rolesPage(cfg: UiConfig; api: CoreApi; token: string): UiResponse =
+  let r = api.get(token, "/api/v1/roles")
+  if r.status != asOk: return explained(cfg, api, token, r, "the list of roles", "GET", "/api/v1/roles")
+  var rows: seq[RoleRow]
+  for x in r.body{"roles"}.getElems:
+    if isRoleName(x{"name"}.getStr):
+      rows.add RoleRow(name: x["name"].getStr, description: x{"description"}.getStr, builtin: x{"builtin"}.getBool, count: x{"permissions"}.getElems.len)
+  page(200, renderRoles(cfg.base, rows, can("role.manage", "", "")))
+
+proc rolePage(cfg: UiConfig; api: CoreApi; token, name: string; isNew: bool): UiResponse =
+  let cat = api.get(token, "/api/v1/permissions")
+  if cat.status != asOk: return explained(cfg, api, token, cat, "the list of permissions", "GET", "/api/v1/permissions")
+  var view = RoleView(name: name, isNew: isNew, editable: can("role.manage", "", ""))
+  var held: seq[string]
+  if not isNew:
+    let r = api.get(token, "/api/v1/roles")
+    if r.status != asOk: return explained(cfg, api, token, r, "the list of roles", "GET", "/api/v1/roles")
+    var found = false
+    for x in r.body{"roles"}.getElems:
+      if x{"name"}.getStr == name:
+        found = true
+        view.description = x{"description"}.getStr
+        view.builtin = x{"builtin"}.getBool
+        for p in x{"permissions"}.getElems: held.add p.getStr
+    if not found: return messagePage(cfg, 404, true, "Not found", "No such role.", "", cfg.base & "/roles", "Roles")
+    if view.builtin: view.editable = false
+  for p in cat.body{"permissions"}.getElems:
+    if isPermName(p{"name"}.getStr):
+      view.perms.add PermRow(name: p["name"].getStr, level: p{"level"}.getStr, text: p{"description"}.getStr, held: p["name"].getStr in held)
+  page(200, renderRole(cfg.base, view))
+
+proc saveRole(cfg: UiConfig; api: CoreApi; req: UiRequest; token, nameGiven: string): UiResponse =
+  ## the form of a role: a new one (`nameGiven` empty: the name is in the form) or a custom one that changes
+  let name = if nameGiven.len > 0: nameGiven else: req.form.getOrDefault("name")
+  if not isRoleName(name): return messagePage(cfg, 400, true, "Not saved", "A role name is lowercase letters, digits, - and _, starting with a letter, at most 32.", "", cfg.base & "/roles", "Roles")
+  var perms: seq[string]
+  for p in req.formAll("perm"):
+    if isPermName(p): perms.add p
+  let desc = req.form.getOrDefault("description")
+  let r = api.send("PUT", token, "/api/v1/roles/" & name, $(%*{"description": desc[0 ..< min(200, desc.len)], "permissions": perms}))
+  afterAction(cfg, api, token, r, cfg.base & "/roles/" & name, "The role was not saved", "role " & name, "PUT", "/api/v1/roles/" & name)
+
+proc deleteRole(cfg: UiConfig; api: CoreApi; token, name: string): UiResponse =
+  let r = api.send("DELETE", token, "/api/v1/roles/" & name, "")
+  afterAction(cfg, api, token, r, cfg.base & "/roles", "The role was not deleted", "delete role " & name, "DELETE", "/api/v1/roles/" & name)
+
+type Target = object
+  ## where a members page is: the organisation, or a group or project of it
+  ok: bool
+  slug, group, kind: string          ## kind: "groups" or "projects" ("" for the organisation)
+
+func targetOf(parts: seq[string]; endAt: int): Target =
+  ## parts[0 ..< endAt] is `orgs/<slug>` or `orgs/<slug>/groups|projects/<path...>`
+  if endAt < 2 or parts[0] != "orgs" or not isSlug(parts[1]): return
+  result.slug = parts[1]
+  if endAt == 2: (result.ok = true; return)
+  if parts[2] notin ["groups", "projects"] or endAt < 4: (result.slug = ""; return)
+  result.kind = parts[2]
+  result.group = parts[3 ..< endAt].join("/")
+  result.ok = isGroupPath(result.group)
+
+func apiBase(t: Target): string =
+  "/api/v1/organizations/" & t.slug & (if t.kind.len > 0: "/" & t.kind & "/" & t.group else: "")
+
+func uiBase(cfg: UiConfig; t: Target): string =
+  cfg.base & "/orgs/" & t.slug & (if t.kind.len > 0: "/" & t.kind & "/" & t.group else: "")
+
+proc membersPage(cfg: UiConfig; api: CoreApi; token: string; t: Target): UiResponse =
+  let r = api.get(token, t.apiBase & "/members")
+  if r.status != asOk: return explained(cfg, api, token, r, "the members of " & t.slug & (if t.group.len > 0: "/" & t.group else: ""), "GET", t.apiBase & "/members")
+  var rows: seq[MemberRow]
+  for m in r.body{"members"}.getElems:
+    var roles: seq[string]
+    for x in m{"roles"}.getElems: roles.add x.getStr
+    if isAccountName(m{"user"}.getStr): rows.add MemberRow(user: m["user"].getStr, roles: roles.join(", "))
+  let here = cfg.base & "/orgs/" & t.slug & (if t.kind.len > 0: "/" & t.kind & "/" & t.group else: "") & "/members"
+  let canEdit = can("access.write", t.slug, t.group)
+  page(200, renderMembers(cfg.base, "organisation " & t.slug & (if t.group.len > 0: ", " & t.group else: ""), t.group, here, cfg.base & "/orgs/" & t.slug & "/members", rows, (if canEdit: api.roleNamesOf(token) else: @[]), canEdit))
+
+proc setMember(cfg: UiConfig; api: CoreApi; req: UiRequest; token: string; t: Target; remove: bool): UiResponse =
+  let user = req.form.getOrDefault("user")
+  let here = uiBase(cfg, t) & "/members"
+  if not isAccountName(user): return messagePage(cfg, 400, true, "Not saved", "Name the person: an account that exists.", "", here, "Back")
+  var roles: seq[string]
+  if not remove:
+    for x in req.formAll("role"):
+      if isRoleName(x): roles.add x
+  let path = t.apiBase & "/members/" & user
+  let r = if remove: api.send("DELETE", token, path, "") else: api.send("PUT", token, path, $(%*{"roles": roles}))
+  afterAction(cfg, api, token, r, here, "The roles were not changed", "the roles of " & user, (if remove: "DELETE" else: "PUT"), path)
+
+proc ldapPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
+  let base = "/api/v1/organizations/" & slug & "/ldap"
+  let r = api.get(token, base)
+  if r.status != asOk: return explained(cfg, api, token, r, "the directories of " & slug, "GET", base)
+  var dirs: seq[DirRow]
+  for d in r.body{"directories"}.getElems:
+    var w: seq[string]
+    for x in d{"warnings"}.getElems: w.add x.getStr
+    if isDirName(d{"name"}.getStr):
+      let at = d{"last_sync_at"}.getBiggestInt(0)
+      dirs.add DirRow(name: d["name"].getStr, url: d{"url"}.getStr, warnings: w.join(" "), priority: int(d{"priority"}.getBiggestInt(0)),
+                      autoCreate: d{"auto_create"}.getBool, enabled: d{"enabled"}.getBool(true), startTls: d{"start_tls"}.getBool,
+                      lastSync: (if at > 0: timeText($at) & " - " & d{"last_sync_result"}.getStr else: "never"))
+  var maps: seq[MapRow]
+  for m in r.body{"mappings"}.getElems:
+    if isId(m{"id"}.getStr): maps.add MapRow(id: m["id"].getStr, directory: m{"directory"}.getStr, groupDn: m{"group_dn"}.getStr, role: m{"role"}.getStr)
+  var accounts: seq[AccountRow]
+  for a in r.body{"accounts"}.getElems:
+    var roles: seq[string]
+    for x in a{"roles_from_directory"}.getElems: roles.add x.getStr
+    if isAccountName(a{"account"}.getStr):
+      accounts.add AccountRow(account: a["account"].getStr, directory: a{"directory"}.getStr, dn: a{"dn"}.getStr, roles: roles.join(", "), off: a{"switched_off"}.getBool)
+  let canMap = can("ldap.map", slug, "")
+  page(200, renderLdap(cfg.base, slug, cfg.base & "/orgs/" & slug & "/ldap", dirs, maps, accounts, (if canMap: api.roleNamesOf(token) else: @[]), canMap, can("ldap.write", "", "")))
+
+proc ldapAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, slug: string; rest: seq[string]): UiResponse =
+  ## the forms of the Directory page: add or remove a group that gives a role, make or remove an account, sync a directory, check one
+  let base = "/api/v1/organizations/" & slug & "/ldap"
+  let back = cfg.base & "/orgs/" & slug & "/ldap"
+  let f = req.form
+  if rest == @["mappings"]:
+    let dn = f.getOrDefault("group_dn")
+    let directory = f.getOrDefault("directory")
+    if dn.len < 3 or dn.len > 500 or not isRoleName(f.getOrDefault("role")) or (directory.len > 0 and not isDirName(directory)):
+      return messagePage(cfg, 400, true, "Not saved", "Give the DN of a group and a role.", "", back, "Back")
+    let r = api.send("POST", token, base & "/mappings", $(%*{"group_dn": dn, "role": f["role"], "directory": directory}))
+    return afterAction(cfg, api, token, r, back, "The group was not added", "map a group", "POST", base & "/mappings")
+  if rest.len == 3 and rest[0] == "mappings" and isId(rest[1]) and rest[2] == "delete":
+    let r = api.send("DELETE", token, base & "/mappings/" & rest[1], "")
+    return afterAction(cfg, api, token, r, back, "The group was not removed", "remove a group", "DELETE", base & "/mappings/" & rest[1])
+  if rest == @["accounts"]:
+    let login = f.getOrDefault("login")
+    let directory = f.getOrDefault("directory")
+    if not isLogin(login) or (directory.len > 0 and not isDirName(directory)): return messagePage(cfg, 400, true, "Not made", "Give the login of a person the directory knows.", "", back, "Back")
+    let r = api.send("PUT", token, base & "/accounts/" & login, $(%*{"directory": directory}))
+    return afterAction(cfg, api, token, r, back, "The account was not made", "make the account of " & login, "PUT", base & "/accounts/" & login)
+  if rest == @["accounts", "remove"]:
+    let account = f.getOrDefault("login")
+    let at = account.find('@')
+    let login = if at > 0: account[0 ..< at] else: account
+    if not isLogin(login): return messagePage(cfg, 400, true, "Not removed", "Name the account.", "", back, "Back")
+    let r = api.send("DELETE", token, base & "/accounts/" & login, "")
+    return afterAction(cfg, api, token, r, back, "The account was not removed", "remove the account of " & login, "DELETE", base & "/accounts/" & login)
+  if rest.len == 3 and rest[0] == "servers" and isDirName(rest[1]) and rest[2] == "sync":
+    let r = api.send("POST", token, base & "/servers/" & rest[1] & ":sync", "{}")
+    return afterAction(cfg, api, token, r, back, "The sync did not run", "sync " & rest[1], "POST", base & "/servers/" & rest[1] & ":sync")
+  if rest == @["check"]:
+    let directory = f.getOrDefault("directory")
+    let user = f.getOrDefault("user")
+    if not isDirName(directory) or (user.len > 0 and not isLogin(user)): return messagePage(cfg, 400, true, "Not checked", "Choose a directory and write a login or leave it empty.", "", back, "Back")
+    let r = api.send("POST", token, base & "/servers/" & directory & ":check", $(%*{"user": user}))
+    if r.status != asOk: return afterAction(cfg, api, token, r, back, "The check did not run", "check " & directory, "POST", base & "/servers/" & directory & ":check")
+    var lines: seq[string]
+    lines.add (if r.body{"connected"}.getBool: "connected and bound" else: "not connected: " & r.body{"error"}.getStr)
+    let person = r.body{"person"}
+    if person.isKind(JObject):
+      if person{"found"}.getBool:
+        var gs, rs: seq[string]
+        for g in person{"groups"}.getElems: gs.add g.getStr
+        for x in person{"roles"}.getElems: rs.add x.getStr
+        lines.add "found " & person{"dn"}.getStr & " (account " & person{"account"}.getStr & "); groups: " & (if gs.len > 0: gs.join("; ") else: "none") & "; roles here: " & (if rs.len > 0: rs.join(", ") else: "none")
+      else:
+        lines.add "the person was not found" & (if person{"problem"}.getStr.len > 0: ": " & person{"problem"}.getStr else: "")
+    return messagePage(cfg, 200, true, "Check of " & directory, "Nothing was changed.", lines.join(" | "), back, "Back to the directory")
+  messagePage(cfg, 404, true, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
+
 proc logPage(cfg: UiConfig; api: CoreApi; token, id, stepText: string; query: Table[string, string]): UiResponse =
   let step = parseInt(stepText)
   var from0 = 0
@@ -479,11 +781,31 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
   let parts = path.strip(chars = {'/'}).split('/')
   if req.meth == "POST" and parts.len == 3 and parts[0] == "runs" and isId(parts[1]) and parts[2] in ["abort", "retry"]:
     return runAction(cfg, api, req, token, parts[1], parts[2])
+  if req.meth == "POST":
+    # the forms of the access pages: a POST from this host, then the thing is asked of the core with the token of the user
+    let isAccessPost = parts == @["new-role"] or (parts.len in [2, 3] and parts[0] == "roles") or (parts.len >= 3 and parts[0] == "orgs" and (parts[2] == "ldap" or "members" in parts))
+    if isAccessPost:
+      if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
+      if parts == @["new-role"]: return saveRole(cfg, api, req, token, "")
+      if parts.len == 2 and parts[1].isRoleName: return saveRole(cfg, api, req, token, parts[1])
+      if parts.len == 3 and parts[0] == "roles" and parts[1].isRoleName and parts[2] == "delete": return deleteRole(cfg, api, token, parts[1])
+      if parts.len >= 4 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
+      if parts.len >= 4 and parts[^2] == "members" and parts[^1] in ["set", "remove"]:
+        let t = targetOf(parts, parts.len - 2)
+        if t.ok: return setMember(cfg, api, req, token, t, parts[^1] == "remove")
+      return messagePage(cfg, 404, true, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
   if req.meth != "GET":
     result = messagePage(cfg, 405, true, "Method not allowed", "GET.")
     result.headers.add ("Allow", "GET")
     return
   if path == "/" or path == "": return redirect(cfg.base & "/orgs")
+  if parts == @["roles"]: return rolesPage(cfg, api, token)
+  if parts == @["new-role"]: return rolePage(cfg, api, token, "", true)
+  if parts.len == 2 and parts[0] == "roles" and parts[1].isRoleName: return rolePage(cfg, api, token, parts[1], false)
+  if parts.len >= 3 and parts[0] == "orgs" and parts[^1] == "members":
+    let t = targetOf(parts, parts.len - 1)
+    if t.ok: return membersPage(cfg, api, token, t)
+  if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapPage(cfg, api, token, parts[1])
   if parts == @["orgs"]: return orgsPage(cfg, api, token)
   if parts == @["runs"]: return runsPage(cfg, api, token, "", query)
   if parts == @["status"]: return statusPage(cfg, api, token)

@@ -4,7 +4,7 @@
 <link rel="stylesheet" href="{{ h(base) }}/static/ui.css?v={{ h(cssVersion) }}"></head>
 <body>
 <header><a class="brand" href="{{ h(base) }}/">CiNim</a>
-{% if loggedIn %}<nav><a href="{{ h(base) }}/orgs">Organisations</a>{% if not hideRuns %} <a href="{{ h(base) }}/runs">All runs</a>{% endif %}{% if not hideStatus %} <a href="{{ h(base) }}/status">Components</a>{% endif %}</nav>
+{% if loggedIn %}<nav><a href="{{ h(base) }}/orgs">Organisations</a>{% if not hideRuns %} <a href="{{ h(base) }}/runs">All runs</a>{% endif %}{% if not hideStatus %} <a href="{{ h(base) }}/status">Components</a>{% endif %}{% if not hideAccess %} <a href="{{ h(base) }}/roles">Roles</a>{% endif %}</nav>
 <form class="logout" method="post" action="{{ h(base) }}/logout"><button type="submit">Log out</button></form>{% endif %}</header>
 <main>
 {% block content %}{% endblock %}

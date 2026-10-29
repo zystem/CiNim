@@ -1,7 +1,7 @@
 {% extends "layout.nimja" %}
 {% block title %}Organisations - CiNim{% endblock %}
 {% block content %}<h1>Organisations</h1>
-<table><thead><tr><th>Slug</th><th>Name</th><th>State</th><th>Namespace</th></tr></thead><tbody>
-{% for o in orgs %}<tr id="org-{{ h(o.slug) }}"><td><a href="{{ h(base) }}/orgs/{{ h(o.slug) }}/runs">{{ h(o.slug) }}</a></td><td>{{ h(o.name) }}</td><td class="state-{{ h(o.state) }}">{{ h(o.state) }}</td><td>{{ h(o.namespace) }}</td></tr>
+<table><thead><tr><th>Slug</th><th>Name</th><th>State</th><th>Namespace</th><th>Access</th></tr></thead><tbody>
+{% for o in orgs %}<tr id="org-{{ h(o.slug) }}"><td><a href="{{ h(base) }}/orgs/{{ h(o.slug) }}/runs">{{ h(o.slug) }}</a></td><td>{{ h(o.name) }}</td><td class="state-{{ h(o.state) }}">{{ h(o.state) }}</td><td>{{ h(o.namespace) }}</td><td><a href="{{ h(base) }}/orgs/{{ h(o.slug) }}/members">Members</a>{% if not hideAccess %} <a href="{{ h(base) }}/orgs/{{ h(o.slug) }}/ldap">Directory</a>{% endif %}</td></tr>
 {% endfor %}</tbody></table>
 {% if orgs.len == 0 %}<p class="empty">No organisations.</p>{% endif %}{% endblock %}

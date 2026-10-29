@@ -1,0 +1,37 @@
+{% extends "layout.nimja" %}
+{% block title %}Directory - CiNim{% endblock %}
+{% block content %}<h1>Directories (LDAP): {{ h(org) }}</h1>
+<p><a href="{{ h(base) }}/orgs">Organisations</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/members">Members</a> - <a href="{{ h(base) }}/roles">Roles</a></p>
+<p class="detail">People log in as <code>login</code> with <b>{{ h(org) }}</b> chosen in the list of the login form. A directory is added or changed with the API (<code>PUT /api/v1/organizations/{{ h(org) }}/ldap/servers/{name}</code>); here are the groups that give roles and the accounts.</p>
+<h2>Directories</h2>
+<table><thead><tr><th>Name</th><th>Address</th><th>Order</th><th>Accounts at login</th><th>Last sync</th><th>Warnings</th>{% if canMap %}<th></th>{% endif %}</tr></thead><tbody>
+{% for d in dirs %}<tr><td><code>{{ h(d.name) }}</code>{% if not d.enabled %} (off){% endif %}</td><td>{{ h(d.url) }}{% if d.startTls %} (StartTLS){% endif %}</td><td>{{ h(d.priority) }}</td><td>{% if d.autoCreate %}made at the first login{% else %}made by hand{% endif %}</td><td>{{ h(d.lastSync) }}</td><td class="error">{{ h(d.warnings) }}</td>
+{% if canMap %}<td><form method="post" action="{{ h(here) }}/servers/{{ h(d.name) }}/sync" class="inline"><button type="submit">Sync now</button></form></td>{% endif %}</tr>
+{% endfor %}</tbody></table>
+{% if dirs.len == 0 %}<p class="empty">This organisation has no directory.</p>{% endif %}
+{% if canWrite and dirs.len > 0 %}<h2>Check a person</h2>
+<form method="post" action="{{ h(here) }}/check" class="stack">
+<label>Directory <select name="directory">{% for d in dirs %}<option value="{{ h(d.name) }}">{{ h(d.name) }}</option>{% endfor %}</select></label>
+<label>Login (empty: only connect) <input type="text" name="user" maxlength="64" pattern="[a-z0-9._-]*"></label>
+<div class="actions"><button type="submit">Check</button></div></form>{% endif %}
+<h2>Groups that give roles</h2>
+<table><thead><tr><th>Group (DN)</th><th>Role</th><th>Directory</th>{% if canMap %}<th></th>{% endif %}</tr></thead><tbody>
+{% for m in maps %}<tr><td><code>{{ h(m.groupDn) }}</code></td><td>{{ h(m.role) }}</td><td>{% if m.directory.len > 0 %}{{ h(m.directory) }}{% else %}any{% endif %}</td>
+{% if canMap %}<td><form method="post" action="{{ h(here) }}/mappings/{{ h(m.id) }}/delete" class="inline"><button type="submit">Remove</button></form></td>{% endif %}</tr>
+{% endfor %}</tbody></table>
+{% if maps.len == 0 %}<p class="empty">No group gives a role yet.</p>{% endif %}
+{% if canMap %}<form method="post" action="{{ h(here) }}/mappings" class="stack">
+<label>Group DN <input type="text" name="group_dn" required maxlength="500" placeholder="cn=ci-admins,ou=groups,dc=example,dc=org"></label>
+<label>Role <select name="role">{% for r in roleNames %}<option value="{{ h(r) }}">{{ h(r) }}</option>{% endfor %}</select></label>
+<label>Directory <select name="directory"><option value="">any</option>{% for d in dirs %}<option value="{{ h(d.name) }}">{{ h(d.name) }}</option>{% endfor %}</select></label>
+<div class="actions"><button type="submit">Add</button></div></form>{% endif %}
+<h2>Accounts</h2>
+<table><thead><tr><th>Account</th><th>Directory</th><th>Roles from it</th><th>State</th>{% if canMap %}<th></th>{% endif %}</tr></thead><tbody>
+{% for a in accounts %}<tr><td><code>{{ h(a.account) }}</code></td><td>{{ h(a.directory) }}</td><td>{{ h(a.roles) }}</td><td>{% if a.off %}<span class="error">switched off</span>{% else %}active{% endif %}</td>
+{% if canMap %}<td><form method="post" action="{{ h(here) }}/accounts/remove" class="inline"><input type="hidden" name="login" value="{{ h(a.account) }}"><button type="submit">Remove</button></form></td>{% endif %}</tr>
+{% endfor %}</tbody></table>
+{% if accounts.len == 0 %}<p class="empty">No account yet.</p>{% endif %}
+{% if canMap and dirs.len > 0 %}<form method="post" action="{{ h(here) }}/accounts" class="stack">
+<label>Make the account of a person the directory knows - login <input type="text" name="login" required maxlength="64" pattern="[a-z0-9._-]+"></label>
+<label>Directory <select name="directory"><option value="">any</option>{% for d in dirs %}<option value="{{ h(d.name) }}">{{ h(d.name) }}</option>{% endfor %}</select></label>
+<div class="actions"><button type="submit">Make</button></div></form>{% endif %}{% endblock %}
