@@ -313,6 +313,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         if not who.ok:
           unauthorized(who.why)
           return
+        who.need = needOf(getMethod(), path)          # D-84: what this request needs; `mayUseOrg` asks it again for the organisation a handler finds
         if who.mustChange and not selfService(who.user, getMethod(), path):
           # IAM-001: the password of this user has to be changed first (the administrator after the first login): that is the one thing allowed
           problem(Http403, "password_change_required", "change the password first: PUT " & passwordPath(who.user) & " {\"current_password\": \"...\", \"password\": \"...\"}")
@@ -333,10 +334,11 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"id": made.id, "token": made.token, "replaced": who.id})
           return
         if not who.mayCall(getMethod(), path):
-          if who.roles.len > 0:
-            # IAM-001: the roles of the user (rw, dev, ro) are the shard's, and every organisation inherits them; what each may do is in rbac.nim
-            ac.record(getTime().toUnix(), actorOf(who), "access", getMethod() & " " & path, "denied", "roles " & who.roles.join(","))
-            problem(Http403, "forbidden", "the role of " & who.user & " (" & who.roles.join(", ") & ") does not allow " & getMethod() & " " & path)
+          if who.user.len > 0:
+            # IAM-001, D-84: what the roles of the user give, at the shard and in organisations, is in permissions.nim; the permission is named so that the refusal can be read
+            let wanted = if who.need.permission.len > 0: who.need.permission else: "(a route that is named for no role)"
+            ac.record(getTime().toUnix(), actorOf(who), "access", getMethod() & " " & path, "denied", "needs " & wanted)
+            problem(Http403, "forbidden", "the roles of " & who.user & " do not allow " & getMethod() & " " & path & ": it needs " & wanted)
           else:
             problem(Http403, "forbidden", "this token is for the runs of one organisation only")
           return
@@ -356,8 +358,13 @@ proc onRequest() {.raises: [], gcsafe.} =
           if not validUserName(name):
             problem(Http400, "invalid_request", "a user name is lowercase letters, digits, - and _, starting with a letter, at most 32 characters")
             return
-          if not validRole(nj["role"].getStr):
-            problem(Http400, "invalid_request", "role is one of " & shardRoles.join(", "))
+          # D-84: the role is a built-in one or one an administrator made; `organization` gives it in that organisation only (the user then sees only that)
+          if not uc.roleExists(nj["role"].getStr):
+            problem(Http400, "invalid_request", "no such role: " & nj["role"].getStr & " (GET /api/v1/roles)")
+            return
+          let orgOfUser = nj{"organization"}.getStr
+          if orgOfUser.len > 0 and uc.organizationState(orgOfUser).len == 0:
+            problem(Http404, "organization_not_found", "this shard has no organisation " & orgOfUser)
             return
           let lenBad = passwordProblem(nj["password"].getStr)
           if lenBad.len > 0:
@@ -367,11 +374,12 @@ proc onRequest() {.raises: [], gcsafe.} =
           if nv.problem.len > 0:
             problem(Http400, nv.code, nv.problem)
             return
-          if not uc.createUser(name, nj["role"].getStr, nj["password"].getStr, getTime().toUnix()):
+          let scopeOfUser = if orgOfUser.len > 0: "org:" & orgOfUser else: shardScope
+          if not uc.createUser(name, nj["role"].getStr, nj["password"].getStr, getTime().toUnix(), scopeOfUser):
             problem(Http409, "user_exists", "there is a user " & name & " already")
             return
-          uc.record(getTime().toUnix(), actorOf(who), "user.create", name, "ok", "role " & nj["role"].getStr)
-          jsonOk(Http201, %*{"name": name, "role": nj["role"].getStr, "scope": shardScope, "breach_check": nv.breachCheck})
+          uc.record(getTime().toUnix(), actorOf(who), "user.create", name, "ok", "role " & nj["role"].getStr & " in " & scopeOfUser)
+          jsonOk(Http201, %*{"name": name, "role": nj["role"].getStr, "scope": scopeOfUser, "breach_check": nv.breachCheck})
         elif umeth == "DELETE" and path.startsWith("/api/v1/users/") and path.count('/') == 4:
           let name = path["/api/v1/users/".len .. ^1]
           if name == roleAdmin:
@@ -435,13 +443,54 @@ proc onRequest() {.raises: [], gcsafe.} =
         let lim = try: parseInt(if limit.len > 0: limit else: "100") except ValueError: 100
         jsonOk(Http200, %*{"events": ac2.list(lim, actor, action, target)})
         return
-      if path == "/api/v1/roles":
-        # IAM-001: the roles of the shard, which every organisation inherits (administrator)
+      if path == "/api/v1/permissions":
+        # D-84: what a role can be made of: every permission, at which level it may be given, and what it allows
         if getMethod() != "GET":
           problem(Http405, "method_not_allowed", "GET")
           return
+        var perms = newJArray()
+        for p in catalogue: perms.add %*{"name": p.name, "level": (if p.level == lvShard: "shard" else: "organization"), "description": p.text}
+        jsonOk(Http200, %*{"permissions": perms})
+        return
+      if path == "/api/v1/roles" or path.startsWith("/api/v1/roles/"):
+        # IAM-001, D-84: the roles (GET: whoever may see who has which role; PUT and DELETE: an administrator makes roles of their own out of permissions)
         var rc = newRq(coreRef.rqliteUrl)
-        jsonOk(Http200, %*{"roles": rc.listRoles()})
+        let rmeth = getMethod()
+        if path == "/api/v1/roles":
+          if rmeth != "GET":
+            problem(Http405, "method_not_allowed", "GET")
+            return
+          jsonOk(Http200, %*{"roles": rc.listRoles()})
+          return
+        let roleName = path["/api/v1/roles/".len .. ^1]
+        if rmeth == "PUT":
+          let rj = try: parseJson(getBody()) except JsonParsingError: nil
+          if rj == nil or rj.kind != JObject or rj{"permissions"}.isNil or rj{"permissions"}.kind != JArray:
+            problem(Http400, "invalid_request", "{\"description\": \"...\", \"permissions\": [\"run.start\", ...]} is required (GET /api/v1/permissions)")
+            return
+          var wanted: seq[string]
+          for x in rj["permissions"].elems:
+            if x.kind != JString:
+              problem(Http400, "invalid_request", "permissions are strings")
+              return
+            wanted.add x.getStr
+          let existed = rc.roleExists(roleName)
+          let bad = rc.putRole(roleName, rj{"description"}.getStr, wanted)
+          if bad.len > 0:
+            problem(Http400, "invalid_role", bad)
+            return
+          rc.record(getTime().toUnix(), actorOf(who), "role.put", roleName, "ok", wanted.join(","))
+          jsonOk(if existed: Http200 else: Http201, %*{"name": roleName, "permissions": wanted})
+        elif rmeth == "DELETE":
+          case rc.deleteRole(roleName)
+          of rdDeleted:
+            rc.record(getTime().toUnix(), actorOf(who), "role.delete", roleName, "ok")
+            jsonOk(Http200, %*{"name": roleName, "deleted": true})
+          of rdNotFound: problem(Http404, "not_found", "no such role")
+          of rdBuiltin: problem(Http409, "builtin_role", "admin, rw, dev and ro are made in code and cannot be deleted")
+          of rdInUse: problem(Http409, "role_in_use", "this role is given to a user; take it away first")
+        else:
+          problem(Http405, "method_not_allowed", "PUT, DELETE")
         return
       if path == "/api/v1/tokens" or path.startsWith("/api/v1/tokens/"):
         var c = newRq(coreRef.rqliteUrl)
@@ -597,7 +646,9 @@ proc onRequest() {.raises: [], gcsafe.} =
         let cfg = currentConfig()
         if getMethod() == "GET":
           var arr = newJArray()
+          let visible = who.visibleOrgs("org.read")
           for o in c.listOrganizationRows():
+            if not visible.all and o.slug notin visible.slugs: continue
             arr.add %*{"id": o.id, "slug": o.slug, "name": o.name, "state": o.state, "url": orgUrl(cfg.publicBase, o.slug),
                        "namespace": namespaceName(orgPrefix, orgShard, o.slug)}
           jsonOk(Http200, %*{"organizations": arr})
@@ -1139,6 +1190,49 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem(Http405, "method_not_allowed", "PUT or DELETE")
         return
+      if path.startsWith("/api/v1/organizations/") and "/members" in path:
+        # D-84: who has which role in an organisation. Read with `access.read`, changed with `access.write` (the gate has checked it for this organisation): the roles of an existing
+        # user are replaced, or taken away. Users are made by an administrator of the shard (POST /api/v1/users).
+        let afterOrg = path["/api/v1/organizations/".len .. ^1]
+        let parts = afterOrg.split('/')
+        if parts.len notin [2, 3] or parts[1] != "members" or not (parts.len == 2 or validUserName(parts[2])):
+          problem(Http404, "not_found", "no such route")
+          return
+        let memberOrg = parts[0]
+        var mc = newRq(coreRef.rqliteUrl)
+        if mc.organizationState(memberOrg).len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & memberOrg)
+          return
+        let mmeth = getMethod()
+        if parts.len == 2 and mmeth == "GET":
+          jsonOk(Http200, %*{"organization": memberOrg, "members": mc.listMembers(memberOrg)})
+        elif parts.len == 3 and mmeth == "PUT":
+          let mj = try: parseJson(getBody()) except JsonParsingError: nil
+          if mj == nil or mj.kind != JObject or mj{"roles"}.isNil or mj{"roles"}.kind != JArray:
+            problem(Http400, "invalid_request", "{\"roles\": [\"dev\", ...]} is required (an empty list takes the roles away)")
+            return
+          var given: seq[string]
+          for x in mj["roles"].elems:
+            if x.kind != JString:
+              problem(Http400, "invalid_request", "roles are strings")
+              return
+            given.add x.getStr
+          let bad = mc.setMember(memberOrg, parts[2], given)
+          if bad.len > 0:
+            problem(Http400, "invalid_member", bad)
+            return
+          mc.record(getTime().toUnix(), actorOf(who), "member.set", parts[2] & " in " & memberOrg, "ok", given.join(","))
+          jsonOk(Http200, %*{"organization": memberOrg, "user": parts[2], "roles": given})
+        elif parts.len == 3 and mmeth == "DELETE":
+          let bad = mc.setMember(memberOrg, parts[2], @[])
+          if bad.len > 0:
+            problem(Http404, "not_found", bad)
+            return
+          mc.record(getTime().toUnix(), actorOf(who), "member.remove", parts[2] & " in " & memberOrg, "ok")
+          jsonOk(Http200, %*{"organization": memberOrg, "user": parts[2], "roles": []})
+        else:
+          problem(Http405, "method_not_allowed", "GET on /members, PUT and DELETE on /members/{user}")
+        return
       if path.startsWith("/api/v1/organizations/"):
         # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)
         if getMethod() != "DELETE":
@@ -1256,8 +1350,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
-        if not who.acrossOrgs and (not j.hasKey("organization") or j["organization"].getStr != who.org):
-          problem(Http403, "forbidden", "this token may start runs of the organisation " & who.org & " only")
+        if not who.mayIn("run.start", j{"organization"}.getStr):
+          problem(Http403, "forbidden", "you may not start runs of " & (if j{"organization"}.getStr.len > 0: "the organisation " & j{"organization"}.getStr else: "the shard's default tenant"))
           return
         var tenant = "t1"
         var profile = ""
@@ -1515,8 +1609,8 @@ proc onRequest() {.raises: [], gcsafe.} =
         # what this caller may do with the run now: its state allows it and the caller's rights allow the call (the UI shows a button for what is true here, and nothing else)
         var ac = newRq(coreRef.rqliteUrl)
         let can = ac.runActions(rest, run{"state"}.getStr)
-        run["actions"] = %*{"abort": can.abort and who.mayCall("POST", base & "/" & rest & ":abort"),
-                            "retry": can.retry and who.mayCall("POST", base & "/" & rest & ":retry")}
+        let runOrg = run{"organization"}.getStr
+        run["actions"] = %*{"abort": can.abort and who.mayIn("run.abort", runOrg), "retry": can.retry and who.mayIn("run.retry", runOrg)}
         jsonOk(Http200, run)
       else:
         problem(Http404, "not_found", "no such route")

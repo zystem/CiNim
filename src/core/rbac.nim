@@ -1,17 +1,18 @@
-## IAM-001, basic RBAC (D-50): four roles of the shard - `admin`, `rw`, `dev`, `ro` - given to users. A role is given at the **shard** level and is inherited by
-## every organisation of the shard: the scope of a binding is `shard` (an organisation-level binding, `org:<slug>`, is the next step and is not built).
+## IAM-001, RBAC (D-50, D-84): the four built-in roles - `admin`, `rw`, `dev`, `ro` - are sets of permissions made in code (permissions.nim), and an administrator makes roles of their own.
+## A role is given to a user at the **shard** (it holds in every organisation) or in one **organisation** (`role_bindings.scope`, `org:<slug>`). What the four have:
 ##
-##   admin  every route (what the `admin` scope of an API token is)
-##   rw     almost an administrator: everything, reads and writes, deletes and edits (as GitLab's Maintainer and GitHub's Maintain: runs, triggers, secrets, settings,
-##          organisations), except what is the shard's own: the management of who may do what - the users, the roles and the API tokens - and the object store
-##          (its endpoint and keys are infrastructure, as GitLab keeps them in the instance's admin area); the own password every user changes
-##   dev    what a developer does: reads what `ro` reads, starts runs (POST /api/v1/runs, and a manual trigger of an organisation: POST .../triggers/{id}:fire), stops them
-##          (POST .../runs/{id}:abort) and starts the failed ones again (POST .../runs/{id}:retry); nothing is deleted or changed
-##   ro     reads runs (state, steps, logs, artifacts), the components, the launch gate, the profile settings, the alerts, the organisations and their triggers
+##   admin  every permission
+##   rw     everything but who may do what (the users, the roles, the API tokens, the access of an organisation), the object stores, the audit, the choice of an organisation's
+##          store and the variables of the shard (as GitLab's Maintainer and GitHub's Maintain: runs, triggers, secrets, settings, organisations)
+##   dev    reads what `ro` reads, starts runs and checks a script, stops a run, starts the failed ones again, fires a manual trigger; nothing is deleted or changed
+##   ro     reads runs (state, steps, logs, artifacts), the components, the launch gate, the profile settings, the alerts, the organisations, their triggers, groups, variables, locks
 ##
-## `dev` and `ro` are allow-lists, so a route added later is closed to them until it is named; `rw` is a deny-list (`adminOnlyPath`), so a route added later is open
-## to it - a route that belongs to the shard's own things must be named in `adminOnlyPath`. Pure; tested in tests/unit/trbac.nim.
+## Which permission a route needs is `needOf` in permissions.nim: a route that is not named there is closed to every role but `admin`, so a route added later stays closed until it is
+## named. `roleMay` here answers for a built-in role given at the shard; it is the old specification of the four roles (tests/unit/trbac.nim), kept to prove that the permissions
+## say the same. The gate asks `mayCall` of apiauth.nim, which knows the organisations too. Pure; tested in tests/unit/trbac.nim and tests/unit/tpermissions.nim.
 import std/[strutils, unicode, json]
+import permissions
+export permissions
 
 const
   roleAdmin* = "admin"
@@ -51,44 +52,12 @@ func userOfPasswordPath*(path: string): string =
     let name = path[head.len ..< path.len - tail.len]
     if validUserName(name): return name
 
-func isRead(meth: string): bool = meth in ["GET", "HEAD"]
-
-func underRuns(path: string): bool = path.startsWith(runsBase)
-
-func readablePath(path: string): bool =
-  ## what a reader may GET
-  if underRuns(path): return true
-  if path in ["/api/v1/components", "/api/v1/launch-gate", "/api/v1/profile", "/api/v1/alerts", "/api/v1/router", "/api/v1/organizations",
-              "/api/v1/organizations:check"]: return true
-  if path == "/api/v1/variables": return true
-  path.startsWith("/api/v1/organizations/") and (path.endsWith("/triggers") or path.endsWith("/locks") or "/locks/" in path or path.endsWith("/variables") or
-                                                 path.endsWith("/groups") or "/groups/" in path or path.endsWith("/projects") or "/projects/" in path or path.endsWith("/holds") or path.endsWith("/hold") or path.endsWith("/caches") or path.endsWith("/storage"))
-
-func adminOnlyPath(path: string): bool =
-  ## what is the shard's own and only an administrator's: the management of who may do what (the users, the roles, the API tokens) and the object store of the shard
-  for head in ["/api/v1/users", "/api/v1/roles", "/api/v1/tokens", "/api/v1/stores", "/api/v1/audit"]:
-    if path == head or path.startsWith(head & "/") or path.startsWith(head & ":"): return true
-  # which store an organisation uses (D-59): the shard's infrastructure, until organisations have administrators of their own (IAM-001, not built)
-  path.startsWith("/api/v1/organizations/") and path.endsWith("/storage")
-
-func shardVariableWrite(meth, path: string): bool =
-  ## the variables of the shard are every organisation's: an administrator writes them (a person who reads reads them)
-  not isRead(meth) and (path == "/api/v1/variables" or path.startsWith("/api/v1/variables/"))
-
-func developerMay(meth, path: string): bool =
-  ## what a developer may do besides reading: start a run, directly or by firing a manual trigger of an organisation, stop a run, start a failed one again
-  if meth != "POST": return false
-  if path == runsBase or path == "/api/v1/pipelines:check": return true
-  if path.startsWith(runsBase & "/") and (path.endsWith(":abort") or path.endsWith(":retry")): return true
-  path.startsWith("/api/v1/organizations/") and "/triggers/" in path and path.endsWith(":fire")
-
 func roleMay*(role, meth, path: string): bool =
-  case role
-  of roleAdmin: true
-  of roleDev: (isRead(meth) and readablePath(path)) or developerMay(meth, path)
-  of roleRw: not adminOnlyPath(path) and not shardVariableWrite(meth, path)
-  of roleRo: isRead(meth) and readablePath(path)
-  else: false
+  ## whether a built-in role, given at the shard, allows this call: the permission the route needs (permissions.nim) is one the role has. An administrator may call anything,
+  ## also a route that is not named; every other role, only the named ones.
+  if role == roleAdmin: return true
+  let n = needOf(meth, path)
+  n.permission.len > 0 and n.permission in builtinPermissions(role)
 
 func rolesMay*(roles: openArray[string]; meth, path: string): bool =
   for r in roles:

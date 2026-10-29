@@ -47,11 +47,11 @@ suite "scopes":
     check principalOf("org:acme").mayCall("POST", abortPath) and principalOf("org:acme").mayCall("GET", "/api/v1/runs/s1_a")
     check not principalOf("org:acme").mayCall("GET", "/api/v1/users") and not principalOf("org:acme").mayCall("POST", "/api/v1/organizations")
     check not principalOf("nonsense").mayCall("GET", "/api/v1/runs")
-    var user = Principal(ok: true, user: "ann", roles: @["ro"])
+    var user = Principal(ok: true, user: "ann", roles: @["ro"], grants: grantsOfRoles(["ro"]))
     check user.mayCall("GET", "/api/v1/runs/s1_a") and not user.mayCall("POST", abortPath) and not user.mayCall("POST", "/api/v1/runs/s1_a:retry")
-    user.roles = @["dev"]
+    user.grants = grantsOfRoles(["dev"])
     check user.mayCall("POST", abortPath) and user.mayCall("POST", "/api/v1/runs/s1_a:retry") and not user.mayCall("DELETE", "/api/v1/organizations/acme")
-    user.roles = @["ro", "dev"]                                                   # the rights of the roles add up
+    user.grants = grantsOfRoles(["ro", "dev"])                                   # the rights of the roles add up
     check user.mayCall("POST", abortPath)
     check user.mayCall("PUT", "/api/v1/users/ann/password") and not user.mayCall("PUT", "/api/v1/users/bob/password")      # one's own password
-    check not Principal(ok: true, user: "gone").mayCall("GET", "/api/v1/runs")      # a user with no role left, and no organisation, may do nothing
+    check not Principal(ok: true, user: "gone").mayCall("GET", "/api/v1/runs")      # a user with no role left may do nothing

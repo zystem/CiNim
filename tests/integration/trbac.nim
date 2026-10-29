@@ -89,6 +89,70 @@ suite "IAM-001 users, roles and their tokens":
       let org = who(c.createApiToken("acme", "org:acme", 0, t0).token)
       check org.ok and org.org == "acme" and org.mayCall("POST", abortPath) and org.mayUseOrg("acme") and not org.mayUseOrg("other")
       check not org.mayCall("POST", "/api/v1/users") and not org.mayCall("PUT", "/api/v1/profile")
+    test "D-84 a role of one's own is a set of permissions: made, changed, listed, and refused when it names a permission that is not one or takes a built-in name":
+      discard first()
+      check c.putRole("deployer", "starts and stops", @["run.read", "run.start", "run.abort"]) == ""
+      check c.rolePermissions("deployer") == @["run.abort", "run.read", "run.start"]
+      check c.putRole("deployer", "starts only", @["run.read", "run.start"]) == ""           # replaces
+      check c.rolePermissions("deployer") == @["run.read", "run.start"]
+      check c.putRole("deployer", "", @["run.fly"]).len > 0 and c.putRole("deployer", "", @[]).len > 0
+      check c.putRole("admin", "", @["run.read"]).len > 0 and c.putRole("Bad Name", "", @["run.read"]).len > 0
+      let listed = c.listRoles()
+      check listed.mapIt(it["name"].getStr) == @["admin", "deployer", "dev", "ro", "rw"]
+      check listed.filterIt(it["name"].getStr == "admin")[0]["builtin"].getBool and not listed.filterIt(it["name"].getStr == "deployer")[0]["builtin"].getBool
+      check listed.filterIt(it["name"].getStr == "ro")[0]["permissions"].len == builtinPermissions("ro").len
+    test "D-84 a user whose only roles are in an organisation holds there and nowhere else, the token works, and the roles of the shard are not touched":
+      discard first()
+      check c.createUser("olga", "dev", pwOf & "olga", t0, "org:acme")
+      let token = c.createApiToken("t", userScope("olga"), 0, t0).token
+      let p = who(token)
+      check p.ok and p.user == "olga" and p.roles.len == 0 and not p.admin and not p.shardWide
+      check p.mayIn("run.start", "acme") and not p.mayIn("run.start", "beta") and not p.mayIn("run.start", "")
+      check p.mayCall("POST", "/api/v1/runs") and p.mayCall("POST", "/api/v1/runs/s1_x:abort") and p.mayCall("GET", "/api/v1/organizations/acme/triggers")
+      check not p.mayCall("GET", "/api/v1/organizations/beta/triggers") and not p.mayCall("GET", "/api/v1/components") and not p.mayCall("GET", "/api/v1/users")
+      check not p.mayCall("POST", "/api/v1/organizations/acme/triggers") and not p.mayCall("PUT", "/api/v1/organizations/acme/members/ann")
+      let li = c.login("olga", pwOf & "olga", t0 + 1)
+      check li.ok and li.roles.len == 0
+      check c.listUsers().filterIt(it["name"].getStr == "olga")[0]["organizations"]["acme"] == %*["dev"]
+    test "D-84 the roles in an organisation are replaced and taken away by its members routes; the others' are not touched; an unknown user or role is refused":
+      discard first()
+      discard makeUser("ann", "ro")
+      check c.createUser("olga", "ro", pwOf & "olga", t0, "org:acme")
+      check c.setMember("acme", "ann", @["dev", "ro"]) == ""
+      check c.setMember("beta", "ann", @["ro"]) == ""
+      check c.listMembers("acme").mapIt(it["user"].getStr) == @["ann", "olga"]
+      check c.listMembers("acme")[0]["roles"] == %*["dev", "ro"]
+      check c.setMember("acme", "ann", @["rw"]) == ""                                          # replaces what ann had in acme
+      check c.listMembers("acme")[0]["roles"] == %*["rw"] and c.listMembers("beta")[0]["roles"] == %*["ro"]
+      check c.setMember("acme", "nobody", @["ro"]).len > 0 and c.setMember("acme", "ann", @["no-such-role"]).len > 0
+      check c.setMember("acme", "ann", @[]) == ""
+      check c.listMembers("acme").mapIt(it["user"].getStr) == @["olga"]
+      let ann = who(c.createApiToken("t", userScope("ann"), 0, t0).token)
+      check ann.roles == @["ro"] and ann.mayIn("run.read", "acme") and not ann.mayIn("run.start", "acme")       # the shard's ro, and nothing more
+    test "D-84 a role of one's own works in the token of a user, at the shard and in an organisation, and cannot be deleted while it is given":
+      discard first()
+      check c.putRole("deployer", "", @["run.read", "run.start", "trigger.fire"]) == ""
+      check c.createUser("dan", "deployer", pwOf & "dan", t0)
+      let dan = who(c.createApiToken("t", userScope("dan"), 0, t0).token)
+      check dan.roles == @["deployer"] and dan.mayCall("POST", "/api/v1/runs") and dan.mayCall("POST", "/api/v1/organizations/acme/triggers/t1:fire")
+      check not dan.mayCall("POST", "/api/v1/runs/s1_x:abort") and not dan.mayCall("GET", "/api/v1/runs/s1_x/log")
+      check c.deleteRole("deployer") == rdInUse and c.deleteRole("ro") == rdBuiltin and c.deleteRole("nope") == rdNotFound
+      check c.deleteUser("dan", t0 + 1)
+      check c.deleteRole("deployer") == rdDeleted and c.rolePermissions("deployer").len == 0
+      # a role changed later changes what the token of its user may do at once
+      check c.putRole("qa", "", @["run.read"]) == ""
+      discard c.createUser("quinn", "qa", pwOf & "quinn", t0)
+      let quinnToken = c.createApiToken("t", userScope("quinn"), 0, t0).token
+      check not who(quinnToken).mayCall("POST", "/api/v1/runs")
+      check c.putRole("qa", "", @["run.read", "run.start"]) == ""
+      check who(quinnToken).mayCall("POST", "/api/v1/runs")
+    test "D-84 a user with no binding at all is refused as one whose roles were taken away":
+      discard first()
+      discard makeUser("zed", "ro")
+      let token = c.createApiToken("t", userScope("zed"), 0, t0).token
+      check who(token).ok
+      discard c.execute(%*[["DELETE FROM role_bindings WHERE user_name = ?", "zed"]])
+      check not who(token).ok and who(token).why == "revoked"
     test "a user's role taken away, or the user switched off: the token stops working at once; another user is not touched":
       discard first()
       let a = makeUser("ann", "rw")

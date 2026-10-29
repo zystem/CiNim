@@ -67,22 +67,39 @@ suite "UI the list of runs":
       check c.listRuns(slugA, "", 0, "")["runs"].len == 7          # 0 and below: the default (50)
       check c.listRuns(slugA, "", -5, "")["runs"].len == 7
       check c.listRuns("", "", 100000, "")["runs"].len <= maxRunPage
+    test "D-84 `only` keeps the runs of the organisations a caller may see, and none of the others":
+      let onlyA = c.listRuns("", "", 200, "", @[slugA])["runs"].mapIt(it["organization"].getStr)
+      check onlyA.len == 7 and onlyA.allIt(it == slugA)
+      let both = c.listRuns("", "", 200, "", @[slugA, slugB])["runs"]
+      check both.len == 7 + idsB.len and both.allIt(it["organization"].getStr in [slugA, slugB])
+      check c.listRuns("", "", 200, "", @["no-such-org-" & sfx])["runs"].len == 0
     test "the values are parameters, not SQL":
       check c.listRuns("x' OR '1'='1", "", 50, "")["runs"].len == 0
       check c.listRuns(slugA, "FAILED' OR '1'='1", 50, "")["runs"].len == 0
       check c.listRuns(slugA, "", 50, "' OR id != '")["runs"].len == 0
 
 suite "UI who may list which runs":
-  test "an administrator and a shard-level role: any organisation, or all of them":
+  test "an administrator and a role at the shard: any organisation, or all of them":
     let admin = principalOf("admin")
-    check runListScope(admin, "") == (true, "")
-    check runListScope(admin, "acme") == (true, "acme")
-    check runListScope(Principal(ok: true, shardWide: true), "acme") == (true, "acme")
+    check runListScope(admin, "") == (true, "", newSeq[string]())
+    check runListScope(admin, "acme") == (true, "acme", newSeq[string]())
+    check runListScope(Principal(ok: true, user: "x", shardWide: true, grants: grantsOfRoles(["ro"])), "acme") == (true, "acme", newSeq[string]())
   test "a token of an organisation: its own runs, whether it names the organisation or not; another's is refused":
     let t = principalOf("org:acme")
-    check runListScope(t, "") == (true, "acme")
-    check runListScope(t, "acme") == (true, "acme")
-    check runListScope(t, "other") == (false, "")
+    check runListScope(t, "") == (true, "", @["acme"])
+    check runListScope(t, "acme") == (true, "acme", newSeq[string]())
+    check not runListScope(t, "other").ok
+  test "D-84 a user with a role in some organisations: those, and another's is refused":
+    var g: Grants
+    g.addRole("org:acme", builtinPermissions("ro"))
+    g.addRole("org:beta", builtinPermissions("dev"))
+    g.addRole("org:gamma", ["trigger.read"])                      # a role that cannot read runs there
+    let u = Principal(ok: true, user: "x", grants: g)
+    let all = runListScope(u, "")
+    check all.ok and all.organization == "" and all.only.len == 2 and "acme" in all.only and "beta" in all.only and "gamma" notin all.only
+    check runListScope(u, "beta") == (true, "beta", newSeq[string]())
+    check not runListScope(u, "gamma").ok and not runListScope(u, "other").ok
   test "no one and a token of no organisation: refused":
-    check runListScope(Principal(), "") == (false, "")
-    check runListScope(Principal(ok: true), "") == (false, "")
+    check not runListScope(Principal(), "").ok
+    check not runListScope(Principal(ok: true), "").ok
+    check not runListScope(Principal(ok: true, user: "x"), "").ok

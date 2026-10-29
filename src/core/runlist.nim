@@ -1,7 +1,7 @@
 ## The list of runs (GET /api/v1/runs), for the page of runs of the UI (docs/ui.md) and for anyone who wants to see what ran: newest first, a page at a time, the id of the last run of a page
 ## as the cursor (`before`), filtered by organisation (its slug) and by state. A row is a run without its steps (`getRun` gives those): the list is cheap however long it is. The ids are
 ## made by the core and ordered by time, so that the order of the ids is the order of the runs, and a cursor that is an id never misses a run or shows one twice while new runs come.
-import std/json
+import std/[json, sequtils, strutils]
 import ../common/rqlite
 import apiauth
 
@@ -9,14 +9,20 @@ const
   defaultRunPage* = 50
   maxRunPage* = 200
 
-proc listRuns*(c: var RqClient; organization, state: string; limit: int; before: string): JsonNode =
-  ## {"runs": [...], "next": <the id to pass as `before` for the next page, or null at the end>}. `organization` and `state` and `before` are "" for no filter.
+proc listRuns*(c: var RqClient; organization, state: string; limit: int; before: string; only: seq[string] = @[]): JsonNode =
+  ## {"runs": [...], "next": <the id to pass as `before` for the next page, or null at the end>}. `organization` and `state` and `before` are "" for no filter; `only` keeps
+  ## the runs of these organisations, for a caller who may see some and not others (D-84).
   let n = if limit < 1: defaultRunPage else: min(limit, maxRunPage)
-  let r = c.query(%*[["SELECT r.id, COALESCE(o.slug, ''), COALESCE(g.path, ''), r.state, r.created_at, r.updated_at, r.fail_code, r.fail_message, " &
+  var stmt = newJArray()
+  stmt.add %("SELECT r.id, COALESCE(o.slug, ''), COALESCE(g.path, ''), r.state, r.created_at, r.updated_at, r.fail_code, r.fail_message, " &
     "r.source_repository, r.source_commit, COALESCE(r.trigger_id, ''), r.source_path " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id LEFT JOIN groups g ON g.id = r.group_id " &
-    "WHERE (? = '' OR o.slug = ?) AND (? = '' OR r.state = ?) AND (? = '' OR r.id < ?) ORDER BY r.id DESC LIMIT ?",
-    organization, organization, state, state, before, before, n + 1]])
+    "WHERE (? = '' OR o.slug = ?) AND (? = '' OR r.state = ?) AND (? = '' OR r.id < ?)" &
+    (if only.len > 0: " AND o.slug IN (" & newSeqWith(only.len, "?").join(",") & ")" else: "") & " ORDER BY r.id DESC LIMIT ?")
+  for a in [organization, organization, state, state, before, before]: stmt.add %a
+  for s in only: stmt.add %s
+  stmt.add %(n + 1)
+  let r = c.query(%*[stmt])
   let vals = r["results"][0]{"values"}
   var runs = newJArray()
   var next = newJNull()
@@ -33,10 +39,13 @@ proc listRuns*(c: var RqClient; organization, state: string; limit: int; before:
       runs.add item
   %*{"runs": runs, "next": next}
 
-func runListScope*(who: Principal; asked: string): tuple[ok: bool, organization: string] =
-  ## which organisation's runs the caller may list: an administrator or a shard-level role, any (`asked`, or all of them when it is empty); a token of an organisation, its own only, whatever it asks
-  ## (asking for another's is refused, not answered with its own, so that a mistake is seen). `ok` false: 403.
-  if who.acrossOrgs: return (true, asked)
-  if not who.ok or who.org.len == 0: return (false, "")
-  if asked.len > 0 and asked != who.org: return (false, "")
-  (true, who.org)
+func runListScope*(who: Principal; asked: string): tuple[ok: bool, organization: string, only: seq[string]] =
+  ## which organisations' runs the caller may list: where `run.read` is held (D-84). An administrator, or a role at the shard: any (`asked`, or all of them when it is empty); a role in some
+  ## organisations: those, and asking for another is refused, not answered with the others, so that a mistake is seen. A token of an organisation: its own. `ok` false: 403.
+  let seen = who.visibleOrgs("run.read")
+  if seen.all: return (true, asked, @[])
+  if not who.ok or seen.slugs.len == 0: return
+  if asked.len > 0:
+    if asked notin seen.slugs: return
+    return (true, asked, @[])
+  (true, "", seen.slugs)

@@ -9,7 +9,7 @@
 ## With neither `CINIM_AUTH=on` nor `CINIM_ADMIN_TOKEN` the API is open, as before this module (development, tests); the core says so at start.
 ##
 ## Pure parts (the header, the token, the scope rules) are tested in tests/unit/tapiauth.nim; the rows are the glue.
-import std/[json, strutils, times, sysrand]
+import std/[json, strutils, times, sysrand, sets, tables]
 import crunchy
 import ../common/[rqlite, ctrlauth]
 import rbac
@@ -30,6 +30,8 @@ type
     user*: string            ## the user a `user:<name>` token stands for (IAM-001)
     roles*: seq[string]      ## that user's roles at the shard level, read when the request came
     shardWide*: bool         ## a role of the shard that is not `admin`: the rights of `rw` or `ro` hold in every organisation
+    grants*: Grants          ## what the user's roles give, at the shard and in each organisation (D-84)
+    need*: Need              ## what the request being served needs, set by the gate: `mayUseOrg` asks it for the organisation the handler finds
     mustChange*: bool        ## the user's password has to be changed first: the only thing allowed is the change of it
     why*: string             ## when not ok: `missing`, `malformed`, `unknown`, `expired`, `revoked`
 
@@ -94,8 +96,28 @@ func acrossOrgs*(p: Principal): bool = p.ok and (p.admin or p.shardWide)
   ## the rights hold in every organisation: an administrator's, and the shard-level roles (which every organisation inherits)
 
 func mayUseOrg*(p: Principal; org: string): bool =
-  ## whether this principal may touch the runs of this organisation: an administrator or a shard-level role any, an organisation's token its own
-  p.acrossOrgs or (p.ok and p.org.len > 0 and p.org == org)
+  ## whether this principal may touch the runs of this organisation: an administrator any; a user, the organisations where the permission the request needs is held (at the shard
+  ## it holds in every one); an organisation's token its own
+  if not p.ok: return false
+  if p.admin: return true
+  if p.user.len > 0:
+    if p.need.permission.len > 0: return p.grants.holds(p.need.permission, org)
+    return p.shardWide or org in p.grants.orgs
+  p.org.len > 0 and p.org == org
+
+func mayIn*(p: Principal; perm, org: string): bool =
+  ## whether the principal holds `perm` for `org` ("" is the shard itself); an organisation's token holds every permission of its own runs
+  if not p.ok: return false
+  if p.admin: return true
+  if p.user.len > 0: return p.grants.holds(perm, org)
+  p.org.len > 0 and p.org == org and perm.startsWith("run.")
+
+func visibleOrgs*(p: Principal; perm: string): tuple[all: bool, slugs: seq[string]] =
+  ## where `perm` is held: every organisation (a binding at the shard, an administrator), or these
+  if not p.ok: return
+  if p.admin or (p.user.len > 0 and perm in p.grants.shard): return (true, @[])
+  if p.user.len > 0: return (false, p.grants.orgsWith(perm))
+  if p.org.len > 0: return (false, @[p.org])
 
 func mayCall*(p: Principal; meth, path: string): bool =
   ## The one answer to "may this caller make this call": the gate of the API asks it, and so does the page of a run that says which actions to offer (`actions`).
@@ -103,7 +125,7 @@ func mayCall*(p: Principal; meth, path: string): bool =
   ## (which of the organisation's runs is checked where the run is known: `mayUseOrg`).
   if not p.ok: return false
   if p.admin: return true
-  if p.roles.len > 0: return rolesMay(p.roles, meth, path) or selfService(p.user, meth, path)
+  if p.user.len > 0: return p.grants.allows(needOf(meth, path)) or selfService(p.user, meth, path)
   p.org.len > 0 and path.startsWith(runsBase)
 
 # ------------------------------------------------------------------ the rows
@@ -152,17 +174,33 @@ const
 proc mintPassword*(): string = randomHex(32)
   ## the password the core makes for a user: 256 random bits (a person changes it for one of their own; either is stored as an Argon2id string, common/sodiumpw.nim)
 
-proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChange: bool, roles: seq[string]] =
-  ## the user, and the roles it has at the shard level (the ones every organisation inherits)
-  let r = c.query(%*[["SELECT disabled, must_change FROM users WHERE name = ?", name], ["SELECT role FROM role_bindings WHERE user_name = ? AND scope = ? ORDER BY role", name, shardScope]])
+proc rolePermissions*(c: var RqClient; role: string): seq[string] =
+  ## the permissions in a role: a built-in one is made in code (permissions.nim), one an administrator made is in `role_permissions`
+  if isBuiltin(role): return builtinPermissions(role)
+  let r = c.query(%*[["SELECT permission FROM role_permissions WHERE role = ? ORDER BY permission", role]])["results"][0]{"values"}
+  if r != nil:
+    for v in r: result.add v[0].getStr
+
+proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope: string]], grants: Grants] =
+  ## the user; the roles it has at the shard level (the ones every organisation inherits); every binding, at the shard and in an organisation; and what they give (D-84)
+  let r = c.query(%*[["SELECT disabled, must_change FROM users WHERE name = ?", name], ["SELECT role, scope FROM role_bindings WHERE user_name = ? ORDER BY scope, role", name]])
   let u = r["results"][0]{"values"}
   if u == nil or u.len == 0: return
   result.found = true
   result.disabled = u[0][0].getInt > 0
   result.mustChange = u[0][1].getInt > 0
   let rs = r["results"][1]{"values"}
+  var known = initTable[string, seq[string]]()
   if rs != nil:
-    for v in rs: result.roles.add v[0].getStr
+    for v in rs:
+      let role = v[0].getStr
+      let scope = v[1].getStr
+      result.bindings.add (role, scope)
+      if scope == shardScope: result.roles.add role
+      if role notin known: known[role] = c.rolePermissions(role)
+      result.grants.addRole(scope, known[role])
+
+func isOrgScope*(scope: string): bool = scope.startsWith("org:") and scope.len > 4
 
 proc ensureRoles*(c: var RqClient) =
   var stmts = newJArray()
@@ -184,12 +222,12 @@ proc bootstrapAdminUser*(c: var RqClient; now: int64): seq[UserCredential] =
     ["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", roleAdmin, roleAdmin, shardScope]], transaction = true)
   @[UserCredential(user: roleAdmin, role: roleAdmin, password: pw, token: c.newUserToken(roleAdmin, now))]
 
-proc createUser*(c: var RqClient; name, role, password: string; now: int64): bool =
-  ## An administrator makes a user with one role of the shard and a password (checked by the caller). False if the name is taken.
+proc createUser*(c: var RqClient; name, role, password: string; now: int64; scope = shardScope): bool =
+  ## An administrator makes a user with one role, at the shard or (`scope` = `org:<slug>`) in one organisation, and a password (checked by the caller). False if the name is taken.
   if c.userRoles(name).found: return false
   discard c.execute(%*[
     ["INSERT INTO users (name, password_hash, created_at) VALUES (?, ?, ?)", name, passwordHash(password), now],
-    ["INSERT INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", name, role, shardScope]], transaction = true)
+    ["INSERT INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", name, role, scope]], transaction = true)
   true
 
 proc deleteUser*(c: var RqClient; name: string; now: int64): bool =
@@ -202,11 +240,63 @@ proc deleteUser*(c: var RqClient; name: string; now: int64): bool =
   true
 
 proc listRoles*(c: var RqClient): JsonNode =
+  ## every role with the permissions in it; `builtin` roles are made in code and cannot be changed
   result = newJArray()
   let r = c.query(%*[["SELECT name, description FROM roles ORDER BY name"]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
-    for v in vals: result.add %*{"name": v[0].getStr, "description": v[1].getStr, "scope": shardScope}
+    for v in vals:
+      let name = v[0].getStr
+      result.add %*{"name": name, "description": v[1].getStr, "scope": shardScope, "builtin": isBuiltin(name), "permissions": c.rolePermissions(name)}
+
+proc roleExists*(c: var RqClient; name: string): bool =
+  if isBuiltin(name): return true
+  let v = c.query(%*[["SELECT 1 FROM roles WHERE name = ?", name]])["results"][0]{"values"}
+  v != nil and v.len > 0                          # rqlite leaves `values` out when there is no row
+
+proc putRole*(c: var RqClient; name, description: string; permissions: seq[string]): string =
+  ## Makes a role, or replaces the permissions of one an administrator made; "" when done, otherwise why not. The built-in four are not touched.
+  if not validRoleName(name): return "a role name is lowercase letters, digits, - and _, starts with a letter, at most 32, and is not admin, rw, dev or ro"
+  if permissions.len == 0: return "a role has at least one permission"
+  for p in permissions:
+    if not isPermission(p): return "no such permission: " & p
+  var stmts = newJArray()
+  stmts.add %*["INSERT INTO roles (name, description) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET description = excluded.description", name, description]
+  stmts.add %*["DELETE FROM role_permissions WHERE role = ?", name]
+  for p in permissions: stmts.add %*["INSERT OR IGNORE INTO role_permissions (role, permission) VALUES (?, ?)", name, p]
+  discard c.execute(stmts, transaction = true)
+
+type RoleDelete* = enum rdDeleted, rdNotFound, rdBuiltin, rdInUse
+
+proc deleteRole*(c: var RqClient; name: string): RoleDelete =
+  if isBuiltin(name): return rdBuiltin
+  if not c.roleExists(name): return rdNotFound
+  let bound = c.query(%*[["SELECT 1 FROM role_bindings WHERE role = ? LIMIT 1", name]])["results"][0]{"values"}
+  if bound != nil and bound.len > 0: return rdInUse
+  discard c.execute(%*[["DELETE FROM role_permissions WHERE role = ?", name], ["DELETE FROM roles WHERE name = ?", name]], transaction = true)
+  rdDeleted
+
+proc listMembers*(c: var RqClient; org: string): JsonNode =
+  ## who has a role in this organisation (a binding of the organisation; the ones at the shard are in GET /users)
+  result = newJArray()
+  let vals = c.query(%*[["SELECT user_name, role FROM role_bindings WHERE scope = ? ORDER BY user_name, role", "org:" & org]])["results"][0]{"values"}
+  var cur = ""
+  if vals != nil:
+    for v in vals:
+      if v[0].getStr != cur:
+        cur = v[0].getStr
+        result.add %*{"user": cur, "roles": []}
+      result[result.len - 1]["roles"].add %v[1].getStr
+
+proc setMember*(c: var RqClient; org, user: string; roles: seq[string]): string =
+  ## The roles of an existing user in this organisation are these (replacing the ones it had there); an empty list takes them all away. "" when done, otherwise why not.
+  if not c.userRoles(user).found: return "no such user: " & user
+  for r in roles:
+    if not c.roleExists(r): return "no such role: " & r
+  var stmts = newJArray()
+  stmts.add %*["DELETE FROM role_bindings WHERE user_name = ? AND scope = ?", user, "org:" & org]
+  for r in roles: stmts.add %*["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", user, r, "org:" & org]
+  discard c.execute(stmts, transaction = true)
 
 proc resetUserCredentials*(c: var RqClient; user: string; now: int64): tuple[ok: bool, cred: UserCredential] =
   ## A new password and a new token for a user (a lost one, a leaked one): every token of that user, also the ones from a login, is revoked, and the password has to be changed at once.
@@ -227,7 +317,12 @@ proc listUsers*(c: var RqClient): JsonNode =
   if vals != nil:
     for v in vals:
       let u = c.userRoles(v[0].getStr)
-      result.add %*{"name": v[0].getStr, "roles": u.roles, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
+      var inOrgs = newJObject()
+      for b in u.bindings:
+        if isOrgScope(b.scope):
+          if not inOrgs.hasKey(b.scope[4 .. ^1]): inOrgs[b.scope[4 .. ^1]] = newJArray()
+          inOrgs[b.scope[4 .. ^1]].add %b.role
+      result.add %*{"name": v[0].getStr, "roles": u.roles, "organizations": inOrgs, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
 
 proc passwordIs*(c: var RqClient; user, password: string): bool =
   ## whether this is the user's password. For a user who does not exist the same work is done (a hash is made), so that the time does not tell.
@@ -253,7 +348,7 @@ proc login*(c: var RqClient; user, password: string; now: int64): tuple[ok: bool
   ## switched-off user are the same answer, and the same work is done for each.
   let same = c.passwordIs(user, password)
   let u = c.userRoles(user)
-  if not (same and u.found and not u.disabled and u.roles.len > 0): return
+  if not (same and u.found and not u.disabled and u.bindings.len > 0): return
   let t = c.createApiToken("login " & user, userScope(user), now + sessionSeconds, now)
   (true, t.token, now + sessionSeconds, u.roles, u.mustChange)
 
@@ -276,8 +371,9 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
   if userName.len > 0:
     # a token of a user: the rights are the user's roles now, so that taking a role away or switching the user off works at once
     let u = c.userRoles(userName)
-    if not u.found or u.disabled or u.roles.len == 0: return Principal(why: "revoked")
-    result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, shardWide: roleAdmin notin u.roles, mustChange: u.mustChange)
+    if not u.found or u.disabled or u.bindings.len == 0: return Principal(why: "revoked")
+    result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, shardWide: u.roles.len > 0 and roleAdmin notin u.roles, mustChange: u.mustChange,
+                       grants: u.grants)
   else:
     result = principalOf(row[1].getStr)
   result.name = row[2].getStr
