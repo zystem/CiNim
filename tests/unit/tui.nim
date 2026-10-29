@@ -33,7 +33,7 @@ proc fakeCore(): CoreApi =
       ApiResult(status: asUnauthorized, code: 401, message: "bad_credentials")
   result.get = proc (token, path: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
-      calls.add token & " " & path
+      if path != "/api/v1/me": calls.add token & " " & path            # the menu asks who the caller is on every page: not counted with what a page asked
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if token != "tok-ann": return ApiResult(status: asUnauthorized, code: 401, message: "bad token")
       if path in routes: ok(routes[path]) else: ApiResult(status: asNotFound, code: 404, message: "no such route")
@@ -292,6 +292,32 @@ suite "the pages":
     routes["/api/v1/components"] = nil
     down = true
     check handle(cfg, fakeCore(), req("GET", "/ui/status", cookie = session)).status == 503
+
+suite "D-84 the menu follows what the core says the caller comes to (GET /api/v1/me)":
+  setup: reset()
+  proc menuOf(me: JsonNode): string =
+    if me != nil: routes["/api/v1/me"] = me
+    routes["/api/v1/organizations"] = %*{"organizations": []}
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/orgs", cookie = session))
+    var m = ""
+    if "href=\"/ui/orgs\"" in r.body: m.add "O"
+    if "href=\"/ui/runs\"" in r.body: m.add "R"
+    if "href=\"/ui/status\"" in r.body: m.add "C"
+    m
+  test "an administrator sees everything; a user of the shard with the right to read sees everything":
+    check menuOf(%*{"administrator": true, "permissions": {"shard": ["run.read"]}}) == "ORC"
+    check menuOf(%*{"administrator": false, "permissions": {"shard": ["run.read", "shard.read"], "organizations": {}, "groups": {}}}) == "ORC"
+  test "a user with roles in organisations only sees the runs but not the components of the shard":
+    check menuOf(%*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["run.read"]}, "groups": {}}}) == "OR"
+  test "a user whose only role is on a group sees the runs when that role reads runs":
+    check menuOf(%*{"administrator": false, "permissions": {"shard": [], "organizations": {}, "groups": {"acme": [{"path": "ci", "permissions": ["run.read", "log.read"]}]}}}) == "OR"
+    check menuOf(%*{"administrator": false, "permissions": {"shard": [], "organizations": {}, "groups": {"acme": [{"path": "ci", "permissions": ["trigger.read"]}]}}}) == "O"
+  test "a user who reads nothing sees the organisations and nothing else":
+    check menuOf(%*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["trigger.read"]}, "groups": {}}}) == "O"
+  test "a core that does not answer /me, or answers with something else, leaves the whole menu (the core refuses what is not allowed all the same)":
+    check menuOf(nil) == "ORC"                                  # no route: the stand-in says 404
+    check menuOf(%*[1, 2]) == "ORC"
+    check menuOf(%*{"permissions": "none"}) == "ORC"
 
 suite "D-87 the organisation in the login form":
   setup: reset()

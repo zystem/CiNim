@@ -193,6 +193,34 @@ func tokenOf(cookie: string): string =
           if c notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '~', '-', ':', '+'}: return ""
         return v
 
+var
+  hideRuns {.threadvar.}: bool        ## the menu of the request being served: what the core says the caller cannot use is not shown (D-84; the core refuses it all the same)
+  hideStatus {.threadvar.}: bool
+
+proc setMenu(api: CoreApi; token: string) =
+  ## asks GET /api/v1/me what the caller comes to, and hides the entries of the menu that would only be a 403. If the core does not say, everything is shown.
+  hideRuns = false
+  hideStatus = false
+  let r = api.get(token, "/api/v1/me")
+  if r.status != asOk or not r.body.isKind(JObject): return
+  let perms = r.body{"permissions"}
+  if r.body{"administrator"}.getBool or not perms.isKind(JObject): return
+  func listHas(n: JsonNode; name: string): bool =
+    if not n.isKind(JArray): return false
+    for x in n.elems:
+      if x.kind == JString and x.getStr == name: return true
+  var canRuns = listHas(perms{"shard"}, "run.read")
+  if perms{"organizations"}.isKind(JObject):
+    for _, l in perms["organizations"]:
+      if listHas(l, "run.read"): canRuns = true
+  if perms{"groups"}.isKind(JObject):
+    for _, arr in perms["groups"]:
+      if arr.isKind(JArray):
+        for g in arr.elems:
+          if listHas(g{"permissions"}, "run.read"): canRuns = true
+  hideRuns = not canRuns
+  hideStatus = not listHas(perms{"shard"}, "shard.read")
+
 # ------------------------------------------------------------------ the pages (templates/*.nimja: every expression through h() or raw(), tests/unit/ttemplates.nim)
 
 proc renderLogin(base, message, user, next, chosen: string; orgs: seq[OrgRow]): string =
@@ -447,6 +475,7 @@ proc parseQuery(q: string): Table[string, string] =
   for k, v in decodeQuery(q): result[k] = v
 
 proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; query: Table[string, string]): UiResponse =
+  api.setMenu(token)
   let parts = path.strip(chars = {'/'}).split('/')
   if req.meth == "POST" and parts.len == 3 and parts[0] == "runs" and isId(parts[1]) and parts[2] in ["abort", "retry"]:
     return runAction(cfg, api, req, token, parts[1], parts[2])

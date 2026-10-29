@@ -6,7 +6,7 @@
 ##
 ## HTTP layer: GuildenStern (D-25): pure Nim, no C dependency. Its `onRequest` is one global dispatcher
 ## reading thread-local request state via `getUri`/`getMethod`/`getBody`, so routes are matched here, by hand.
-import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
+import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
 import ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
@@ -365,7 +365,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           unauthorized(who.why)
           return
         who.need = needOf(getMethod(), path)          # D-84: what this request needs; `mayUseOrg` asks it again for the organisation a handler finds
-        if who.mustChange and not selfService(who.user, getMethod(), path):
+        if who.mustChange and path != "/api/v1/me" and not selfService(who.user, getMethod(), path):
           # IAM-001: the password of this user has to be changed first (the administrator after the first login): that is the one thing allowed
           problem(Http403, "password_change_required", "change the password first: PUT " & passwordPath(who.user) & " {\"current_password\": \"...\", \"password\": \"...\"}")
           return
@@ -393,6 +393,31 @@ proc onRequest() {.raises: [], gcsafe.} =
           else:
             problem(Http403, "forbidden", "this token is for the runs of one organisation only")
           return
+      if path == "/api/v1/me" or path == "/api/v1/me/can":
+        # the caller, as the core sees them: roles, permissions, organisations (/me); and whether one call would be allowed, which permission it needs and which role gives it (/me/can)
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        var mc = newRq(coreRef.rqliteUrl)
+        if path == "/api/v1/me":
+          var slugs: seq[string]
+          if who.admin or (who.user.len > 0 and "org.read" in who.grants.shard):
+            for o in mc.listOrganizationRows(): slugs.add o.slug
+          jsonOk(Http200, mc.whoAmI(who, slugs))
+          return
+        var qMethod, qPath, qOrg, qProject = ""
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            case k
+            of "method": qMethod = v.toUpperAscii
+            of "path": qPath = v
+            of "organization": qOrg = v
+            of "project": qProject = normalPath(v)
+        if qMethod notin ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] or not qPath.startsWith("/api/v1/") or qPath.len > 400 or '?' in qPath:
+          problem(Http400, "invalid_request", "?method=POST&path=/api/v1/runs/{id}:abort (a path of the API, without a query) is required; organization= and project= say where the thing is, for a route that does not name its organisation")
+          return
+        jsonOk(Http200, mc.explainCall(who, qMethod, qPath, qOrg, qProject))
+        return
       if path == "/api/v1/users" or path.startsWith("/api/v1/users/"):
         # IAM-001: the users of the shard and their roles, for an administrator (the gate above lets no one else here)
         var uc = newRq(coreRef.rqliteUrl)

@@ -9,7 +9,7 @@
 ## With neither `CINIM_AUTH=on` nor `CINIM_ADMIN_TOKEN` the API is open, as before this module (development, tests); the core says so at start.
 ##
 ## Pure parts (the header, the token, the scope rules) are tested in tests/unit/tapiauth.nim; the rows are the glue.
-import std/[json, strutils, times, sysrand, sets, tables]
+import std/[json, strutils, times, sysrand, sets, tables, algorithm]
 import crunchy
 import ../common/[rqlite, ctrlauth]
 import rbac
@@ -31,6 +31,7 @@ type
     roles*: seq[string]      ## that user's roles at the shard level, read when the request came
     shardWide*: bool         ## a role of the shard that is not `admin`: the rights of `rw` or `ro` hold in every organisation
     grants*: Grants          ## what the user's roles give, at the shard and in each organisation (D-84)
+    bindings*: seq[tuple[role, scope, source: string]]       ## the roles themselves, for GET /api/v1/me
     need*: Need              ## what the request being served needs, set by the gate: `mayUseOrg` asks it for the organisation the handler finds
     mustChange*: bool        ## the user's password has to be changed first: the only thing allowed is the change of it
     why*: string             ## when not ok: `missing`, `malformed`, `unknown`, `expired`, `revoked`
@@ -133,6 +134,7 @@ func mayCall*(p: Principal; meth, path: string): bool =
   ## An administrator any; a user, what the roles allow (rbac.nim) and the change of their own password; a token of an organisation, the routes under `runsBase`
   ## (which of the organisation's runs is checked where the run is known: `mayUseOrg`).
   if not p.ok: return false
+  if meth == "GET" and (path == "/api/v1/me" or path == "/api/v1/me/can"): return true          # whoever asks is told about themself
   if p.admin: return true
   if p.user.len > 0: return p.grants.allows(needOf(meth, path)) or selfService(p.user, meth, path)
   p.org.len > 0 and path.startsWith(runsBase)
@@ -190,9 +192,9 @@ proc rolePermissions*(c: var RqClient; role: string): seq[string] =
   if r != nil:
     for v in r: result.add v[0].getStr
 
-proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope: string]], grants: Grants] =
+proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope, source: string]], grants: Grants] =
   ## the user; the roles it has at the shard level (the ones every organisation inherits); every binding, at the shard and in an organisation; and what they give (D-84)
-  let r = c.query(%*[["SELECT disabled, must_change FROM users WHERE name = ?", name], ["SELECT role, scope FROM role_bindings WHERE user_name = ? ORDER BY scope, role", name]])
+  let r = c.query(%*[["SELECT disabled, must_change FROM users WHERE name = ?", name], ["SELECT role, scope, source FROM role_bindings WHERE user_name = ? ORDER BY scope, role", name]])
   let u = r["results"][0]{"values"}
   if u == nil or u.len == 0: return
   result.found = true
@@ -204,7 +206,7 @@ proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChang
     for v in rs:
       let role = v[0].getStr
       let scope = v[1].getStr
-      result.bindings.add (role, scope)
+      result.bindings.add (role, scope, v[2].getStr)
       if scope == shardScope: result.roles.add role
       if role notin known: known[role] = c.rolePermissions(role)
       result.grants.addRole(scope, known[role])
@@ -371,6 +373,103 @@ proc userSourceOf*(c: var RqClient; name: string): string =
   let v = c.query(%*[["SELECT source FROM users WHERE name = ?", name]])["results"][0]{"values"}
   if v != nil and v.len > 0: v[0][0].getStr else: ""
 
+# ------------------------------------------------------------------ who am I, and may I
+
+func sortedList(set: HashSet[string]): JsonNode =
+  var names: seq[string]
+  for n in set: names.add n
+  names.sort()
+  result = newJArray()
+  for n in names: result.add %n
+
+proc whoAmI*(c: var RqClient; p: Principal; organizationSlugs: seq[string]): JsonNode =
+  ## GET /api/v1/me: the caller as the core sees it. Who, which roles at which place, what they come to (the permissions at the shard, in each organisation, on each group), and which
+  ## organisations the caller sees. `organizationSlugs` is every organisation of the shard, for a caller who may see all.
+  let kind = if p.operator: "operator" elif p.user.len > 0: "user" elif p.org.len > 0: "organization token" elif p.name == "open API": "open api" else: "administrator token"
+  result = %*{"kind": kind, "name": p.name, "user": p.user, "administrator": p.admin, "password_change_required": p.mustChange}
+  if p.org.len > 0: result["organization"] = %p.org
+  var bs = newJArray()
+  for b in p.bindings: bs.add %*{"role": b.role, "scope": b.scope, "source": b.source}
+  result["bindings"] = bs
+  var perms = newJObject()
+  if p.admin:
+    var all = newJArray()
+    for pm in catalogue: all.add %pm.name
+    perms["shard"] = all
+    result["permissions"] = perms
+  elif p.user.len > 0:
+    perms["shard"] = sortedList(p.grants.shard)
+    var orgs = newJObject()
+    for slug, set in p.grants.orgs: orgs[slug] = sortedList(set)
+    perms["organizations"] = orgs
+    var groups = newJObject()
+    for slug, list in p.grants.groups:
+      var arr = newJArray()
+      for b in list: arr.add %*{"path": b.path, "permissions": sortedList(b.perms)}
+      groups[slug] = arr
+    perms["groups"] = groups
+    result["permissions"] = perms
+  else:
+    result["permissions"] = %*{"note": "an organisation\'s token may use the routes of its own runs"}
+  # the organisations the caller sees: all, or these
+  var seen = newJArray()
+  if p.admin or (p.user.len > 0 and "org.read" in p.grants.shard):
+    result["organizations"] = %*{"all": true, "slugs": organizationSlugs}
+  else:
+    var slugs: seq[string]
+    if p.user.len > 0: slugs = p.grants.orgsTouched
+    elif p.org.len > 0: slugs = @[p.org]
+    slugs.sort()
+    for s in slugs: seen.add %s
+    result["organizations"] = %*{"all": false, "slugs": seen}
+
+proc explainCall*(c: var RqClient; p: Principal; meth, path, org, group: string): JsonNode =
+  ## GET /api/v1/me/can: may the caller make this call, which permission it needs and where, and which of their roles give it. `org` and `group` say which organisation and
+  ## group the thing is in, for a route (a run\'s, a trigger\'s) whose organisation the path does not name.
+  let n = needOf(meth, path)
+  let where = case n.scope
+    of nsShard: "at the shard"
+    of nsOrg: (if n.group.len > 0: "in the organisation " & n.org & ", or on the group " & n.group & " or above it" else: "in the organisation " & n.org)
+    of nsInOrg: "in the organisation " & n.org & " or on a group of it"
+    of nsAny: "anywhere" & (if org.len > 0: ", here in " & org & (if group.len > 0: "/" & group else: "") else: "")
+  result = %*{"method": meth, "path": path, "permission": n.permission, "needs": (if n.permission.len == 0: "" else: where), "allowed": false, "granted_by": []}
+  if not p.ok:
+    result["reason"] = %"not logged in"
+    return
+  if p.admin:
+    result["allowed"] = %true
+    result["reason"] = %"an administrator may make any call"
+    return
+  if meth == "GET" and (path == "/api/v1/me" or path == "/api/v1/me/can"):
+    result["allowed"] = %true
+    result["reason"] = %"everyone may ask about themself"
+    return
+  if p.user.len == 0:
+    let ok = p.mayCall(meth, path)
+    result["allowed"] = %ok
+    result["reason"] = %(if ok: "a token of an organisation may use the routes of its own runs" else: "a token of an organisation may use the routes of its own runs only")
+    return
+  if selfService(p.user, meth, path):
+    result["allowed"] = %true
+    result["reason"] = %"every user may change their own password"
+    return
+  if n.permission.len == 0:
+    result["reason"] = %"this route is named for no role: only an administrator may call it"
+    return
+  # which bindings give it: each binding is tried alone
+  var by = newJArray()
+  for b in p.bindings:
+    var g: Grants
+    g.addRole(b.scope, c.rolePermissions(b.role))
+    let gives = if n.scope == nsAny and org.len > 0: g.holds(n.permission, org, group)
+                elif n.scope == nsAny: g.holdsAnywhere(n.permission)
+                else: g.allows(n)
+    if gives: by.add %*{"role": b.role, "scope": b.scope}
+  result["granted_by"] = by
+  let allowed = by.len > 0
+  result["allowed"] = %allowed
+  result["reason"] = %(if allowed: "held through the roles listed" elif n.scope == nsShard: "this needs a role at the shard, and a role in an organisation does not count" else: "no role of yours has " & n.permission & " " & where)
+
 proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Principal =
   ## the principal of a request. The administrator token of the chart is compared in constant time on its hash; every other token is looked up
   ## by its id and its secret compared the same way.
@@ -392,7 +491,7 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
     let u = c.userRoles(userName)
     if not u.found or u.disabled or u.bindings.len == 0: return Principal(why: "revoked")
     result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, shardWide: u.roles.len > 0 and roleAdmin notin u.roles, mustChange: u.mustChange,
-                       grants: u.grants)
+                       grants: u.grants, bindings: u.bindings)
   else:
     result = principalOf(row[1].getStr)
   result.name = row[2].getStr

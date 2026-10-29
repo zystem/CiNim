@@ -144,6 +144,51 @@ suite "IAM-001 users, roles and their tokens":
       check c.listMembers("org:acme/ci").len == 0 and c.listMembers("org:acme").len == 1
       check not who(c.createApiToken("t", userScope("ann"), 0, t0).token).mayIn("run.start", "acme", "ci")
       check c.userRoles("ann").bindings.len == 2          # the shard's ro and the organisation's
+    test "GET /api/v1/me: who, the roles with where they are given, what they come to at the shard, in organisations and on groups, and which organisations are seen":
+      discard first()
+      let adm = who(c.createApiToken("t", userScope("admin"), 0, t0).token)
+      let am = c.whoAmI(adm, @["acme", "beta"])
+      check am["kind"].getStr == "user" and am["administrator"].getBool and am["permissions"]["shard"].len == catalogue.len and am["organizations"]["all"].getBool
+      let ro = who(makeUser("rita", "ro"))
+      let rm = c.whoAmI(ro, @["acme", "beta"])
+      check rm["user"].getStr == "rita" and not rm["administrator"].getBool and rm["bindings"] == %*[{"role": "ro", "scope": "shard", "source": ""}]
+      check "run.read" in $rm["permissions"]["shard"] and "run.start" notin $rm["permissions"]["shard"] and rm["organizations"]["slugs"] == %*["acme", "beta"]
+      check c.createUser("olga", "dev", pwOf & "olga", t0, "org:acme")
+      check c.setMember("org:acme/ci", "olga", @["ro"]) == ""
+      check c.setMember("org:beta/qa/web", "olga", @["admin"]) == ""
+      let om = c.whoAmI(who(c.createApiToken("t", userScope("olga"), 0, t0).token), @["acme", "beta", "gamma"])
+      check om["permissions"]["shard"].len == 0 and "run.start" in $om["permissions"]["organizations"]["acme"] and not om["permissions"]["organizations"].hasKey("beta")
+      check om["permissions"]["groups"]["beta"][0]["path"].getStr == "qa/web" and "run.start" in $om["permissions"]["groups"]["beta"][0]["permissions"] and "cache.delete" notin $om["permissions"]["groups"]["beta"][0]["permissions"]
+      check om["organizations"]["all"].getBool == false and om["organizations"]["slugs"] == %*["acme", "beta"]
+      let ot = c.whoAmI(c.authenticate("", c.createApiToken("acme", "org:acme", 0, t0).token, t0 + 1), @[])
+      check ot["kind"].getStr == "organization token" and ot["organization"].getStr == "acme" and ot["organizations"]["slugs"] == %*["acme"]
+      check not ($am).contains("secret_hash") and not ($rm).contains("password_hash") and not ($rm).contains("token")
+    test "GET /api/v1/me/can: allowed or not, which permission and where, which of the caller\'s roles give it, and why not":
+      discard first()
+      discard makeUser("rita", "ro")
+      discard makeUser("dan", "dev")
+      let ro = who(c.createApiToken("t", userScope("rita"), 0, t0).token)
+      let dev = who(c.createApiToken("t", userScope("dan"), 0, t0).token)
+      let abortPath = "/api/v1/runs/s1_x:abort"
+      let no = c.explainCall(ro, "POST", abortPath, "", "")
+      check not no["allowed"].getBool and no["permission"].getStr == "run.abort" and no["granted_by"].len == 0 and "run.abort" in no["reason"].getStr
+      let yes = c.explainCall(dev, "post".toUpperAscii, abortPath, "acme", "ci")
+      check yes["allowed"].getBool and yes["granted_by"] == %*[{"role": "dev", "scope": "shard"}]
+      check c.explainCall(ro, "GET", "/api/v1/runs/s1_x", "", "")["allowed"].getBool
+      # a role in an organisation, a thing in another one, and a thing of the shard
+      check c.createUser("olga", "dev", pwOf & "olga", t0, "org:acme")
+      let og = who(c.createApiToken("t", userScope("olga"), 0, t0).token)
+      check c.explainCall(og, "POST", abortPath, "acme", "")["allowed"].getBool and c.explainCall(og, "POST", abortPath, "acme", "")["granted_by"] == %*[{"role": "dev", "scope": "org:acme"}]
+      check not c.explainCall(og, "POST", abortPath, "beta", "")["allowed"].getBool and c.explainCall(og, "POST", abortPath, "", "")["allowed"].getBool      # anywhere: she has it somewhere
+      let shardThing = c.explainCall(og, "GET", "/api/v1/components", "", "")
+      check not shardThing["allowed"].getBool and "at the shard" in shardThing["needs"].getStr and "does not count" in shardThing["reason"].getStr
+      check c.explainCall(og, "GET", "/api/v1/organizations/acme/triggers", "", "")["allowed"].getBool and not c.explainCall(og, "GET", "/api/v1/organizations/beta/triggers", "", "")["allowed"].getBool
+      let unnamed = c.explainCall(dev, "GET", "/api/v1/nothing-like-it", "", "")
+      check not unnamed["allowed"].getBool and unnamed["permission"].getStr == "" and "only an administrator" in unnamed["reason"].getStr
+      check c.explainCall(who(c.createApiToken("t", userScope("admin"), 0, t0).token), "DELETE", "/api/v1/users/x", "", "")["allowed"].getBool
+      check c.explainCall(dev, "GET", "/api/v1/me", "", "")["allowed"].getBool and c.explainCall(dev, "PUT", "/api/v1/users/dan/password", "", "")["allowed"].getBool
+      check not c.explainCall(dev, "PUT", "/api/v1/users/rita/password", "", "")["allowed"].getBool
+      check dev.mayCall("GET", "/api/v1/me") and dev.mayCall("GET", "/api/v1/me/can") and not dev.mayCall("POST", "/api/v1/me")
     test "D-84 a role of one's own works in the token of a user, at the shard and in an organisation, and cannot be deleted while it is given":
       discard first()
       check c.putRole("deployer", "", @["run.read", "run.start", "trigger.fire"]) == ""

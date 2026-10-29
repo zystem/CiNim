@@ -34,6 +34,8 @@ extension points (UI-002), the start of a run, administration (secrets, triggers
 - The list of runs shows the last six characters of a long id (the random end; its start is the time, which has a column of its own) with the whole id as the title and in the link; the page of a run shows it whole.
   The style sheet is cached for a day, so its link carries a version made from its content (`ui.css?v=<hash>`): a new one is a new address.
 
+The menu (Organisations, All runs, Components) follows `GET /api/v1/me` (D-88): an entry that the caller comes to nothing under is not shown, and the core refuses it all the same.
+
 ## What the core got for it
 
 `GET /api/v1/runs?organization=<slug>&state=<STATE>&limit=<n>&before=<run id>` (`core/runlist.nim`): the list of runs, newest first (the ids are made in time order, so the id is the cursor and no run is missed or shown twice while new ones come), at most 200
