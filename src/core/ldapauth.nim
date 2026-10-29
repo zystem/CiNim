@@ -189,6 +189,8 @@ proc deleteServer*(c: var RqClient; tenantId, name: string): bool =
   discard c.execute(%*[
     ["UPDATE users SET disabled = 2 WHERE source = ?", sourceOf(s.server.id)],
     ["DELETE FROM role_bindings WHERE source = ?", sourceOf(s.server.id)],
+    ["DELETE FROM team_members WHERE source = ?", sourceOf(s.server.id)],
+    ["UPDATE teams SET group_dn = '', server_id = '' WHERE server_id = ?", s.server.id],
     ["DELETE FROM ldap_group_map WHERE server_id = ?", s.server.id],
     ["DELETE FROM ldap_servers WHERE id = ?", s.server.id]], transaction = true)
   true
@@ -271,6 +273,32 @@ proc groupsOf(conn: LdapConn; s: LdapServer; uid, dn: string; entry: LdapEntry):
       let n = normDn(v)
       if n notin result: result.add n
 
+proc teamsFor(c: var RqClient; s: LdapServer; groups: seq[string]): seq[string] =
+  ## the ids of the teams of the organisation that take their members from a group the person is in (D-91)
+  if groups.len == 0: return
+  let vals = c.query(%*[["SELECT id, group_dn FROM teams WHERE tenant_id = ? AND group_dn <> '' AND (server_id = '' OR server_id = ?)", s.tenantId, s.id]])["results"][0]{"values"}
+  if vals == nil: return
+  for v in vals:
+    if normDn(v[1].getStr) in groups: result.add v[0].getStr
+
+proc syncTeams(c: var RqClient; user, serverId: string; want: seq[string]): int =
+  ## the person is a member, given by this directory, of exactly these teams: the ones they are not in any more are left, the ones they are in now are joined; a member added by hand stays
+  let src = sourceOf(serverId)
+  let have = c.query(%*[["SELECT team_id FROM team_members WHERE user_name = ? AND source = ?", user, src]])["results"][0]{"values"}
+  var current: seq[string]
+  if have != nil:
+    for v in have: current.add v[0].getStr
+  var stmts = newJArray()
+  for t in current:
+    if t notin want:
+      stmts.add %*["DELETE FROM team_members WHERE team_id = ? AND user_name = ? AND source = ?", t, user, src]
+      inc result
+  for t in want:
+    if t notin current:
+      stmts.add %*["INSERT OR IGNORE INTO team_members (team_id, user_name, source) VALUES (?, ?, ?)", t, user, src]
+      inc result
+  if stmts.len > 0: discard c.execute(stmts, transaction = true)
+
 proc syncBindings(c: var RqClient; user, serverId, slug: string; roles: seq[string]): int =
   ## makes the bindings of the account that come from this directory the roles given (in the organisation); returns how many rows changed
   let scope = "org:" & slug
@@ -338,12 +366,15 @@ proc ldapLogin*(c: var RqClient; kek: KekProvider; vaultReady: bool; slug, uidGi
         sawNoAccount = true
         detail.add s.name & ": there is no account " & name & " and this directory does not make accounts at login"
         continue
-      let roles = c.rolesFor(s, service.groupsOf(s, uid, who.dn, who.entry))
-      if roles.len == 0 and isNew:
+      let groups = service.groupsOf(s, uid, who.dn, who.entry)
+      let roles = c.rolesFor(s, groups)
+      let teams = c.teamsFor(s, groups)
+      if roles.len == 0 and teams.len == 0 and isNew:
         return LdapLogin(outcome: loNoRole, user: name, detail: s.name & ": no group of " & name & " gives a role here")
       discard c.execute(%*[["INSERT INTO users (name, password_hash, created_at, disabled, must_change, source, dn) VALUES (?, '', ?, 0, 0, ?, ?) " &
         "ON CONFLICT(name) DO UPDATE SET disabled = 0, dn = excluded.dn WHERE users.source = excluded.source", name, now, sourceOf(s.id), who.dn]])
       discard c.syncBindings(name, s.id, slug, roles)
+      discard c.syncTeams(name, s.id, teams)
       # the account is let in if it has a role at all: from the groups, or one given by hand
       if c.userRoles(name).bindings.len == 0: return LdapLogin(outcome: loNoRole, user: name, detail: s.name & ": no group of " & name & " gives a role here")
       return LdapLogin(outcome: loOk, user: name, roles: roles, detail: s.name)
@@ -390,10 +421,12 @@ proc makeAccount*(c: var RqClient; kek: KekProvider; vaultReady: bool; tenantId,
       let existing = c.query(%*[["SELECT source FROM users WHERE name = ?", name]])["results"][0]{"values"}
       let have = existing != nil and existing.len > 0
       if have and existing[0][0].getStr != sourceOf(s.id): return (aoTaken, name, "the account " & name & " belongs to another directory (or is a local one)", @[])
-      let roles = c.rolesFor(s, service.groupsOf(s, uid, who.dn, who.entry))
+      let groups = service.groupsOf(s, uid, who.dn, who.entry)
+      let roles = c.rolesFor(s, groups)
       discard c.execute(%*[["INSERT INTO users (name, password_hash, created_at, disabled, must_change, source, dn) VALUES (?, '', ?, 0, 0, ?, ?) " &
         "ON CONFLICT(name) DO UPDATE SET disabled = 0, dn = excluded.dn WHERE users.source = excluded.source", name, now, sourceOf(s.id), who.dn]])
       discard c.syncBindings(name, s.id, slug, roles)
+      discard c.syncTeams(name, s.id, c.teamsFor(s, groups))
       let outcome = if have: aoExists else: aoMade
       return (outcome, name, s.name, roles)
     except LdapError as e:
@@ -414,6 +447,7 @@ proc removeAccount*(c: var RqClient; tenantId, slug, loginGiven: string): bool =
   discard c.execute(%*[
     ["UPDATE api_tokens SET revoked_at = ? WHERE scope = ? AND revoked_at = 0", now, "user:" & name],
     ["DELETE FROM role_bindings WHERE user_name = ?", name],
+    ["DELETE FROM team_members WHERE user_name = ?", name],
     ["DELETE FROM users WHERE name = ?", name]], transaction = true)
   true
 
@@ -449,7 +483,11 @@ proc checkServer*(c: var RqClient; kek: KekProvider; vaultReady: bool; s: LdapSe
         for g in groups: gs.add %g
         var rs = newJArray()
         for r in c.rolesFor(s, groups): rs.add %r
-        result["person"] = %*{"found": true, "dn": who.dn, "groups": gs, "roles": rs, "account": accountName(u, s.slug)}
+        var ts = newJArray()
+        for id in c.teamsFor(s, groups):
+          let nm = c.query(%*[["SELECT name FROM teams WHERE id = ?", id]])["results"][0]{"values"}
+          if nm != nil and nm.len > 0: ts.add %nm[0][0].getStr
+        result["person"] = %*{"found": true, "dn": who.dn, "groups": gs, "roles": rs, "teams": ts, "account": accountName(u, s.slug)}
   except LdapError as e:
     result["error"] = %e.msg
   finally:
@@ -480,11 +518,14 @@ proc syncServer*(c: var RqClient; kek: KekProvider; vaultReady: bool; s: LdapSer
         if gone:
           if v[2].getInt != 2:
             inc result.switchedOff
-          discard c.execute(%*[["UPDATE users SET disabled = 2 WHERE name = ? AND source = ?", user, sourceOf(s.id)], ["DELETE FROM role_bindings WHERE user_name = ? AND source = ?", user, sourceOf(s.id)]], transaction = true)
+          discard c.execute(%*[["UPDATE users SET disabled = 2 WHERE name = ? AND source = ?", user, sourceOf(s.id)], ["DELETE FROM role_bindings WHERE user_name = ? AND source = ?", user, sourceOf(s.id)],
+                               ["DELETE FROM team_members WHERE user_name = ? AND source = ?", user, sourceOf(s.id)]], transaction = true)
           continue
         let sp = splitAccount(user)
-        let roles = c.rolesFor(s, service.groupsOf(s, sp.uid, dn, entry))
+        let groups = service.groupsOf(s, sp.uid, dn, entry)
+        let roles = c.rolesFor(s, groups)
         result.changed += c.syncBindings(user, s.id, s.slug, roles)
+        result.changed += c.syncTeams(user, s.id, c.teamsFor(s, groups))
         if v[2].getInt == 2:
           discard c.execute(%*[["UPDATE users SET disabled = 0 WHERE name = ? AND source = ? AND disabled = 2", user, sourceOf(s.id)]])
           inc result.switchedOn

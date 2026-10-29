@@ -162,6 +162,7 @@ func orgNeed(meth, org, rest: string): Need =
   if has("/caches"): return need(if write: "cache.delete" else: "cache.read", nsOrg, org)
   if has("/secrets"): return need(if write: "secret.write" else: "secret.read", nsOrg, org)
   if has("/members"): return need(if write: "access.write" else: "access.read", nsOrg, org)
+  if has("/teams"): return need(if write: "access.write" else: "access.read", nsOrg, org)         # D-91: a team belongs to the organisation, not to a group
   if has("/ldap"):
     # D-87: the directories of an organisation. Adding one makes the core connect to an address someone typed, so it is the shard's; the map of groups to roles is the organisation's
     if rest == "/ldap" or rest == "/ldap/": return (if write: Need() else: need("ldap.read", nsOrg, org))

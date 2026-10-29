@@ -77,6 +77,15 @@ const ddl = [
        group_base TEXT NOT NULL DEFAULT '', group_filter TEXT NOT NULL DEFAULT '', group_attr TEXT NOT NULL DEFAULT '',
        enabled INTEGER NOT NULL DEFAULT 1, auto_create INTEGER NOT NULL DEFAULT 0, tls_insecure INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_sync_at INTEGER NOT NULL DEFAULT 0, last_sync_result TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS ldap_servers_name ON ldap_servers (tenant_id, name)",
+  # D-91: the teams of an organisation. A team is made by hand or takes its members from a group of a directory (`group_dn`, of the directory `server_id`, or of any when it is empty); its roles
+  # are rows of `role_bindings` whose user_name is `team:<slug>/<name>`. A member is a manual one (`source` '') or one the directory gives (`ldap:<server id>`)
+  """CREATE TABLE IF NOT EXISTS teams (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', group_dn TEXT NOT NULL DEFAULT '', server_id TEXT NOT NULL DEFAULT '',
+       created_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS teams_name ON teams (tenant_id, name)",
+  """CREATE TABLE IF NOT EXISTS team_members (
+       team_id TEXT NOT NULL, user_name TEXT NOT NULL, source TEXT NOT NULL DEFAULT '', PRIMARY KEY (team_id, user_name))""",
+  "CREATE INDEX IF NOT EXISTS team_members_user ON team_members (user_name)",
   """CREATE TABLE IF NOT EXISTS ldap_group_map (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, server_id TEXT NOT NULL DEFAULT '', group_dn TEXT NOT NULL, role TEXT NOT NULL, created_at INTEGER NOT NULL)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS ldap_group_map_key ON ldap_group_map (tenant_id, server_id, group_dn, role)",
@@ -375,7 +384,9 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
   let o = c.organizationRow(slug)
   if o.id.len > 0:
     discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
-    discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id], ["DELETE FROM ldap_servers WHERE tenant_id = ?", o.id], ["DELETE FROM ldap_group_map WHERE tenant_id = ?", o.id]])
+    discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id], ["DELETE FROM ldap_servers WHERE tenant_id = ?", o.id], ["DELETE FROM ldap_group_map WHERE tenant_id = ?", o.id],
+      ["DELETE FROM role_bindings WHERE user_name IN (SELECT 'team:' || ? || '/' || name FROM teams WHERE tenant_id = ?)", slug, o.id],
+      ["DELETE FROM team_members WHERE team_id IN (SELECT id FROM teams WHERE tenant_id = ?)", o.id], ["DELETE FROM teams WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM org_storage WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM artifacts WHERE tenant_id = ?", o.id]])      # the objects stay in the store until a sweeper removes them (not built)

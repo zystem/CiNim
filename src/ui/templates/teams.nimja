@@ -1,0 +1,26 @@
+{% extends "layout.nimja" %}
+{% block title %}Teams - CiNim{% endblock %}
+{% block content %}<h1>Teams: {{ h(org) }}</h1>
+<p><a href="{{ h(base) }}/orgs">Organisations</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/members">Members</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/ldap">Directory</a> - <a href="{{ h(base) }}/roles">Roles</a></p>
+<p class="detail">A team is a set of the people of the organisation; a role given to a team is given to each of its members. A team is made by hand, or takes its members from a group of a directory (LDAP). To give a team a role on a group or a project, use the Members page of that group with the person <code>team:name</code>.</p>
+{% for t in teams %}<h2 id="team-{{ h(t.name) }}">{{ h(t.name) }}</h2>
+<p>{{ h(t.description) }}{% if t.ldap.len > 0 %} <br>Members come from the group <code>{{ h(t.ldap) }}</code>, and those added by hand.{% endif %}</p>
+<table><thead><tr><th>Member</th><th>Added</th>{% if canEdit %}<th></th>{% endif %}</tr></thead><tbody>
+{% for m in t.members %}<tr><td><code>{{ h(m.user) }}</code></td><td>{{ h(m.source) }}</td>{% if canEdit %}<td>{% if m.source == "by hand" %}<form method="post" action="{{ h(here) }}/{{ h(t.name) }}/members/remove" class="inline"><input type="hidden" name="user" value="{{ h(m.user) }}"><button type="submit">Remove</button></form>{% endif %}</td>{% endif %}</tr>
+{% endfor %}</tbody></table>
+{% if t.members.len == 0 %}<p class="empty">No members.</p>{% endif %}
+<p>Roles of the team: {% if t.roles.len > 0 %}{{ h(t.roles) }}{% else %}none{% endif %}</p>
+{% if canEdit %}<form method="post" action="{{ h(here) }}/{{ h(t.name) }}/members" class="stack"><label>Add a member (an account that exists) <input type="text" name="user" required maxlength="100" pattern="[a-z0-9._@-]+"></label><div class="actions"><button type="submit">Add</button></div></form>
+<form method="post" action="{{ h(here) }}/{{ h(t.name) }}/roles" class="stack"><fieldset><legend>Roles in the organisation (these replace the ones given to the team here by hand)</legend>
+{% for r in roleNames %}<label class="check"><input type="checkbox" name="role" value="{{ h(r) }}"> {{ h(r) }}</label>
+{% endfor %}</fieldset><div class="actions"><button type="submit">Save the roles</button></div></form>
+<form method="post" action="{{ h(here) }}/{{ h(t.name) }}/delete" class="actions"><button type="submit">Delete the team</button></form>{% endif %}
+{% endfor %}
+{% if teams.len == 0 %}<p class="empty">This organisation has no team.</p>{% endif %}
+{% if canEdit %}<h2>New team</h2>
+<form method="post" action="{{ h(here) }}" class="stack">
+<label>Name <input type="text" name="name" required maxlength="40" pattern="[a-z][a-z0-9_-]*"></label>
+<label>Description <input type="text" name="description" maxlength="300"></label>
+<label>Group of a directory (optional; the DN) <input type="text" name="group_dn" maxlength="500" placeholder="cn=ci-dev,ou=groups,dc=example,dc=org"></label>
+<label>Directory (when the group is in one) <input type="text" name="directory" maxlength="40" pattern="[a-z][a-z0-9_-]*"></label>
+<div class="actions"><button type="submit">Make the team</button></div></form>{% endif %}{% endblock %}

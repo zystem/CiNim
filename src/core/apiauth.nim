@@ -216,6 +216,21 @@ proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChang
       if scope == shardScope: result.roles.add role
       if role notin known: known[role] = c.rolePermissions(role)
       result.grants.addRole(scope, known[role])
+  # D-91: the roles of the teams the user is a member of, in the organisation of the team and below (a team\'s binding outside its organisation is no right)
+  let tv = c.query(%*[["SELECT o.slug, t.name FROM team_members m JOIN teams t ON t.id = m.team_id JOIN organizations o ON o.id = t.tenant_id WHERE m.user_name = ?", name]])["results"][0]{"values"}
+  if tv != nil:
+    for t in tv:
+      let slug = t[0].getStr
+      let subject = "team:" & slug & "/" & t[1].getStr
+      let tb = c.query(%*[["SELECT role, scope FROM role_bindings WHERE user_name = ? ORDER BY scope, role", subject]])["results"][0]{"values"}
+      if tb != nil:
+        for b in tb:
+          let scope = b[1].getStr
+          if scope != "org:" & slug and not scope.startsWith("org:" & slug & "/"): continue
+          let role = b[0].getStr
+          result.bindings.add (role, scope, subject)
+          if role notin known: known[role] = c.rolePermissions(role)
+          result.grants.addRole(scope, known[role])
 
 func isOrgScope*(scope: string): bool = scope.startsWith("org:") and scope.len > 4
 
@@ -253,6 +268,7 @@ proc deleteUser*(c: var RqClient; name: string; now: int64): bool =
   discard c.execute(%*[
     ["UPDATE api_tokens SET revoked_at = ? WHERE scope = ? AND revoked_at = 0", now, userScope(name)],
     ["DELETE FROM role_bindings WHERE user_name = ?", name],
+    ["DELETE FROM team_members WHERE user_name = ?", name],
     ["DELETE FROM users WHERE name = ?", name]], transaction = true)
   true
 
@@ -307,7 +323,14 @@ proc listMembers*(c: var RqClient; scope: string): JsonNode =
 
 proc setMember*(c: var RqClient; scope, user: string; roles: seq[string]): string =
   ## The roles of an existing user at this scope are these (replacing the ones it had there); an empty list takes them all away. "" when done, otherwise why not.
-  if not c.userRoles(user).found: return "no such user: " & user
+  if user.startsWith("team:"):
+    # D-91: the roles of a team, in its own organisation and below
+    let at = user.find('/')
+    let slug = if at > 5: user[5 ..< at] else: ""
+    if slug.len == 0 or not (scope == "org:" & slug or scope.startsWith("org:" & slug & "/")): return "a team has roles in its own organisation and below only"
+    let found = c.query(%*[["SELECT 1 FROM teams t JOIN organizations o ON o.id = t.tenant_id WHERE o.slug = ? AND t.name = ?", slug, user[at + 1 .. ^1]]])["results"][0]{"values"}
+    if found == nil or found.len == 0: return "no such team: " & user[at + 1 .. ^1]
+  elif not c.userRoles(user).found: return "no such user: " & user
   for r in roles:
     if not c.roleExists(r): return "no such role: " & r
   var stmts = newJArray()
@@ -470,7 +493,10 @@ proc explainCall*(c: var RqClient; p: Principal; meth, path, org, group: string)
     let gives = if n.scope == nsAny and org.len > 0: g.holds(n.permission, org, group)
                 elif n.scope == nsAny: g.holdsAnywhere(n.permission)
                 else: g.allows(n)
-    if gives: by.add %*{"role": b.role, "scope": b.scope}
+    if gives:
+      var item = %*{"role": b.role, "scope": b.scope}
+      if b.source.len > 0: item["source"] = %b.source               # given through a team, or by a directory
+      by.add item
   result["granted_by"] = by
   let allowed = by.len > 0
   result["allowed"] = %allowed

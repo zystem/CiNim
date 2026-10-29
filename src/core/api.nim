@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -928,6 +928,59 @@ proc onRequest() {.raises: [], gcsafe.} =
         for h in hq.listScopeHolds(orgHq.id): scopes.add h.view
         jsonOk(Http200, %*{"organization": slugH, "holds": items, "scopes": scopes})
         return
+      if path.startsWith("/api/v1/organizations/") and "/teams" in path:
+        # D-91: the teams of an organisation. The gate has checked access.read / access.write in the organisation.
+        #   GET /organizations/{slug}/teams
+        #   PUT|DELETE /organizations/{slug}/teams/{name}      PUT {"description", "ldap": {"group_dn", "directory"?} | null}
+        #   PUT|DELETE /organizations/{slug}/teams/{name}/members/{user}     (the roles of a team: .../members/team:{name} of the organisation or of a group)
+        let partsT = path["/api/v1/organizations/".len .. ^1].split('/')
+        if partsT.len < 2 or partsT[1] != "teams":
+          problem(Http404, "not_found", "no such route")
+          return
+        let slugT = partsT[0]
+        var tc = newRq(coreRef.rqliteUrl)
+        let orgT = tc.organizationRow(slugT)
+        if orgT.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugT)
+          return
+        let tmeth = getMethod()
+        let nowT = getTime().toUnix()
+        if partsT.len == 2 and tmeth == "GET":
+          jsonOk(Http200, %*{"organization": slugT, "teams": tc.listTeams(orgT.id, slugT)})
+        elif partsT.len == 3 and tmeth == "PUT":
+          let tj = try: (if getBody().strip.len == 0: newJObject() else: parseJson(getBody())) except JsonParsingError: nil
+          let done = tc.putTeam(orgT.id, partsT[2], tj, nowT)
+          if done.error.len > 0:
+            problem(HttpCode(done.status), "invalid_team", done.error)
+            return
+          tc.record(nowT, actorOf(who), "team.put", slugT & "/" & partsT[2], "ok")
+          jsonOk(if done.created: Http201 else: Http200, %*{"organization": slugT, "team": partsT[2]})
+        elif partsT.len == 3 and tmeth == "DELETE":
+          if not tc.deleteTeam(orgT.id, slugT, partsT[2]):
+            problem(Http404, "not_found", "no such team")
+            return
+          tc.record(nowT, actorOf(who), "team.delete", slugT & "/" & partsT[2], "ok")
+          jsonOk(Http200, %*{"organization": slugT, "team": partsT[2], "deleted": true})
+        elif partsT.len == 5 and partsT[3] == "members" and tmeth == "PUT":
+          let added = tc.addTeamMember(orgT.id, partsT[2], partsT[4])
+          if added.error.len > 0:
+            problem(HttpCode(added.status), "invalid_member", added.error)
+            return
+          tc.record(nowT, actorOf(who), "team.member", slugT & "/" & partsT[2] & " + " & partsT[4], "ok")
+          jsonOk(Http200, %*{"organization": slugT, "team": partsT[2], "user": partsT[4], "member": true})
+        elif partsT.len == 5 and partsT[3] == "members" and tmeth == "DELETE":
+          let gone = tc.removeTeamMember(orgT.id, partsT[2], partsT[4])
+          if gone.error.len > 0:
+            problem((if gone.found: Http409 else: Http404), (if gone.found: "directory_member" else: "not_found"), gone.error)
+            return
+          if not gone.found:
+            problem(Http404, "not_found", "this person is not a member of the team")
+            return
+          tc.record(nowT, actorOf(who), "team.member_remove", slugT & "/" & partsT[2] & " - " & partsT[4], "ok")
+          jsonOk(Http200, %*{"organization": slugT, "team": partsT[2], "user": partsT[4], "member": false})
+        else:
+          problem(Http404, "not_found", "no such route")
+        return
       if path.startsWith("/api/v1/organizations/") and "/ldap" in path:
         # D-87: the directories of an organisation and the map of their groups to roles. The gate has checked the permission for this organisation (ldap.read; ldap.map for the map and for a
         # sync; ldap.write, the shard's, for adding, changing, checking and removing a directory: the core connects to the address that is given).
@@ -1045,13 +1098,17 @@ proc onRequest() {.raises: [], gcsafe.} =
         let parts = afterOrg.split('/')
         let memberAt = parts.find("members")
         var memberOrg, memberGroup, memberUser = ""
-        var shapeOk = parts.len >= 2 and memberAt >= 1 and memberAt >= parts.len - 2 and (memberAt == parts.len - 1 or validAccountName(parts[memberAt + 1]))
+        # a subject is a person (an account) or a team, `team:<name>` (D-91)
+        func isSubject(s: string): bool = validAccountName(s) or (s.startsWith("team:") and validTeamName(s[5 .. ^1]))
+        var shapeOk = parts.len >= 2 and memberAt >= 1 and memberAt >= parts.len - 2 and (memberAt == parts.len - 1 or isSubject(parts[memberAt + 1]))
         if shapeOk:
           memberOrg = parts[0]
           if memberAt > 1:
             shapeOk = parts[1] in ["groups", "projects"] and memberAt > 2
             memberGroup = parts[2 ..< memberAt].join("/")
-          if memberAt < parts.len - 1: memberUser = parts[memberAt + 1]
+          if memberAt < parts.len - 1:
+            memberUser = parts[memberAt + 1]
+            if memberUser.startsWith("team:"): memberUser = teamSubject(memberOrg, memberUser[5 .. ^1])          # kept as `team:<slug>/<name>`
         if not shapeOk:
           problem(Http404, "not_found", "no such route")
           return

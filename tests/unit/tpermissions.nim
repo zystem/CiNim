@@ -49,6 +49,8 @@ suite "D-84 what a request needs":
                          ("GET", "/api/v1/organizations/acme/secrets/TOKEN", "secret.read"), ("PUT", "/api/v1/organizations/acme/secrets/TOKEN", "secret.write"),
                          ("GET", "/api/v1/organizations/acme/locks/stand", "lock.read"), ("GET", "/api/v1/organizations/acme/storage", "storage.read"),
                          ("GET", "/api/v1/organizations/acme/members", "access.read"), ("PUT", "/api/v1/organizations/acme/members/ann", "access.write"),
+                         ("GET", "/api/v1/organizations/acme/teams", "access.read"), ("PUT", "/api/v1/organizations/acme/teams/qa", "access.write"), ("DELETE", "/api/v1/organizations/acme/teams/qa", "access.write"),
+                         ("PUT", "/api/v1/organizations/acme/teams/qa/members/ann", "access.write"), ("DELETE", "/api/v1/organizations/acme/teams/qa/members/ann", "access.write"),
                          ("DELETE", "/api/v1/organizations/acme/members/ann", "access.write")]:
       let n = needOf(m, p)
       check n.permission == want and n.scope in {nsOrg, nsInOrg} and n.org == "acme"
@@ -94,6 +96,12 @@ suite "D-87 the directories of an organisation":
       check n.permission == want and n.scope == sc and n.org == "acme"
     for (m, p) in [("PUT", "/api/v1/organizations/acme/ldap"), ("GET", "/api/v1/organizations/acme/ldap/servers/corp:sync"), ("PUT", "/api/v1/organizations/acme/ldap/other")]:
       check needOf(m, p).permission == ""
+  test "D-91 teams are the organisation\'s: an administrator of the organisation manages them, one of a group of it does not":
+    var org, grp: Grants
+    org.addRole("org:acme", builtinPermissions("admin"))
+    grp.addRole("org:acme/ci", builtinPermissions("admin"))
+    check org.allows(needOf("PUT", "/api/v1/organizations/acme/teams/qa")) and not grp.allows(needOf("PUT", "/api/v1/organizations/acme/teams/qa")) and not grp.allows(needOf("GET", "/api/v1/organizations/acme/teams"))
+    check grp.allows(needOf("PUT", "/api/v1/organizations/acme/groups/ci/members/team:qa"))            # but a role of a team on the group's own node is the group\'s to give
   test "an administrator of an organisation maps groups and syncs but cannot add a directory; rw has none of it; admin of the shard has all":
     var org: Grants
     org.addRole("org:acme", builtinPermissions("admin"))

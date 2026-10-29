@@ -1,9 +1,9 @@
 ## D-87, against a real OpenLDAP (in Docker, with a certificate made by tests/support/mkcerts.sh) and a real rqlite: the client (ldaps, StartTLS, a bind, a search, the certificate and the
 ## host name checked), and the core's use of it - the directories of an organisation, the map of groups to roles, the login `<login>@<slug>`, the sync that takes roles away and switches
 ## people off. Needs CINIM_RQLITE_URL, Docker and the openssl command; without them it is skipped (the tests of the repository run in a Pod without Docker).
-import std/[unittest, json, os, osproc, strutils, times, streams]
+import std/[unittest, json, os, osproc, strutils, times, streams, sequtils]
 import common/[rqlite, ldapclient]
-import core/[schema, apiauth, ldapauth, secretvault, kekprovider]
+import core/[schema, apiauth, ldapauth, secretvault, kekprovider, teams]
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -108,7 +108,7 @@ suite "D-87 LDAP":
       removeDir(dir))
     var ready = false
     if started == 0:
-      let deadline = epochTime() + 90
+      let deadline = epochTime() + 180
       while epochTime() < deadline and not ready:
         # the container starts a slapd of its own to set itself up and then the one that stays: ready is when the one with the certificate answers, twice in a row
         try:
@@ -122,7 +122,7 @@ suite "D-87 LDAP":
     doAssert ready, "the OpenLDAP container did not come up"
     var ssReady = false
     if ssStarted == 0:
-      let deadline = epochTime() + 90
+      let deadline = epochTime() + 180
       while epochTime() < deadline and not ssReady:
         try:
           for _ in 1 .. 2:
@@ -386,6 +386,49 @@ suite "D-87 LDAP":
       discard c.createUser("localone", "ro", "a-long-password-of-localone", now)
       check not c.removeAccount(orgId, slug, "localone")                                                           # a local user is not an account of a directory
       discard c.deleteUser("localone", now)
+    test "D-91 a team that takes its members from a group of the directory: joined at login with no role of their own, left at the sync, hand-made members stay, the group is the one that decides":
+      let slug2 = "lt" & sfx
+      let org2 = c.addOrganization(slug2, "L2")
+      let teamSubj = teamSubject(slug2, "ci-people")
+      check c.putServer(kek, true, org2, "teamdir", spec("ldaps://127.0.0.1:" & $tlsPort), now).error == ""
+      check c.putTeam(org2, "ci-people", %*{"ldap": {"group_dn": "CN=ci-dev, OU=groups, DC=example, DC=org"}}, now).created
+      check c.listTeams(org2, slug2)[0]["ldap"]["group_dn"].getStr == "cn=ci-dev,ou=groups,dc=example,dc=org"
+      check c.setMember("org:" & slug2, teamSubj, @["dev"]) == ""
+      let who2 = c.serverNamed(org2, "teamdir").server
+      # nobody maps a group to a role in this organisation: the team is the only thing that gives the roles
+      check c.checkServer(kek, true, who2, "bob")["person"]["teams"] == %*["ci-people"]
+      let a = c.ldapLogin(kek, true, slug2, "ann", "ann-secret-1", now)
+      check a.outcome == loOk and a.user == "ann@" & slug2
+      let b = c.ldapLogin(kek, true, slug2, "bob", "bob-secret-1", now)
+      check b.outcome == loOk
+      check c.listTeams(org2, slug2)[0]["members"] == %*[{"user": "ann@" & slug2, "source": "ldap:" & who2.id}, {"user": "bob@" & slug2, "source": "ldap:" & who2.id}]
+      let annRights = c.authenticate("", c.createApiToken("t", userScope("ann@" & slug2), 0, now).token, now + 1)
+      check annRights.ok and annRights.mayIn("run.start", slug2) and annRights.bindings == @[(role: "dev", scope: "org:" & slug2, source: teamSubj)]
+      check c.ldapLogin(kek, true, slug2, "eve", "eve-secret-1", now).outcome == loNoRole                      # in no group of any team: no account
+      # a member by hand, and the directory\'s member that cannot be taken away by hand
+      check c.addTeamMember(org2, "ci-people", "ann@" & slug2).error == ""                                     # she is the directory\'s already: it becomes hers by hand too
+      doAssert c.createUser("carl" & sfx, "ro", "a-long-password-of-carl", now, "org:" & slug2)
+      check c.addTeamMember(org2, "ci-people", "carl" & sfx).error == ""
+      check c.removeTeamMember(org2, "ci-people", "bob@" & slug2).error.len > 0
+      # bob leaves the group in the directory: the sync takes him out of the team, and his rights with it; carl stays
+      check inContainer("ldapmodify -x -H ldap://localhost -D " & adminDn & " -w " & adminPw,
+        "dn: cn=ci-dev,ou=groups,dc=example,dc=org\nchangetype: modify\ndelete: member\nmember: uid=bob,ou=people,dc=example,dc=org\n")
+      let rep = c.syncServer(kek, true, who2, now)
+      check rep.error == "" and rep.changed >= 1
+      check c.listTeams(org2, slug2)[0]["members"].mapIt(it["user"].getStr) == @["ann@" & slug2, "carl" & sfx]
+      check c.userRoles("bob@" & slug2).bindings.len == 0
+      check c.removeTeamMember(org2, "ci-people", "carl" & sfx).found
+      # the team is no longer tied to the group: the directory\'s members go at the next sync, nobody is added any more
+      check c.putTeam(org2, "ci-people", %*{"ldap": newJNull()}, now).error == ""
+      check c.listTeams(org2, slug2)[0].hasKey("ldap") == false
+      discard c.syncServer(kek, true, who2, now)
+      check c.listTeams(org2, slug2)[0]["members"].len == 1                                                       # ann: hers is by hand now
+      # the group again, then the directory goes: the memberships it gave go and the team is a team of hand-made members
+      check c.putTeam(org2, "ci-people", %*{"ldap": {"group_dn": "cn=ci-dev,ou=groups,dc=example,dc=org", "directory": "teamdir"}}, now).error == ""
+      discard c.ldapLogin(kek, true, slug2, "ann", "ann-secret-1", now)
+      check c.deleteServer(org2, "teamdir")
+      check c.listTeams(org2, slug2)[0]["members"].mapIt(it["source"].getStr) == @[""] and not c.listTeams(org2, slug2)[0].hasKey("ldap")
+      c.deleteOrganization(slug2)
     test "a user that a directory vouches for cannot be given a password, and the list of users says where they come from":
       let users = c.listUsers()
       var sources: seq[string]

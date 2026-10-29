@@ -66,6 +66,11 @@ type
   AccountRow = object
     account, directory, dn, roles: string
     off: bool
+  TeamMemberRow = object
+    user, source: string
+  TeamRow = object
+    name, description, ldap, roles: string
+    members: seq[TeamMemberRow]
   DirRow = object
     name, url, warnings, lastSync: string
     priority: int
@@ -324,6 +329,10 @@ proc renderMembers(base, scopeText, group, here, orgMembers: string; members: se
   let loggedIn = true
   compileTemplateFile("members.nimja", templateDir)
 
+proc renderTeams(base, org, here: string; teams: seq[TeamRow]; roleNames: seq[string]; canEdit: bool): string =
+  let loggedIn = true
+  compileTemplateFile("teams.nimja", templateDir)
+
 proc renderLdap(base, org, here: string; dirs: seq[DirRow]; maps: seq[MapRow]; accounts: seq[AccountRow]; roleNames: seq[string]; canMap, canWrite: bool): string =
   let loggedIn = true
   compileTemplateFile("ldap.nimja", templateDir)
@@ -490,10 +499,10 @@ func isRoleName(s: string): bool =
   true
 
 func isAccountName(s: string): bool =
-  ## a local user or `login@slug`: lowercase letters, digits and . _ - @
+  ## a local user, `login@slug`, or a team `team:name`: lowercase letters, digits and . _ - @ :
   if s.len < 1 or s.len > 100: return false
   for c in s:
-    if c notin {'a' .. 'z', '0' .. '9', '.', '_', '-', '@'}: return false
+    if c notin {'a' .. 'z', '0' .. '9', '.', '_', '-', '@', ':'}: return false
   true
 
 func isLogin(s: string): bool =
@@ -632,6 +641,58 @@ proc setMember(cfg: UiConfig; api: CoreApi; req: UiRequest; token: string; t: Ta
   let path = t.apiBase & "/members/" & user
   let r = if remove: api.send("DELETE", token, path, "") else: api.send("PUT", token, path, $(%*{"roles": roles}))
   afterAction(cfg, api, token, r, here, "The roles were not changed", "the roles of " & user, (if remove: "DELETE" else: "PUT"), path)
+
+proc teamsPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
+  let base = "/api/v1/organizations/" & slug & "/teams"
+  let r = api.get(token, base)
+  if r.status != asOk: return explained(cfg, api, token, r, "the teams of " & slug, "GET", base)
+  var rows: seq[TeamRow]
+  for t in r.body{"teams"}.getElems:
+    if not isDirName(t{"name"}.getStr): continue
+    var row = TeamRow(name: t["name"].getStr, description: t{"description"}.getStr)
+    if t{"ldap"}.isKind(JObject): row.ldap = t["ldap"]{"group_dn"}.getStr & (if t["ldap"]{"directory"}.getStr.len > 0: " (" & t["ldap"]{"directory"}.getStr & ")" else: "")
+    for m in t{"members"}.getElems:
+      if isAccountName(m{"user"}.getStr): row.members.add TeamMemberRow(user: m["user"].getStr, source: (if m{"source"}.getStr.len == 0: "by hand" else: "from the directory"))
+    var roles: seq[string]
+    for x in t{"roles"}.getElems: roles.add x{"role"}.getStr & " (" & x{"scope"}.getStr & ")"
+    row.roles = roles.join(", ")
+    rows.add row
+  let canEdit = can("access.write", slug, "")
+  page(200, renderTeams(cfg.base, slug, cfg.base & "/orgs/" & slug & "/teams", rows, (if canEdit: api.roleNamesOf(token) else: @[]), canEdit))
+
+proc teamsAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, slug: string; rest: seq[string]): UiResponse =
+  ## the forms of the Teams page
+  let base = "/api/v1/organizations/" & slug & "/teams"
+  let back = cfg.base & "/orgs/" & slug & "/teams"
+  let f = req.form
+  if rest.len == 0:
+    let name = f.getOrDefault("name")
+    let dn = f.getOrDefault("group_dn")
+    let directory = f.getOrDefault("directory")
+    if not isDirName(name) or dn.len > 500 or (directory.len > 0 and not isDirName(directory)): return messagePage(cfg, 400, true, "Not made", "A team is named by lowercase letters, digits, - and _.", "", back, "Back")
+    var body = %*{"description": f.getOrDefault("description")[0 ..< min(300, f.getOrDefault("description").len)]}
+    if dn.len > 0: body["ldap"] = %*{"group_dn": dn, "directory": directory}
+    let r = api.send("PUT", token, base & "/" & name, $body)
+    return afterAction(cfg, api, token, r, back, "The team was not made", "make the team " & name, "PUT", base & "/" & name)
+  if rest.len >= 2 and isDirName(rest[0]):
+    let name = rest[0]
+    if rest == @[name, "delete"]:
+      let r = api.send("DELETE", token, base & "/" & name, "")
+      return afterAction(cfg, api, token, r, back, "The team was not deleted", "delete the team " & name, "DELETE", base & "/" & name)
+    if rest == @[name, "members"] or rest == @[name, "members", "remove"]:
+      let user = f.getOrDefault("user")
+      if not isAccountName(user) or user.startsWith("team:"): return messagePage(cfg, 400, true, "Not saved", "Name the person: an account that exists.", "", back, "Back")
+      let remove = rest.len == 3
+      let r = api.send(if remove: "DELETE" else: "PUT", token, base & "/" & name & "/members/" & user, "")
+      return afterAction(cfg, api, token, r, back, "The member was not changed", "change the members of " & name, (if remove: "DELETE" else: "PUT"), base & "/" & name & "/members/" & user)
+    if rest == @[name, "roles"]:
+      var roles: seq[string]
+      for x in req.formAll("role"):
+        if isRoleName(x): roles.add x
+      let path = "/api/v1/organizations/" & slug & "/members/team:" & name
+      let r = api.send("PUT", token, path, $(%*{"roles": roles}))
+      return afterAction(cfg, api, token, r, back, "The roles were not changed", "the roles of the team " & name, "PUT", path)
+  messagePage(cfg, 404, true, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
 
 proc ldapPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
   let base = "/api/v1/organizations/" & slug & "/ldap"
@@ -783,13 +844,14 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
     return runAction(cfg, api, req, token, parts[1], parts[2])
   if req.meth == "POST":
     # the forms of the access pages: a POST from this host, then the thing is asked of the core with the token of the user
-    let isAccessPost = parts == @["new-role"] or (parts.len in [2, 3] and parts[0] == "roles") or (parts.len >= 3 and parts[0] == "orgs" and (parts[2] == "ldap" or "members" in parts))
+    let isAccessPost = parts == @["new-role"] or (parts.len in [2, 3] and parts[0] == "roles") or (parts.len >= 3 and parts[0] == "orgs" and (parts[2] == "ldap" or parts[2] == "teams" or "members" in parts))
     if isAccessPost:
       if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
       if parts == @["new-role"]: return saveRole(cfg, api, req, token, "")
       if parts.len == 2 and parts[1].isRoleName: return saveRole(cfg, api, req, token, parts[1])
       if parts.len == 3 and parts[0] == "roles" and parts[1].isRoleName and parts[2] == "delete": return deleteRole(cfg, api, token, parts[1])
       if parts.len >= 4 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
+      if parts.len >= 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "teams": return teamsAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
       if parts.len >= 4 and parts[^2] == "members" and parts[^1] in ["set", "remove"]:
         let t = targetOf(parts, parts.len - 2)
         if t.ok: return setMember(cfg, api, req, token, t, parts[^1] == "remove")
@@ -806,6 +868,7 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
     let t = targetOf(parts, parts.len - 1)
     if t.ok: return membersPage(cfg, api, token, t)
   if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapPage(cfg, api, token, parts[1])
+  if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "teams": return teamsPage(cfg, api, token, parts[1])
   if parts == @["orgs"]: return orgsPage(cfg, api, token)
   if parts == @["runs"]: return runsPage(cfg, api, token, "", query)
   if parts == @["status"]: return statusPage(cfg, api, token)

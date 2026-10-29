@@ -454,6 +454,42 @@ suite "D-84 D-85 D-87 the pages of roles, members and directories":
       check post(path, pairs).status == 400
     check post("/ui/orgs/acme/ldap/servers/Bad/sync", @[]).status == 404 and post("/ui/orgs/acme/ldap/nothing", @[]).status == 404
     check sent.len == 0
+  test "the teams of an organisation: how each is made, who is in it and from where, its roles; the forms only for whoever may give roles":
+    seed(orgAdminMe)
+    routes["/api/v1/organizations/acme/teams"] = %*{"teams": [
+      {"name": "qa", "description": "the <b>testers</b>", "members": [{"user": "ann@acme", "source": "ldap:x"}, {"user": "bob", "source": ""}], "roles": [{"role": "dev", "scope": "org:acme"}], "ldap": {"group_dn": "cn=qa,dc=x", "directory": "corp"}},
+      {"name": "ops", "description": "", "members": [], "roles": []}]}
+    let r = get("/ui/orgs/acme/teams")
+    check r.status == 200 and "the &lt;b&gt;testers&lt;/b&gt;" in r.body and "<b>testers</b>" notin r.body and "cn=qa,dc=x" in r.body and "dev (org:acme)" in r.body and "from the directory" in r.body and "by hand" in r.body
+    check "action=\"/ui/orgs/acme/teams/qa/members/remove\"" in r.body and r.body.count("members/remove\" class=\"inline\"") == 1            # only the member added by hand can be taken away by hand
+    check "action=\"/ui/orgs/acme/teams/ops/roles\"" in r.body and "action=\"/ui/orgs/acme/teams/ops/delete\"" in r.body and "action=\"/ui/orgs/acme/teams\"" in r.body and "This organisation has no team." notin r.body
+    seed(readerMe)
+    routes["/api/v1/organizations/acme/teams"] = %*{"teams": []}
+    let ro = get("/ui/orgs/acme/teams")
+    check ro.status == 200 and "This organisation has no team." in ro.body and "action=\"/ui/orgs/acme/teams\"" notin ro.body
+  test "the forms of the teams page: a team by hand or from a group, members, the roles of a team, deleting; bad input does not reach the core":
+    seed(orgAdminMe)
+    check post("/ui/orgs/acme/teams", @[("name", "qa"), ("description", "d"), ("group_dn", "cn=qa,dc=x"), ("directory", "corp")]).header("Location") == "/ui/orgs/acme/teams"
+    check sent == @["PUT /api/v1/organizations/acme/teams/qa {\"description\":\"d\",\"ldap\":{\"group_dn\":\"cn=qa,dc=x\",\"directory\":\"corp\"}}"]
+    reset(); seed(orgAdminMe)
+    discard post("/ui/orgs/acme/teams", @[("name", "ops"), ("description", "")])
+    discard post("/ui/orgs/acme/teams/ops/members", @[("user", "bob")])
+    discard post("/ui/orgs/acme/teams/ops/members/remove", @[("user", "bob")])
+    discard post("/ui/orgs/acme/teams/ops/roles", @[("role", "dev"), ("role", "rw"), ("role", "Bad Role")])
+    discard post("/ui/orgs/acme/teams/ops/delete", @[])
+    check sent == @["PUT /api/v1/organizations/acme/teams/ops {\"description\":\"\"}", "PUT /api/v1/organizations/acme/teams/ops/members/bob ", "DELETE /api/v1/organizations/acme/teams/ops/members/bob ",
+                    "PUT /api/v1/organizations/acme/members/team:ops {\"roles\":[\"dev\",\"rw\"]}", "DELETE /api/v1/organizations/acme/teams/ops "]
+    reset(); seed(orgAdminMe)
+    check post("/ui/orgs/acme/teams", @[("name", "Bad Name")]).status == 400 and post("/ui/orgs/acme/teams/ops/members", @[("user", "team:other")]).status == 400 and post("/ui/orgs/acme/teams/ops/members", @[("user", "../x")]).status == 400
+    check post("/ui/orgs/acme/teams/Bad/delete", @[]).status == 404 and post("/ui/orgs/acme/teams/ops/nothing", @[]).status == 404 and sent.len == 0
+    seed(orgAdminMe)
+    sendAnswer = ApiResult(status: asRefused, code: 409, message: "this member comes from the group of a directory")
+    let refused = post("/ui/orgs/acme/teams/qa/members/remove", @[("user", "ann@acme")])
+    check refused.status == 409 and "comes from the group of a directory" in refused.body
+  test "the roles of a team on a group are given on the members page of the group, with the person team:name":
+    seed(orgAdminMe)
+    discard post("/ui/orgs/acme/groups/ci/members/set", @[("user", "team:qa"), ("role", "dev")])
+    check sent == @["PUT /api/v1/organizations/acme/groups/ci/members/team:qa {\"roles\":[\"dev\"]}"]
   test "the menu has Roles for whoever can read access, and the list of organisations links to the pages":
     seed(adminMe)
     routes["/api/v1/organizations"] = %*{"organizations": [{"id": "o1", "slug": "acme", "name": "A", "state": "active", "namespace": "n"}]}
