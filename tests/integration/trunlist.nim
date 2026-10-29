@@ -88,6 +88,37 @@ suite "UI the list of runs":
       let mixed = c.listRuns("", "", 200, "", @[slugB], @[(slugA, "ci/cinim")])["runs"]
       check mixed.len == idsB.len + 1
       check c.listRuns(slugA, "", 200, "", @[], @[(slugA, "ci"), (slugB, "ci")])["runs"].len == 2
+    test "D-92 a binding tied to the caller's own runs or to refs lists the runs that meet it":
+      let ci = c.query(%*[["SELECT group_id FROM runs WHERE id = ?", idsA[0]]])["results"][0]["values"][0][0].getStr
+      discard c.execute(%*[["UPDATE runs SET actor_id = 'user:ann', source_ref = 'main', group_id = ? WHERE id = ?", ci, idsA[3]],
+                           ["UPDATE runs SET actor_id = 'user:bob', source_ref = 'release/1.2', group_id = ? WHERE id = ?", ci, idsA[4]],
+                           ["UPDATE runs SET actor_id = 'user:ann', source_ref = 'release/2', group_id = ? WHERE id = ?", ci, idsA[5]],
+                           ["UPDATE runs SET actor_id = 'user:ann', source_ref = '', group_id = '' WHERE id = ?", idsA[6]]])
+      func ids(j: JsonNode): seq[string] = j["runs"].elems.mapIt(it["id"].getStr).sorted
+      let mine = c.listRuns(slugA, "", 200, "", @[], @[], @[(org: slugA, path: "", onlyOwn: true, refs: newSeq[string]())], "user:ann")
+      check mine.ids == sorted(@[idsA[3], idsA[5], idsA[6]])
+      let onRefs = c.listRuns(slugA, "", 200, "", @[], @[], @[(org: slugA, path: "", onlyOwn: false, refs: @["main", "release/*"])], "user:ann")
+      check onRefs.ids == sorted(@[idsA[3], idsA[4], idsA[5]])
+      let both = c.listRuns(slugA, "", 200, "", @[], @[], @[(org: slugA, path: "ci", onlyOwn: true, refs: @["release/*"])], "user:ann")
+      check both.ids == @[idsA[5]]
+      check c.listRuns(slugB, "", 200, "", @[], @[], @[(org: slugA, path: "", onlyOwn: true, refs: newSeq[string]())], "user:ann")["runs"].len == 0
+      check c.listRuns("", "", 200, "", @[], @[], @[(org: slugA, path: "", onlyOwn: true, refs: newSeq[string]())], "user:nobody")["runs"].len == 0
+      check c.listRuns("", "", 200, "", @[slugB], @[], @[(org: slugA, path: "", onlyOwn: true, refs: newSeq[string]())], "user:ann").ids == sorted(idsB & @[idsA[3], idsA[5], idsA[6]])
+    test "D-94 a new run is QUEUED with the reason; a run that is led and has only steps that wait is PENDING, with the reason of the step":
+      let id = co.createRun("return 1", orgA, profA)
+      let fresh = co.getRun(id)
+      check fresh["state"].getStr == "QUEUED" and fresh["queue"]["reason"].getStr.len > 0 and not fresh.hasKey("pending")
+      check c.listRuns(slugA, "", 200, "", @[], @[])["runs"].elems.filterIt(it["id"].getStr == id)[0]["state"].getStr == "QUEUED"
+      discard c.execute(%*[["UPDATE runs SET state = 'RUNNING', lease_attempt = 1 WHERE id = ?", id]])
+      let jobId = newId()
+      discard c.execute(%*[["INSERT INTO jobs (id, run_id, key, state, profile_id) VALUES (?, ?, 'j1', 'RUNNING', ?)", jobId, id, profA]])
+      discard c.execute(%*[["INSERT INTO steps (id, run_id, job_id, ordinal, type, state, profile_id, image, command, opts, queued_at) VALUES (?, ?, ?, 1, 'sh', 'PENDING', ?, 'alpine', 'true', '', '1')", newId(), id, jobId, profA]])
+      let waiting = co.getRun(id)
+      check waiting["state"].getStr == "RUNNING" and waiting["pending"]["reason"].getStr == "no controller has taken it yet" and waiting["steps"][0]["pending_reason"].getStr.len > 0
+      check c.listRuns(slugA, "", 200, "", @[], @[])["runs"].elems.filterIt(it["id"].getStr == id)[0]["pending"].getBool
+      discard c.execute(%*[["UPDATE steps SET state = 'RUNNING' WHERE run_id = ?", id]])
+      check not co.getRun(id).hasKey("pending") and not c.listRuns(slugA, "", 200, "", @[], @[])["runs"].elems.filterIt(it["id"].getStr == id)[0].hasKey("pending")
+      discard c.execute(%*[["UPDATE runs SET state = 'OK' WHERE id = ?", id]])
     test "the values are parameters, not SQL":
       check c.listRuns("x' OR '1'='1", "", 50, "")["runs"].len == 0
       check c.listRuns(slugA, "FAILED' OR '1'='1", 50, "")["runs"].len == 0
@@ -131,6 +162,16 @@ suite "UI who may list which runs":
     var onlyGroup: Grants
     onlyGroup.addRole("org:beta/ci", builtinPermissions("ro"))
     check scopeOf(Principal(ok: true, user: "y", grants: onlyGroup), "") == "true   beta/ci"
+  test "D-92 a binding tied to own runs or refs: listed as a limit, and the organisation asked for counts":
+    var g: Grants
+    g.addRole("org:acme", builtinPermissions("dev"), BindingCondition(onlyOwn: true))
+    g.addRole("org:beta", builtinPermissions("ro"))
+    let u = Principal(ok: true, user: "x", grants: g)
+    let all = runListScope(u, "")
+    check all.ok and all.only == @["beta"] and all.limited.len == 1 and all.limited[0].org == "acme" and all.limited[0].onlyOwn and all.limited[0].path == ""
+    let asked = runListScope(u, "acme")
+    check asked.ok and asked.only.len == 0 and asked.limited.len == 1
+    check not runListScope(u, "gamma").ok
   test "no one and a token of no organisation: refused":
     check not runListScope(Principal(), "").ok
     check not runListScope(Principal(ok: true), "").ok

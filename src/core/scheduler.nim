@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource]
 import ctrlpresence, logwindow, keptpods, stepsecrets, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
+import approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
 export protos
@@ -64,9 +64,11 @@ proc loadPolicy*(c: var RqClient; profileId: string): RetryPolicy =
 
 # ------------------------------------------------------------------ run creation and lookup (REST API)
 
-proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; params: seq[(string, string)] = @[]; triggerId = ""; groupId = ""; source = Source()): string =
+proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; params: seq[(string, string)] = @[]; triggerId = ""; groupId = ""; source = Source(); actor = ""; approval = ApprovalSpec()): string =
   ## `tenantId` is the organisation's id and `profileId` its execution profile (SHD-007); without them the run belongs to the
   ## shard's default tenant and profile (single-tenant setups and tests). `groupId` is the group the run belongs to (PRJ-001, D-54; "" = the organisation itself).
+  ## `actor` is who started it (`actorOf`: `user:<name>`, `token:<id>`, `trigger:<id>` for a trigger that fired by itself; D-92 "only their own runs" asks for it).
+  ## `approval` (D-93) makes the run wait, in the state WAITING, for that many approvals before it starts: it is ABORTED at once when fewer people than that could give them.
   ## `source` says where `script` was read from when it was read from a repository (D-63): the repository, the SHA of the commit, the path; the run keeps it (PIP-001) and the script sees it as `run.source`.
   var c = newRq(co.rqliteUrl)
   result = newId()
@@ -79,10 +81,22 @@ proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; param
     if last != nil and last.len > 0: base = last[0][0].getStr
   # D-86: a run on a protected ref of its project is trusted (its protected secrets, the profile deploy)
   let trusted = source.refName.len > 0 and c.isProtectedRef(groupId, source.refName)
-  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path, source_base, source_ref, trusted) " &
-    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, protoName(rsRunning), now, now,
+  var initial = protoName(rsQueued)          # D-94: a new run is queued until a conductor leads it (the first lease makes it RUNNING)
+  var deadline = 0'i64
+  var failCode, failMessage = ""
+  if approval.required > 0:
+    initial = protoName(rsWaiting)
+    deadline = getTime().toUnix() + approval.timeoutSeconds
+    let where = c.query(%*[["SELECT COALESCE((SELECT slug FROM organizations WHERE id = ?), ''), COALESCE((SELECT path FROM groups WHERE id = ?), '')", tenantId, groupId]])["results"][0]{"values"}
+    let could = c.approverNames(where[0][0].getStr, where[0][1].getStr, source.refName, actor, getTime().toUnix())
+    if could.len < approval.required:
+      initial = protoName(rsAborted)
+      failCode = "no_approvers"
+      failMessage = "the run needs " & $approval.required & " approval" & (if approval.required > 1: "s" else: "") & ", and " & (if could.len == 0: "nobody" else: "only " & $could.len) & " besides its author holds run.approve for this project"
+  discard c.execute(%*[["INSERT INTO runs (id, tenant_id, group_id, state, version, created_at, updated_at, profile_id, params, trigger_id, api_version, source_repository, source_commit, source_path, source_base, source_ref, trusted, actor_id, approval_required, approval_deadline, fail_code, fail_message) " &
+    "VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result, tenantId, groupId, initial, now, now,
     (if profileId.len > 0: profileId else: co.profileId), (if params.len > 0: toJson(params) else: ""),
-    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path, base, source.refName, (if trusted: 1 else: 0)]])
+    (if triggerId.len > 0: %triggerId else: newJNull()), currentApiVersion, source.repository, source.commit, source.path, base, source.refName, (if trusted: 1 else: 0), actor, approval.required, deadline, failCode, failMessage]])
   # the script itself has nowhere else to live yet (no pipeline_bundles/blob storage, spec 8.2): stash it
   # on the run's own journal as a seq-0 "script" marker the executor service's lease query reads back.
   discard c.execute(%*[["INSERT INTO run_journal (run_id, seq, kind, fingerprint, payload, result, created_at) " &
@@ -128,6 +142,58 @@ proc abortRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Abort
   c.releaseRun(runId, now)                       # it holds no lock of a job and waits for none (core/joblocks.nim)
   kickProfile(profileOfRun(c, runId, ""))       # the controllers hear of it now, not at their next poll
   (coAborted, protoName(rsAborted))
+
+type ApprovalOutcome* = enum
+  aoNotFound, aoNotWaiting, aoOwnRun, aoAlreadyAnswered, aoGiven, aoApproved, aoRejected
+
+proc answerApproval*(c: var RqClient; runId, user, decision, comment: string; now: int64): tuple[outcome: ApprovalOutcome, state: string, have, required: int] =
+  ## D-93: a person's answer to a run that waits for approval. The run is read, the author is refused, the answer is written once for each person; with enough approvals the run is RUNNING
+  ## (a conductor takes it at once), with one rejection it is ABORTED. Whether the caller holds `run.approve` is the API\'s to check.
+  let r = c.query(%*[["SELECT state, approval_required, COALESCE(actor_id, '') FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
+  if r == nil or r.len == 0: return (aoNotFound, "", 0, 0)
+  let was = r[0][0].getStr
+  let need = r[0][1].getInt
+  if was != protoName(rsWaiting) or need == 0: return (aoNotWaiting, was, 0, need)
+  if r[0][2].getStr == "user:" & user: return (aoOwnRun, was, 0, need)
+  let ins = c.execute(%*[["INSERT OR IGNORE INTO run_approvals (run_id, user_name, decision, comment, at) VALUES (?, ?, ?, ?, ?)", runId, user, decision, comment, now]])
+  if ins["results"][0]{"rows_affected"}.getInt == 0: return (aoAlreadyAnswered, was, 0, need)
+  if decision == "reject":
+    discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0, fail_code = 'rejected', fail_message = ? WHERE id = ? AND state = ?",
+                          protoName(rsAborted), $now, "rejected by " & user & (if comment.len > 0: ": " & comment else: ""), runId, protoName(rsWaiting)]])
+    return (aoRejected, protoName(rsAborted), 0, need)
+  let have = c.query(%*[["SELECT count(*) FROM run_approvals WHERE run_id = ? AND decision = 'approve'", runId]])["results"][0]{"values"}[0][0].getInt
+  if have < need: return (aoGiven, was, have, need)
+  let go = c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0 WHERE id = ? AND state = ?", protoName(rsQueued), $now, runId, protoName(rsWaiting)]])
+  if go["results"][0]{"rows_affected"}.getInt > 0: kickProfile(profileOfRun(c, runId, ""))
+  (aoApproved, protoName(rsQueued), have, need)
+
+proc sweepApprovals*(c: var RqClient; now: int64): int =
+  ## D-93, each beat of the core: a run whose time to be approved has passed is TIMED_OUT; one that has no person left who could give the approvals it still needs is ABORTED
+  ## (the last of them was taken off, switched off, or their term ended). Returns how many ended.
+  let rows = c.query(%*[["SELECT r.id, r.approval_required, r.approval_deadline, COALESCE(o.slug, ''), COALESCE(g.path, ''), r.source_ref, COALESCE(r.actor_id, '') " &
+    "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id LEFT JOIN groups g ON g.id = r.group_id WHERE r.state = ? AND r.approval_required > 0", protoName(rsWaiting)]])["results"][0]{"values"}
+  if rows == nil: return
+  for v in rows:
+    let id = v[0].getStr
+    if v[2].getBiggestInt > 0 and now >= v[2].getBiggestInt:
+      let done = c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0, fail_code = 'approval_timeout', fail_message = 'nobody approved the run in time' WHERE id = ? AND state = ?",
+                               protoName(rsTimedOut), $now, id, protoName(rsWaiting)]])
+      if done["results"][0]{"rows_affected"}.getInt > 0: inc result
+      continue
+    let answered = c.query(%*[["SELECT user_name FROM run_approvals WHERE run_id = ?", id]])["results"][0]{"values"}
+    var given: seq[string]
+    if answered != nil:
+      for a in answered: given.add a[0].getStr
+    var could = 0
+    for n in c.approverNames(v[3].getStr, v[4].getStr, v[5].getStr, v[6].getStr, now):
+      if n notin given: inc could
+    var haveYes = 0
+    let hy = c.query(%*[["SELECT count(*) FROM run_approvals WHERE run_id = ? AND decision = 'approve'", id]])["results"][0]{"values"}
+    if hy != nil and hy.len > 0: haveYes = hy[0][0].getInt
+    if haveYes + could < v[1].getInt:
+      let done = c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, lease_until = 0, fail_code = 'no_approvers', fail_message = 'nobody is left who could approve the run' WHERE id = ? AND state = ?",
+                               protoName(rsAborted), $now, id, protoName(rsWaiting)]])
+      if done["results"][0]{"rows_affected"}.getInt > 0: inc result
 
 type RetryOutcome* = enum
   roNotFound, roRetried, roNotRetryable, roNothingToRetry, roVolumeGone
@@ -182,9 +248,15 @@ proc retryRun*(c: var RqClient; runId: string; now: int64): tuple[outcome: Retry
   kickProfile(profileOfRun(c, runId, ""))
   (roRetried, protoName(rsRunning), ordinals)
 
+proc stateOfRun*(co: Core; runId: string): string =
+  ## the state a run is in now (a new one is QUEUED, or WAITING for approval, or ABORTED at once when nobody could approve it)
+  var c = newRq(co.rqliteUrl)
+  let v = c.query(%*[["SELECT state FROM runs WHERE id = ?", runId]])["results"][0]{"values"}
+  if v != nil and v.len > 0: v[0][0].getStr else: ""
+
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path, r.source_base, r.source_ref, r.trusted " &
+  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path, r.source_base, r.source_ref, r.trusted, COALESCE(r.actor_id, ''), r.approval_required, r.approval_deadline " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
@@ -196,6 +268,15 @@ proc getRun*(co: Core; runId: string): JsonNode =
     result["source"] = %*{"repository": row[10].getStr, "commit": row[11].getStr, "path": row[12].getStr}
     if row[13].getStr.len > 0: result["source"]["base"] = %row[13].getStr          # D-82
     if row[14].getStr.len > 0: result["source"]["ref"] = %row[14].getStr           # D-86
+  if row[16].getStr.len > 0: result["started_by"] = %row[16].getStr                  # D-92: `user:<name>`, `token:<id>`, `trigger:<id>`
+  if row[17].getInt > 0:
+    # D-93: the approvals a run asks for, who has given them, and until when it waits
+    var yes, no: seq[string]
+    let ans = c.query(%*[["SELECT user_name, decision FROM run_approvals WHERE run_id = ? ORDER BY at, user_name", runId]])["results"][0]{"values"}
+    if ans != nil:
+      for a in ans:
+        if a[1].getStr == "approve": yes.add a[0].getStr else: no.add a[0].getStr
+    result["approval"] = %*{"required": row[17].getInt, "approved_by": yes, "rejected_by": no, "deadline": row[18].getBiggestInt, "waiting": row[2].getStr == protoName(rsWaiting)}
   result["trusted"] = %(row[15].getInt > 0)                                          # D-86: a run on a protected ref of its project
   if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
   if row[6].getStr.len > 0:
@@ -221,17 +302,43 @@ proc getRun*(co: Core; runId: string): JsonNode =
   if wv != nil and wv.len > 0: result["wait_reason"] = %wv[0][0].getStr
   # the steps with their attempt and the reason the last attempt ended the way it did (lost_never_started was retried,
   # outcome_unknown was not, logs_undelivered = result known but the log is incomplete, ...): visible, not buried in a log
-  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination, pod_reason, pod_message, pod_diag, COALESCE(CAST(started_at AS INTEGER), 0), COALESCE(CAST(finished_at AS INTEGER), 0) FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
+  let st = c.query(%*[["SELECT ordinal, attempt, state, exit_code, termination, pod_reason, pod_message, pod_diag, COALESCE(CAST(started_at AS INTEGER), 0), COALESCE(CAST(finished_at AS INTEGER), 0), COALESCE(wait_reason, ''), not_before FROM steps WHERE run_id = ? ORDER BY ordinal", runId]])
   var steps = newJArray()
   let sv = st["results"][0]{"values"}
+  # D-94: why a run or a step is not running yet: the limits of the organisation, a pause after a lost attempt, the log circuit, or nobody has taken it
+  let pid = profileOfRun(c, runId, "")
+  let limit = loadSettings(c, pid).podLimit
+  var inFlight = 0
+  if sv != nil and sv.len > 0:
+    let fl = c.query(%*[["SELECT COUNT(*) FROM steps WHERE profile_id = ? AND state IN (?, ?)", pid, protoName(ssStarting), protoName(ssRunning)]])["results"][0]{"values"}
+    if fl != nil and fl.len > 0: inFlight = fl[0][0].getInt
+  let nowSec = getTime().toUnix()
+  if row[2].getStr == protoName(rsQueued):
+    let lv = c.query(%*[["SELECT COUNT(*) FROM runs WHERE profile_id = ? AND state = ? AND lease_attempt > 0", pid, protoName(rsRunning)]])["results"][0]{"values"}
+    let led = if lv != nil and lv.len > 0: lv[0][0].getInt else: 0
+    result["queue"] = %*{"reason": (if led >= limit: "the organisation leads " & $led & " runs and its limit is " & $limit & " (pod_limit): this run starts when one of them ends"
+                                    else: "no conductor of the organisation has taken it yet; one starts when the organisation has a free place")}
+  # D-94: PENDING - the run is being led, nothing of it runs, and its steps wait for a place
+  var anyRunning, firstPending = ""
   if sv != nil:
     for r in sv:
-      steps.add %*{"seq": r[0].getInt, "attempt": r[1].getInt, "state": r[2].getStr,
+      if r[2].getStr in [protoName(ssStarting), protoName(ssRunning)]: anyRunning = "yes"
+  if sv != nil:
+    for r in sv:
+      var pending = ""
+      if r[2].getStr == protoName(ssPending):
+        pending = if r[10].getStr.len > 0: (if r[10].getStr == reasonUnavailable: "the log circuit is open: the log store does not answer" else: r[10].getStr)
+                  elif r[11].getBiggestInt > nowSec: "paused after a lost attempt until " & $r[11].getBiggestInt & " (epoch seconds)"
+                  elif inFlight >= limit: "the organisation runs " & $inFlight & " pods and its limit is " & $limit & " (pod_limit)"
+                  else: "no controller has taken it yet"
+        if firstPending.len == 0: firstPending = pending
+      steps.add %*{"pending_reason": pending, "seq": r[0].getInt, "attempt": r[1].getInt, "state": r[2].getStr,
                    "exit_code": (if r[3].kind == JNull: newJNull() else: %r[3].getInt), "termination": r[4].getStr,
                    "pod_reason": r[5].getStr, "pod_message": r[6].getStr,
                    "started_at": r[8].getInt, "finished_at": r[9].getInt,        # epoch seconds; 0: not yet (the UI says how long a step took)
                    "pod_diag": (if r[7].getStr.len > 0: (try: parseJson(r[7].getStr) except CatchableError: newJNull()) else: newJNull())}
   result["steps"] = steps
+  if row[2].getStr == protoName(rsRunning) and anyRunning.len == 0 and firstPending.len > 0: result["pending"] = %*{"reason": firstPending}
 
 # ------------------------------------------------------------------ retry settings (D-27)
 
@@ -639,7 +746,7 @@ const conductorDrainSeconds* = 30
 
 proc runCounts*(c: var RqClient; profileId: string): tuple[active, waiting: int] =
   ## the organisation's runs that are not over: those that were led before (they hold a place of pod_limit) and those that have not been led yet
-  let r = c.query(%*[["SELECT COUNT(CASE WHEN lease_attempt > 0 THEN 1 END), COUNT(*) FROM runs WHERE profile_id = ? AND state = ?", profileId, protoName(rsRunning)]])
+  let r = c.query(%*[["SELECT COUNT(CASE WHEN lease_attempt > 0 THEN 1 END), COUNT(*) FROM runs WHERE profile_id = ? AND state IN (?, ?)", profileId, protoName(rsQueued), protoName(rsRunning)]])
   let vals = r["results"][0]{"values"}
   if vals != nil and vals.len > 0:
     result.active = vals[0][0].getInt
@@ -842,10 +949,11 @@ proc takeRunLease*(c: var RqClient; master, runId, owner: string; versions: seq[
   let now = getTime().toUnix()
   let st = leaseStateOf(c, runId)
   if not canTake(st, now): return ""
-  let r = c.execute(%*[["UPDATE runs SET lease_attempt = lease_attempt + 1, lease_until = ?, lease_owner = ?, dirty = 0 " &
-    "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state = ? " &
+  let r = c.execute(%*[["UPDATE runs SET lease_attempt = lease_attempt + 1, lease_until = ?, lease_owner = ?, dirty = 0, " &
+    "state = '" & protoName(rsRunning) & "', updated_at = CASE WHEN state = '" & protoName(rsQueued) & "' THEN '" & $now & "' ELSE updated_at END, version = version + 1 " &
+    "WHERE id = ? AND lease_attempt = ? AND (lease_until = 0 OR lease_until < ?) AND state IN (?, ?) " &
     (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "RETURNING lease_attempt",
-    now + leaseTtlSeconds, owner, runId, st.attempt, now, protoName(rsRunning)]])
+    now + leaseTtlSeconds, owner, runId, st.attempt, now, protoName(rsQueued), protoName(rsRunning)]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: "" else: leaseToken(master, runId, vals[0][0].getInt)
 
@@ -866,7 +974,7 @@ proc grantLease*(c: var RqClient; master, candidate, owner: string; versions: se
   if v.check.verdict == cvBroken:
     stderr.writeLine "core: the journal of run " & candidate & " is corrupt: " & v.check.why & "; the run ends"
     discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = 'journal_corrupt', fail_message = ?, lease_until = 0 " &
-      "WHERE id = ? AND state = ?", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsRunning)]])
+      "WHERE id = ? AND state IN (?, ?)", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsQueued), protoName(rsRunning)]])
     return none(LeaseGranted)
   let vr = c.query(%*[["SELECT api_version, step_table, source_repository, source_commit, source_path, source_base FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
   var given = runParams(c, candidate).mapIt(ParamsEntry(key: it[0], value: it[1]))
@@ -884,10 +992,10 @@ proc leaseForConductor*(c: var RqClient; profileId, master, owner: string; versi
   ## organisation's own runs, only of the host API versions the conductor can run.
   if places <= 0: return
   # one look at what is free: the runs that were led before come first. When nothing is free (the usual case) that is the only query.
-  let r = c.query(%*[["SELECT id, lease_attempt FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?) AND profile_id = ? " &
+  let r = c.query(%*[["SELECT id, lease_attempt FROM runs WHERE state IN (?, ?) AND (lease_until = 0 OR lease_until < ?) AND profile_id = ? " &
     (if versions.len > 0: "AND api_version IN (" & sqlVersionList(versions) & ") " else: "") & "AND (dirty = 1 OR id NOT IN " &
     "(SELECT run_id FROM steps WHERE state IN (?, ?, ?))) AND id NOT IN (SELECT run_id FROM lock_waiters) ORDER BY (lease_attempt > 0) DESC, created_at LIMIT ?",
-    protoName(rsRunning), getTime().toUnix(), profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), places]])
+    protoName(rsQueued), protoName(rsRunning), getTime().toUnix(), profileId, protoName(ssPending), protoName(ssStarting), protoName(ssRunning), places]])
   var led, fresh: seq[string]
   let vals = r["results"][0]{"values"}
   if vals != nil:

@@ -34,9 +34,12 @@ type
     name, value: string
   StepRow = object
     seq, attempt: int
-    state, exitCode, termination, pod, took: string
+    state, exitCode, termination, pod, took, pending: string        ## `pending`: why a step that is PENDING is not running (D-94)
   RunView = object
     id, state, organization, project, created, updated, repository, commit, path, waitReason, failureCode, failureMessage, took: string
+    queue: string                    ## D-94: why a QUEUED run is not led yet
+    approval: string                 ## D-93: what the run waits for, or how the wait ended
+    canApprove: bool                 ## approve / reject buttons
     canAbort, canRetry: bool         ## the buttons of the page: `actions` of the run, as the core says them
     params: seq[ParamRow]
     steps: seq[StepRow]
@@ -86,7 +89,7 @@ const
   templateDir = currentSourcePath().parentDir / "templates"
   css = staticRead("ui.css")
   cssVersion = toHex(int64(hash(css)), 8)       # in the link: a new style sheet is a new address, and the day of caching does not hold back a change
-  runStates = ["PENDING", "RUNNING", "OK", "FAILED", "ABORTED"]   # the core's word (RUN_STATE_ABORTED); a state that is spelled two ways is a filter that matches nothing
+  runStates = ["QUEUED", "WAITING", "RUNNING", "OK", "FAILED", "ABORTED", "TIMED_OUT"]   # the core's word (RUN_STATE_ABORTED); a state that is spelled two ways is a filter that matches nothing
 
 func isDirName(s: string): bool =
   if s.len < 1 or s.len > 40 or s[0] notin {'a' .. 'z'}: return false
@@ -446,7 +449,7 @@ proc runsPage(cfg: UiConfig; api: CoreApi; token, org: string; query: Table[stri
   for x in r.body{"runs"}.getElems:
     let commit = x{"source"}{"commit"}.getStr
     let failure = if x.hasKey("failure"): x["failure"]{"code"}.getStr & (if x["failure"]{"message"}.getStr.len > 0: ": " & x["failure"]{"message"}.getStr else: "") else: ""
-    runs.add RunItem(id: x{"id"}.getStr, short: shortRunId(x{"id"}.getStr), state: x{"state"}.getStr, organization: x{"organization"}.getStr,
+    runs.add RunItem(id: x{"id"}.getStr, short: shortRunId(x{"id"}.getStr), state: (if x{"pending"}.getBool: "PENDING" else: x{"state"}.getStr), organization: x{"organization"}.getStr,
                      project: x{"project"}.getStr, pipeline: x{"source"}{"path"}.getStr, repository: x{"source"}{"repository"}.getStr, source: (if commit.len > 7: commit[0 ..< 7] else: commit),
                      created: timeText(x{"created_at"}.getStr), updated: timeText(x{"updated_at"}.getStr), failure: failure,
                      took: runTook(x{"state"}.getStr, x{"created_at"}.getStr, x{"updated_at"}.getStr, getTime().toUnix))
@@ -470,12 +473,23 @@ proc runPage(cfg: UiConfig; api: CoreApi; token, id: string): UiResponse =
   if not isSlug(v.organization): v.organization = ""
   v.canAbort = j{"actions"}{"abort"}.getBool        # the core's word: the state of the run allows it and so do the rights of this user in this organisation
   v.canRetry = j{"actions"}{"retry"}.getBool
+  v.canApprove = j{"actions"}{"approve"}.getBool
+  v.queue = j{"queue"}{"reason"}.getStr
+  if j{"pending"}.isKind(JObject) and v.state == "RUNNING":
+    v.state = "PENDING"                                  # D-94: led, but nothing of it runs: its steps wait for a place
+    v.queue = j["pending"]{"reason"}.getStr
+  if j{"approval"}.isKind(JObject):
+    let a = j["approval"]
+    let by = a{"approved_by"}.getElems.mapIt(it.getStr).join(", ")
+    v.approval = $a{"approved_by"}.getElems.len & " of " & $a{"required"}.getInt & " approval" & (if a{"required"}.getInt > 1: "s" else: "") & (if by.len > 0: " (" & by & ")" else: "") &
+      (if a{"rejected_by"}.getElems.len > 0: ", rejected by " & a{"rejected_by"}.getElems.mapIt(it.getStr).join(", ") else: "") &
+      (if a{"waiting"}.getBool and a{"deadline"}.getBiggestInt > 0: "; waits until " & fromUnix(a["deadline"].getBiggestInt).utc.format("yyyy-MM-dd HH:mm") & " UTC" else: "")
   if j{"params"}.isKind(JObject):
     for k, x in j["params"]: v.params.add ParamRow(name: k, value: (if x.kind == JString: x.getStr else: $x))
   for s in j{"steps"}.getElems:
     let reason = s{"pod_reason"}.getStr
     v.steps.add StepRow(seq: s{"seq"}.getInt, attempt: s{"attempt"}.getInt, state: s{"state"}.getStr,
-                        exitCode: (if s{"exit_code"}.isKind(JInt): $s["exit_code"].getInt else: ""), termination: s{"termination"}.getStr, pod: reason,
+                        pending: s{"pending_reason"}.getStr, exitCode: (if s{"exit_code"}.isKind(JInt): $s["exit_code"].getInt else: ""), termination: s{"termination"}.getStr, pod: reason,
                         took: tookText(s{"started_at"}.getInt(0), s{"finished_at"}.getInt(0), s{"finished_at"}.getInt(0) > 0, getTime().toUnix))
   page(200, renderRun(cfg.base, v))
 
@@ -483,11 +497,15 @@ proc runAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, id, action: s
   ## The buttons of a run's page (RUN-006 abort, PIP-015 retry): a POST that asks the core for `POST /api/v1/runs/<id>:<action>` with the token of the user, and goes back to the run.
   ## What the core refuses (the run has ended, nothing failed, the volume is gone, the role may not) is told in words, and the run is left as it is.
   if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
-  let r = api.post(token, "/api/v1/runs/" & id & ":" & action, "{}")
+  let r = api.post(token, "/api/v1/runs/" & id & ":" & action, (if action in ["approve", "reject"]: $(%*{"comment": req.form.getOrDefault("comment").strip[0 ..< min(500, req.form.getOrDefault("comment").strip.len)]}) else: "{}"))
   let back = cfg.base & "/runs/" & id
   case r.status
   of asOk: redirect(back)
-  of asRefused: messagePage(cfg, 409, true, (if action == "abort": "The run was not stopped" else: "The run was not started again"), "The core refused.", r.message, back, "Back to the run")
+  of asRefused: messagePage(cfg, 409, true, (case action
+    of "abort": "The run was not stopped"
+    of "approve": "The run was not approved"
+    of "reject": "The run was not rejected"
+    else: "The run was not started again"), "The core refused.", r.message, back, "Back to the run")
   else: failed(cfg, r, "run " & id)
 
 # ------------------------------------------------------------------ roles, members, directories (D-84, D-85, D-87, D-88)
@@ -624,7 +642,15 @@ proc membersPage(cfg: UiConfig; api: CoreApi; token: string; t: Target): UiRespo
   var rows: seq[MemberRow]
   for m in r.body{"members"}.getElems:
     var roles: seq[string]
-    for x in m{"roles"}.getElems: roles.add x.getStr
+    for x in m{"roles"}.getElems:
+      # D-92: what a role is tied to, said after its name
+      let cond = m{"conditions"}{x.getStr}
+      var tied: seq[string]
+      if cond != nil and cond.kind == JObject:
+        if cond{"expires_at"} != nil and cond{"expires_at"}.kind == JInt: tied.add((if cond{"expired"}.getBool: "ended " else: "until ") & fromUnix(cond["expires_at"].getBiggestInt).utc.format("yyyy-MM-dd HH:mm") & " UTC")
+        if cond{"only_own"}.getBool: tied.add "own runs only"
+        if cond{"refs"} != nil and cond{"refs"}.kind == JArray: tied.add "refs " & cond["refs"].getElems.mapIt(it.getStr).join(", ")
+      roles.add x.getStr & (if tied.len > 0: " (" & tied.join("; ") & ")" else: "")
     if isAccountName(m{"user"}.getStr): rows.add MemberRow(user: m["user"].getStr, roles: roles.join(", "))
   let here = cfg.base & "/orgs/" & t.slug & (if t.kind.len > 0: "/" & t.kind & "/" & t.group else: "") & "/members"
   let canEdit = can("access.write", t.slug, t.group)
@@ -634,10 +660,25 @@ proc setMember(cfg: UiConfig; api: CoreApi; req: UiRequest; token: string; t: Ta
   let user = req.form.getOrDefault("user")
   let here = uiBase(cfg, t) & "/members"
   if not isAccountName(user): return messagePage(cfg, 400, true, "Not saved", "Name the person: an account that exists.", "", here, "Back")
-  var roles: seq[string]
+  var roles: seq[JsonNode]
   if not remove:
+    # D-92: a term (a date, to the end of that day, UTC), the person's own runs only, and refs (one to a line or separated by commas) apply to every role ticked
+    var cond = newJObject()
+    let until = req.form.getOrDefault("until").strip
+    if until.len > 0:
+      if until.len != 10 or until[4] != '-' or until[7] != '-' or not (until[0 ..< 4] & until[5 ..< 7] & until[8 ..< 10]).allIt(it in {'0' .. '9'}):
+        return messagePage(cfg, 400, true, "Not saved", "The term is a date: year-month-day.", "", here, "Back")
+      cond["expires_at"] = %(until & "T23:59:59Z")
+    if req.form.getOrDefault("only_own") == "1": cond["only_own"] = %true
+    let refs = req.form.getOrDefault("refs").replace(',', '\n').splitLines.mapIt(it.strip).filterIt(it.len > 0)
+    if refs.len > 0: cond["refs"] = %refs
     for x in req.formAll("role"):
-      if isRoleName(x): roles.add x
+      if isRoleName(x):
+        if cond.len == 0: roles.add %x
+        else:
+          var item = copy(cond)
+          item["role"] = %x
+          roles.add item
   let path = t.apiBase & "/members/" & user
   let r = if remove: api.send("DELETE", token, path, "") else: api.send("PUT", token, path, $(%*{"roles": roles}))
   afterAction(cfg, api, token, r, here, "The roles were not changed", "the roles of " & user, (if remove: "DELETE" else: "PUT"), path)
@@ -840,7 +881,7 @@ proc parseQuery(q: string): Table[string, string] =
 proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; query: Table[string, string]): UiResponse =
   api.setMenu(token)
   let parts = path.strip(chars = {'/'}).split('/')
-  if req.meth == "POST" and parts.len == 3 and parts[0] == "runs" and isId(parts[1]) and parts[2] in ["abort", "retry"]:
+  if req.meth == "POST" and parts.len == 3 and parts[0] == "runs" and isId(parts[1]) and parts[2] in ["abort", "retry", "approve", "reject"]:
     return runAction(cfg, api, req, token, parts[1], parts[2])
   if req.meth == "POST":
     # the forms of the access pages: a POST from this host, then the thing is asked of the core with the token of the user

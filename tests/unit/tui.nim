@@ -414,6 +414,17 @@ suite "D-84 D-85 D-87 the pages of roles, members and directories":
     check sent == @["DELETE /api/v1/organizations/acme/groups/ci/cinim/members/gina "]
     reset(); seed(orgAdminMe)
     check post("/ui/orgs/acme/members/set", @[("user", "../x"), ("role", "dev")]).status == 400 and post("/ui/orgs/acme/members/set", @[("role", "dev")]).status == 400 and sent.len == 0
+  test "D-92 the members page says what a role is tied to; the form sends the term, own runs and refs with every ticked role":
+    seed(orgAdminMe)
+    routes["/api/v1/organizations/acme/members"] = %*{"members": [{"user": "ann@acme", "roles": ["dev", "ro"], "conditions": {"dev": {"expires_at": 1_800_000_000, "only_own": true, "refs": ["main", "release/*"]}, "ro": {"expires_at": 1_700_000_000, "expired": true}}}]}
+    let o = get("/ui/orgs/acme/members")
+    check "dev (until 2027-01-15 08:00 UTC; own runs only; refs main, release/*)" in o.body and "ro (ended 2023-11-14 22:13 UTC)" in o.body
+    check "name=\"until\"" in o.body and "name=\"only_own\"" in o.body and "name=\"refs\"" in o.body
+    reset(); seed(orgAdminMe)
+    let r = post("/ui/orgs/acme/members/set", @[("user", "ann@acme"), ("role", "dev"), ("until", "2027-01-15"), ("only_own", "1"), ("refs", "main, release/*\nv*")])
+    check r.status == 303 and sent == @["PUT /api/v1/organizations/acme/members/ann@acme {\"roles\":[{\"expires_at\":\"2027-01-15T23:59:59Z\",\"only_own\":true,\"refs\":[\"main\",\"release/*\",\"v*\"],\"role\":\"dev\"}]}"]
+    reset(); seed(orgAdminMe)
+    check post("/ui/orgs/acme/members/set", @[("user", "ann@acme"), ("role", "dev"), ("until", "tomorrow")]).status == 400 and sent.len == 0
   test "the directories of an organisation: the settings, the warnings, the groups, the accounts; forms for whoever may map groups; the check only for the shard":
     seed(orgAdminMe)
     routes["/api/v1/organizations/acme/ldap"] = %*{"directories": [{"name": "corp", "url": "ldap://dc.example", "priority": 0, "start_tls": false, "enabled": true, "auto_create": false, "last_sync_at": 1793292000, "last_sync_result": "ok: 3 accounts",
@@ -569,6 +580,27 @@ suite "the actions of a run":
     let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session, origin = "http://ui.example"))
     check r.status == 303 and r.header("Location") == "/ui/runs/s1_b"
     check posted == @["tok-ann /api/v1/runs/s1_b:abort {}"]
+  test "D-93 a run that waits for approval says what it waits for; the buttons come when the core says so; the comment goes with the answer":
+    routes["/api/v1/runs/s1_w"] = %*{"id": "s1_w", "organization": "acme", "state": "WAITING", "steps": [], "actions": {"approve": true, "reject": true},
+                                     "approval": {"required": 2, "approved_by": ["bob"], "rejected_by": [], "deadline": 1_800_000_000, "waiting": true}}
+    let page = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_w", cookie = session)).body
+    check "1 of 2 approvals (bob); waits until 2027-01-15 08:00 UTC" in page and "action=\"/ui/runs/s1_w/approve\"" in page and "formaction=\"/ui/runs/s1_w/reject\"" in page
+    routes["/api/v1/runs/s1_w"]["actions"] = %*{"approve": false, "reject": false}
+    check "/ui/runs/s1_w/approve" notin handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_w", cookie = session)).body
+    let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_w/approve", cookie = session, origin = "http://ui.example", pairs = @[("comment", "ship it")]))
+    check r.status == 303 and r.header("Location") == "/ui/runs/s1_w" and posted == @["tok-ann /api/v1/runs/s1_w:approve {\"comment\":\"ship it\"}"]
+  test "D-94 a queued run says why it is not led, and a step that is PENDING says why it does not run":
+    routes["/api/v1/runs/s1_q"] = %*{"id": "s1_q", "organization": "acme", "state": "QUEUED", "queue": {"reason": "the organisation leads 5 runs and its limit is 5 (pod_limit): this run starts when one of them ends"},
+                                     "steps": [{"seq": 1, "attempt": 1, "state": "PENDING", "pending_reason": "the organisation runs 5 pods and its limit is 5 (pod_limit)"}]}
+    let q = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_q", cookie = session)).body
+    check "<dt>Queue</dt><dd>the organisation leads 5 runs" in q and "the organisation runs 5 pods and its limit is 5 (pod_limit)" in q and "state-QUEUED" in q
+    check "<dt>Queue</dt>" notin handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_b", cookie = session)).body
+  test "D-94 a run that is led and has only steps that wait is shown as PENDING with the reason; so is its row in the list":
+    routes["/api/v1/runs/s1_p"] = %*{"id": "s1_p", "organization": "acme", "state": "RUNNING", "pending": {"reason": "no controller has taken it yet"}, "steps": []}
+    let p = handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_p", cookie = session)).body
+    check "state-PENDING\">PENDING" in p and "<dt>Queue</dt><dd>no controller has taken it yet" in p
+    routes["/api/v1/runs/s1_p"] = %*{"id": "s1_p", "organization": "acme", "state": "RUNNING", "steps": []}
+    check "PENDING" notin handle(cfg, fakeCore(), req("GET", "/ui/runs/s1_p", cookie = session)).body
   test "PIP-015 the button of a retry asks the core for a retry":
     let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/retry", cookie = session))
     check r.status == 303 and r.header("Location") == "/ui/runs/s1_b"

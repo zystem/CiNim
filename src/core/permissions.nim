@@ -7,7 +7,9 @@
 ## `needOf(method, path)` says what a request needs: a permission, and where it has to be held - at the shard (the shard's own things), in the organisation the path names, or in
 ## the organisation that the handler finds (a run's, the one in the body): the gate lets a request in when the permission is held anywhere, the handler asks again for the organisation.
 ## A route that is not in the table needs no permission that any role has: only an administrator may call it, so a route added later is closed until it is named here.
-import std/[strutils, sets, tables]
+import std/[strutils, sets, tables, sequtils]
+import refpattern
+export refpattern
 
 type
   Level* = enum
@@ -43,6 +45,8 @@ const
     ("lock.write", lvOrg, "change the locks of an organisation"),
     ("storage.read", lvOrg, "see which store an organisation uses"),
     ("org.read", lvGroup, "see organisations"),
+    ("run.approve", lvGroup, "approve or reject a run that waits for approval (not the one who started it)"),
+    ("approval.configure", lvGroup, "choose how many approvals the runs of a project that wait for approval need"),
     ("run.start.protected", lvGroup, "start a run on a protected ref of a project (the secrets marked protected go to such runs only)"),
     ("ref.protect", lvGroup, "choose which refs of a project are protected"),
     ("profile.grant", lvGroup, "choose which privileged profiles (build, deploy) the pipelines of a project may use"),
@@ -67,7 +71,7 @@ const
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
-  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
+  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "approval.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
 
 func isPermission*(name: string): bool =
   for p in catalogue:
@@ -204,6 +208,7 @@ func needOf*(meth, path: string): Need =
     let tail = rest["runs/".len .. ^1]
     if tail.endsWith(":abort"): return need("run.abort", nsAny)
     if tail.endsWith(":retry"): return need("run.retry", nsAny)
+    if tail.endsWith(":approve") or tail.endsWith(":reject"): return need("run.approve", nsAny)
     if tail.endsWith(":hold") or tail.endsWith(":release"): return need("hold.write", nsAny)
     if meth == "DELETE": return need("run.delete", nsAny)
     if not isRead(meth): return Need()
@@ -212,23 +217,54 @@ func needOf*(meth, path: string): Need =
     return need("run.read", nsAny)
   Need()
 
+const
+  runPermissions* = ["run.read", "run.start", "run.start.protected", "run.approve", "run.abort", "run.retry", "run.delete", "log.read", "artifact.read", "hold.write"]
+    ## the permissions that are about one run: a binding's condition ("only own runs", "only these refs") limits these and no others (D-92)
+
+func isRunPermission*(name: string): bool = name in runPermissions
+
 type
+  BindingCondition* = object
+    ## D-92: what a binding is tied to. `expiresAt` (unix seconds, 0 = never) ends the whole binding. `onlyOwn` and `refs` limit the run permissions of the role: the runs the user
+    ## started themself, the runs on a ref that matches one of the patterns (a name or a prefix with a `*`, as the protected refs are); the rest of the role holds as ever.
+    expiresAt*: int64
+    onlyOwn*: bool
+    refs*: seq[string]
+  RunFacts* = object
+    ## what is known of the run a permission is asked about: whether the caller started it, and the ref it is on ("" for none)
+    own*: bool
+    ref0*: string
   GroupBinding* = tuple[path: string, perms: HashSet[string]]
+  LimitedBinding* = tuple[path: string, perms: HashSet[string], onlyOwn: bool, refs: seq[string]]
   Grants* = object
     ## what a user holds: the permissions of the roles at the shard, in each organisation, and on groups and projects of an organisation
     shard*: HashSet[string]
     orgs*: Table[string, HashSet[string]]
     groups*: Table[string, seq[GroupBinding]]
+    limited*: Table[string, seq[LimitedBinding]]       ## D-92: the run permissions of bindings that have a condition; `path` "" is the organisation itself
+
+func limits*(c: BindingCondition): bool = c.onlyOwn or c.refs.len > 0
+
+func expired*(c: BindingCondition; now: int64): bool = c.expiresAt > 0 and now >= c.expiresAt
 
 func covers*(boundPath, group: string): bool =
   ## whether a binding on `boundPath` reaches the group or project at `group`: that node, and everything under it
   boundPath.len > 0 and (group == boundPath or group.startsWith(boundPath & "/"))
 
-proc addRole*(g: var Grants; scope: string; perms: openArray[string]) =
+func admits(b: LimitedBinding; f: RunFacts): bool =
+  (not b.onlyOwn or f.own) and (b.refs.len == 0 or b.refs.anyIt(refMatches(it, f.ref0)))
+
+proc addRole*(g: var Grants; scope: string; perms: openArray[string]; cond = BindingCondition()) =
   ## `scope` is "shard", "org:<slug>" or "org:<slug>/<group path>". A permission does nothing where it is not about: one of the shard's own in an organisation, and anything but
-  ## a thing in the tree of groups on a group.
+  ## a thing in the tree of groups on a group. With a condition that limits (D-92) the run permissions go to `limited` and the rest of the role is given as usual; at the shard
+  ## a condition is not honoured (nothing but `admin` is a right there, and it is not limited).
+  var plain: seq[string]
+  var tied = initHashSet[string]()
+  for p in perms:
+    if cond.limits and scope != "shard" and isRunPermission(p): tied.incl p
+    else: plain.add p
   if scope == "shard":
-    for p in perms: g.shard.incl p
+    for p in plain: g.shard.incl p
   elif scope.startsWith("org:") and scope.len > 4:
     let rest = scope[4 .. ^1]
     let slash = rest.find('/')
@@ -236,14 +272,20 @@ proc addRole*(g: var Grants; scope: string; perms: openArray[string]) =
     if slug.len == 0: return
     if slash < 0:
       if slug notin g.orgs: g.orgs[slug] = initHashSet[string]()
-      for p in perms:
+      for p in plain:
         if levelOf(p) != lvShard: g.orgs[slug].incl p
+      if tied.len > 0:
+        if slug notin g.limited: g.limited[slug] = @[]
+        g.limited[slug].add ("", tied, cond.onlyOwn, cond.refs)
     elif slash < rest.len - 1:
       var kept = initHashSet[string]()
-      for p in perms:
+      for p in plain:
         if levelOf(p) == lvGroup: kept.incl p
       if slug notin g.groups: g.groups[slug] = @[]
       g.groups[slug].add (rest[slash + 1 .. ^1], kept)
+      if tied.len > 0:
+        if slug notin g.limited: g.limited[slug] = @[]
+        g.limited[slug].add (rest[slash + 1 .. ^1], tied, cond.onlyOwn, cond.refs)
 
 func holds*(g: Grants; perm: string; org = ""; group = ""): bool =
   ## whether `perm` is held for `org` ("" asks about the shard itself: only a binding at the shard counts) and, with `group`, for that group or project: a binding at the shard or in
@@ -255,9 +297,21 @@ func holds*(g: Grants; perm: string; org = ""; group = ""): bool =
     for b in g.groups[org]:
       if perm in b.perms and covers(b.path, group): return true
 
+func holdsRun*(g: Grants; perm, org, group: string; f: RunFacts): bool =
+  ## `holds` for a permission about one run (D-92): also through a binding whose condition the run meets (started by the caller, on one of the refs). A permission that
+  ## is not about a run is `holds`.
+  if g.holds(perm, org, group): return true
+  if org.len > 0 and isRunPermission(perm) and org in g.limited:
+    for b in g.limited[org]:
+      if perm in b.perms and (b.path.len == 0 or (group.len > 0 and covers(b.path, group))) and b.admits(f): return true
+
 func holdsWithin*(g: Grants; perm, org: string): bool =
-  ## held in the organisation, or on some group or project of it (the gate of a list: the handler leaves out what is not for the caller)
+  ## held in the organisation, or on some group or project of it (the gate of a list: the handler leaves out what is not for the caller); a binding with a condition counts, the
+  ## handler asks again with the run in hand
   if g.holds(perm, org): return true
+  if isRunPermission(perm) and org in g.limited:
+    for b in g.limited[org]:
+      if perm in b.perms: return true
   if levelOf(perm) == lvGroup and org in g.groups:
     for b in g.groups[org]:
       if perm in b.perms: return true
@@ -271,6 +325,17 @@ func holdsAnywhere*(g: Grants; perm: string): bool =
     for _, bs in g.groups:
       for b in bs:
         if perm in b.perms: return true
+  if isRunPermission(perm):
+    for _, bs in g.limited:
+      for b in bs:
+        if perm in b.perms: return true
+
+func limitedWith*(g: Grants; perm: string): seq[tuple[org, path: string, onlyOwn: bool, refs: seq[string]]] =
+  ## where `perm` (about runs) is held through a binding with a condition: the list of runs keeps what the condition lets through
+  if not isRunPermission(perm): return
+  for slug, bs in g.limited:
+    for b in bs:
+      if perm in b.perms: result.add (slug, b.path, b.onlyOwn, b.refs)
 
 func orgsWith*(g: Grants; perm: string): seq[string] =
   ## the organisations (by slug) in which `perm` is held through a binding of the organisation; the ones a binding at the shard covers are not listed

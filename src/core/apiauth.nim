@@ -17,6 +17,7 @@ import ../common/sodiumpw
 export rbac
 
 const
+  maxBindingRefs* = 16        ## the refs a condition of one binding names
   tokenPrefix* = "cnm_"
   touchEvery = 60            ## seconds between two writes of `last_used_at` of one token: reads must not turn into a write each
 
@@ -30,7 +31,7 @@ type
     user*: string            ## the user a `user:<name>` token stands for (IAM-001)
     roles*: seq[string]      ## that user's roles at the shard level, read when the request came
     grants*: Grants          ## what the user's roles give, at the shard and in each organisation (D-84)
-    bindings*: seq[tuple[role, scope, source: string]]       ## the roles themselves, for GET /api/v1/me
+    bindings*: seq[tuple[role, scope, source: string, cond: BindingCondition]]       ## the roles themselves, for GET /api/v1/me (with what each is tied to, D-92)
     need*: Need              ## what the request being served needs, set by the gate: `mayUseOrg` asks it for the organisation the handler finds
     mustChange*: bool        ## the user's password has to be changed first: the only thing allowed is the change of it
     why*: string             ## when not ok: `missing`, `malformed`, `unknown`, `expired`, `revoked`
@@ -108,6 +109,50 @@ func mayUseIn*(p: Principal; org, group: string): bool =
   if p.ok and not p.admin and p.user.len > 0 and p.need.permission.len > 0: return p.grants.holds(p.need.permission, org, group)
   p.mayUseOrg(org)
 
+func runFactsOf*(p: Principal; startedBy, ref0: string): RunFacts =
+  ## a run is the caller's own when they started it: the actor recorded at its start is the caller (`actorOf` of the audit)
+  RunFacts(own: startedBy.len > 0 and p.user.len > 0 and startedBy == "user:" & p.user, ref0: ref0)
+
+func mayUseRun*(p: Principal; run: JsonNode): bool =
+  ## `mayUseIn` for a run as `getRun` gives it (D-92): a binding that holds for the caller's own runs, or for some refs, counts when this run is such
+  let org = run{"organization"}.getStr
+  let group = run{"project"}.getStr
+  if p.ok and not p.admin and p.user.len > 0 and p.need.permission.len > 0:
+    let src = run{"source"}
+    return p.grants.holdsRun(p.need.permission, org, group, p.runFactsOf(run{"started_by"}.getStr, (if src != nil and src.kind == JObject: src{"ref"}.getStr else: "")))
+  p.mayUseOrg(org)
+
+func mayInRun*(p: Principal; perm: string; run: JsonNode): bool =
+  ## whether the caller holds `perm` for this run (the actions offered with it): D-92 as `mayUseRun`
+  let org = run{"organization"}.getStr
+  let group = run{"project"}.getStr
+  if not p.ok: return false
+  if p.admin: return true
+  if p.user.len > 0:
+    let src = run{"source"}
+    return p.grants.holdsRun(perm, org, group, p.runFactsOf(run{"started_by"}.getStr, (if src != nil and src.kind == JObject: src{"ref"}.getStr else: "")))
+  p.org.len > 0 and p.org == org and perm.startsWith("run.")
+
+func mayStart*(p: Principal; perm, org, group, ref0: string): bool =
+  ## whether the caller may start a run of this project on this ref ("" for none): the run will be theirs, so only the refs of a condition count (D-92)
+  if not p.ok: return false
+  if p.admin: return true
+  if p.user.len > 0: return p.grants.holdsRun(perm, org, group, RunFacts(own: true, ref0: ref0))
+  p.org.len > 0 and p.org == org and perm.startsWith("run.")
+
+func mayStartSomewhere*(p: Principal; perm, org, group: string): bool =
+  ## the first look at a start, before the ref is known: held outright, or through a binding tied to some refs (`mayStart` asks again with the ref)
+  if not p.ok: return false
+  if p.admin: return true
+  if p.user.len > 0: return p.grants.holds(perm, org, group) or (isRunPermission(perm) and org.len > 0 and p.grants.holdsWithin(perm, org))
+  p.org.len > 0 and p.org == org and perm.startsWith("run.")
+
+func mayFireOn*(p: Principal; org, group, ref0: string): bool =
+  ## a trigger started by hand makes a run: whoever holds `run.start` only through a binding tied to refs may fire it on those refs only (D-92); anyone else is as they were
+  if not p.ok or p.admin or p.user.len == 0: return true
+  if p.grants.holds("run.start", org, group) or not p.grants.holdsWithin("run.start", org): return true
+  p.grants.holdsRun("run.start", org, group, RunFacts(own: true, ref0: ref0))
+
 func mayIn*(p: Principal; perm, org: string; group = ""): bool =
   ## whether the principal holds `perm` for `org` ("" is the shard itself) and, with `group`, for that group or project; an organisation's token holds every permission of its own runs
   if not p.ok: return false
@@ -118,6 +163,10 @@ func mayIn*(p: Principal; perm, org: string; group = ""): bool =
 func visibleGroups*(p: Principal; perm: string): seq[tuple[org, path: string]] =
   ## the groups and projects on which a binding gives `perm` (the ones a binding of the organisation or of the shard covers are in `visibleOrgs`)
   if p.ok and not p.admin and p.user.len > 0: return p.grants.groupsWith(perm)
+
+func visibleLimited*(p: Principal; perm: string): seq[tuple[org, path: string, onlyOwn: bool, refs: seq[string]]] =
+  ## the places where `perm` is held through a binding with a condition (D-92)
+  if p.ok and not p.admin and p.user.len > 0: return p.grants.limitedWith(perm)
 
 func visibleOrgs*(p: Principal; perm: string): tuple[all: bool, slugs: seq[string]] =
   ## where `perm` is held: every organisation (a binding at the shard, an administrator), or these
@@ -195,9 +244,18 @@ proc legacyShardBindings*(c: var RqClient): seq[tuple[user, role: string]] =
   if v != nil:
     for r in v: result.add (r[0].getStr, r[1].getStr)
 
-proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope, source: string]], grants: Grants, ignored: seq[string]] =
-  ## the user; the roles it has at the shard level (the ones every organisation inherits); every binding, at the shard and in an organisation; and what they give (D-84)
-  let r = c.query(%*[["SELECT disabled, must_change FROM users WHERE name = ?", name], ["SELECT role, scope, source FROM role_bindings WHERE user_name = ? ORDER BY scope, role", name]])
+func conditionOf*(expiresAt: int64; onlyOwn: bool; refs: string): BindingCondition =
+  ## the condition of a row: the refs are kept one to a line
+  result = BindingCondition(expiresAt: expiresAt, onlyOwn: onlyOwn)
+  for l in refs.splitLines:
+    let t = l.strip
+    if t.len > 0: result.refs.add t
+
+proc userRoles*(c: var RqClient; name: string; now = 0'i64): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope, source: string, cond: BindingCondition]], grants: Grants, ignored: seq[string]] =
+  ## the user; the roles it has at the shard level (the ones every organisation inherits); every binding, at the shard and in an organisation; and what they give (D-84).
+  ## A binding whose term has passed (`expires_at`, D-92) is not read at all: it gives nothing and is not listed.
+  let at = if now > 0: now else: getTime().toUnix()
+  let r = c.query(%*[["SELECT disabled, must_change FROM users WHERE name = ?", name], ["SELECT role, scope, source, expires_at, only_own, refs FROM role_bindings WHERE user_name = ? AND (expires_at = 0 OR expires_at > ?) ORDER BY scope, role", name, at]])
   let u = r["results"][0]{"values"}
   if u == nil or u.len == 0: return
   result.found = true
@@ -212,25 +270,27 @@ proc userRoles*(c: var RqClient; name: string): tuple[found, disabled, mustChang
       if scope == shardScope and not allowedAtShard(role):
         result.ignored.add role                       # D-90: the shard has no users but administrators; a role of another kind given there before is not a right any more
         continue
-      result.bindings.add (role, scope, v[2].getStr)
+      let cond = conditionOf(v[3].getBiggestInt, v[4].getInt > 0, v[5].getStr)
+      result.bindings.add (role, scope, v[2].getStr, cond)
       if scope == shardScope: result.roles.add role
       if role notin known: known[role] = c.rolePermissions(role)
-      result.grants.addRole(scope, known[role])
+      result.grants.addRole(scope, known[role], cond)
   # D-91: the roles of the teams the user is a member of, in the organisation of the team and below (a team\'s binding outside its organisation is no right)
   let tv = c.query(%*[["SELECT o.slug, t.name FROM team_members m JOIN teams t ON t.id = m.team_id JOIN organizations o ON o.id = t.tenant_id WHERE m.user_name = ?", name]])["results"][0]{"values"}
   if tv != nil:
     for t in tv:
       let slug = t[0].getStr
       let subject = "team:" & slug & "/" & t[1].getStr
-      let tb = c.query(%*[["SELECT role, scope FROM role_bindings WHERE user_name = ? ORDER BY scope, role", subject]])["results"][0]{"values"}
+      let tb = c.query(%*[["SELECT role, scope, expires_at, only_own, refs FROM role_bindings WHERE user_name = ? AND (expires_at = 0 OR expires_at > ?) ORDER BY scope, role", subject, at]])["results"][0]{"values"}
       if tb != nil:
         for b in tb:
           let scope = b[1].getStr
           if scope != "org:" & slug and not scope.startsWith("org:" & slug & "/"): continue
           let role = b[0].getStr
-          result.bindings.add (role, scope, subject)
+          let cond = conditionOf(b[2].getBiggestInt, b[3].getInt > 0, b[4].getStr)
+          result.bindings.add (role, scope, subject, cond)
           if role notin known: known[role] = c.rolePermissions(role)
-          result.grants.addRole(scope, known[role])
+          result.grants.addRole(scope, known[role], cond)
 
 func isOrgScope*(scope: string): bool = scope.startsWith("org:") and scope.len > 4
 
@@ -309,10 +369,52 @@ proc deleteRole*(c: var RqClient; name: string): RoleDelete =
   discard c.execute(%*[["DELETE FROM role_permissions WHERE role = ?", name], ["DELETE FROM roles WHERE name = ?", name]], transaction = true)
   rdDeleted
 
-proc listMembers*(c: var RqClient; scope: string): JsonNode =
-  ## who has a role at this scope (`org:<slug>` or `org:<slug>/<group path>`; a binding exactly there; the ones at the shard are in GET /users)
+func conditionView*(cond: BindingCondition; now: int64): JsonNode =
+  ## what a binding is tied to, for the API; `expired` is shown on a binding that is listed after its term (the lists of members show it, the rights do not read it)
+  result = newJObject()
+  if cond.expiresAt > 0:
+    result["expires_at"] = %cond.expiresAt
+    if now >= cond.expiresAt: result["expired"] = %true
+  if cond.onlyOwn: result["only_own"] = %true
+  if cond.refs.len > 0: result["refs"] = %cond.refs
+
+proc bindingConditionOf*(j: JsonNode): tuple[cond: BindingCondition, error: string] =
+  ## the condition in the body of a member call (D-92): `expires_at` (unix seconds, or a time as RFC 3339), `only_own` (true), `refs` (a list of names or prefixes with a `*`)
+  if j.hasKey("expires_at") and j["expires_at"].kind != JNull:
+    let e = j["expires_at"]
+    if e.kind == JInt: result.cond.expiresAt = e.getBiggestInt
+    elif e.kind == JString:
+      try: result.cond.expiresAt = parse(e.getStr, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc()).toTime.toUnix
+      except CatchableError:
+        result.error = "expires_at is unix seconds or a time like 2026-12-31T23:59:59Z"
+        return
+    else:
+      result.error = "expires_at is unix seconds or a time like 2026-12-31T23:59:59Z"
+      return
+    if result.cond.expiresAt < 0:
+      result.error = "expires_at is in the past"
+      return
+  if j.hasKey("only_own"):
+    if j["only_own"].kind != JBool:
+      result.error = "only_own is true or false"
+      return
+    result.cond.onlyOwn = j["only_own"].getBool
+  if j.hasKey("refs") and j["refs"].kind != JNull:
+    if j["refs"].kind != JArray:
+      result.error = "refs is a list of branch or tag names, or names followed by *"
+      return
+    for r in j["refs"].elems:
+      if r.kind != JString:
+        result.error = "refs is a list of branch or tag names, or names followed by *"
+        return
+      result.cond.refs.add r.getStr
+
+proc listMembers*(c: var RqClient; scope: string; now = 0'i64): JsonNode =
+  ## who has a role at this scope (`org:<slug>` or `org:<slug>/<group path>`; a binding exactly there; the ones at the shard are in GET /users). `roles` are the names;
+  ## `conditions` has an entry for each role that is tied to a term, to the user's own runs or to refs (D-92), and the binding of an ended term is still listed, marked `expired`.
   result = newJArray()
-  let vals = c.query(%*[["SELECT user_name, role FROM role_bindings WHERE scope = ? ORDER BY user_name, role", scope]])["results"][0]{"values"}
+  let at = if now > 0: now else: getTime().toUnix()
+  let vals = c.query(%*[["SELECT user_name, role, expires_at, only_own, refs FROM role_bindings WHERE scope = ? ORDER BY user_name, role", scope]])["results"][0]{"values"}
   var cur = ""
   if vals != nil:
     for v in vals:
@@ -320,9 +422,14 @@ proc listMembers*(c: var RqClient; scope: string): JsonNode =
         cur = v[0].getStr
         result.add %*{"user": cur, "roles": []}
       result[result.len - 1]["roles"].add %v[1].getStr
+      let view = conditionView(conditionOf(v[2].getBiggestInt, v[3].getInt > 0, v[4].getStr), at)
+      if view.len > 0:
+        if not result[result.len - 1].hasKey("conditions"): result[result.len - 1]["conditions"] = newJObject()
+        result[result.len - 1]["conditions"][v[1].getStr] = view
 
-proc setMember*(c: var RqClient; scope, user: string; roles: seq[string]): string =
-  ## The roles of an existing user at this scope are these (replacing the ones it had there); an empty list takes them all away. "" when done, otherwise why not.
+proc setMember*(c: var RqClient; scope, user: string; roles: seq[string]; conds = initTable[string, BindingCondition](); now = 0'i64): string =
+  ## The roles of an existing user at this scope are these (replacing the ones it had there); an empty list takes them all away. `conds` ties a role to a term, to the user's own runs
+  ## or to refs (D-92). "" when done, otherwise why not.
   if user.startsWith("team:"):
     # D-91: the roles of a team, in its own organisation and below
     let at = user.find('/')
@@ -331,11 +438,20 @@ proc setMember*(c: var RqClient; scope, user: string; roles: seq[string]): strin
     let found = c.query(%*[["SELECT 1 FROM teams t JOIN organizations o ON o.id = t.tenant_id WHERE o.slug = ? AND t.name = ?", slug, user[at + 1 .. ^1]]])["results"][0]{"values"}
     if found == nil or found.len == 0: return "no such team: " & user[at + 1 .. ^1]
   elif not c.userRoles(user).found: return "no such user: " & user
+  let at = if now > 0: now else: getTime().toUnix()
   for r in roles:
     if not c.roleExists(r): return "no such role: " & r
+    let cd = conds.getOrDefault(r)
+    if cd.expiresAt < 0 or (cd.expiresAt > 0 and cd.expiresAt <= at): return "the term of " & r & " is in the past"
+    if cd.refs.len > maxBindingRefs: return "at most " & $maxBindingRefs & " refs to a role"
+    for pat in cd.refs:
+      if not isRefPattern(pat): return "a ref is a branch or tag name, or a name followed by * (" & pat & ")"
+    if cd.limits and scope == shardScope: return "a condition is for a role in an organisation"
   var stmts = newJArray()
   stmts.add %*["DELETE FROM role_bindings WHERE user_name = ? AND scope = ? AND source = ''", user, scope]          # the roles that come from a directory are the directory's to give and take away (D-87)
-  for r in roles: stmts.add %*["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", user, r, scope]
+  for r in roles:
+    let cd = conds.getOrDefault(r)
+    stmts.add %*["INSERT OR IGNORE INTO role_bindings (user_name, role, scope, expires_at, only_own, refs) VALUES (?, ?, ?, ?, ?, ?)", user, r, scope, cd.expiresAt, (if cd.onlyOwn: 1 else: 0), cd.refs.join("\n")]
   discard c.execute(stmts, transaction = true)
 
 proc resetUserCredentials*(c: var RqClient; user: string; now: int64): tuple[ok: bool, cred: UserCredential] =
@@ -418,7 +534,11 @@ proc whoAmI*(c: var RqClient; p: Principal; organizationSlugs: seq[string]): Jso
   result = %*{"kind": kind, "name": p.name, "user": p.user, "administrator": p.admin, "password_change_required": p.mustChange}
   if p.org.len > 0: result["organization"] = %p.org
   var bs = newJArray()
-  for b in p.bindings: bs.add %*{"role": b.role, "scope": b.scope, "source": b.source}
+  for b in p.bindings:
+    var item = %*{"role": b.role, "scope": b.scope, "source": b.source}
+    let tied = conditionView(b.cond, 0)
+    if tied.len > 0: item["condition"] = tied
+    bs.add item
   result["bindings"] = bs
   var perms = newJObject()
   if p.admin:
@@ -437,6 +557,18 @@ proc whoAmI*(c: var RqClient; p: Principal; organizationSlugs: seq[string]): Jso
       for b in list: arr.add %*{"path": b.path, "permissions": sortedList(b.perms)}
       groups[slug] = arr
     perms["groups"] = groups
+    # D-92: the run permissions that hold for some runs only
+    var tied = newJObject()
+    for slug, list in p.grants.limited:
+      var arr = newJArray()
+      for b in list:
+        var item = %*{"permissions": sortedList(b.perms)}
+        if b.path.len > 0: item["path"] = %b.path
+        if b.onlyOwn: item["only_own"] = %true
+        if b.refs.len > 0: item["refs"] = %b.refs
+        arr.add item
+      tied[slug] = arr
+    if tied.len > 0: perms["conditional"] = tied
     result["permissions"] = perms
   else:
     result["permissions"] = %*{"note": "an organisation\'s token may use the routes of its own runs"}
@@ -489,13 +621,14 @@ proc explainCall*(c: var RqClient; p: Principal; meth, path, org, group: string)
   var by = newJArray()
   for b in p.bindings:
     var g: Grants
-    g.addRole(b.scope, c.rolePermissions(b.role))
-    let gives = if n.scope == nsAny and org.len > 0: g.holds(n.permission, org, group)
+    g.addRole(b.scope, c.rolePermissions(b.role), b.cond)
+    let gives = if n.scope == nsAny and org.len > 0: g.holds(n.permission, org, group) or (isRunPermission(n.permission) and g.holdsWithin(n.permission, org))
                 elif n.scope == nsAny: g.holdsAnywhere(n.permission)
                 else: g.allows(n)
     if gives:
       var item = %*{"role": b.role, "scope": b.scope}
       if b.source.len > 0: item["source"] = %b.source               # given through a team, or by a directory
+      if b.cond.limits and isRunPermission(n.permission): item["condition"] = conditionView(b.cond, 0)          # D-92: holds for some runs only; the call is allowed when the run is one of them
       by.add item
   result["granted_by"] = by
   let allowed = by.len > 0
@@ -520,7 +653,7 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
   let userName = userOfScope(row[1].getStr)
   if userName.len > 0:
     # a token of a user: the rights are the user's roles now, so that taking a role away or switching the user off works at once
-    let u = c.userRoles(userName)
+    let u = c.userRoles(userName, now)
     if not u.found or u.disabled or u.bindings.len == 0: return Principal(why: "revoked")
     result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, mustChange: u.mustChange,
                        grants: u.grants, bindings: u.bindings)

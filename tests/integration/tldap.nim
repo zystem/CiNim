@@ -403,7 +403,7 @@ suite "D-87 LDAP":
       check b.outcome == loOk
       check c.listTeams(org2, slug2)[0]["members"] == %*[{"user": "ann@" & slug2, "source": "ldap:" & who2.id}, {"user": "bob@" & slug2, "source": "ldap:" & who2.id}]
       let annRights = c.authenticate("", c.createApiToken("t", userScope("ann@" & slug2), 0, now).token, now + 1)
-      check annRights.ok and annRights.mayIn("run.start", slug2) and annRights.bindings == @[(role: "dev", scope: "org:" & slug2, source: teamSubj)]
+      check annRights.ok and annRights.mayIn("run.start", slug2) and annRights.bindings == @[(role: "dev", scope: "org:" & slug2, source: teamSubj, cond: BindingCondition())]
       check c.ldapLogin(kek, true, slug2, "eve", "eve-secret-1", now).outcome == loNoRole                      # in no group of any team: no account
       # a member by hand, and the directory\'s member that cannot be taken away by hand
       check c.addTeamMember(org2, "ci-people", "ann@" & slug2).error == ""                                     # she is the directory\'s already: it becomes hers by hand too

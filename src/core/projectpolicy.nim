@@ -4,29 +4,12 @@
 ## the names a commit was asked by (a branch or a tag): a run started by a bare SHA has no ref and is not trusted, whatever branch the commit is on.
 import std/[json, strutils]
 import ../common/rqlite
-import groups
+import groups, refpattern
+export refpattern
 
 const
   maxRefPatterns* = 32
-  maxPatternLen* = 100
   privilegedProfiles* = ["build", "deploy"]           ## the profiles that need a grant; the ordinary one needs none
-
-func refMatches*(pattern, name: string): bool =
-  ## `main` is that name only; `release/*` and `v*` are the names that begin so (a `*` at the end only: a pattern is a name or a prefix, nothing cleverer to get wrong)
-  if pattern.len == 0 or name.len == 0: return false
-  if pattern.endsWith("*"):
-    let head = pattern[0 ..< pattern.len - 1]
-    return head.len > 0 and name.startsWith(head)
-  pattern == name
-
-func isRefPattern*(p: string): bool =
-  ## letters, digits and . _ - / for a name; one * at the end; at most 100 characters
-  if p.len < 1 or p.len > maxPatternLen: return false
-  for i, ch in p:
-    if ch == '*':
-      if i != p.high or p.len == 1: return false
-    elif ch notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-', '/'}: return false
-  true
 
 func isFullSha*(s: string): bool =
   ## what is asked by hash has no ref (40 hex digits, or 64 for SHA-256)
@@ -60,6 +43,15 @@ proc protectedPatterns*(c: var RqClient; groupId: string): seq[string] =
 proc isProtectedRef*(c: var RqClient; groupId, name: string): bool =
   ## whether a run of this project asked for `name` is on a protected ref
   name.len > 0 and protectedBy(c.protectedPatterns(groupId), name)
+
+proc requiredApprovals*(c: var RqClient; groupId: string): int =
+  ## D-93: how many approvals a run of this project that waits for approval needs (1 unless the project says more)
+  if groupId.len == 0: return 1
+  let v = c.query(%*[["SELECT required_approvals FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
+  if v != nil and v.len > 0: max(1, v[0][0].getInt) else: 1
+
+proc setRequiredApprovals*(c: var RqClient; groupId: string; n: int) =
+  discard c.execute(%*[["UPDATE groups SET required_approvals = ? WHERE id = ?", n, groupId]])
 
 proc setProtectedRefs*(c: var RqClient; groupId: string; patterns: seq[string]): string =
   ## "" when saved, otherwise why not

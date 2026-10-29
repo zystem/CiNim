@@ -17,6 +17,7 @@ pre.log .n { color: var(--muted); user-select: none; display: inline-block; min-
 .state-OK, .state-up, .state-active { color: var(--ok); font-weight: 600; }
 .state-FAILED, .state-down, .state-disabled, .error { color: var(--bad); }
 .state-RUNNING, .state-PENDING { color: var(--warn); }
+.state-QUEUED, .state-WAITING { color: var(--muted, var(--warn)); font-style: italic; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; }
 .facts dt { color: var(--muted); } .facts dd { margin: 0; }
 .login { display: grid; gap: .6rem; max-width: 22rem; }

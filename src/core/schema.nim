@@ -68,7 +68,8 @@ const ddl = [
   # the permissions of a role an administrator made (D-84); the four built-in roles are made in code (core/permissions.nim)
   """CREATE TABLE IF NOT EXISTS role_permissions (role TEXT NOT NULL, permission TEXT NOT NULL, PRIMARY KEY (role, permission))""",
   """CREATE TABLE IF NOT EXISTS role_bindings (
-       user_name TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'shard', source TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_name, role, scope))""",
+       user_name TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'shard', source TEXT NOT NULL DEFAULT '',
+       expires_at INTEGER NOT NULL DEFAULT 0, only_own INTEGER NOT NULL DEFAULT 0, refs TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_name, role, scope))""",
   # D-87: the directories of an organisation (an organisation may have several, tried in the order of `priority`) and which of their groups give which role in it
   """CREATE TABLE IF NOT EXISTS ldap_servers (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, url TEXT NOT NULL, start_tls INTEGER NOT NULL DEFAULT 0,
@@ -79,6 +80,9 @@ const ddl = [
   "CREATE UNIQUE INDEX IF NOT EXISTS ldap_servers_name ON ldap_servers (tenant_id, name)",
   # D-91: the teams of an organisation. A team is made by hand or takes its members from a group of a directory (`group_dn`, of the directory `server_id`, or of any when it is empty); its roles
   # are rows of `role_bindings` whose user_name is `team:<slug>/<name>`. A member is a manual one (`source` '') or one the directory gives (`ldap:<server id>`)
+  # D-93: who approved or rejected a run that waited for approval, and when (one answer from each person)
+  """CREATE TABLE IF NOT EXISTS run_approvals (
+       run_id TEXT NOT NULL, user_name TEXT NOT NULL, decision TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL, PRIMARY KEY (run_id, user_name))""",
   """CREATE TABLE IF NOT EXISTS teams (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', group_dn TEXT NOT NULL DEFAULT '', server_id TEXT NOT NULL DEFAULT '',
        created_at INTEGER NOT NULL)""",
@@ -135,7 +139,7 @@ const ddl = [
   # belongs to it). `path` is the slugs from the top joined by '/'; the variables of a group (VAR-001) are inherited by the groups below it and by its runs
   """CREATE TABLE IF NOT EXISTS groups (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL,
-       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '')""",
+       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS groups_tenant_path ON groups (tenant_id, path)",
   "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
   """CREATE TABLE IF NOT EXISTS group_variables (
@@ -256,6 +260,12 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("users", "source", "TEXT NOT NULL DEFAULT ''"),                         # D-87: where a user comes from, and the DN the directory knows them by (2026-10-29)
   ("users", "dn", "TEXT NOT NULL DEFAULT ''"),
   ("role_bindings", "source", "TEXT NOT NULL DEFAULT ''"),
+  ("role_bindings", "expires_at", "INTEGER NOT NULL DEFAULT 0"),            # D-92: a binding ends at this time (unix seconds; 0 never), holds for the user's own runs only, holds for these refs only (one to a line)
+  ("role_bindings", "only_own", "INTEGER NOT NULL DEFAULT 0"),
+  ("role_bindings", "refs", "TEXT NOT NULL DEFAULT ''"),
+  ("runs", "approval_required", "INTEGER NOT NULL DEFAULT 0"),             # D-93: a run that waits (state WAITING) until this many people have approved it; 0 = it needs none
+  ("runs", "approval_deadline", "INTEGER NOT NULL DEFAULT 0"),             # ... and the time (unix seconds) after which it is TIMED_OUT
+  ("groups", "required_approvals", "INTEGER NOT NULL DEFAULT 1"),          # D-93: how many approvals the runs of a project that ask for approval need
   ("groups", "protected_refs", "TEXT NOT NULL DEFAULT ''"),               # D-86: the refs of a project whose runs are trusted, and the privileged profiles its pipelines may use (2026-10-29)
   ("groups", "allowed_profiles", "TEXT NOT NULL DEFAULT ''"),
   ("runs", "source_ref", "TEXT NOT NULL DEFAULT ''"),                      # D-86: the name the commit was asked by (a branch or a tag; "" for a SHA), and whether it is a protected ref of the project

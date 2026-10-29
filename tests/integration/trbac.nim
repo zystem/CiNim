@@ -1,8 +1,8 @@
 ## IAM-001, basic RBAC (D-50), against a real rqlite: the user `admin` made at the first start (its password has to be changed first), the users an administrator makes with a
 ## role each, what a token stands for, the login, the change of a password. Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
-import std/[unittest, json, os, strutils, sequtils]
+import std/[unittest, json, os, strutils, sequtils, tables]
 import common/[rqlite, sodiumpw]
-import core/[schema, apiauth]
+import core/[schema, apiauth, permissions]
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -249,7 +249,7 @@ suite "IAM-001 users, roles and their tokens":
       check c.createUser("ann", "rw", pwOf & "ann", t0, "org:acme")
       check not c.createUser("ann", "ro", pwOf & "ann", t0, "org:acme")
       check not c.createUser("admin", "ro", pwOf & "admin", t0, "org:acme")
-      check c.userRoles("ann").bindings == @[(role: "rw", scope: "org:acme", source: "")] and c.userRoles("admin").roles == @["admin"]
+      check c.userRoles("ann").bindings == @[(role: "rw", scope: "org:acme", source: "", cond: BindingCondition())] and c.userRoles("admin").roles == @["admin"]
     test "a user deleted: the user, the roles, every token and every session are gone":
       discard first()
       let tok = makeUser("ann", "rw")
@@ -316,4 +316,47 @@ suite "IAM-001 users, roles and their tokens":
     test "a token of a scope user:<name> is a valid scope; others stay as they were":
       check validScope("user:rw") and validScope("admin") and validScope("org:acme")
       check not validScope("user:") and not validScope("user:Bad") and not validScope("role:rw")
+    test "D-92 a binding with a term gives nothing after it, and is listed as expired; a new term is a new binding":
+      discard first()
+      discard makeUser("ann", "ro")
+      let tok = c.createApiToken("t", userScope("ann"), 0, t0).token
+      check c.setMember("org:acme", "ann", @["dev"], {"dev": BindingCondition(expiresAt: t0 + 100)}.toTable, t0) == ""
+      check who(tok, t0 + 50).grants.holds("run.start", "acme") and who(tok, t0 + 50).bindings.len == 1
+      let late = who(tok, t0 + 100)
+      check not late.ok and late.why == "revoked" and c.userRoles("ann", t0 + 100).found and c.userRoles("ann", t0 + 100).bindings.len == 0          # a user with no role left is refused, as when a role is taken away
+      let listed = c.listMembers("org:acme", t0 + 100)[0]
+      check listed["roles"] == %*["dev"] and listed["conditions"]["dev"]["expired"].getBool and listed["conditions"]["dev"]["expires_at"].getInt == t0 + 100
+      check c.listMembers("org:acme", t0 + 50)[0]["conditions"]["dev"].hasKey("expired") == false
+      check c.setMember("org:acme", "ann", @["dev"], {"dev": BindingCondition(expiresAt: t0 + 10)}.toTable, t0 + 20) == "the term of dev is in the past"
+      check c.setMember("org:acme", "ann", @["dev"], {"dev": BindingCondition(expiresAt: t0 + 500)}.toTable, t0 + 200) == ""
+      check who(tok, t0 + 300).grants.holds("run.start", "acme")
+    test "D-92 own runs and refs are kept on the binding and read back into the grants":
+      discard first()
+      discard makeUser("ann", "ro")
+      let tok = c.createApiToken("t", userScope("ann"), 0, t0).token
+      check c.setMember("org:acme", "ann", @["dev"], {"dev": BindingCondition(onlyOwn: true, refs: @["main", "release/*"])}.toTable, t0) == ""
+      let p = who(tok)
+      check p.bindings.len == 1 and p.bindings[0].cond.onlyOwn and p.bindings[0].cond.refs == @["main", "release/*"]
+      check not p.grants.holds("run.abort", "acme") and p.grants.holdsRun("run.abort", "acme", "ci", RunFacts(own: true, ref0: "release/1"))
+      check not p.grants.holdsRun("run.abort", "acme", "ci", RunFacts(own: false, ref0: "main")) and not p.grants.holdsRun("run.abort", "acme", "ci", RunFacts(own: true, ref0: "x"))
+      check p.grants.holds("trigger.fire", "acme")
+      let run = %*{"organization": "acme", "project": "ci", "started_by": "user:ann", "source": {"ref": "main"}}
+      var pp = p
+      pp.need = needOf("POST", "/api/v1/runs/x:abort")
+      check pp.mayUseRun(run) and pp.mayInRun("run.abort", run) and not pp.mayInRun("run.abort", %*{"organization": "acme", "project": "ci", "started_by": "user:bob", "source": {"ref": "main"}})
+      check pp.mayStart("run.start", "acme", "ci", "release/2") and not pp.mayStart("run.start", "acme", "ci", "") and not pp.mayStart("run.start", "acme", "ci", "dev")
+      check pp.mayFireOn("acme", "ci", "main") and not pp.mayFireOn("acme", "ci", "dev")
+      check c.listMembers("org:acme")[0]["conditions"]["dev"]["refs"] == %*["main", "release/*"]
+      let me = c.whoAmI(p, @[])
+      check me["bindings"][0]["condition"]["only_own"].getBool and me["permissions"]["conditional"]["acme"][0]["refs"].len == 2
+    test "D-92 a condition is refused where it means nothing or is not well formed":
+      discard first()
+      discard makeUser("ann", "ro")
+      check c.setMember("org:acme", "ann", @["dev"], {"dev": BindingCondition(refs: @["a*b"])}.toTable, t0).startsWith("a ref is a branch or tag name")
+      check c.setMember("org:acme", "ann", @["dev"], {"dev": BindingCondition(refs: @["a b"])}.toTable, t0).startsWith("a ref is")
+      check c.setMember("shard", "ann", @["dev"], {"dev": BindingCondition(onlyOwn: true)}.toTable, t0) == "a condition is for a role in an organisation"
+      let parsed = bindingConditionOf(%*{"role": "dev", "expires_at": "2027-01-15T08:00:00Z", "only_own": true, "refs": ["main"]})
+      check parsed.error == "" and parsed.cond.expiresAt == 1_800_000_000'i64 and parsed.cond.onlyOwn and parsed.cond.refs == @["main"]
+      check bindingConditionOf(%*{"expires_at": "tomorrow"}).error.len > 0 and bindingConditionOf(%*{"only_own": "yes"}).error.len > 0 and bindingConditionOf(%*{"refs": "main"}).error.len > 0
+      check bindingConditionOf(%*{"expires_at": 1_900_000_000}).cond.expiresAt == 1_900_000_000'i64
     clean()

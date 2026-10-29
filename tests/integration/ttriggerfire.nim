@@ -34,7 +34,7 @@ suite "TRG-004 concurrency of a trigger":
       let a = co.fire(t, @[], getTime().toUnix())
       let b = co.fire(t, @[], getTime().toUnix())
       check a.started and b.started and a.runId != b.runId
-      check stateOf(a.runId) == "RUNNING" and stateOf(b.runId) == "RUNNING"
+      check stateOf(a.runId) == "QUEUED" and stateOf(b.runId) == "QUEUED"
     test "abort_newest starts none while an earlier run of the trigger has not ended, in any state that is not final":
       let t = newTrigger("abort_newest")
       let a = co.fire(t, @[], getTime().toUnix())
@@ -63,7 +63,7 @@ suite "TRG-004 concurrency of a trigger":
       let t = newTrigger("abort_previous")
       let a = co.fire(t, @[], getTime().toUnix())
       let b = co.fire(t, @[], getTime().toUnix())
-      check b.started and stateOf(a.runId) == "ABORTED" and stateOf(b.runId) == "RUNNING"
+      check b.started and stateOf(a.runId) == "ABORTED" and stateOf(b.runId) == "QUEUED"
       check resultOf(t) == "started; aborted the earlier run " & a.runId
     test "abort_previous cancels every earlier run that has not ended, and leaves the ended ones and the runs of other triggers as they are":
       let t = newTrigger("abort_previous")
@@ -75,8 +75,8 @@ suite "TRG-004 concurrency of a trigger":
       let w = co.fire(t, @[], getTime().toUnix())                # nothing to cancel: done ended
       setState(w.runId, "WAITING")
       let q = co.fire(t, @[], getTime().toUnix())                # cancels the waiting one
-      check stateOf(a.runId) == "ABORTED" and stateOf(done.runId) == "OK" and stateOf(w.runId) == "ABORTED" and stateOf(q.runId) == "RUNNING"
-      check stateOf(o.runId) == "RUNNING"
+      check stateOf(a.runId) == "ABORTED" and stateOf(done.runId) == "OK" and stateOf(w.runId) == "ABORTED" and stateOf(q.runId) == "QUEUED"
+      check stateOf(o.runId) == "QUEUED"
 
     test "D-63, D-68 a trigger of a project starts no run when the script cannot be had, and says why in its last result":
       inc n

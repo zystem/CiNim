@@ -210,7 +210,8 @@ proc unfinishedRuns(c: var RqClient; triggerId: string): seq[string] =
 
 proc stillRunning(c: var RqClient; triggerId: string): bool = c.unfinishedRuns(triggerId).len > 0
 
-proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; byClock = false; commit = ""; asRef = ""): Fired =
+proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; byClock = false; commit = ""; asRef = ""; actor = ""): Fired =
+  ## `actor` is who fired it by hand (`actorOf`); a firing by the clock, a poll or a webhook is the trigger's own (`trigger:<id>`).
   ## Starts the trigger's run (or says why not). `extra` are launch parameters of this call; they replace the trigger's own of the same name. `commit` (a webhook's, D-63) is the commit of a trigger
   ## that reads its script from a repository; without one the trigger's `ref` is run. `asRef` is the ref the run is on when the commit is given by its hash (a poll found it at the ref).
   var c = newRq(co.rqliteUrl)
@@ -257,7 +258,7 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
   if c.queueIsFull(profile):
     discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: the organisation has " & $maxUnfinishedRuns & " runs that have not ended", t.id]])
     return Fired(reason: "queue_full")
-  let id = co.createRun(script, t.tenantId, profile, pairs, t.id, t.groupId, source)
+  let id = co.createRun(script, t.tenantId, profile, pairs, t.id, t.groupId, source, actor = (if actor.len > 0: actor else: "trigger:" & t.id))
   let result = if aborted.len == 0: "started" else: "started; aborted the earlier run" & (if aborted.len > 1: "s " else: " ") & aborted.join(", ")
   discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_run_id = ?, last_result = ? WHERE id = ?", clock, id, result, t.id]])
   Fired(started: true, runId: id)
@@ -326,6 +327,9 @@ proc runTriggerLoop*(a: tuple[co: Core, stop: ptr Atomic[bool]]) {.thread.} =
       beat(bTriggers)
       try:
         discard fireSchedules(a.co, getTime().toUnix())
+        block approvals:
+          var ac = newRq(a.co.rqliteUrl)
+          discard ac.sweepApprovals(getTime().toUnix())          # D-93: runs that wait for approval past their time, or with nobody left to approve
         discard pollTriggers(a.co, getTime().toUnix(), conductorResolver(a.co))
       except Exception as e: stderr.writeLine "core: triggers: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       for _ in 0 ..< loopEverySeconds * 10:

@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -266,7 +266,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         let wanted = said.commit
         let fired = coreRef.fire(hook.row, @[], getTime().toUnix(), commit = wanted)
         if fired.started:
-          jsonOk(Http201, %*{"id": fired.runId, "organization": hook.row.slug, "trigger_id": hook.row.id, "state": "RUNNING"})
+          jsonOk(Http201, %*{"id": fired.runId, "organization": hook.row.slug, "trigger_id": hook.row.id, "state": coreRef.stateOfRun(fired.runId)})
         elif fired.status != 0:
           problem(HttpCode(fired.status), fired.reason, fired.detail)
         else:
@@ -1132,18 +1132,34 @@ proc onRequest() {.raises: [], gcsafe.} =
           if mj == nil or mj.kind != JObject or mj{"roles"}.isNil or mj{"roles"}.kind != JArray:
             problem(Http400, "invalid_request", "{\"roles\": [\"dev\", ...]} is required (an empty list takes the roles away)")
             return
+          # a role is its name, or (D-92) {"role": "dev", "expires_at": <unix seconds or RFC 3339>, "only_own": true, "refs": ["main", "release/*"]}
           var given: seq[string]
+          var conds = initTable[string, BindingCondition]()
+          var badRole = ""
           for x in mj["roles"].elems:
-            if x.kind != JString:
-              problem(Http400, "invalid_request", "roles are strings")
-              return
-            given.add x.getStr
-          let bad = mc.setMember(memberScope, memberUser, given)
+            if x.kind == JString: given.add x.getStr
+            elif x.kind == JObject and x.isString("role"):
+              let parsed = bindingConditionOf(x)
+              if parsed.error.len > 0:
+                badRole = parsed.error
+                break
+              given.add x["role"].getStr
+              conds[x["role"].getStr] = parsed.cond
+            else:
+              badRole = "a role is its name, or {\"role\": \"...\", \"expires_at\": ..., \"only_own\": true, \"refs\": [...]}"
+              break
+          if badRole.len > 0:
+            problem(Http400, "invalid_request", badRole)
+            return
+          let bad = mc.setMember(memberScope, memberUser, given, conds)
           if bad.len > 0:
             problem(Http400, "invalid_member", bad)
             return
-          mc.record(getTime().toUnix(), actorOf(who), "member.set", memberUser & " at " & memberScope, "ok", given.join(","))
-          jsonOk(Http200, %*{"organization": memberOrg, "group": memberGroup, "user": memberUser, "roles": given})
+          mc.record(getTime().toUnix(), actorOf(who), "member.set", memberUser & " at " & memberScope, "ok", given.join(",") & (if conds.len > 0: " (tied)" else: ""))
+          var saved = newJObject()
+          for m in mc.listMembers(memberScope):
+            if m["user"].getStr == memberUser and m.hasKey("conditions"): saved = m["conditions"]
+          jsonOk(Http200, %*{"organization": memberOrg, "group": memberGroup, "user": memberUser, "roles": given, "conditions": saved})
         elif memberUser.len > 0 and mmeth == "DELETE":
           let bad = mc.setMember(memberScope, memberUser, @[])
           if bad.len > 0:
@@ -1322,6 +1338,19 @@ proc onRequest() {.raises: [], gcsafe.} =
             if sj.hasKey("allowed_profiles") and not who.mayIn("profile.grant", slugG, sp):
               problem(Http403, "forbidden", "allowed_profiles needs profile.grant on " & normalPath(sp))
               return
+            if sj.hasKey("required_approvals"):
+              # D-93: how many approvals the runs of this project that wait for approval need
+              if sj["required_approvals"].kind != JInt or sj["required_approvals"].getInt < 1 or sj["required_approvals"].getInt > maxRequiredApprovals:
+                problem(Http400, "invalid_request", "required_approvals is a whole number from 1 to " & $maxRequiredApprovals)
+                return
+              if not who.mayIn("approval.configure", slugG, sp):
+                problem(Http403, "forbidden", "required_approvals needs approval.configure on " & normalPath(sp))
+                return
+              if gc.resolveProject(orgG.id, sp).code.len > 0:
+                problem(Http409, "not_a_project", "approvals belong to a project (a group with a repository), and " & normalPath(sp) & " is not one")
+                return
+              gc.setRequiredApprovals(sg.id, sj["required_approvals"].getInt)
+              gc.record(getTime().toUnix(), actorOf(who), "project.required_approvals", slugG & "/" & normalPath(sp), "ok", $sj["required_approvals"].getInt)
             let cur = gc.groupLimit(sg.id)
             var q = cur.quota
             var d = cur.retentionDays
@@ -1353,7 +1382,7 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           let lim = gc.groupLimit(sg.id)
           jsonOk(Http200, %*{"organization": slugG, "group": normalPath(sp), "cache_quota_bytes": lim.quota, "cache_retention_days": lim.retentionDays,
-                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()),
+                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.requiredApprovals(sg.id),
                              "protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id)})
           return
         let vpos = segs.find("variables")
@@ -1554,12 +1583,16 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem(Http400, "invalid_source", "commit is a SHA, a branch or a tag name")
             return
           # D-86: a manual firing that names another ref than the trigger's own, and a protected one, is for those who hold run.start.protected
-          if wanted.len > 0 and refNameOf(wanted).len > 0 and c.isProtectedRef(found.row.groupId, refNameOf(wanted)) and not who.mayIn("run.start.protected", slug, found.row.groupPath):
+          if wanted.len > 0 and refNameOf(wanted).len > 0 and c.isProtectedRef(found.row.groupId, refNameOf(wanted)) and not who.mayStart("run.start.protected", slug, found.row.groupPath, refNameOf(wanted)):
             problem(Http403, "protected_ref", "\"" & wanted & "\" is a protected ref of the project " & found.row.groupPath & ": firing a trigger on it needs run.start.protected there")
             return
-          let fired = coreRef.fire(found.row, given.pairs, getTime().toUnix(), commit = wanted)
+          # D-92: a role tied to refs starts runs on those refs only, also through a trigger
+          if not who.mayFireOn(slug, found.row.groupPath, (if wanted.len > 0: refNameOf(wanted) else: refNameOf(found.row.ref0))):
+            problem(Http403, "forbidden", "your role may start runs of " & found.row.groupPath & " on certain refs only; this firing is on another")
+            return
+          let fired = coreRef.fire(found.row, given.pairs, getTime().toUnix(), commit = wanted, actor = actorOf(who))
           if fired.started:
-            jsonOk(Http201, %*{"id": fired.runId, "organization": slug, "trigger_id": tid, "state": "RUNNING"})
+            jsonOk(Http201, %*{"id": fired.runId, "organization": slug, "trigger_id": tid, "state": coreRef.stateOfRun(fired.runId)})
           elif fired.status != 0:
             problem(HttpCode(fired.status), fired.reason, fired.detail)
           else:
@@ -1684,7 +1717,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
-        if not who.mayIn("run.start", j{"organization"}.getStr, normalPath(j{"project"}.getStr)):
+        if not who.mayStartSomewhere("run.start", j{"organization"}.getStr, normalPath(j{"project"}.getStr)):
           problem(Http403, "forbidden", "you may not start runs of " & (if j{"organization"}.getStr.len > 0: "the organisation " & j{"organization"}.getStr else: "the shard's default tenant"))
           return
         var tenant = "t1"
@@ -1726,7 +1759,10 @@ proc onRequest() {.raises: [], gcsafe.} =
         let fromRepo = src.source
         # D-86: a run on a protected ref of the project is for those who hold run.start.protected; asked by a hash it is on no ref
         let askedRef = refNameOf(fromRepo.commit)
-        if askedRef.len > 0 and gq.isProtectedRef(groupId, askedRef) and not who.mayIn("run.start.protected", orgSlug, proj.path):
+        if not who.mayStart("run.start", orgSlug, proj.path, askedRef):          # D-92: a role tied to refs holds for a run on one of them
+          problem(Http403, "forbidden", "your role may start runs of " & proj.path & " on certain refs only" & (if askedRef.len > 0: ", and \"" & askedRef & "\" is not one of them" else: ": name the ref"))
+          return
+        if askedRef.len > 0 and gq.isProtectedRef(groupId, askedRef) and not who.mayStart("run.start.protected", orgSlug, proj.path, askedRef):
           problem(Http403, "protected_ref", "\"" & askedRef & "\" is a protected ref of the project " & proj.path & ": starting a run on it needs run.start.protected there")
           return
         var qc = newRq(coreRef.rqliteUrl)
@@ -1752,8 +1788,21 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           script = ans.script
           source = Source(repository: fromRepo.repository, commit: ans.commit, path: (if fromRepo.path.len == 0: defaultPath else: fromRepo.path), refName: askedRef)
-        let id = coreRef.createRun(script, tenant, profile, given.pairs, groupId = groupId, source = source)
-        var made = %*{"id": id, "organization": orgSlug, "project": proj.path, "state": "RUNNING", "checked": checked}
+        # D-93: {"approval": true | {"timeout_seconds": n}} makes the run wait for the approvals its project asks for
+        var spec = ApprovalSpec()
+        if j.hasKey("approval") and j["approval"].kind notin [JNull, JBool] or (j.hasKey("approval") and j["approval"].kind == JBool and j["approval"].getBool):
+          var secs = defaultApprovalSeconds
+          if j["approval"].kind == JObject and j["approval"].hasKey("timeout_seconds"):
+            if j["approval"]["timeout_seconds"].kind != JInt or j["approval"]["timeout_seconds"].getBiggestInt < minApprovalSeconds or j["approval"]["timeout_seconds"].getBiggestInt > maxApprovalSeconds:
+              problem(Http400, "invalid_request", "approval.timeout_seconds is between " & $minApprovalSeconds & " and " & $maxApprovalSeconds)
+              return
+            secs = j["approval"]["timeout_seconds"].getBiggestInt
+          elif j["approval"].kind notin [JObject, JBool]:
+            problem(Http400, "invalid_request", "approval is true or {\"timeout_seconds\": n}")
+            return
+          spec = ApprovalSpec(required: gq.requiredApprovals(groupId), timeoutSeconds: secs)
+        let id = coreRef.createRun(script, tenant, profile, given.pairs, groupId = groupId, source = source, actor = actorOf(who), approval = spec)
+        var made = %*{"id": id, "organization": orgSlug, "project": proj.path, "state": coreRef.stateOfRun(id), "checked": checked}
         if source.repository.len > 0: made["source"] = %*{"repository": source.repository, "commit": source.commit, "path": source.path, "ref": source.refName}
         jsonOk(Http201, made)
       elif meth == "GET" and rest.endsWith("/log") and "/steps/" notin rest:
@@ -1784,7 +1833,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         backwards = not seenFrom
         if not who.admin:
           let owner = coreRef.getRun(runId)
-          if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
+          if owner == nil or not who.mayUseRun(owner):
             problem(Http404, "not_found", "no such run")
             return
         let log = coreRef.getRunLog(runId, wantCursor, cursor, backwards, (if limit < 1: defaultRunWindow else: limit))
@@ -1810,7 +1859,7 @@ proc onRequest() {.raises: [], gcsafe.} =
               return
         if not who.admin:
           let owner = coreRef.getRun(parts[0])
-          if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
+          if owner == nil or not who.mayUseRun(owner):
             problem(Http404, "not_found", "no log stream for this step yet")      # not 403: another organisation's runs are not even confirmed
             return
         let log = coreRef.getStepLog(parts[0], seq, max(0, fromLine), (if limit < 1: maxWindow else: limit))
@@ -1822,7 +1871,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         # the artifacts of a run (DAT-003): the list, or one file (read from the store by the core and passed on, up to 64 MiB)
         let parts = rest.split("/artifacts", maxsplit = 1)
         let owner = coreRef.getRun(parts[0])
-        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
+        if owner == nil or not who.mayUseRun(owner):
           problem(Http404, "not_found", "no such run")
           return
         var c = newRq(coreRef.rqliteUrl)
@@ -1858,7 +1907,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         # RUN-006: stop a run. The same people that may read it: another organisation's run is not confirmed (404), as for a read
         let runId = rest[0 ..< rest.len - ":abort".len]
         let owner = coreRef.getRun(runId)
-        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
+        if owner == nil or not who.mayUseRun(owner):
           problem(Http404, "not_found", "no such run")
           return
         var cc = newRq(coreRef.rqliteUrl)
@@ -1869,12 +1918,35 @@ proc onRequest() {.raises: [], gcsafe.} =
         of coAborted:
           cc.record(getTime().toUnix(), actorOf(who), "run.abort", runId, "ok")
           jsonOk(Http200, %*{"id": runId, "state": done.state})
+      elif meth == "POST" and (rest.endsWith(":approve") or rest.endsWith(":reject")):
+        # D-93: a run that waits for approval is approved or rejected by a person who holds run.approve for it and did not start it; {"comment": "..."} is kept with the answer
+        let approving = rest.endsWith(":approve")
+        let runId = rest[0 ..< rest.len - (if approving: ":approve".len else: ":reject".len)]
+        let owner = coreRef.getRun(runId)
+        if owner == nil or not who.mayUseRun(owner):
+          problem(Http404, "not_found", "no such run")
+          return
+        if who.user.len == 0:
+          problem(Http403, "forbidden", "a run is approved by a person; a token of an organisation or the operator\'s is not one")
+          return
+        let aj = try: parseJson(getBody()) except JsonParsingError: nil
+        let comment = if aj != nil and aj.kind == JObject and aj.isString("comment"): aj["comment"].getStr.strip[0 ..< min(500, aj["comment"].getStr.strip.len)] else: ""
+        var ac = newRq(coreRef.rqliteUrl)
+        let ans = ac.answerApproval(runId, who.user, (if approving: "approve" else: "reject"), comment, getTime().toUnix())
+        case ans.outcome
+        of aoNotFound: problem(Http404, "not_found", "no such run")
+        of aoNotWaiting: problem(Http409, "not_waiting_for_approval", "this run does not wait for approval (it is " & ans.state & ")")
+        of aoOwnRun: problem(Http403, "own_run", "you started this run: another person approves it")
+        of aoAlreadyAnswered: problem(Http409, "already_answered", "you have answered for this run already")
+        of aoGiven, aoApproved, aoRejected:
+          ac.record(getTime().toUnix(), actorOf(who), (if approving: "run.approve" else: "run.reject"), runId, "ok", comment)
+          jsonOk(Http200, %*{"id": runId, "state": ans.state, "approvals": ans.have, "required": ans.required})
       elif meth == "POST" and (rest.endsWith(":hold") or rest.endsWith(":release")):
         # DAT-006: a legal hold on a run - its artifacts and volume are not garbage-collected and its organisation is not deleted for good (core/holds.nim)
         let placing = rest.endsWith(":hold")
         let runId = rest[0 ..< rest.len - (if placing: ":hold".len else: ":release".len)]
         let owner = coreRef.getRun(runId)
-        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
+        if owner == nil or not who.mayUseRun(owner):
           problem(Http404, "not_found", "no such run")
           return
         var hc = newRq(coreRef.rqliteUrl)
@@ -1902,7 +1974,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         # PIP-015 failed-only: run again only what failed, in the same run, if its volume is still there (docs/parallel.md section 11)
         let runId = rest[0 ..< rest.len - ":retry".len]
         let owner = coreRef.getRun(runId)
-        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
+        if owner == nil or not who.mayUseRun(owner):
           problem(Http404, "not_found", "no such run")
           return
         var rc = newRq(coreRef.rqliteUrl)
@@ -1936,10 +2008,10 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http403, "forbidden", "this token may list the runs of its own organisation only")
           return
         var c = newRq(coreRef.rqliteUrl)
-        jsonOk(Http200, c.listRuns(scope.organization, askedState, limit, before, scope.only, scope.groups))
+        jsonOk(Http200, c.listRuns(scope.organization, askedState, limit, before, scope.only, scope.groups, scope.limited, actorOf(who)))
       elif meth == "GET" and rest.len > 0:
         let run = coreRef.getRun(rest)
-        if run != nil and not who.mayUseIn(run{"organization"}.getStr, run{"project"}.getStr):
+        if run != nil and not who.mayUseRun(run):
           problem(Http404, "not_found", "no such run")
           return
         if run == nil:
@@ -1948,8 +2020,15 @@ proc onRequest() {.raises: [], gcsafe.} =
         # what this caller may do with the run now: its state allows it and the caller's rights allow the call (the UI shows a button for what is true here, and nothing else)
         var ac = newRq(coreRef.rqliteUrl)
         let can = ac.runActions(rest, run{"state"}.getStr)
-        let runOrg = run{"organization"}.getStr
-        run["actions"] = %*{"abort": can.abort and who.mayIn("run.abort", runOrg, run{"project"}.getStr), "retry": can.retry and who.mayIn("run.retry", runOrg, run{"project"}.getStr)}
+        # D-93: a person other than the author, who holds run.approve for the run, and has not answered yet
+        var answerable = false
+        if who.user.len > 0 and run{"approval"} != nil and run["approval"]{"waiting"}.getBool and who.mayInRun("run.approve", run) and run{"started_by"}.getStr != "user:" & who.user:
+          answerable = true
+          for k in ["approved_by", "rejected_by"]:
+            for x in run["approval"][k].getElems:
+              if x.getStr == who.user: answerable = false
+        run["actions"] = %*{"abort": can.abort and who.mayInRun("run.abort", run), "retry": can.retry and who.mayInRun("run.retry", run),
+                             "approve": answerable, "reject": answerable}
         jsonOk(Http200, run)
       else:
         problem(Http404, "not_found", "no such route")

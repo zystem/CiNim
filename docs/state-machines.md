@@ -11,6 +11,7 @@ Transitions are compare-and-swap writes in rqlite. Terminal states are final: a 
 stateDiagram-v2
   [*] --> rsCreated
   rsCreated --> rsCompiling
+  rsCreated --> rsWaiting
   rsCreated --> rsAborted
   rsCreated --> rsSkipped
   rsCreated --> rsInfrastructureError
@@ -29,6 +30,7 @@ stateDiagram-v2
   rsRunning --> rsAborted
   rsRunning --> rsTimedOut
   rsRunning --> rsInfrastructureError
+  rsWaiting --> rsQueued
   rsWaiting --> rsRunning
   rsWaiting --> rsAborted
   rsWaiting --> rsTimedOut

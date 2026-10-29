@@ -410,7 +410,7 @@ proc pendingProfiles(h: var Hub): seq[string] =
 
 proc leasableProfiles(h: var Hub): seq[string] =
   ## the profiles with a run that nobody holds: one query for all conductors
-  let r = h.c.query(%*[["SELECT DISTINCT profile_id FROM runs WHERE state = ? AND (lease_until = 0 OR lease_until < ?)", protoName(rsRunning), getTime().toUnix()]])
+  let r = h.c.query(%*[["SELECT DISTINCT profile_id FROM runs WHERE state IN (?, ?) AND (lease_until = 0 OR lease_until < ?)", protoName(rsQueued), protoName(rsRunning), getTime().toUnix()]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for row in vals: result.add row[0].getStr

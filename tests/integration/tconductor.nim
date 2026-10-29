@@ -98,7 +98,7 @@ suite "RUN-009 the conductor":
       let r = co.createRun("return 1", "t1", o.profile)
       let p = startConductor(o.ns, "c-t3", credential = "wrong")
       check p.waitForExit(15000) == 3
-      check stateOf(r) == "RUNNING"
+      check stateOf(r) == "QUEUED"          # not led
       p.close()
     test "RUN-009 a conductor holds at most its places: more runs wait in the queue":
       let o = newOrg()
@@ -131,7 +131,7 @@ suite "RUN-009 the conductor":
       let r = co.createRun(script, "t1", o.profile)
       var seen: seq[int]
       let deadline = epochTime() + 90
-      while epochTime() < deadline and stateOf(r) == "RUNNING":
+      while epochTime() < deadline and stateOf(r) in ["QUEUED", "RUNNING"]:
         for n in pendingOrdinals(r):
           if n notin seen:
             seen.add n

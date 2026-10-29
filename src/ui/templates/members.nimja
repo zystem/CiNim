@@ -3,7 +3,7 @@
 {% block content %}<h1>Members: {{ h(scopeText) }}</h1>
 <p><a href="{{ h(base) }}/orgs">Organisations</a> - <a href="{{ h(base) }}/roles">Roles</a>{% if group.len > 0 %} - <a href="{{ h(orgMembers) }}">members of the organisation</a>{% endif %}</p>
 <p class="detail">Who has which role here. {% if group.len > 0 %}A role on a group holds for it and for everything under it, and only for the permissions about the tree of groups.{% else %}A role in an organisation holds in all of it. People who come from a directory (LDAP) have their roles from it on the Directory page.{% endif %}</p>
-<table><thead><tr><th>Person</th><th>Roles given here by hand or by a directory</th>{% if canEdit %}<th></th>{% endif %}</tr></thead><tbody>
+<table><thead><tr><th>Person</th><th>Roles given here by hand or by a directory (and what a role is tied to)</th>{% if canEdit %}<th></th>{% endif %}</tr></thead><tbody>
 {% for m in members %}<tr><td><code>{{ h(m.user) }}</code></td><td>{{ h(m.roles) }}</td>{% if canEdit %}<td><form method="post" action="{{ h(here) }}/remove" class="inline"><input type="hidden" name="user" value="{{ h(m.user) }}"><button type="submit">Take all away</button></form></td>{% endif %}</tr>
 {% endfor %}</tbody></table>
 {% if members.len == 0 %}<p class="empty">Nobody has a role here.</p>{% endif %}
@@ -13,4 +13,9 @@
 <fieldset><legend>Roles (these replace the ones the person has here by hand)</legend>
 {% for r in roleNames %}<label class="check"><input type="checkbox" name="role" value="{{ h(r) }}"> {{ h(r) }}</label>
 {% endfor %}</fieldset>
+<fieldset><legend>Tied to (optional, for the roles ticked above)</legend>
+<label>Until the end of the day <input type="date" name="until"></label>
+<label class="check"><input type="checkbox" name="only_own" value="1"> Runs the person started themselves: the run permissions of the role hold for those only</label>
+<label>Refs (the run permissions hold for runs on these; one to a line, a name or a prefix ending in *) <textarea name="refs" rows="2" maxlength="1000"></textarea></label>
+</fieldset>
 <div class="actions"><button type="submit">Save</button></div></form>{% endif %}{% endblock %}

@@ -30,11 +30,11 @@ func protoName*(s: StepState): string = stepProtoNames[s.ord]
 func runNext*(s: RunState): set[RunState] =
   ## Compare-and-swap transitions (RUN-001). A retry of a finished run is a new run (PIP-015), so terminal states are final.
   case s
-  of rsCreated: {rsCompiling, rsSkipped, rsAborted, rsInfrastructureError}
+  of rsCreated: {rsCompiling, rsWaiting, rsSkipped, rsAborted, rsInfrastructureError}          # waiting: D-93, a run that waits for approval before it starts
   of rsCompiling: {rsQueued, rsFailed, rsSkipped, rsAborted, rsInfrastructureError}
   of rsQueued: {rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
   of rsRunning: {rsWaiting, rsOk, rsFailed, rsAborted, rsTimedOut, rsInfrastructureError}
-  of rsWaiting: {rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
+  of rsWaiting: {rsQueued, rsRunning, rsAborted, rsTimedOut, rsInfrastructureError}
   of rsOk, rsFailed, rsAborted, rsSkipped, rsTimedOut, rsInfrastructureError: {}
 
 func stepNext*(s: StepState): set[StepState] =

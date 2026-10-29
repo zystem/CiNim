@@ -43,6 +43,7 @@ suite "RUN-006 cancelling a run":
     test "another run is not touched":
       let a = co.createRun("return 1")
       let b = co.createRun("return 1")
+      discard c.execute(%*[["UPDATE runs SET state = 'RUNNING' WHERE id IN (?, ?)", a, b]])          # both are being led
       addStep(a, 0, "RUNNING")
       addStep(b, 0, "RUNNING")
       discard c.abortRun(a, getTime().toUnix())

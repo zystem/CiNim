@@ -7,6 +7,8 @@
 {% if run.project.len > 0 %}<dt>Project</dt><dd>{{ h(run.project) }}</dd>{% endif %}
 <dt>Started</dt><dd>{{ h(run.created) }}</dd><dt>Updated</dt><dd>{{ h(run.updated) }}</dd>{% if run.took.len > 0 %}<dt>Took</dt><dd>{{ h(run.took) }}</dd>{% endif %}
 {% if run.repository.len > 0 %}<dt>Pipeline</dt><dd>{{ h(run.path) }}</dd><dt>Source</dt><dd>{{ h(run.repository) }} @ <code>{{ h(run.commit) }}</code></dd>{% endif %}
+{% if run.queue.len > 0 %}<dt>Queue</dt><dd>{{ h(run.queue) }}</dd>{% endif %}
+{% if run.approval.len > 0 %}<dt>Approval</dt><dd>{{ h(run.approval) }}</dd>{% endif %}
 {% if run.waitReason.len > 0 %}<dt>Waiting</dt><dd>{{ h(run.waitReason) }}</dd>{% endif %}
 {% if run.failureCode.len > 0 %}<dt>Failure</dt><dd class="error"><code>{{ h(run.failureCode) }}</code> {{ h(run.failureMessage) }}</dd>{% endif %}
 </dl>
@@ -14,10 +16,13 @@
 {% if run.canAbort %}<form method="post" action="{{ h(base) }}/runs/{{ h(run.id) }}/abort"><button type="submit">Stop the run</button></form>{% endif %}
 {% if run.canRetry %}<form method="post" action="{{ h(base) }}/runs/{{ h(run.id) }}/retry"><button type="submit">Run the failed steps again</button></form>{% endif %}
 </div>{% endif %}
+{% if run.canApprove %}<form method="post" action="{{ h(base) }}/runs/{{ h(run.id) }}/approve" class="stack"><h2>This run waits for your approval</h2>
+<label>Comment (optional) <input type="text" name="comment" maxlength="500"></label>
+<div class="actions"><button type="submit">Approve</button><button type="submit" formaction="{{ h(base) }}/runs/{{ h(run.id) }}/reject">Reject</button></div></form>{% endif %}
 {% if run.params.len > 0 %}<h2>Parameters</h2><table><tbody>{% for p in run.params %}<tr><th>{{ h(p.name) }}</th><td>{{ h(p.value) }}</td></tr>{% endfor %}</tbody></table>{% endif %}
 <h2>Steps</h2>
 <p><a href="{{ h(base) }}/runs/{{ h(run.id) }}/log">The log of the whole run</a></p>
 <table><thead><tr><th>Step</th><th>Attempt</th><th>State</th><th>Took</th><th>Exit</th><th>Ended as</th><th>Pod</th><th>Log</th></tr></thead><tbody>
-{% for s in run.steps %}<tr id="step-{{ h(s.seq) }}"><td>{{ h(s.seq) }}</td><td>{{ h(s.attempt) }}</td><td class="state-{{ h(s.state) }}">{{ h(s.state) }}</td><td>{{ h(s.took) }}</td><td>{{ h(s.exitCode) }}</td><td>{{ h(s.termination) }}</td><td>{{ h(s.pod) }}</td><td><a href="{{ h(base) }}/runs/{{ h(run.id) }}/steps/{{ h(s.seq) }}/log">log</a></td></tr>
+{% for s in run.steps %}<tr id="step-{{ h(s.seq) }}"><td>{{ h(s.seq) }}</td><td>{{ h(s.attempt) }}</td><td class="state-{{ h(s.state) }}">{{ h(s.state) }}{% if s.pending.len > 0 %}<br><small class="detail">{{ h(s.pending) }}</small>{% endif %}</td><td>{{ h(s.took) }}</td><td>{{ h(s.exitCode) }}</td><td>{{ h(s.termination) }}</td><td>{{ h(s.pod) }}</td><td><a href="{{ h(base) }}/runs/{{ h(run.id) }}/steps/{{ h(s.seq) }}/log">log</a></td></tr>
 {% endfor %}</tbody></table>
 {% if run.steps.len == 0 %}<p class="empty">No steps yet.</p>{% endif %}{% endblock %}

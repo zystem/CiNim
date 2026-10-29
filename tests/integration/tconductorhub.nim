@@ -153,7 +153,7 @@ suite "RUN-016 conductors on the push channel":
       check cl.sendFrame(hello("cd-c-" & sfx, "c-c", a.ns, 3))
       check cl.nextKind("conductor.welcome").isSome
       check cl.nextKind("conductor.lease", 1500).isNone
-      check runState(rb) == "RUNNING"
+      check runState(rb) == "QUEUED"          # nobody led it
       cl.close()
     test "the calls of the holder are answered; a finish ends the run":
       let o = newOrg()
@@ -252,7 +252,7 @@ suite "RUN-016 conductors on the push channel":
       check keep.nextKind("conductor.drain", 2500).isNone
       let r = co.createRun("return 1", "t1", o.profile)
       check extra.nextKind("conductor.lease", 1500).isNone          # draining: no more runs
-      check runState(r) == "RUNNING"
+      check runState(r) == "QUEUED"
       conductorIdleSeconds = 300.0
       drainPassSeconds = 10.0
       keep.close()

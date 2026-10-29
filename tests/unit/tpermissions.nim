@@ -72,7 +72,7 @@ suite "D-84 what a request needs":
       check not grantsOfRoles(["rw", "dev", "ro"]).allows(needOf(m, p))
   test "every permission of the catalogue is needed by some route (a permission nothing asks for is a mistake)":
     var used = initHashSet[string]()
-    for (m, p) in [("GET", "/api/v1/runs"), ("POST", "/api/v1/runs"), ("POST", "/api/v1/pipelines:check"), ("POST", "/api/v1/runs/x:abort"), ("POST", "/api/v1/runs/x:retry"),
+    for (m, p) in [("GET", "/api/v1/runs"), ("POST", "/api/v1/runs"), ("POST", "/api/v1/pipelines:check"), ("POST", "/api/v1/runs/x:abort"), ("POST", "/api/v1/runs/x:retry"), ("POST", "/api/v1/runs/x:approve"),
                    ("DELETE", "/api/v1/runs/x"), ("GET", "/api/v1/runs/x/log"), ("GET", "/api/v1/runs/x/artifacts"), ("GET", "/api/v1/organizations/o/triggers"),
                    ("POST", "/api/v1/organizations/o/triggers"), ("POST", "/api/v1/organizations/o/triggers/t:fire"), ("GET", "/api/v1/organizations/o/variables"),
                    ("PUT", "/api/v1/organizations/o/variables/V"), ("GET", "/api/v1/organizations/o/secrets"), ("PUT", "/api/v1/organizations/o/secrets/S"),
@@ -188,3 +188,52 @@ suite "D-84 what a user holds":
     let u = g(orgs = {"acme": @["run.read", "run.start", "run.abort"]})
     check u.allows(needOf("POST", "/api/v1/runs")) and u.allows(needOf("POST", "/api/v1/runs/x:abort")) and u.allows(needOf("GET", "/api/v1/runs/x"))
     check not u.allows(needOf("POST", "/api/v1/runs/x:retry")) and not u.allows(needOf("GET", "/api/v1/runs/x/log")) and not u.allows(needOf("POST", "/api/v1/organizations/acme/triggers/t:fire"))
+
+suite "D-92 what a binding is tied to":
+  let dev = builtinPermissions("dev")
+  test "own runs only: the run permissions hold for a run the caller started; the rest of the role holds as ever":
+    var u: Grants
+    u.addRole("org:acme", dev, BindingCondition(onlyOwn: true))
+    check u.holdsRun("run.abort", "acme", "ci", RunFacts(own: true)) and not u.holdsRun("run.abort", "acme", "ci", RunFacts(own: false))
+    check u.holdsRun("run.read", "acme", "ci/app", RunFacts(own: true)) and not u.holdsRun("run.read", "acme", "ci/app", RunFacts())
+    check u.holds("trigger.fire", "acme") and u.holds("run.check", "acme")                  # not about one run
+    check not u.holds("run.abort", "acme") and not u.holds("run.read", "acme", "ci")          # `holds` is the unconditional answer
+    check u.holdsAnywhere("run.abort") and u.holdsWithin("run.abort", "acme") and not u.holdsWithin("run.abort", "beta")
+    check u.allows(needOf("POST", "/api/v1/runs/x:abort"))                                  # the gate lets it through, the handler asks again with the run
+    check not u.holdsRun("run.abort", "beta", "ci", RunFacts(own: true))
+  test "refs: a run on a ref that matches one of the patterns; a run on none matches none":
+    var u: Grants
+    u.addRole("org:acme", dev, BindingCondition(refs: @["main", "release/*"]))
+    for r in ["main", "release/1.2"]: check u.holdsRun("run.start", "acme", "ci", RunFacts(ref0: r))
+    for r in ["", "main2", "feature/x", "release"]: check not u.holdsRun("run.start", "acme", "ci", RunFacts(ref0: r))
+  test "own and refs together are both needed":
+    var u: Grants
+    u.addRole("org:acme", dev, BindingCondition(onlyOwn: true, refs: @["main"]))
+    check u.holdsRun("run.retry", "acme", "ci", RunFacts(own: true, ref0: "main"))
+    check not u.holdsRun("run.retry", "acme", "ci", RunFacts(own: true, ref0: "x")) and not u.holdsRun("run.retry", "acme", "ci", RunFacts(own: false, ref0: "main"))
+  test "on a group the condition reaches that group and what is under it":
+    var u: Grants
+    u.addRole("org:acme/ci", dev, BindingCondition(onlyOwn: true))
+    check u.holdsRun("run.abort", "acme", "ci/app", RunFacts(own: true)) and u.holdsRun("run.abort", "acme", "ci", RunFacts(own: true))
+    check not u.holdsRun("run.abort", "acme", "cix", RunFacts(own: true)) and not u.holdsRun("run.abort", "acme", "ci", RunFacts())
+    check u.limitedWith("run.abort") == @[(org: "acme", path: "ci", onlyOwn: true, refs: newSeq[string]())]
+  test "a binding without a condition is as before, and a plain one next to a tied one wins":
+    var u: Grants
+    u.addRole("org:acme", dev, BindingCondition(onlyOwn: true))
+    u.addRole("org:acme", builtinPermissions("ro"))
+    check u.holdsRun("run.read", "acme", "ci", RunFacts()) and not u.holdsRun("run.abort", "acme", "ci", RunFacts())
+    check u.limitedWith("run.read").len == 0 or u.limitedWith("run.read").len == 1
+  test "at the shard a condition is not honoured: only admin is a right there, whole":
+    var u: Grants
+    u.addRole("shard", builtinPermissions("admin"), BindingCondition(onlyOwn: true))
+    check u.holds("run.abort", "acme") and u.limited.len == 0
+  test "a term ends the binding":
+    check BindingCondition(expiresAt: 100).expired(100) and BindingCondition(expiresAt: 100).expired(101) and not BindingCondition(expiresAt: 100).expired(99)
+    check not BindingCondition().expired(1_000_000_000) and not BindingCondition().limits and BindingCondition(onlyOwn: true).limits and BindingCondition(refs: @["a"]).limits
+
+suite "D-93 approval":
+  test "approving and rejecting a run need run.approve, held anywhere (the handler knows the run); dev and ro do not have it, rw and admin do":
+    check needOf("POST", "/api/v1/runs/x:approve") == needOf("POST", "/api/v1/runs/x:reject") and needOf("POST", "/api/v1/runs/x:approve").permission == "run.approve"
+    check "run.approve" in builtinPermissions("rw") and "run.approve" in builtinPermissions("admin")
+    check "run.approve" notin builtinPermissions("dev") and "run.approve" notin builtinPermissions("ro")
+    check isRunPermission("run.approve") and "approval.configure" in checkedByHandlers and "approval.configure" in builtinPermissions("rw")
