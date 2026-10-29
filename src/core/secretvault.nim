@@ -230,6 +230,19 @@ proc getSecrets*(c: var RqClient; kek: KekProvider; tenant: string; names: seq[s
     result.values.add (n, u.plain)
   result.ok = true
 
+proc sealOrgText*(c: var RqClient; kek: KekProvider; tenant, label, plain: string): tuple[ok, retry: bool, sealed, error: string] =
+  ## a piece of text that is not a step secret (the password a core binds to a directory with) sealed with the organisation's data key; `label` is bound into it, so that it opens only where it was made for
+  let d = dekFor(c, kek, tenant, create = true)
+  if not d.ok: return (false, d.retry, "", d.error)
+  (true, false, seal(d.dek, plain, "cinim/text/v1|" & tenant & "|" & label), "")
+
+proc openOrgText*(c: var RqClient; kek: KekProvider; tenant, label, sealed: string): tuple[ok, retry: bool, plain, error: string] =
+  let d = dekFor(c, kek, tenant, create = false)
+  if not d.ok: return (false, d.retry, "", d.error)
+  let u = unseal(d.dek, sealed, "cinim/text/v1|" & tenant & "|" & label)
+  if not u.ok: return (false, false, "", "the sealed text cannot be opened")
+  (true, false, u.plain, "")
+
 # ------------------------------------------------------------------ the active key
 
 var

@@ -14,6 +14,7 @@ type
 
   CoreApi* = object
     login*: proc (user, password: string): ApiResult {.gcsafe.}
+    loginOptions*: proc (): ApiResult {.gcsafe.}                       ## GET /api/v1/login/options: the organisations a person can choose at the login (D-87), asked with no token
     get*: proc (token, pathAndQuery: string): ApiResult {.gcsafe.}
     post*: proc (token, path, body: string): ApiResult {.gcsafe.}      ## a POST of an action (abort, retry) with the token of the user
 
@@ -63,6 +64,8 @@ proc httpCoreApi*(url: string; timeoutMs = 10000): CoreApi =
       if c != nil: c.close()
   result.login = proc (user, password: string): ApiResult {.gcsafe.} =
     call(HttpPost, "/api/v1/login", "", $(%*{"user": user, "password": password}))
+  result.loginOptions = proc (): ApiResult {.gcsafe.} =
+    call(HttpGet, "/api/v1/login/options", "", "")
   result.get = proc (token, pathAndQuery: string): ApiResult {.gcsafe.} =
     call(HttpGet, pathAndQuery, token, "")
   result.post = proc (token, path, body: string): ApiResult {.gcsafe.} =

@@ -102,6 +102,14 @@ suite "IAM-001 what rw may do":
     check rolesMay(["ro", "rw"], "DELETE", "/api/v1/runs/x")
     check not rolesMay(newSeq[string](), "GET", "/api/v1/runs")
 
+suite "D-87 the names of accounts":
+  test "the names of accounts: a local user, or login@organisation; nothing else":
+    for n in ["ann", "build_bot", "a-1", "ann@acme", "a.b_c-d@acme-1", "x@a"]: check validAccountName(n)
+    for n in ["", "@acme", "ann@", "ann@Acme", "Ann@acme", "ann@1acme", "ann@ac me", "an n@acme", "ann@acme@x", "a/b@acme", "ann*@acme"]: check not validAccountName(n)
+    check validUserName("ann") and not validUserName("ann@acme")                         # a user is never made with an @, so a directory\'s account cannot be taken by name
+    check userOfScope("user:ann@acme") == "ann@acme" and userOfScope("user:ann@") == "" and userOfPasswordPath("/api/v1/users/ann@acme/password") == "ann@acme"
+
+
 suite "IAM-001 a body that lacks the field is a bad request, not a crash":
   test "a missing key is nil in a JSON object, and isString copes with it":
     check not parseJson("{}").isString("password")

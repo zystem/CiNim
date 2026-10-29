@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options]
 import ../common/httpsrv
 import ../common/scriptsource
-import projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -272,6 +272,20 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         return
+      if path == "/api/v1/login/options":
+        # D-87: what a login form offers before anyone is known: the organisations that have a directory (slug and name), so that a person picks theirs instead of typing `login@slug`.
+        # Nothing else is told, and an organisation with no directory is not listed.
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        var oc = newRq(coreRef.rqliteUrl)
+        var os = newJArray()
+        if authOn:
+          let vals = oc.query(%*[["SELECT DISTINCT o.slug, o.name FROM organizations o JOIN ldap_servers s ON s.tenant_id = o.id WHERE o.state = 'active' AND s.enabled = 1 ORDER BY o.slug"]])["results"][0]{"values"}
+          if vals != nil:
+            for v in vals: os.add %*{"slug": v[0].getStr, "name": v[1].getStr}
+        jsonOk(Http200, %*{"organizations": os})
+        return
       if path == "/api/v1/login":
         # IAM-001: a user proves the password and gets a token with the rights of the user's roles (it needs no token itself)
         if getMethod() != "POST":
@@ -286,7 +300,13 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         var lc = newRq(coreRef.rqliteUrl)
         let now = getTime().toUnix()
-        let loginName = lj["user"].getStr
+        var loginName = lj["user"].getStr
+        # D-87: `organization` is the same as writing `@<organisation>` after the login (the login form of the UI has a list to choose it from)
+        if lj.hasKey("organization") and lj["organization"].kind == JString and lj["organization"].getStr.len > 0:
+          if '@' in loginName:
+            problem(Http400, "invalid_request", "write the login without @organisation when the organization is given")
+            return
+          loginName = loginName & "@" & lj["organization"].getStr
         # too many wrong passwords for this name, or for all names together, and nobody is let in for a while (the audit is what is counted)
         let wait = lc.loginRetryAfter(loginName, now)
         if wait.blocked:
@@ -295,6 +315,37 @@ proc onRequest() {.raises: [], gcsafe.} =
                               "detail": "too many wrong passwords; try again in " & $wait.seconds & " seconds"}),
                 ["Content-Type: application/problem+json", "Retry-After: " & $wait.seconds])
           return
+        # D-87: `<login>@<organisation>` is a person a directory of that organisation vouches for (a local user is never named with an @)
+        let atAt = loginName.rfind('@')
+        if atAt > 0:
+          let vk = vaultKek()
+          let ld = lc.ldapLogin(vk.kek, vk.ready, loginName[atAt + 1 .. ^1].toLowerAscii, loginName[0 ..< atAt], lj["password"].getStr, now)
+          case ld.outcome
+          of loNoDirectory: discard                                    # the organisation has no directory: the name is tried among the local users, which it will not be
+          of loOk:
+            let ses = lc.sessionFor(ld.user, now)
+            if ses.ok:
+              lc.record(now, "user:" & ld.user, "login", ld.user, "ok", "directory " & ld.detail)
+              jsonOk(Http200, %*{"token": ses.token, "user": ld.user, "roles": ses.roles, "expires_at": ses.expiresAt, "password_change_required": false})
+            else:
+              unauthorized("bad_credentials")
+            return
+          of loNoRole:
+            lc.record(now, "user:" & ld.user, "login", ld.user, "no_role", ld.detail)
+            problem(Http403, "no_role", "the directory knows you, but no group of yours gives a role in the organisation " & loginName[atAt + 1 .. ^1])
+            return
+          of loUnavailable:
+            lc.record(now, "login", "login", loginName, "directory_unavailable", ld.detail)
+            problem(Http503, "directory_unavailable", "no directory of the organisation could be asked")
+            return
+          of loNoAccount:
+            lc.record(now, "user:" & ld.user, "login", ld.user, "no_account", ld.detail)
+            problem(Http403, "no_account", "the directory knows you, but the organisation " & loginName[atAt + 1 .. ^1] & " has no account for you: ask its administrator to make one")
+            return
+          of loBadCredentials, loNameTaken:
+            lc.record(now, "login", "login", loginName, "failed", ld.detail)
+            unauthorized("bad_credentials")
+            return
         let li = lc.login(loginName, lj["password"].getStr, now)
         if not li.ok:
           lc.record(now, "login", "login", loginName, "failed")
@@ -394,6 +445,9 @@ proc onRequest() {.raises: [], gcsafe.} =
           # a user changes their own password (the gate lets a user of any role in for exactly this), an administrator anyone's. A user changing their own
           # also proves the current one, so that a stolen token does not take the account over.
           let name = userOfPasswordPath(path)
+          if uc.userSourceOf(name).len > 0:
+            problem(Http409, "directory_user", "this account has no password of its own: its directory knows it")
+            return
           let pj = try: parseJson(getBody()) except JsonParsingError: nil
           if not pj.isString("password"):
             problem(Http400, "invalid_request", "{\"password\": \"...\"} is required" & (if who.user == name: ", with \"current_password\"" else: ""))
@@ -845,6 +899,114 @@ proc onRequest() {.raises: [], gcsafe.} =
         for h in hq.listScopeHolds(orgHq.id): scopes.add h.view
         jsonOk(Http200, %*{"organization": slugH, "holds": items, "scopes": scopes})
         return
+      if path.startsWith("/api/v1/organizations/") and "/ldap" in path:
+        # D-87: the directories of an organisation and the map of their groups to roles. The gate has checked the permission for this organisation (ldap.read; ldap.map for the map and for a
+        # sync; ldap.write, the shard's, for adding, changing, checking and removing a directory: the core connects to the address that is given).
+        #   GET /organizations/{slug}/ldap
+        #   PUT|DELETE /organizations/{slug}/ldap/servers/{name}     POST .../servers/{name}:check {"user": "ann"} (nothing is changed)     POST .../servers/{name}:sync
+        #   POST /organizations/{slug}/ldap/mappings {"group_dn", "role", "directory"?}     DELETE /organizations/{slug}/ldap/mappings/{id}
+        let afterOrgL = path["/api/v1/organizations/".len .. ^1]
+        let partsL = afterOrgL.split('/')
+        if partsL.len < 2 or partsL[1] != "ldap":
+          problem(Http404, "not_found", "no such route")
+          return
+        let slugL = partsL[0]
+        var lc = newRq(coreRef.rqliteUrl)
+        let orgL = lc.organizationRow(slugL)
+        if orgL.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugL)
+          return
+        let lmeth = getMethod()
+        let vkL = vaultKek()
+        let nowL = getTime().toUnix()
+        if partsL.len == 2:
+          if lmeth != "GET":
+            problem(Http405, "method_not_allowed", "GET")
+            return
+          var ds = newJArray()
+          for s in lc.serversOf(orgL.id): ds.add s.view
+          jsonOk(Http200, %*{"organization": slugL, "directories": ds, "mappings": lc.mappings(orgL.id), "accounts": lc.accounts(orgL.id)})
+        elif partsL.len == 4 and partsL[2] == "servers":
+          let rawName = partsL[3]
+          let colonL = rawName.find(':')
+          let nameL = if colonL >= 0: rawName[0 ..< colonL] else: rawName
+          let actionL = if colonL >= 0: rawName[colonL + 1 .. ^1] else: ""
+          if actionL == "" and lmeth == "PUT":
+            let sj = try: parseJson(getBody()) except JsonParsingError: nil
+            let done = lc.putServer(vkL.kek, vkL.ready, orgL.id, nameL, sj, nowL)
+            if done.error.len > 0:
+              problem(HttpCode(done.status), "invalid_directory", done.error)
+              return
+            lc.record(nowL, actorOf(who), "ldap.put", slugL & "/" & nameL, "ok", (if sj != nil and sj.kind == JObject: sj{"url"}.getStr else: "") & (if lc.serverNamed(orgL.id, nameL).server.warningsOf.len > 0: " (with a warning: " & lc.serverNamed(orgL.id, nameL).server.warningsOf.join(" ") & ")" else: ""))
+            jsonOk(if done.created: Http201 else: Http200, lc.serverNamed(orgL.id, nameL).server.view)
+          elif actionL == "" and lmeth == "DELETE":
+            if not lc.deleteServer(orgL.id, nameL):
+              problem(Http404, "not_found", "no such directory")
+              return
+            lc.record(nowL, actorOf(who), "ldap.delete", slugL & "/" & nameL, "ok")
+            jsonOk(Http200, %*{"organization": slugL, "directory": nameL, "deleted": true})
+          elif actionL in ["check", "sync"] and lmeth == "POST":
+            let found = lc.serverNamed(orgL.id, nameL)
+            if not found.found:
+              problem(Http404, "not_found", "no such directory")
+              return
+            if actionL == "check":
+              let cj = try: (if getBody().strip.len == 0: newJObject() else: parseJson(getBody())) except JsonParsingError: nil
+              if cj == nil or cj.kind != JObject:
+                problem(Http400, "invalid_request", "the body is empty or {\"user\": \"ann\"}")
+                return
+              jsonOk(Http200, lc.checkServer(vkL.kek, vkL.ready, found.server, cj{"user"}.getStr))
+            else:
+              let rep = lc.syncServer(vkL.kek, vkL.ready, found.server, nowL)
+              lc.record(nowL, actorOf(who), "ldap.sync_now", slugL & "/" & nameL, (if rep.error.len == 0: "ok" else: "failed"), rep.error)
+              jsonOk(Http200, %*{"directory": nameL, "checked": rep.checked, "switched_off": rep.switchedOff, "switched_on": rep.switchedOn, "roles_changed": rep.changed, "error": rep.error})
+          else:
+            problem(Http405, "method_not_allowed", "PUT, DELETE, POST :check, POST :sync")
+        elif partsL.len == 4 and partsL[2] == "accounts" and lmeth in ["PUT", "DELETE"]:
+          if lmeth == "DELETE":
+            if not lc.removeAccount(orgL.id, slugL, partsL[3]):
+              problem(Http404, "not_found", "no such account of a directory of this organisation")
+              return
+            lc.record(nowL, actorOf(who), "ldap.account_remove", slugL & ": " & partsL[3], "ok")
+            jsonOk(Http200, %*{"account": accountName(partsL[3].toLowerAscii, slugL), "deleted": true})
+          else:
+            let aj = try: (if getBody().strip.len == 0: newJObject() else: parseJson(getBody())) except JsonParsingError: nil
+            if aj == nil or aj.kind != JObject:
+              problem(Http400, "invalid_request", "the body is empty or {\"directory\": \"corp\"}")
+              return
+            let made = lc.makeAccount(vkL.kek, vkL.ready, orgL.id, slugL, partsL[3], aj{"directory"}.getStr, nowL)
+            case made.outcome
+            of aoMade, aoExists:
+              lc.record(nowL, actorOf(who), "ldap.account", made.user, "ok", made.roles.join(","))
+              var rs = newJArray()
+              for r in made.roles: rs.add %r
+              jsonOk(if made.outcome == aoMade: Http201 else: Http200, %*{"account": made.user, "directory": made.detail, "roles_from_directory": rs})
+            of aoBadLogin: problem(Http400, "invalid_login", made.detail)
+            of aoNoDirectory: problem(Http404, "no_directory", made.detail)
+            of aoNotFound: problem(Http404, "person_not_found", made.detail)
+            of aoAmbiguous: problem(Http409, "ambiguous_login", made.detail)
+            of aoTaken: problem(Http409, "account_taken", made.detail)
+            of aoUnavailable: problem(Http503, "directory_unavailable", made.detail)
+        elif partsL.len == 3 and partsL[2] == "mappings" and lmeth == "POST":
+          let mj = try: parseJson(getBody()) except JsonParsingError: nil
+          if mj == nil or mj.kind != JObject or not mj.isString("group_dn") or not mj.isString("role"):
+            problem(Http400, "invalid_request", "{\"group_dn\": \"cn=ci-admins,ou=groups,dc=example,dc=org\", \"role\": \"dev\", \"directory\": \"corp\" (optional)} is required")
+            return
+          let made = lc.addMapping(orgL.id, mj{"directory"}.getStr, mj["group_dn"].getStr, mj["role"].getStr, nowL)
+          if made.error.len > 0:
+            problem(HttpCode(made.status), "invalid_mapping", made.error)
+            return
+          lc.record(nowL, actorOf(who), "ldap.map", slugL & ": " & mj["group_dn"].getStr, "ok", "role " & mj["role"].getStr)
+          jsonOk(Http201, %*{"id": made.id, "group_dn": normDn(mj["group_dn"].getStr), "role": mj["role"].getStr, "directory": mj{"directory"}.getStr})
+        elif partsL.len == 4 and partsL[2] == "mappings" and lmeth == "DELETE":
+          if not lc.deleteMapping(orgL.id, partsL[3]):
+            problem(Http404, "not_found", "no such mapping")
+            return
+          lc.record(nowL, actorOf(who), "ldap.unmap", slugL & ": " & partsL[3], "ok")
+          jsonOk(Http200, %*{"id": partsL[3], "deleted": true})
+        else:
+          problem(Http404, "not_found", "no such route")
+        return
       if path.startsWith("/api/v1/organizations/") and "/members" in path:
         # D-84: who has which role in an organisation, or on a group or project of it. Read with `access.read`, changed with `access.write` (the gate has checked it for this organisation
         # and group): the roles of an existing user there are replaced, or taken away. Users are made by an administrator of the shard (POST /api/v1/users).
@@ -854,7 +1016,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         let parts = afterOrg.split('/')
         let memberAt = parts.find("members")
         var memberOrg, memberGroup, memberUser = ""
-        var shapeOk = parts.len >= 2 and memberAt >= 1 and memberAt >= parts.len - 2 and (memberAt == parts.len - 1 or validUserName(parts[memberAt + 1]))
+        var shapeOk = parts.len >= 2 and memberAt >= 1 and memberAt >= parts.len - 2 and (memberAt == parts.len - 1 or validAccountName(parts[memberAt + 1]))
         if shapeOk:
           memberOrg = parts[0]
           if memberAt > 1:

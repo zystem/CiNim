@@ -6,7 +6,7 @@
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
 import health
-import apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub, vaultsetup, secretvault, kekprovider
+import ldapauth, apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub, vaultsetup, secretvault, kekprovider
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -175,6 +175,7 @@ proc main() =
   if not launchGateOff:
     createThread(gateThread, runLogGate, (watch, addr stopServers))
   startReconciler(co)      # SHD-008: the organisations against their objects, and the retention of a switched-off one
+  startLdapSync(rqliteUrl, (try: parseInt(getEnv("CINIM_LDAP_SYNC_SECONDS", "900")) except ValueError: 900), addr stopServers)      # D-87: the accounts of the directories against the directories
   var stepReportThread: Thread[StepReportArgs]
   var logIngestThread: Thread[tuple[co: Collector, certs: string, port: int]]
   var streamThread: Thread[Args]
@@ -214,5 +215,6 @@ proc main() =
   if not launchGateOff: joinThread(gateThread)
   if routerUrl.len > 0: joinThread(routerThread)
   joinReconciler()
+  joinLdapSync()
 
 main()

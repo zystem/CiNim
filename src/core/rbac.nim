@@ -44,13 +44,32 @@ func validUserName*(name: string): bool =
     if ch notin {'a' .. 'z', '0' .. '9', '-', '_'}: return false
   true
 
+func validDirectoryId*(uid: string): bool =
+  ## what a directory's login name may be here: lowercase letters, digits, `.`, `_`, `-`, at most 64 (a name with other characters is refused rather than changed: two people must not become one)
+  if uid.len < 1 or uid.len > 64: return false
+  for ch in uid:
+    if ch notin {'a' .. 'z', '0' .. '9', '.', '_', '-'}: return false
+  true
+
+func validAccountName*(name: string): bool =
+  ## the name of an account that exists: a local user (`validUserName`) or a person a directory vouches for, `<login>@<organisation slug>` (D-87). A local user is never made with an `@`,
+  ## so the two cannot meet.
+  if validUserName(name): return true
+  let at = name.find('@')
+  if at < 1 or at == name.high: return false
+  let slug = name[at + 1 .. ^1]
+  if not validDirectoryId(name[0 ..< at]) or slug.len > 40 or slug[0] notin {'a' .. 'z'}: return false
+  for ch in slug:
+    if ch notin {'a' .. 'z', '0' .. '9', '-'}: return false
+  true
+
 func userOfPasswordPath*(path: string): string =
   ## the user named in `/api/v1/users/<name>/password`, "" for any other path
   const head = "/api/v1/users/"
   const tail = "/password"
   if path.startsWith(head) and path.endsWith(tail) and path.len > head.len + tail.len:
     let name = path[head.len ..< path.len - tail.len]
-    if validUserName(name): return name
+    if validAccountName(name): return name
 
 func roleMay*(role, meth, path: string): bool =
   ## whether a built-in role, given at the shard, allows this call: the permission the route needs (permissions.nim) is one the role has. An administrator may call anything,
@@ -78,7 +97,7 @@ func userScope*(name: string): string = userScopePrefix & name
 
 func userOfScope*(scope: string): string =
   ## the user of a `user:<name>` scope; "" for any other
-  if scope.startsWith(userScopePrefix) and validUserName(scope[userScopePrefix.len .. ^1]): scope[userScopePrefix.len .. ^1] else: ""
+  if scope.startsWith(userScopePrefix) and validAccountName(scope[userScopePrefix.len .. ^1]): scope[userScopePrefix.len .. ^1] else: ""
 
 func credentialLine*(c: UserCredential): string =
   ## the line the core writes to its log, made to be parsed: it starts with the fixed word `cinim-credentials` at the beginning of the line, then `key=value`

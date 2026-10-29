@@ -151,6 +151,9 @@ auth:
   # route out); `pwnedUrl` points to a mirror of the range API (ending with a slash).
   pwnedCheck: "on"
   pwnedUrl: ""
+  # D-87: the people the directories (LDAP) of the organisations vouch for are looked at again every `ldapSyncSeconds`: one that is gone from its directory is switched off, the roles from its groups are made
+  # what the groups give now. 0 does not sync by the clock (a login still brings the roles up to date). The directories are set per organisation through the API, not here.
+  ldapSyncSeconds: 900
 
 # The step secrets (6.7): sealed in the database with XChaCha20-Poly1305, a data key per organisation, wrapped by a master key that is NOT in the database.
 # `keySecret` names a Secret whose key `key` holds 64 hexadecimal digits (32 bytes; `openssl rand -hex 32`): keep it apart from the database backup. A database

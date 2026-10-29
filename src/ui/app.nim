@@ -4,7 +4,7 @@
 ##   /login, /logout, /orgs, /orgs/<slug>/runs, /runs, /runs/<id>, /runs/<id>/steps/<n>/log, /status, /static/ui.css  (all under the prefix `base`), and /healthz outside it.
 ## A page that needs a session sends a visitor without one to the login and brings them back; a token that the core refuses ends the session; what a page puts in a link to the core is checked
 ## first (a slug, an id, a number), so that an address cannot reach further than the page it names.
-import std/[json, strutils, tables, times, uri, os, hashes, algorithm]
+import std/[json, strutils, tables, times, uri, os, hashes, algorithm, sequtils]
 import nimja
 import render, coreapi
 
@@ -50,6 +50,7 @@ type
 
 const
   cookieName = "cinim_ui"
+  orgCookieName = "cinim_org"        # the organisation chosen at the last login, so that the list shows it again (not a secret; it is only a default)
   logWindow = 200
   runLogWindow = 200         ## the log of a run: this many lines to a window (DAT-007)
   runsPerPage = 50
@@ -175,6 +176,13 @@ func sessionCookie(cfg: UiConfig; token: string; maxAge: int): string =
 func clearCookie(cfg: UiConfig): string =
   sessionCookie(cfg, "", 0)
 
+func orgOfCookie(cookie: string): string =
+  for part in cookie.split(';'):
+    let p = part.strip
+    if p.startsWith(orgCookieName & "="):
+      let v = p[orgCookieName.len + 1 .. ^1]
+      if v == "local" or isSlug(v): return v
+
 func tokenOf(cookie: string): string =
   for part in cookie.split(';'):
     let p = part.strip
@@ -187,7 +195,7 @@ func tokenOf(cookie: string): string =
 
 # ------------------------------------------------------------------ the pages (templates/*.nimja: every expression through h() or raw(), tests/unit/ttemplates.nim)
 
-proc renderLogin(base, message, user, next: string): string =
+proc renderLogin(base, message, user, next, chosen: string; orgs: seq[OrgRow]): string =
   let loggedIn = false
   compileTemplateFile("login.nimja", templateDir)
 
@@ -220,8 +228,17 @@ proc renderStatus(base: string; components: seq[ComponentRow]): string =
 
 # ------------------------------------------------------------------ the handlers
 
-proc loginPage(cfg: UiConfig; status: int; message, user, next: string): UiResponse =
-  page(status, renderLogin(cfg.base, message, user, next))
+proc loginOrgs(api: CoreApi): seq[OrgRow] =
+  ## the organisations that have a directory, for the list of the login form (D-87); none when the core does not say, and then the form is the plain one
+  if api.loginOptions == nil: return
+  let r = api.loginOptions()
+  if r.status != asOk: return
+  for o in r.body{"organizations"}.getElems:
+    let slug = o{"slug"}.getStr
+    if isSlug(slug): result.add OrgRow(slug: slug, name: o{"name"}.getStr)
+
+proc loginPage(cfg: UiConfig; api: CoreApi; status: int; message, user, next: string; chosen = ""): UiResponse =
+  page(status, renderLogin(cfg.base, message, user, next, chosen, api.loginOrgs))
 
 proc messagePage(cfg: UiConfig; status: int; loggedIn: bool; title, text: string; detail = ""; back = ""; backText = ""): UiResponse =
   page(status, renderMessage(cfg.base, loggedIn, title, text, detail, back, backText))
@@ -257,10 +274,22 @@ proc failed(cfg: UiConfig; r: ApiResult; what: string): UiResponse =
   else:
     messagePage(cfg, 502, true, "The core refused", "The core did not do what the page asked.", r.message)
 
+const localAccount = "local"          ## the value of the list for a user of the shard itself (no organisation)
+
 proc doLogin(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
   let user = req.form.getOrDefault("user")
   let next = req.form.getOrDefault("next")
-  let r = api.login(user, req.form.getOrDefault("password"))
+  # D-87: when some organisation has a directory the form has a list to choose the organisation from, and a choice is required (`local`: a user of the shard); the core is given `login@organisation`
+  let orgs = api.loginOrgs
+  let chosen = req.form.getOrDefault("organization")
+  var name = user
+  if orgs.len > 0:
+    if chosen.len == 0 or (chosen != localAccount and not orgs.anyIt(it.slug == chosen)):
+      return loginPage(cfg, api, 400, "Choose the organisation you log in to (or Local account).", user, next)
+    if chosen != localAccount:
+      if '@' in user: return loginPage(cfg, api, 400, "Write the login without @organisation: the organisation is chosen in the list.", user, next, chosen)
+      name = user & "@" & chosen
+  let r = api.login(name, req.form.getOrDefault("password"))
   case r.status
   of asOk:
     if r.body{"password_change_required"}.getBool:
@@ -270,13 +299,15 @@ proc doLogin(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
     let token = r.body{"token"}.getStr
     let left = r.body{"expires_at"}.getBiggestInt(0) - getTime().toUnix()
     let maxAge = int(min(max(left, 60), sessionMax))
-    redirect(safeNext(cfg, next), sessionCookie(cfg, token, maxAge))
+    result = redirect(safeNext(cfg, next), sessionCookie(cfg, token, maxAge))
+    if orgs.len > 0:
+      result.headers.add ("Set-Cookie", orgCookieName & "=" & chosen & "; Path=" & cookiePath(cfg) & "; SameSite=Strict; Max-Age=31536000" & (if cfg.secureCookie: "; Secure" else: ""))
   of asUnauthorized:
-    loginPage(cfg, 401, "Wrong user name or password.", user, next)
+    result = loginPage(cfg, api, 401, "Wrong user name or password.", user, next, chosen)
   of asRefused:
-    loginPage(cfg, (if r.code == 429: 429 else: 502), "The login was refused: " & r.message & ".", user, next)
+    result = loginPage(cfg, api, (if r.code == 429: 429 else: 502), "The login was refused: " & r.message & ".", user, next, chosen)
   else:
-    messagePage(cfg, 503, false, "The core does not answer", "Try again in a moment.", r.message, cfg.base & "/login", "Back to the login")
+    result = messagePage(cfg, 503, false, "The core does not answer", "Try again in a moment.", r.message, cfg.base & "/login", "Back to the login")
 
 proc orgsPage(cfg: UiConfig; api: CoreApi; token: string): UiResponse =
   let r = api.get(token, "/api/v1/organizations")
@@ -461,7 +492,7 @@ proc handle*(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
       result = messagePage(cfg, 405, false, "Method not allowed", "GET or POST.")
       result.headers.add ("Allow", "GET, POST")
       return
-    return loginPage(cfg, 200, "", "", query.getOrDefault("next"))
+    return loginPage(cfg, api, 200, "", "", query.getOrDefault("next"), orgOfCookie(req.cookie))
   if path == "/logout":
     if not isPost:
       result = messagePage(cfg, 405, false, "Method not allowed", "POST.")

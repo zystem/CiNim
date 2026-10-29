@@ -104,6 +104,7 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_ORG_PURGE_GRACE` | 86400 | seconds the core must have been up before it deletes a switched-off organisation for good at the end of its retention (the retention may have run out while the core was stopped; Helm `organizations.purgeGrace`) |
 | `CINIM_ORG_RECONCILE_INTERVAL` | 300 | seconds between two passes of the reconciliation (SHD-008; the Helm value `organizations.reconcileInterval`, at least 10); a pass also runs at start |
 | `CINIM_ORG_RETENTION` | 1209600 (14 days) | seconds a switched-off organisation is kept before it is deleted for good with its namespace (the Helm value `organizations.retention`); `0` deletes it at once, a negative value never |
+| `CINIM_LDAP_SYNC_SECONDS` | 900 | seconds between two looks at the accounts that the directories (LDAP) of the organisations vouch for: one gone from its directory is switched off, the roles from its groups are made what the groups give (D-87; the Helm value `auth.ldapSyncSeconds`); `0` does not sync by the clock |
 | `CINIM_CONTROLLER_BOOTSTRAP_TTL` | 86400 | seconds that the bootstrap token of an organisation's controller stays good (IAM-003) |
 | `CINIM_INGRESS_CLASS`, `CINIM_INGRESS_TLS_SECRET`, `CINIM_INGRESS_ANNOTATIONS` | empty | the Ingress of an organisation in the `multi` mode: the class, the TLS Secret (for the host of `CINIM_PUBLIC_URL`) and the annotations as a JSON object |
 

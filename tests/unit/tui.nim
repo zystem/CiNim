@@ -12,17 +12,24 @@ var
   routes: Table[string, JsonNode]          # the path with the query -> the body
   down: bool
   posted: seq[string]                      # "token path body" of every POST that reached the stand-in core
+  loginCalls: seq[string]                  # the user names the stand-in core was asked to log in
+  directoryOrgs: JsonNode                  # what GET /api/v1/login/options says
   postAnswer: ApiResult                    # what the stand-in core answers to a POST
 
 proc ok(body: JsonNode): ApiResult = ApiResult(status: asOk, code: 200, body: body)
 
 proc fakeCore(): CoreApi =
+  result.loginOptions = proc (): ApiResult {.gcsafe.} =
+    {.cast(gcsafe).}:
+      if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
+      ok(%*{"organizations": directoryOrgs})
   result.login = proc (user, password: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
+      loginCalls.add user
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if password == "throttled": return ApiResult(status: asRefused, code: 429, message: "retry after 30 s")
       if user == "new" and password == "right-password-1234": return ok(%*{"token": "tok-new", "user": "new", "roles": ["admin"], "expires_at": 1800000000, "password_change_required": true})
-      if user == "ann" and password == "right-password-1234": return ok(%*{"token": "tok-ann", "user": "ann", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
+      if (user == "ann" or user == "ann@acme") and password == "right-password-1234": return ok(%*{"token": "tok-ann", "user": "ann", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
       ApiResult(status: asUnauthorized, code: 401, message: "bad_credentials")
   result.get = proc (token, path: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
@@ -52,6 +59,8 @@ let session = "cinim_ui=tok-ann"
 proc reset() =
   calls = @[]
   posted = @[]
+  loginCalls = @[]
+  directoryOrgs = newJArray()
   postAnswer = ok(%*{"id": "s1_b", "state": "ABORTED"})
   routes = initTable[string, JsonNode]()
   down = false
@@ -283,6 +292,60 @@ suite "the pages":
     routes["/api/v1/components"] = nil
     down = true
     check handle(cfg, fakeCore(), req("GET", "/ui/status", cookie = session)).status == 503
+
+suite "D-87 the organisation in the login form":
+  setup: reset()
+  proc withDirectories() =
+    directoryOrgs = %*[{"slug": "acme", "name": "Acme <Corp>"}, {"slug": "beta", "name": "Beta"}]
+  test "an organisation with a directory is in a list that the form requires; the list has the name and the slug, a first line that is not a choice, and the local accounts":
+    withDirectories()
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/login"))
+    check r.status == 200 and "<select name=\"organization\" required>" in r.body
+    check "<option value=\"\" selected disabled>Choose...</option>" in r.body
+    check "<option value=\"acme\">Acme &lt;Corp&gt; (acme)</option>" in r.body and "<option value=\"beta\">Beta (beta)</option>" in r.body and "<option value=\"local\">Local account</option>" in r.body
+    check "<Corp>" notin r.body
+  test "no organisation has a directory: the form is the plain one, and the login goes as typed":
+    let r = handle(cfg, fakeCore(), req("GET", "/ui/login"))
+    check "<select" notin r.body and "name=\"user\"" in r.body
+    var f = initTable[string, string]()
+    f["user"] = "ann"
+    f["password"] = "right-password-1234"
+    check handle(cfg, fakeCore(), req("POST", "/ui/login", form = f)).status == 303 and loginCalls == @["ann"]
+  test "the login is sent as login@organisation, and the person does not write the @":
+    withDirectories()
+    var f = {"user": "ann", "password": "right-password-1234", "organization": "acme"}.toTable
+    let r = handle(cfg, fakeCore(), req("POST", "/ui/login", form = f))
+    check r.status == 303 and loginCalls == @["ann@acme"] and r.header("Set-Cookie").startsWith("cinim_ui=tok-ann")
+    var cookies: seq[string]
+    for (k, v) in r.headers:
+      if k == "Set-Cookie": cookies.add v
+    check cookies.len == 2 and cookies[1].startsWith("cinim_org=acme; Path=/ui; SameSite=Strict")
+  test "a user of the shard picks Local account, and the login goes as typed":
+    withDirectories()
+    var f = {"user": "ann", "password": "right-password-1234", "organization": "local"}.toTable
+    check handle(cfg, fakeCore(), req("POST", "/ui/login", form = f)).status == 303 and loginCalls == @["ann"]
+  test "a choice is required: none, an organisation that is not in the list, and @ in the login with an organisation chosen are refused before the core is asked":
+    withDirectories()
+    for (org, user, word) in [("", "ann", "Choose the organisation"), ("nope", "ann", "Choose the organisation"), ("<script>", "ann", "Choose the organisation"), ("acme", "ann@acme", "without @organisation")]:
+      var f = {"user": user, "password": "right-password-1234", "organization": org}.toTable
+      let r = handle(cfg, fakeCore(), req("POST", "/ui/login", form = f))
+      check r.status == 400 and word in r.body and "set-cookie" notin r.body.toLowerAscii and r.header("Set-Cookie") == ""
+    check loginCalls.len == 0
+  test "after a wrong password the form keeps the organisation and the login":
+    withDirectories()
+    var f = {"user": "ann", "password": "wrong", "organization": "beta"}.toTable
+    let r = handle(cfg, fakeCore(), req("POST", "/ui/login", form = f))
+    check r.status == 401 and "<option value=\"beta\" selected>" in r.body and "value=\"ann\"" in r.body
+  test "the organisation of the last login is the default of the list; a cookie that is not a slug is ignored":
+    withDirectories()
+    check "<option value=\"beta\" selected>" in handle(cfg, fakeCore(), req("GET", "/ui/login", cookie = "cinim_org=beta")).body
+    check "<option value=\"local\" selected>" in handle(cfg, fakeCore(), req("GET", "/ui/login", cookie = "cinim_org=local")).body
+    let hostile = handle(cfg, fakeCore(), req("GET", "/ui/login", cookie = "cinim_org=\"><script>"))
+    check " selected>" notin hostile.body.replace("selected disabled", "") and "<script>" notin hostile.body
+  test "a core that does not give the list (or is down) leaves the plain form":
+    directoryOrgs = %*[{"slug": "acme", "name": "A"}]
+    down = true
+    check "<select" notin handle(cfg, fakeCore(), req("GET", "/ui/login")).body
 
 suite "the actions of a run":
   setup: reset()

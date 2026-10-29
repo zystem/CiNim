@@ -48,6 +48,9 @@ const
     ("profile.grant", lvGroup, "choose which privileged profiles (build, deploy) the pipelines of a project may use"),
     ("access.read", lvGroup, "see who has which role in an organisation, and the roles and permissions"),
     ("access.write", lvGroup, "give and take away roles in an organisation"),
+    ("ldap.read", lvOrg, "see the directories of an organisation and which of their groups give which role"),
+    ("ldap.map", lvOrg, "choose which groups of a directory give which role in the organisation, and sync now"),
+    ("ldap.write", lvShard, "add, change, check and remove the directories of an organisation (the core connects to the address given)"),
     ("shard.read", lvShard, "see the components, the launch gate, the alerts, the router, the profile and the checks of the shard"),
     ("shard.write", lvShard, "change the profile, the launch gate and the reconciliation of the shard"),
     ("shard.variable.write", lvShard, "write the variables of the shard"),
@@ -62,7 +65,7 @@ const
 
   roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read", "shard.read"]
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
-  rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write"]
+  rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
   checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
 
@@ -155,6 +158,14 @@ func orgNeed(meth, org, rest: string): Need =
   if has("/caches"): return need(if write: "cache.delete" else: "cache.read", nsOrg, org)
   if has("/secrets"): return need(if write: "secret.write" else: "secret.read", nsOrg, org)
   if has("/members"): return need(if write: "access.write" else: "access.read", nsOrg, org)
+  if has("/ldap"):
+    # D-87: the directories of an organisation. Adding one makes the core connect to an address someone typed, so it is the shard's; the map of groups to roles is the organisation's
+    if rest == "/ldap" or rest == "/ldap/": return (if write: Need() else: need("ldap.read", nsOrg, org))
+    if rest.startsWith("/ldap/servers/"):
+      if rest.endsWith(":sync"): return (if meth == "POST": need("ldap.map", nsOrg, org) else: Need())
+      return need("ldap.write", nsShard, org)
+    if rest == "/ldap/mappings" or rest.startsWith("/ldap/mappings/") or rest.startsWith("/ldap/accounts/"): return need("ldap.map", nsOrg, org)
+    return Need()
 
   Need()
 

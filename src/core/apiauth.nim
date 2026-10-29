@@ -303,7 +303,7 @@ proc setMember*(c: var RqClient; scope, user: string; roles: seq[string]): strin
   for r in roles:
     if not c.roleExists(r): return "no such role: " & r
   var stmts = newJArray()
-  stmts.add %*["DELETE FROM role_bindings WHERE user_name = ? AND scope = ?", user, scope]
+  stmts.add %*["DELETE FROM role_bindings WHERE user_name = ? AND scope = ? AND source = ''", user, scope]          # the roles that come from a directory are the directory's to give and take away (D-87)
   for r in roles: stmts.add %*["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", user, r, scope]
   discard c.execute(stmts, transaction = true)
 
@@ -321,7 +321,7 @@ proc resetUserCredentials*(c: var RqClient; user: string; now: int64): tuple[ok:
 proc listUsers*(c: var RqClient): JsonNode =
   ## the users with their roles; never a password or a hash
   result = newJArray()
-  let r = c.query(%*[["SELECT name, created_at, disabled, must_change FROM users ORDER BY name"]])
+  let r = c.query(%*[["SELECT name, created_at, disabled, must_change, source FROM users ORDER BY name"]])
   let vals = r["results"][0]{"values"}
   if vals != nil:
     for v in vals:
@@ -331,7 +331,7 @@ proc listUsers*(c: var RqClient): JsonNode =
         if isOrgScope(b.scope):
           if not inOrgs.hasKey(b.scope[4 .. ^1]): inOrgs[b.scope[4 .. ^1]] = newJArray()
           inOrgs[b.scope[4 .. ^1]].add %b.role
-      result.add %*{"name": v[0].getStr, "roles": u.roles, "organizations": inOrgs, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
+      result.add %*{"name": v[0].getStr, "roles": u.roles, "organizations": inOrgs, "source": v[4].getStr, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
 
 proc passwordIs*(c: var RqClient; user, password: string): bool =
   ## whether this is the user's password. For a user who does not exist the same work is done (a hash is made), so that the time does not tell.
@@ -352,14 +352,24 @@ proc changePassword*(c: var RqClient; user, password: string; now: int64; keepTo
     transaction = true)
   (true, r["results"][1]{"rows_affected"}.getInt)
 
+proc sessionFor*(c: var RqClient; user: string; now: int64): tuple[ok: bool, token: string, expiresAt: int64, roles: seq[string], mustChange: bool] =
+  ## a token for a user whose identity has been proved (by a password, or by a directory): good for `sessionSeconds`, with the rights of the user's roles
+  let u = c.userRoles(user)
+  if not (u.found and not u.disabled and u.bindings.len > 0): return
+  let t = c.createApiToken("login " & user, userScope(user), now + sessionSeconds, now)
+  (true, t.token, now + sessionSeconds, u.roles, u.mustChange)
+
 proc login*(c: var RqClient; user, password: string; now: int64): tuple[ok: bool, token: string, expiresAt: int64, roles: seq[string], mustChange: bool] =
   ## A token for a user who proves the password: good for `sessionSeconds`, with the rights of the user's roles. An unknown user, a wrong password and a
   ## switched-off user are the same answer, and the same work is done for each.
   let same = c.passwordIs(user, password)
-  let u = c.userRoles(user)
-  if not (same and u.found and not u.disabled and u.bindings.len > 0): return
-  let t = c.createApiToken("login " & user, userScope(user), now + sessionSeconds, now)
-  (true, t.token, now + sessionSeconds, u.roles, u.mustChange)
+  if not same: return
+  c.sessionFor(user, now)
+
+proc userSourceOf*(c: var RqClient; name: string): string =
+  ## "" for a local user (and for one that does not exist); `ldap:<server id>` for a person a directory vouches for
+  let v = c.query(%*[["SELECT source FROM users WHERE name = ?", name]])["results"][0]{"values"}
+  if v != nil and v.len > 0: v[0][0].getStr else: ""
 
 proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Principal =
   ## the principal of a request. The administrator token of the chart is compared in constant time on its hash; every other token is looked up

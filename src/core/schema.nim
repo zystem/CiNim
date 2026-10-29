@@ -59,14 +59,27 @@ const ddl = [
        id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL UNIQUE, profile_id TEXT NOT NULL, name TEXT NOT NULL, call_key TEXT NOT NULL,
        payload TEXT NOT NULL, since INTEGER NOT NULL, job_key TEXT NOT NULL DEFAULT '')""",
   # IAM-001 (D-50): the users of the shard, the roles, and which user has which role at which level (`shard`: every organisation inherits it)
+  # `source` (D-87): '' for a local user, 'ldap:<server id>' for one that a directory vouches for (no password of its own; `disabled` is 2 when the directory lost them)
   """CREATE TABLE IF NOT EXISTS users (
        name TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL, disabled INTEGER NOT NULL DEFAULT 0,
-       must_change INTEGER NOT NULL DEFAULT 0)""",
+       must_change INTEGER NOT NULL DEFAULT 0,
+       source TEXT NOT NULL DEFAULT '', dn TEXT NOT NULL DEFAULT '')""",
   """CREATE TABLE IF NOT EXISTS roles (name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '')""",
   # the permissions of a role an administrator made (D-84); the four built-in roles are made in code (core/permissions.nim)
   """CREATE TABLE IF NOT EXISTS role_permissions (role TEXT NOT NULL, permission TEXT NOT NULL, PRIMARY KEY (role, permission))""",
   """CREATE TABLE IF NOT EXISTS role_bindings (
-       user_name TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'shard', PRIMARY KEY (user_name, role, scope))""",
+       user_name TEXT NOT NULL, role TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'shard', source TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_name, role, scope))""",
+  # D-87: the directories of an organisation (an organisation may have several, tried in the order of `priority`) and which of their groups give which role in it
+  """CREATE TABLE IF NOT EXISTS ldap_servers (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0, url TEXT NOT NULL, start_tls INTEGER NOT NULL DEFAULT 0,
+       ca_pem TEXT NOT NULL DEFAULT '', bind_dn TEXT NOT NULL DEFAULT '', bind_secret_enc TEXT NOT NULL DEFAULT '',
+       user_base TEXT NOT NULL, user_filter TEXT NOT NULL, uid_attr TEXT NOT NULL DEFAULT 'uid',
+       group_base TEXT NOT NULL DEFAULT '', group_filter TEXT NOT NULL DEFAULT '', group_attr TEXT NOT NULL DEFAULT '',
+       enabled INTEGER NOT NULL DEFAULT 1, auto_create INTEGER NOT NULL DEFAULT 0, tls_insecure INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_sync_at INTEGER NOT NULL DEFAULT 0, last_sync_result TEXT NOT NULL DEFAULT '')""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS ldap_servers_name ON ldap_servers (tenant_id, name)",
+  """CREATE TABLE IF NOT EXISTS ldap_group_map (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, server_id TEXT NOT NULL DEFAULT '', group_dn TEXT NOT NULL, role TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS ldap_group_map_key ON ldap_group_map (tenant_id, server_id, group_dn, role)",
   # the identity of the job controller of an organisation's namespace (IAM-003, common/ctrlauth.nim): a generation, no secrets
   """CREATE TABLE IF NOT EXISTS controller_credentials (
        namespace TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1, confirmed INTEGER NOT NULL DEFAULT 0,
@@ -229,6 +242,11 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("triggers", "seen_commit", "TEXT NOT NULL DEFAULT ''"),            # D-76: a poll trigger: the commit its ref was at when it last looked, and when it looked (2026-10-23)
   ("triggers", "last_checked_at", "INTEGER NOT NULL DEFAULT 0"),
   ("groups", "repository", "TEXT NOT NULL DEFAULT ''"),
+  ("ldap_servers", "tls_insecure", "INTEGER NOT NULL DEFAULT 0"),             # D-87: the certificate of the directory is not checked (2026-10-29)
+  ("ldap_servers", "auto_create", "INTEGER NOT NULL DEFAULT 0"),             # D-87: an account is made at the first login of a person the directory knows (off unless asked for)
+  ("users", "source", "TEXT NOT NULL DEFAULT ''"),                         # D-87: where a user comes from, and the DN the directory knows them by (2026-10-29)
+  ("users", "dn", "TEXT NOT NULL DEFAULT ''"),
+  ("role_bindings", "source", "TEXT NOT NULL DEFAULT ''"),
   ("groups", "protected_refs", "TEXT NOT NULL DEFAULT ''"),               # D-86: the refs of a project whose runs are trusted, and the privileged profiles its pipelines may use (2026-10-29)
   ("groups", "allowed_profiles", "TEXT NOT NULL DEFAULT ''"),
   ("runs", "source_ref", "TEXT NOT NULL DEFAULT ''"),                      # D-86: the name the commit was asked by (a branch or a tag; "" for a SHA), and whether it is a protected ref of the project
@@ -357,7 +375,7 @@ proc deleteOrganization*(c: var RqClient; slug: string) =
   let o = c.organizationRow(slug)
   if o.id.len > 0:
     discard c.execute(%*[["DELETE FROM execution_profiles WHERE tenant_id = ?", o.id]])
-    discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id]])
+    discard c.execute(%*[["DELETE FROM step_secrets WHERE tenant_id = ?", o.id], ["DELETE FROM ldap_servers WHERE tenant_id = ?", o.id], ["DELETE FROM ldap_group_map WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM org_storage WHERE tenant_id = ?", o.id]])
     discard c.execute(%*[["DELETE FROM artifacts WHERE tenant_id = ?", o.id]])      # the objects stay in the store until a sweeper removes them (not built)

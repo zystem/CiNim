@@ -23,7 +23,7 @@ extension points (UI-002), the start of a run, administration (secrets, triggers
 
 ## The login, the cookie, the rights
 
-- The form calls `POST /api/v1/login` of the core (so its throttle of a user's tries, its audit and the rule "change the password first" are the core's), and puts the token it gets (8 hours) in the cookie `cinim_ui`:
+- When some organisation has a directory (LDAP, D-87) the form has a list **Organisation** that must be chosen (the organisations with a directory, and `Local account` for the users of the shard, such as `admin`; the last choice is the default, kept in the cookie `cinim_org`); the person writes the login only, and the UI gives the core `login@organisation` (a login with an `@` is refused when an organisation is chosen). The list comes from `GET /api/v1/login/options`, which tells slugs and names of organisations that have a directory to anyone; with none, there is no list. The form calls `POST /api/v1/login` of the core (so its throttle of a user's tries, its audit and the rule "change the password first" are the core's), and puts the token it gets (8 hours) in the cookie `cinim_ui`:
   `HttpOnly` (a script cannot read it), `SameSite=Strict` (another site cannot send it), `Path=<ui.path>`, `Secure` when `ui.cookieSecure` says the Ingress has TLS. The token is the credential and the cookie is only where it lies: there is
   no session on the server to steal or to lose, and a token that the core revokes (a changed password, a rotated token) ends the session at the next page.
 - A user who has to change the password first gets no session (the UI does not change passwords): the page says which API call does.

@@ -75,9 +75,32 @@ suite "D-84 what a request needs":
                    ("GET", "/api/v1/organizations/o/caches"), ("DELETE", "/api/v1/organizations/o/caches"), ("GET", "/api/v1/organizations/o/locks"), ("PUT", "/api/v1/organizations/o/locks/l"),
                    ("GET", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/organizations"), ("GET", "/api/v1/roles"), ("PUT", "/api/v1/organizations/o/members/u"),
                    ("GET", "/api/v1/components"), ("PUT", "/api/v1/profile"), ("PUT", "/api/v1/variables/V"), ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/o"),
-                   ("PUT", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/stores"), ("GET", "/api/v1/users"), ("PUT", "/api/v1/roles/r"), ("GET", "/api/v1/tokens"), ("GET", "/api/v1/audit")]:
+                   ("PUT", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/stores"), ("GET", "/api/v1/users"), ("PUT", "/api/v1/roles/r"), ("GET", "/api/v1/tokens"), ("GET", "/api/v1/audit"),
+                   ("GET", "/api/v1/organizations/o/ldap"), ("POST", "/api/v1/organizations/o/ldap/mappings"), ("PUT", "/api/v1/organizations/o/ldap/servers/s")]:
       used.incl needOf(m, p).permission
     for p in catalogue: check p.name in used or p.name in checkedByHandlers
+
+suite "D-87 the directories of an organisation":
+  test "reading is the organisation\'s, the map and the sync are the organisation\'s, adding and checking a directory is the shard\'s":
+    check needOf("GET", "/api/v1/organizations/acme/ldap") == Need(permission: "ldap.read", scope: nsOrg, org: "acme")
+    for (m, p, want, sc) in [("PUT", "/api/v1/organizations/acme/ldap/servers/corp", "ldap.write", nsShard), ("DELETE", "/api/v1/organizations/acme/ldap/servers/corp", "ldap.write", nsShard),
+                             ("POST", "/api/v1/organizations/acme/ldap/servers/corp:check", "ldap.write", nsShard), ("POST", "/api/v1/organizations/acme/ldap/servers/corp:sync", "ldap.map", nsOrg),
+                             ("POST", "/api/v1/organizations/acme/ldap/mappings", "ldap.map", nsOrg), ("DELETE", "/api/v1/organizations/acme/ldap/mappings/m1", "ldap.map", nsOrg),
+                             ("PUT", "/api/v1/organizations/acme/ldap/accounts/ann", "ldap.map", nsOrg), ("DELETE", "/api/v1/organizations/acme/ldap/accounts/ann", "ldap.map", nsOrg)]:
+      let n = needOf(m, p)
+      check n.permission == want and n.scope == sc and n.org == "acme"
+    for (m, p) in [("PUT", "/api/v1/organizations/acme/ldap"), ("GET", "/api/v1/organizations/acme/ldap/servers/corp:sync"), ("PUT", "/api/v1/organizations/acme/ldap/other")]:
+      check needOf(m, p).permission == ""
+  test "an administrator of an organisation maps groups and syncs but cannot add a directory; rw has none of it; admin of the shard has all":
+    var org: Grants
+    org.addRole("org:acme", builtinPermissions("admin"))
+    check org.allows(needOf("GET", "/api/v1/organizations/acme/ldap")) and org.allows(needOf("POST", "/api/v1/organizations/acme/ldap/mappings")) and org.allows(needOf("POST", "/api/v1/organizations/acme/ldap/servers/corp:sync"))
+    check not org.allows(needOf("PUT", "/api/v1/organizations/acme/ldap/servers/corp")) and not org.allows(needOf("POST", "/api/v1/organizations/acme/ldap/servers/corp:check"))
+    check not org.allows(needOf("GET", "/api/v1/organizations/beta/ldap"))
+    let rw = grantsOfRoles(["rw"])
+    for (m, p) in [("GET", "/api/v1/organizations/acme/ldap"), ("POST", "/api/v1/organizations/acme/ldap/mappings"), ("PUT", "/api/v1/organizations/acme/ldap/servers/corp")]:
+      check not rw.allows(needOf(m, p))
+    check grantsOfRoles(["admin"]).allows(needOf("PUT", "/api/v1/organizations/acme/ldap/servers/corp"))
 
 suite "D-84 groups and projects":
   test "the routes of a group name its path (variables, settings and hold are not part of it), the lists name only the organisation":
