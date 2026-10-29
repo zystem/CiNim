@@ -648,7 +648,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           var arr = newJArray()
           let visible = who.visibleOrgs("org.read")
           for o in c.listOrganizationRows():
-            if not visible.all and o.slug notin visible.slugs: continue
+            if not visible.all and o.slug notin visible.slugs and (who.user.len == 0 or o.slug notin who.grants.orgsTouched): continue
             arr.add %*{"id": o.id, "slug": o.slug, "name": o.name, "state": o.state, "url": orgUrl(cfg.publicBase, o.slug),
                        "namespace": namespaceName(orgPrefix, orgShard, o.slug)}
           jsonOk(Http200, %*{"organizations": arr})
@@ -845,6 +845,67 @@ proc onRequest() {.raises: [], gcsafe.} =
         for h in hq.listScopeHolds(orgHq.id): scopes.add h.view
         jsonOk(Http200, %*{"organization": slugH, "holds": items, "scopes": scopes})
         return
+      if path.startsWith("/api/v1/organizations/") and "/members" in path:
+        # D-84: who has which role in an organisation, or on a group or project of it. Read with `access.read`, changed with `access.write` (the gate has checked it for this organisation
+        # and group): the roles of an existing user there are replaced, or taken away. Users are made by an administrator of the shard (POST /api/v1/users).
+        #   /organizations/{slug}/members[/{user}]                       in the organisation
+        #   /organizations/{slug}/groups|projects/{path}/members[/{user}] on the group or project (and what is under it)
+        let afterOrg = path["/api/v1/organizations/".len .. ^1]
+        let parts = afterOrg.split('/')
+        let memberAt = parts.find("members")
+        var memberOrg, memberGroup, memberUser = ""
+        var shapeOk = parts.len >= 2 and memberAt >= 1 and memberAt >= parts.len - 2 and (memberAt == parts.len - 1 or validUserName(parts[memberAt + 1]))
+        if shapeOk:
+          memberOrg = parts[0]
+          if memberAt > 1:
+            shapeOk = parts[1] in ["groups", "projects"] and memberAt > 2
+            memberGroup = parts[2 ..< memberAt].join("/")
+          if memberAt < parts.len - 1: memberUser = parts[memberAt + 1]
+        if not shapeOk:
+          problem(Http404, "not_found", "no such route")
+          return
+        var mc = newRq(coreRef.rqliteUrl)
+        let memberOrgRow = mc.organizationRow(memberOrg)
+        if memberOrgRow.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & memberOrg)
+          return
+        if memberGroup.len > 0:
+          let hg = mc.groupIdOf(memberOrgRow.id, memberGroup)
+          if not hg.found or hg.id.len == 0:
+            problem(Http404, "group_not_found", "the organisation " & memberOrg & " has no group or project " & memberGroup)
+            return
+          memberGroup = normalPath(memberGroup)
+        let memberScope = "org:" & memberOrg & (if memberGroup.len > 0: "/" & memberGroup else: "")
+        let mmeth = getMethod()
+        if memberUser.len == 0 and mmeth == "GET":
+          jsonOk(Http200, %*{"organization": memberOrg, "group": memberGroup, "members": mc.listMembers(memberScope)})
+        elif memberUser.len > 0 and mmeth == "PUT":
+          let mj = try: parseJson(getBody()) except JsonParsingError: nil
+          if mj == nil or mj.kind != JObject or mj{"roles"}.isNil or mj{"roles"}.kind != JArray:
+            problem(Http400, "invalid_request", "{\"roles\": [\"dev\", ...]} is required (an empty list takes the roles away)")
+            return
+          var given: seq[string]
+          for x in mj["roles"].elems:
+            if x.kind != JString:
+              problem(Http400, "invalid_request", "roles are strings")
+              return
+            given.add x.getStr
+          let bad = mc.setMember(memberScope, memberUser, given)
+          if bad.len > 0:
+            problem(Http400, "invalid_member", bad)
+            return
+          mc.record(getTime().toUnix(), actorOf(who), "member.set", memberUser & " at " & memberScope, "ok", given.join(","))
+          jsonOk(Http200, %*{"organization": memberOrg, "group": memberGroup, "user": memberUser, "roles": given})
+        elif memberUser.len > 0 and mmeth == "DELETE":
+          let bad = mc.setMember(memberScope, memberUser, @[])
+          if bad.len > 0:
+            problem(Http404, "not_found", bad)
+            return
+          mc.record(getTime().toUnix(), actorOf(who), "member.remove", memberUser & " at " & memberScope, "ok")
+          jsonOk(Http200, %*{"organization": memberOrg, "group": memberGroup, "user": memberUser, "roles": []})
+        else:
+          problem(Http405, "method_not_allowed", "GET on /members, PUT and DELETE on /members/{user}")
+        return
       if path.startsWith("/api/v1/organizations/") and ("/groups" in path or "/projects" in path):
         # PRJ-001, D-54: the groups of an organisation, nested up to 8 levels, and their variables (inherited by the groups below and by the runs in them).
         #   GET /groups                      the groups, by path
@@ -876,6 +937,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           var items = newJArray()
           for g in gc.listGroups(orgG.id):
             if (g.repository.len > 0) != onProjects: continue            # /groups lists the folders, /projects the projects
+            if not who.mayIn("group.read", slugG, g.path): continue      # D-84: the ones the caller may see
             if onProjects: items.add %*{"path": g.path, "depth": g.depth, "repository": g.repository}
             else: items.add %*{"path": g.path, "depth": g.depth}
           jsonOk(Http200, %*{"organization": slugG, (if onProjects: "projects" else: "groups"): items})
@@ -1054,7 +1116,8 @@ proc onRequest() {.raises: [], gcsafe.} =
         if tid.len == 0:
           if tmeth == "GET":
             var items = newJArray()
-            for t in c.listTriggers(org.id): items.add t.view
+            for t in c.listTriggers(org.id):
+              if who.mayIn("trigger.read", slug, t.groupPath): items.add t.view
             jsonOk(Http200, %*{"organization": slug, "triggers": items})
           elif tmeth == "POST":
             if org.state != "active":
@@ -1069,6 +1132,9 @@ proc onRequest() {.raises: [], gcsafe.} =
               return
             if c.countTriggers(org.id) >= maxTriggersPerOrg:
               problem(Http409, "too_many_triggers", "at most " & $maxTriggersPerOrg & " triggers per organisation")
+              return
+            if not who.mayIn("trigger.write", slug, spec.spec.groupPath):
+              problem(Http403, "forbidden", "you may not make triggers for the project " & spec.spec.groupPath & ": it needs trigger.write there")
               return
             let tg = c.resolveProject(org.id, spec.spec.groupPath)
             if tg.code.len > 0:
@@ -1085,8 +1151,8 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem(Http405, "method_not_allowed", "GET lists, POST creates")
           return
         let found = c.getTrigger(org.id, tid)
-        if not found.found:
-          problem(Http404, "not_found", "no such trigger")
+        if not found.found or not who.mayUseIn(slug, found.row.groupPath):
+          problem(Http404, "not_found", "no such trigger")                   # one in a project the caller may not use is not confirmed
           return
         if action == "" and tmeth == "GET":
           jsonOk(Http200, found.row.view)
@@ -1189,49 +1255,6 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"organization": slug, "name": secName, "deleted": true})
         else:
           problem(Http405, "method_not_allowed", "PUT or DELETE")
-        return
-      if path.startsWith("/api/v1/organizations/") and "/members" in path:
-        # D-84: who has which role in an organisation. Read with `access.read`, changed with `access.write` (the gate has checked it for this organisation): the roles of an existing
-        # user are replaced, or taken away. Users are made by an administrator of the shard (POST /api/v1/users).
-        let afterOrg = path["/api/v1/organizations/".len .. ^1]
-        let parts = afterOrg.split('/')
-        if parts.len notin [2, 3] or parts[1] != "members" or not (parts.len == 2 or validUserName(parts[2])):
-          problem(Http404, "not_found", "no such route")
-          return
-        let memberOrg = parts[0]
-        var mc = newRq(coreRef.rqliteUrl)
-        if mc.organizationState(memberOrg).len == 0:
-          problem(Http404, "organization_not_found", "this shard has no organisation " & memberOrg)
-          return
-        let mmeth = getMethod()
-        if parts.len == 2 and mmeth == "GET":
-          jsonOk(Http200, %*{"organization": memberOrg, "members": mc.listMembers(memberOrg)})
-        elif parts.len == 3 and mmeth == "PUT":
-          let mj = try: parseJson(getBody()) except JsonParsingError: nil
-          if mj == nil or mj.kind != JObject or mj{"roles"}.isNil or mj{"roles"}.kind != JArray:
-            problem(Http400, "invalid_request", "{\"roles\": [\"dev\", ...]} is required (an empty list takes the roles away)")
-            return
-          var given: seq[string]
-          for x in mj["roles"].elems:
-            if x.kind != JString:
-              problem(Http400, "invalid_request", "roles are strings")
-              return
-            given.add x.getStr
-          let bad = mc.setMember(memberOrg, parts[2], given)
-          if bad.len > 0:
-            problem(Http400, "invalid_member", bad)
-            return
-          mc.record(getTime().toUnix(), actorOf(who), "member.set", parts[2] & " in " & memberOrg, "ok", given.join(","))
-          jsonOk(Http200, %*{"organization": memberOrg, "user": parts[2], "roles": given})
-        elif parts.len == 3 and mmeth == "DELETE":
-          let bad = mc.setMember(memberOrg, parts[2], @[])
-          if bad.len > 0:
-            problem(Http404, "not_found", bad)
-            return
-          mc.record(getTime().toUnix(), actorOf(who), "member.remove", parts[2] & " in " & memberOrg, "ok")
-          jsonOk(Http200, %*{"organization": memberOrg, "user": parts[2], "roles": []})
-        else:
-          problem(Http405, "method_not_allowed", "GET on /members, PUT and DELETE on /members/{user}")
         return
       if path.startsWith("/api/v1/organizations/"):
         # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)
@@ -1350,7 +1373,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # SHD-007: a run belongs to an organisation, whose execution profile places its steps in the organisation's namespace.
         # Without `organization` it belongs to the shard's default tenant and profile (single-tenant setups, development).
-        if not who.mayIn("run.start", j{"organization"}.getStr):
+        if not who.mayIn("run.start", j{"organization"}.getStr, normalPath(j{"project"}.getStr)):
           problem(Http403, "forbidden", "you may not start runs of " & (if j{"organization"}.getStr.len > 0: "the organisation " & j{"organization"}.getStr else: "the shard's default tenant"))
           return
         var tenant = "t1"
@@ -1445,7 +1468,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         backwards = not seenFrom
         if not who.admin:
           let owner = coreRef.getRun(runId)
-          if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+          if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
             problem(Http404, "not_found", "no such run")
             return
         let log = coreRef.getRunLog(runId, wantCursor, cursor, backwards, (if limit < 1: defaultRunWindow else: limit))
@@ -1471,7 +1494,7 @@ proc onRequest() {.raises: [], gcsafe.} =
               return
         if not who.admin:
           let owner = coreRef.getRun(parts[0])
-          if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+          if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
             problem(Http404, "not_found", "no log stream for this step yet")      # not 403: another organisation's runs are not even confirmed
             return
         let log = coreRef.getStepLog(parts[0], seq, max(0, fromLine), (if limit < 1: maxWindow else: limit))
@@ -1483,7 +1506,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         # the artifacts of a run (DAT-003): the list, or one file (read from the store by the core and passed on, up to 64 MiB)
         let parts = rest.split("/artifacts", maxsplit = 1)
         let owner = coreRef.getRun(parts[0])
-        if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
           problem(Http404, "not_found", "no such run")
           return
         var c = newRq(coreRef.rqliteUrl)
@@ -1519,7 +1542,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         # RUN-006: stop a run. The same people that may read it: another organisation's run is not confirmed (404), as for a read
         let runId = rest[0 ..< rest.len - ":abort".len]
         let owner = coreRef.getRun(runId)
-        if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
           problem(Http404, "not_found", "no such run")
           return
         var cc = newRq(coreRef.rqliteUrl)
@@ -1535,7 +1558,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         let placing = rest.endsWith(":hold")
         let runId = rest[0 ..< rest.len - (if placing: ":hold".len else: ":release".len)]
         let owner = coreRef.getRun(runId)
-        if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
           problem(Http404, "not_found", "no such run")
           return
         var hc = newRq(coreRef.rqliteUrl)
@@ -1563,7 +1586,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         # PIP-015 failed-only: run again only what failed, in the same run, if its volume is still there (docs/parallel.md section 11)
         let runId = rest[0 ..< rest.len - ":retry".len]
         let owner = coreRef.getRun(runId)
-        if owner == nil or not who.mayUseOrg(owner{"organization"}.getStr):
+        if owner == nil or not who.mayUseIn(owner{"organization"}.getStr, owner{"project"}.getStr):
           problem(Http404, "not_found", "no such run")
           return
         var rc = newRq(coreRef.rqliteUrl)
@@ -1597,10 +1620,10 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http403, "forbidden", "this token may list the runs of its own organisation only")
           return
         var c = newRq(coreRef.rqliteUrl)
-        jsonOk(Http200, c.listRuns(scope.organization, askedState, limit, before))
+        jsonOk(Http200, c.listRuns(scope.organization, askedState, limit, before, scope.only, scope.groups))
       elif meth == "GET" and rest.len > 0:
         let run = coreRef.getRun(rest)
-        if run != nil and not who.mayUseOrg(run{"organization"}.getStr):
+        if run != nil and not who.mayUseIn(run{"organization"}.getStr, run{"project"}.getStr):
           problem(Http404, "not_found", "no such run")
           return
         if run == nil:
@@ -1610,7 +1633,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         var ac = newRq(coreRef.rqliteUrl)
         let can = ac.runActions(rest, run{"state"}.getStr)
         let runOrg = run{"organization"}.getStr
-        run["actions"] = %*{"abort": can.abort and who.mayIn("run.abort", runOrg), "retry": can.retry and who.mayIn("run.retry", runOrg)}
+        run["actions"] = %*{"abort": can.abort and who.mayIn("run.abort", runOrg, run{"project"}.getStr), "retry": can.retry and who.mayIn("run.retry", runOrg, run{"project"}.getStr)}
         jsonOk(Http200, run)
       else:
         problem(Http404, "not_found", "no such route")

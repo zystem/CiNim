@@ -9,18 +9,26 @@ const
   defaultRunPage* = 50
   maxRunPage* = 200
 
-proc listRuns*(c: var RqClient; organization, state: string; limit: int; before: string; only: seq[string] = @[]): JsonNode =
-  ## {"runs": [...], "next": <the id to pass as `before` for the next page, or null at the end>}. `organization` and `state` and `before` are "" for no filter; `only` keeps
-  ## the runs of these organisations, for a caller who may see some and not others (D-84).
+proc listRuns*(c: var RqClient; organization, state: string; limit: int; before: string; only: seq[string] = @[]; groups: seq[tuple[org, path: string]] = @[]): JsonNode =
+  ## {"runs": [...], "next": <the id to pass as `before` for the next page, or null at the end>}. `organization` and `state` and `before` are "" for no filter; `only` and `groups`
+  ## keep the runs of these organisations and of these groups and projects (with what is under them), for a caller who may see some and not others (D-84).
   let n = if limit < 1: defaultRunPage else: min(limit, maxRunPage)
   var stmt = newJArray()
   stmt.add %("SELECT r.id, COALESCE(o.slug, ''), COALESCE(g.path, ''), r.state, r.created_at, r.updated_at, r.fail_code, r.fail_message, " &
     "r.source_repository, r.source_commit, COALESCE(r.trigger_id, ''), r.source_path " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id LEFT JOIN groups g ON g.id = r.group_id " &
     "WHERE (? = '' OR o.slug = ?) AND (? = '' OR r.state = ?) AND (? = '' OR r.id < ?)" &
-    (if only.len > 0: " AND o.slug IN (" & newSeqWith(only.len, "?").join(",") & ")" else: "") & " ORDER BY r.id DESC LIMIT ?")
+    (if only.len > 0 or groups.len > 0:
+       " AND (" & (@[(if only.len > 0: "o.slug IN (" & newSeqWith(only.len, "?").join(",") & ")" else: "")] &
+                   groups.mapIt("(o.slug = ? AND (g.path = ? OR substr(g.path, 1, ?) = ?))")).filterIt(it.len > 0).join(" OR ") & ")"
+     else: "") & " ORDER BY r.id DESC LIMIT ?")
   for a in [organization, organization, state, state, before, before]: stmt.add %a
   for s in only: stmt.add %s
+  for g in groups:
+    stmt.add %g.org
+    stmt.add %g.path
+    stmt.add %(g.path.len + 1)
+    stmt.add %(g.path & "/")
   stmt.add %(n + 1)
   let r = c.query(%*[stmt])
   let vals = r["results"][0]{"values"}
@@ -39,13 +47,18 @@ proc listRuns*(c: var RqClient; organization, state: string; limit: int; before:
       runs.add item
   %*{"runs": runs, "next": next}
 
-func runListScope*(who: Principal; asked: string): tuple[ok: bool, organization: string, only: seq[string]] =
-  ## which organisations' runs the caller may list: where `run.read` is held (D-84). An administrator, or a role at the shard: any (`asked`, or all of them when it is empty); a role in some
-  ## organisations: those, and asking for another is refused, not answered with the others, so that a mistake is seen. A token of an organisation: its own. `ok` false: 403.
+func runListScope*(who: Principal; asked: string): tuple[ok: bool, organization: string, only: seq[string], groups: seq[tuple[org, path: string]]] =
+  ## which runs the caller may list: where `run.read` is held (D-84). An administrator, or a role at the shard: any (`asked`, or all of them when it is empty); a role in some
+  ## organisations and on some groups: those, and asking for an organisation where nothing is held is refused, not answered with the others, so that a mistake is seen.
+  ## A token of an organisation: its own. `ok` false: 403.
   let seen = who.visibleOrgs("run.read")
-  if seen.all: return (true, asked, @[])
-  if not who.ok or seen.slugs.len == 0: return
+  if seen.all: return (true, asked, @[], @[])
+  if not who.ok: return
+  var groups = who.visibleGroups("run.read")
   if asked.len > 0:
-    if asked notin seen.slugs: return
-    return (true, asked, @[])
-  (true, "", seen.slugs)
+    if asked in seen.slugs: return (true, asked, @[], @[])
+    groups = groups.filterIt(it.org == asked)
+    if groups.len == 0: return
+    return (true, asked, @[], groups)
+  if seen.slugs.len == 0 and groups.len == 0: return
+  (true, "", seen.slugs, groups)

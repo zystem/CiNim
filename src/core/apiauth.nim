@@ -105,12 +105,21 @@ func mayUseOrg*(p: Principal; org: string): bool =
     return p.shardWide or org in p.grants.orgs
   p.org.len > 0 and p.org == org
 
-func mayIn*(p: Principal; perm, org: string): bool =
-  ## whether the principal holds `perm` for `org` ("" is the shard itself); an organisation's token holds every permission of its own runs
+func mayUseIn*(p: Principal; org, group: string): bool =
+  ## like `mayUseOrg`, for a thing at a group or project of the organisation (a run's `project`, a trigger's): a binding on that group or above it counts too
+  if p.ok and not p.admin and p.user.len > 0 and p.need.permission.len > 0: return p.grants.holds(p.need.permission, org, group)
+  p.mayUseOrg(org)
+
+func mayIn*(p: Principal; perm, org: string; group = ""): bool =
+  ## whether the principal holds `perm` for `org` ("" is the shard itself) and, with `group`, for that group or project; an organisation's token holds every permission of its own runs
   if not p.ok: return false
   if p.admin: return true
-  if p.user.len > 0: return p.grants.holds(perm, org)
+  if p.user.len > 0: return p.grants.holds(perm, org, group)
   p.org.len > 0 and p.org == org and perm.startsWith("run.")
+
+func visibleGroups*(p: Principal; perm: string): seq[tuple[org, path: string]] =
+  ## the groups and projects on which a binding gives `perm` (the ones a binding of the organisation or of the shard covers are in `visibleOrgs`)
+  if p.ok and not p.admin and p.user.len > 0: return p.grants.groupsWith(perm)
 
 func visibleOrgs*(p: Principal; perm: string): tuple[all: bool, slugs: seq[string]] =
   ## where `perm` is held: every organisation (a binding at the shard, an administrator), or these
@@ -276,10 +285,10 @@ proc deleteRole*(c: var RqClient; name: string): RoleDelete =
   discard c.execute(%*[["DELETE FROM role_permissions WHERE role = ?", name], ["DELETE FROM roles WHERE name = ?", name]], transaction = true)
   rdDeleted
 
-proc listMembers*(c: var RqClient; org: string): JsonNode =
-  ## who has a role in this organisation (a binding of the organisation; the ones at the shard are in GET /users)
+proc listMembers*(c: var RqClient; scope: string): JsonNode =
+  ## who has a role at this scope (`org:<slug>` or `org:<slug>/<group path>`; a binding exactly there; the ones at the shard are in GET /users)
   result = newJArray()
-  let vals = c.query(%*[["SELECT user_name, role FROM role_bindings WHERE scope = ? ORDER BY user_name, role", "org:" & org]])["results"][0]{"values"}
+  let vals = c.query(%*[["SELECT user_name, role FROM role_bindings WHERE scope = ? ORDER BY user_name, role", scope]])["results"][0]{"values"}
   var cur = ""
   if vals != nil:
     for v in vals:
@@ -288,14 +297,14 @@ proc listMembers*(c: var RqClient; org: string): JsonNode =
         result.add %*{"user": cur, "roles": []}
       result[result.len - 1]["roles"].add %v[1].getStr
 
-proc setMember*(c: var RqClient; org, user: string; roles: seq[string]): string =
-  ## The roles of an existing user in this organisation are these (replacing the ones it had there); an empty list takes them all away. "" when done, otherwise why not.
+proc setMember*(c: var RqClient; scope, user: string; roles: seq[string]): string =
+  ## The roles of an existing user at this scope are these (replacing the ones it had there); an empty list takes them all away. "" when done, otherwise why not.
   if not c.userRoles(user).found: return "no such user: " & user
   for r in roles:
     if not c.roleExists(r): return "no such role: " & r
   var stmts = newJArray()
-  stmts.add %*["DELETE FROM role_bindings WHERE user_name = ? AND scope = ?", user, "org:" & org]
-  for r in roles: stmts.add %*["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", user, r, "org:" & org]
+  stmts.add %*["DELETE FROM role_bindings WHERE user_name = ? AND scope = ?", user, scope]
+  for r in roles: stmts.add %*["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", user, r, scope]
   discard c.execute(stmts, transaction = true)
 
 proc resetUserCredentials*(c: var RqClient; user: string; now: int64): tuple[ok: bool, cred: UserCredential] =

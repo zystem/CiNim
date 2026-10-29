@@ -73,21 +73,40 @@ suite "UI the list of runs":
       let both = c.listRuns("", "", 200, "", @[slugA, slugB])["runs"]
       check both.len == 7 + idsB.len and both.allIt(it["organization"].getStr in [slugA, slugB])
       check c.listRuns("", "", 200, "", @["no-such-org-" & sfx])["runs"].len == 0
+    test "D-84 `groups` keep the runs of a group or project and of what is under it, and not a sibling or a group whose name only starts the same":
+      proc groupWith(path: string): string =
+        let id = newId()
+        discard c.execute(%*[["INSERT INTO groups (id, tenant_id, parent_id, slug, path, depth, created_at) VALUES (?, ?, '', ?, ?, 1, 0)", id, orgA, path.split('/')[^1], path, path.split('/').len]])
+        id
+      let ci = groupWith("ci"); let cinim = groupWith("ci/cinim"); let cinema = groupWith("cinema")
+      discard c.execute(%*[["UPDATE runs SET group_id = ? WHERE id = ?", ci, idsA[0]], ["UPDATE runs SET group_id = ? WHERE id = ?", cinim, idsA[1]],
+                           ["UPDATE runs SET group_id = ? WHERE id = ?", cinema, idsA[2]]])
+      let seen = c.listRuns("", "", 200, "", @[], @[(slugA, "ci")])["runs"].mapIt(it["id"].getStr)
+      check seen.len == 2 and idsA[0] in seen and idsA[1] in seen and idsA[2] notin seen
+      check c.listRuns("", "", 200, "", @[], @[(slugA, "ci/cinim")])["runs"].mapIt(it["id"].getStr) == @[idsA[1]]
+      check c.listRuns("", "", 200, "", @[], @[(slugB, "ci")])["runs"].len == 0                       # the organisation counts
+      let mixed = c.listRuns("", "", 200, "", @[slugB], @[(slugA, "ci/cinim")])["runs"]
+      check mixed.len == idsB.len + 1
+      check c.listRuns(slugA, "", 200, "", @[], @[(slugA, "ci"), (slugB, "ci")])["runs"].len == 2
     test "the values are parameters, not SQL":
       check c.listRuns("x' OR '1'='1", "", 50, "")["runs"].len == 0
       check c.listRuns(slugA, "FAILED' OR '1'='1", 50, "")["runs"].len == 0
       check c.listRuns(slugA, "", 50, "' OR id != '")["runs"].len == 0
 
 suite "UI who may list which runs":
+  proc scopeOf(w: Principal; asked: string): string =
+    ## the answer as one line: ok, the organisation asked, the organisations, the groups
+    let r = runListScope(w, asked)
+    $r.ok & " " & r.organization & " " & r.only.join(",") & " " & r.groups.mapIt(it.org & "/" & it.path).join(",")
   test "an administrator and a role at the shard: any organisation, or all of them":
     let admin = principalOf("admin")
-    check runListScope(admin, "") == (true, "", newSeq[string]())
-    check runListScope(admin, "acme") == (true, "acme", newSeq[string]())
-    check runListScope(Principal(ok: true, user: "x", shardWide: true, grants: grantsOfRoles(["ro"])), "acme") == (true, "acme", newSeq[string]())
+    check scopeOf(admin, "") == "true   "
+    check scopeOf(admin, "acme") == "true acme  "
+    check scopeOf(Principal(ok: true, user: "x", shardWide: true, grants: grantsOfRoles(["ro"])), "acme") == "true acme  "
   test "a token of an organisation: its own runs, whether it names the organisation or not; another's is refused":
     let t = principalOf("org:acme")
-    check runListScope(t, "") == (true, "", @["acme"])
-    check runListScope(t, "acme") == (true, "acme", newSeq[string]())
+    check scopeOf(t, "") == "true  acme "
+    check scopeOf(t, "acme") == "true acme  "
     check not runListScope(t, "other").ok
   test "D-84 a user with a role in some organisations: those, and another's is refused":
     var g: Grants
@@ -96,9 +115,23 @@ suite "UI who may list which runs":
     g.addRole("org:gamma", ["trigger.read"])                      # a role that cannot read runs there
     let u = Principal(ok: true, user: "x", grants: g)
     let all = runListScope(u, "")
-    check all.ok and all.organization == "" and all.only.len == 2 and "acme" in all.only and "beta" in all.only and "gamma" notin all.only
-    check runListScope(u, "beta") == (true, "beta", newSeq[string]())
+    check all.ok and all.organization == "" and all.only.len == 2 and "acme" in all.only and "beta" in all.only and "gamma" notin all.only and all.groups.len == 0
+    check scopeOf(u, "beta") == "true beta  "
     check not runListScope(u, "gamma").ok and not runListScope(u, "other").ok
+  test "D-84 a user with a role on groups: those groups, and the organisation asked for only when something is held in it":
+    var g: Grants
+    g.addRole("org:acme", builtinPermissions("ro"))
+    g.addRole("org:beta/ci", builtinPermissions("dev"))
+    g.addRole("org:beta/qa/web", builtinPermissions("ro"))
+    g.addRole("org:gamma/x", ["trigger.read"])
+    let u = Principal(ok: true, user: "x", grants: g)
+    check scopeOf(u, "") == "true  acme beta/ci,beta/qa/web"
+    check scopeOf(u, "acme") == "true acme  "
+    check scopeOf(u, "beta") == "true beta  beta/ci,beta/qa/web"
+    check not runListScope(u, "gamma").ok
+    var onlyGroup: Grants
+    onlyGroup.addRole("org:beta/ci", builtinPermissions("ro"))
+    check scopeOf(Principal(ok: true, user: "y", grants: onlyGroup), "") == "true   beta/ci"
   test "no one and a token of no organisation: refused":
     check not runListScope(Principal(), "").ok
     check not runListScope(Principal(ok: true), "").ok

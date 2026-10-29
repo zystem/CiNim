@@ -9,7 +9,7 @@ import ../common/scriptsource
 const
   maxGroupDepth* = 8
   maxGroupsPerOrganization* = 1000
-  reservedSlugs = ["variables", "settings", "hold"]           ## a segment of the URL that names something under a group
+  reservedSlugs = ["variables", "settings", "hold", "members"]           ## a segment of the URL that names something under a group
 
 func validGroupSlug*(s: string): bool =
   ## lowercase letters, digits and '-', starting with a letter, at most 40; not a word the URLs use

@@ -1,7 +1,8 @@
 ## IAM-001, D-84: the rights of the API as a list of **permissions**, one for each kind of operation (`run.start`, `run.abort`, `trigger.fire`, ...). A role is a set of permissions;
 ## the four roles of D-50 (`admin`, `rw`, `dev`, `ro`) are sets made here, in code, and an administrator makes roles of their own (`roles`, `role_permissions`). A role is given to a
-## user at the **shard** (it holds in every organisation) or at one **organisation** (`role_bindings.scope`, `org:<slug>`; it holds there). Pure; tested in tests/unit/trbac.nim and
-## tests/unit/tpermissions.nim.
+## user at the **shard** (it holds in every organisation), at one **organisation** (`role_bindings.scope`, `org:<slug>`; it holds there) or at a **group or project** of an organisation
+## (`org:<slug>/<path>`; it holds for that node and everything under it, and only for the permissions that are about things in the tree of groups: runs, triggers, variables,
+## groups, holds). Pure; tested in tests/unit/trbac.nim and tests/unit/tpermissions.nim.
 ##
 ## `needOf(method, path)` says what a request needs: a permission, and where it has to be held - at the shard (the shard's own things), in the organisation the path names, or in
 ## the organisation that the handler finds (a run's, the one in the body): the gate lets a request in when the permission is held anywhere, the handler asks again for the organisation.
@@ -10,39 +11,40 @@ import std/[strutils, sets, tables]
 
 type
   Level* = enum
+    lvGroup        ## about a thing in the tree of groups: may be given on a group or a project (and in an organisation, and at the shard)
     lvOrg          ## may be given in an organisation (and at the shard, where it holds in every organisation)
     lvShard        ## the shard's own: held only through a binding at the shard
   Perm = tuple[name: string, level: Level, text: string]
 
 const
   catalogue*: seq[Perm] = @[
-    ("run.read", lvOrg, "see runs and their steps"),
-    ("run.start", lvOrg, "start a run"),
-    ("run.check", lvOrg, "check a script before a run (POST /pipelines:check)"),
-    ("run.abort", lvOrg, "stop a run"),
-    ("run.retry", lvOrg, "run the failed steps of a run again"),
-    ("run.delete", lvOrg, "delete a run"),
-    ("log.read", lvOrg, "read the logs of a run and of its steps"),
-    ("artifact.read", lvOrg, "list and download the artifacts of a run"),
-    ("trigger.read", lvOrg, "see the triggers of an organisation"),
-    ("trigger.write", lvOrg, "make, delete, switch and re-key triggers"),
-    ("trigger.fire", lvOrg, "fire a manual trigger"),
-    ("variable.read", lvOrg, "read variables"),
-    ("variable.write", lvOrg, "write and delete variables of an organisation or of a group"),
+    ("run.read", lvGroup, "see runs and their steps"),
+    ("run.start", lvGroup, "start a run"),
+    ("run.check", lvGroup, "check a script before a run (POST /pipelines:check)"),
+    ("run.abort", lvGroup, "stop a run"),
+    ("run.retry", lvGroup, "run the failed steps of a run again"),
+    ("run.delete", lvGroup, "delete a run"),
+    ("log.read", lvGroup, "read the logs of a run and of its steps"),
+    ("artifact.read", lvGroup, "list and download the artifacts of a run"),
+    ("trigger.read", lvGroup, "see the triggers of an organisation"),
+    ("trigger.write", lvGroup, "make, delete, switch and re-key triggers"),
+    ("trigger.fire", lvGroup, "fire a manual trigger"),
+    ("variable.read", lvGroup, "read variables"),
+    ("variable.write", lvGroup, "write and delete variables of an organisation or of a group"),
     ("secret.read", lvOrg, "see the names of the secrets of an organisation"),
     ("secret.write", lvOrg, "set and delete secrets"),
-    ("group.read", lvOrg, "see groups and projects"),
-    ("group.write", lvOrg, "make and delete groups and projects"),
-    ("hold.read", lvOrg, "see legal holds"),
-    ("hold.write", lvOrg, "place and release legal holds"),
+    ("group.read", lvGroup, "see groups and projects"),
+    ("group.write", lvGroup, "make and delete groups and projects"),
+    ("hold.read", lvGroup, "see legal holds"),
+    ("hold.write", lvGroup, "place and release legal holds"),
     ("cache.read", lvOrg, "see the caches of an organisation"),
     ("cache.delete", lvOrg, "delete caches"),
     ("lock.read", lvOrg, "see the locks of an organisation"),
     ("lock.write", lvOrg, "change the locks of an organisation"),
     ("storage.read", lvOrg, "see which store an organisation uses"),
-    ("org.read", lvOrg, "see organisations"),
-    ("access.read", lvOrg, "see who has which role in an organisation, and the roles and permissions"),
-    ("access.write", lvOrg, "give and take away roles in an organisation"),
+    ("org.read", lvGroup, "see organisations"),
+    ("access.read", lvGroup, "see who has which role in an organisation, and the roles and permissions"),
+    ("access.write", lvGroup, "give and take away roles in an organisation"),
     ("shard.read", lvShard, "see the components, the launch gate, the alerts, the router, the profile and the checks of the shard"),
     ("shard.write", lvShard, "change the profile, the launch gate and the reconciliation of the shard"),
     ("shard.variable.write", lvShard, "write the variables of the shard"),
@@ -93,41 +95,62 @@ func validRoleName*(name: string): bool =
 type
   NeedScope* = enum
     nsShard      ## held through a binding at the shard
-    nsOrg        ## held at the shard or in the organisation `org` that the path names
-    nsAny        ## held anywhere; the handler finds the organisation and asks `holds` for it
+    nsOrg        ## held at the shard or in the organisation `org` that the path names; when `group` is set, also on that group or above it (a binding on a group or project)
+    nsInOrg      ## held in the organisation or on any group of it: a list, whose handler leaves out what the caller may not see
+    nsAny        ## held anywhere; the handler finds the organisation (and the group) and asks `holds` for it
   Need* = object
     permission*: string     ## "" for a route that is not in the table
     scope*: NeedScope
     org*: string
+    group*: string          ## the path of the group or project the route names ("" for none)
 
-func need(permission: string; scope: NeedScope; org = ""): Need = Need(permission: permission, scope: scope, org: org)
+func need(permission: string; scope: NeedScope; org = ""; group = ""): Need = Need(permission: permission, scope: scope, org: org, group: group)
 
 func isRead(meth: string): bool = meth in ["GET", "HEAD"]
+
+func groupPathOf(afterWord: string): string =
+  ## the path of a group in `/groups/<path>[/variables/NAME | /settings | /hold]`; `variables`, `settings` and `hold` cannot be the name of a group
+  var segs: seq[string]
+  for seg in afterWord.strip(chars = {'/'}).split('/'):
+    if seg.len == 0: continue                            # as `normalPath` of groups.nim reads a path
+    if seg in ["variables", "settings", "hold", "members"]: break
+    segs.add seg
+  segs.join("/")
 
 func orgNeed(meth, org, rest: string): Need =
   ## `rest` is what follows `/api/v1/organizations/<slug>`: "" or a path that starts with a slash
   let write = not isRead(meth)
   func has(part: string): bool = rest == part or rest.startsWith(part & "/") or rest.startsWith(part & ":")
+  func onTree(): bool = rest.startsWith("/groups/") or rest.startsWith("/projects/")
+  func treeNeed(perm: string): Need =
+    let gp = groupPathOf(rest[rest.find('/', 1) .. ^1])
+    need(perm, (if gp.len > 0: nsOrg else: nsInOrg), org, gp)
   if rest.len == 0: return (if meth == "DELETE": need("org.delete", nsShard) else: Need())
   if rest.endsWith("/storage"): return (if write: need("storage.write", nsShard) else: need("storage.read", nsOrg, org))
   # a hold is placed on the organisation or on a group, and read; `/holds` lists them
-  if rest == "/hold" or rest == "/holds" or (rest.endsWith("/hold") and (rest.startsWith("/groups/") or rest.startsWith("/projects/"))):
-    return need(if write: "hold.write" else: "hold.read", nsOrg, org)
+  if rest == "/hold" or rest == "/holds": return need(if write: "hold.write" else: "hold.read", nsOrg, org)       # the holds of the whole organisation: not for a binding on a group
+  if onTree() and rest.endsWith("/hold"): return treeNeed(if write: "hold.write" else: "hold.read")
+  if onTree() and ("/members/" in rest or rest.endsWith("/members")): return treeNeed(if write: "access.write" else: "access.read")      # the roles on a group or project
   if rest.startsWith("/triggers"):
     let tail = rest["/triggers".len .. ^1]
     let colon = tail.rfind(':')
     if colon >= 0 and not write: return Need()
     if colon >= 0:
       let action = tail[colon + 1 .. ^1]
-      return (if action == "fire": need("trigger.fire", nsOrg, org) elif action in ["enable", "disable", "rotate-secret"]: need("trigger.write", nsOrg, org) else: Need())
-    return need(if write: "trigger.write" else: "trigger.read", nsOrg, org)
+      if action == "fire": return need("trigger.fire", nsInOrg, org)           # the trigger knows its project: the handler asks for it
+      if action in ["enable", "disable", "rotate-secret"]: return need("trigger.write", nsInOrg, org)
+      return Need()
+    return need(if write: "trigger.write" else: "trigger.read", nsInOrg, org)
   if has("/locks"): return need(if write: "lock.write" else: "lock.read", nsOrg, org)
-  if has("/variables") or ((rest.startsWith("/groups/") or rest.startsWith("/projects/")) and "/variables" in rest):
-    return need(if write: "variable.write" else: "variable.read", nsOrg, org)
-  if has("/groups") or has("/projects"): return need(if write: "group.write" else: "group.read", nsOrg, org)
+  if has("/variables"): return need(if write: "variable.write" else: "variable.read", nsOrg, org)
+  if onTree() and "/variables" in rest: return treeNeed(if write: "variable.write" else: "variable.read")
+  if has("/groups") or has("/projects"):
+    if onTree(): return treeNeed(if write: "group.write" else: "group.read")
+    return need(if write: "group.write" else: "group.read", (if write: nsOrg else: nsInOrg), org)       # the list of groups; making one names a path
   if has("/caches"): return need(if write: "cache.delete" else: "cache.read", nsOrg, org)
   if has("/secrets"): return need(if write: "secret.write" else: "secret.read", nsOrg, org)
   if has("/members"): return need(if write: "access.write" else: "access.read", nsOrg, org)
+
   Need()
 
 func needOf*(meth, path: string): Need =
@@ -169,44 +192,91 @@ func needOf*(meth, path: string): Need =
   Need()
 
 type
+  GroupBinding* = tuple[path: string, perms: HashSet[string]]
   Grants* = object
-    ## what a user holds: the permissions of the roles at the shard, and of the roles in each organisation
+    ## what a user holds: the permissions of the roles at the shard, in each organisation, and on groups and projects of an organisation
     shard*: HashSet[string]
     orgs*: Table[string, HashSet[string]]
+    groups*: Table[string, seq[GroupBinding]]
+
+func covers*(boundPath, group: string): bool =
+  ## whether a binding on `boundPath` reaches the group or project at `group`: that node, and everything under it
+  boundPath.len > 0 and (group == boundPath or group.startsWith(boundPath & "/"))
 
 proc addRole*(g: var Grants; scope: string; perms: openArray[string]) =
-  ## `scope` is "shard" or "org:<slug>". A permission of the shard's own does nothing in an organisation, whatever role it came in.
+  ## `scope` is "shard", "org:<slug>" or "org:<slug>/<group path>". A permission does nothing where it is not about: one of the shard's own in an organisation, and anything but
+  ## a thing in the tree of groups on a group.
   if scope == "shard":
     for p in perms: g.shard.incl p
   elif scope.startsWith("org:") and scope.len > 4:
-    let slug = scope[4 .. ^1]
-    if slug notin g.orgs: g.orgs[slug] = initHashSet[string]()
-    for p in perms:
-      if levelOf(p) == lvOrg: g.orgs[slug].incl p
+    let rest = scope[4 .. ^1]
+    let slash = rest.find('/')
+    let slug = if slash < 0: rest else: rest[0 ..< slash]
+    if slug.len == 0: return
+    if slash < 0:
+      if slug notin g.orgs: g.orgs[slug] = initHashSet[string]()
+      for p in perms:
+        if levelOf(p) != lvShard: g.orgs[slug].incl p
+    elif slash < rest.len - 1:
+      var kept = initHashSet[string]()
+      for p in perms:
+        if levelOf(p) == lvGroup: kept.incl p
+      if slug notin g.groups: g.groups[slug] = @[]
+      g.groups[slug].add (rest[slash + 1 .. ^1], kept)
 
-func holds*(g: Grants; perm: string; org = ""): bool =
-  ## whether `perm` is held for `org` ("" asks about the shard itself: only a binding at the shard counts). A binding at the shard holds in every organisation.
+func holds*(g: Grants; perm: string; org = ""; group = ""): bool =
+  ## whether `perm` is held for `org` ("" asks about the shard itself: only a binding at the shard counts) and, with `group`, for that group or project: a binding at the shard or in
+  ## the organisation holds for all of them, a binding on a group for it and the groups under it.
   if perm in g.shard: return true
-  org.len > 0 and levelOf(perm) == lvOrg and org in g.orgs and perm in g.orgs[org]
+  if org.len == 0: return false
+  if levelOf(perm) != lvShard and org in g.orgs and perm in g.orgs[org]: return true
+  if group.len > 0 and levelOf(perm) == lvGroup and org in g.groups:
+    for b in g.groups[org]:
+      if perm in b.perms and covers(b.path, group): return true
+
+func holdsWithin*(g: Grants; perm, org: string): bool =
+  ## held in the organisation, or on some group or project of it (the gate of a list: the handler leaves out what is not for the caller)
+  if g.holds(perm, org): return true
+  if levelOf(perm) == lvGroup and org in g.groups:
+    for b in g.groups[org]:
+      if perm in b.perms: return true
 
 func holdsAnywhere*(g: Grants; perm: string): bool =
   if perm in g.shard: return true
-  if levelOf(perm) != lvOrg: return false
+  if levelOf(perm) == lvShard: return false
   for _, perms in g.orgs:
     if perm in perms: return true
+  if levelOf(perm) == lvGroup:
+    for _, bs in g.groups:
+      for b in bs:
+        if perm in b.perms: return true
 
 func orgsWith*(g: Grants; perm: string): seq[string] =
   ## the organisations (by slug) in which `perm` is held through a binding of the organisation; the ones a binding at the shard covers are not listed
-  if levelOf(perm) != lvOrg: return
+  if levelOf(perm) == lvShard: return
   for slug, perms in g.orgs:
     if perm in perms: result.add slug
+
+func groupsWith*(g: Grants; perm: string): seq[tuple[org, path: string]] =
+  ## the groups and projects on which `perm` is held through a binding on them
+  if levelOf(perm) != lvGroup: return
+  for slug, bs in g.groups:
+    for b in bs:
+      if perm in b.perms: result.add (slug, b.path)
+
+func orgsTouched*(g: Grants): seq[string] =
+  ## every organisation in which the user has a binding, of the organisation or of a group of it
+  for slug, _ in g.orgs: result.add slug
+  for slug, _ in g.groups:
+    if slug notin result: result.add slug
 
 func allows*(g: Grants; n: Need): bool =
   ## the gate: whether a request with this need may go on (a route that is not named is refused here, whatever is held)
   if n.permission.len == 0: return false
   case n.scope
   of nsShard: n.permission in g.shard
-  of nsOrg: g.holds(n.permission, n.org)
+  of nsOrg: g.holds(n.permission, n.org, n.group)
+  of nsInOrg: g.holdsWithin(n.permission, n.org)
   of nsAny: g.holdsAnywhere(n.permission)
 
 func grantsOfRoles*(roles: openArray[string]): Grants =

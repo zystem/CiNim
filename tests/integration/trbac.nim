@@ -118,17 +118,32 @@ suite "IAM-001 users, roles and their tokens":
       discard first()
       discard makeUser("ann", "ro")
       check c.createUser("olga", "ro", pwOf & "olga", t0, "org:acme")
-      check c.setMember("acme", "ann", @["dev", "ro"]) == ""
-      check c.setMember("beta", "ann", @["ro"]) == ""
-      check c.listMembers("acme").mapIt(it["user"].getStr) == @["ann", "olga"]
-      check c.listMembers("acme")[0]["roles"] == %*["dev", "ro"]
-      check c.setMember("acme", "ann", @["rw"]) == ""                                          # replaces what ann had in acme
-      check c.listMembers("acme")[0]["roles"] == %*["rw"] and c.listMembers("beta")[0]["roles"] == %*["ro"]
-      check c.setMember("acme", "nobody", @["ro"]).len > 0 and c.setMember("acme", "ann", @["no-such-role"]).len > 0
-      check c.setMember("acme", "ann", @[]) == ""
-      check c.listMembers("acme").mapIt(it["user"].getStr) == @["olga"]
+      check c.setMember("org:acme", "ann", @["dev", "ro"]) == ""
+      check c.setMember("org:beta", "ann", @["ro"]) == ""
+      check c.listMembers("org:acme").mapIt(it["user"].getStr) == @["ann", "olga"]
+      check c.listMembers("org:acme")[0]["roles"] == %*["dev", "ro"]
+      check c.setMember("org:acme", "ann", @["rw"]) == ""                                          # replaces what ann had in acme
+      check c.listMembers("org:acme")[0]["roles"] == %*["rw"] and c.listMembers("org:beta")[0]["roles"] == %*["ro"]
+      check c.setMember("org:acme", "nobody", @["ro"]).len > 0 and c.setMember("org:acme", "ann", @["no-such-role"]).len > 0
+      check c.setMember("org:acme", "ann", @[]) == ""
+      check c.listMembers("org:acme").mapIt(it["user"].getStr) == @["olga"]
       let ann = who(c.createApiToken("t", userScope("ann"), 0, t0).token)
       check ann.roles == @["ro"] and ann.mayIn("run.read", "acme") and not ann.mayIn("run.start", "acme")       # the shard's ro, and nothing more
+    test "D-84 a role on a group or a project: held for that node and under it, listed and replaced at exactly that scope, and the other scopes of the user are not touched":
+      discard first()
+      discard makeUser("ann", "ro")
+      check c.setMember("org:acme/ci", "ann", @["dev"]) == ""
+      check c.setMember("org:acme", "ann", @["ro"]) == ""
+      check c.listMembers("org:acme/ci") == %*[{"user": "ann", "roles": ["dev"]}] and c.listMembers("org:acme") == %*[{"user": "ann", "roles": ["ro"]}]
+      let ann = who(c.createApiToken("t", userScope("ann"), 0, t0).token)
+      check ann.mayIn("run.start", "acme", "ci") and ann.mayIn("run.start", "acme", "ci/cinim") and not ann.mayIn("run.start", "acme", "team") and not ann.mayIn("run.start", "acme")
+      check ann.mayIn("run.read", "acme", "team")                                    # the role of the organisation
+      check ann.mayCall("POST", "/api/v1/organizations/acme/triggers/t1:fire") and ann.mayCall("GET", "/api/v1/organizations/acme/groups")
+      check not ann.mayCall("POST", "/api/v1/organizations/beta/triggers/t1:fire")
+      check c.setMember("org:acme/ci", "ann", @[]) == ""
+      check c.listMembers("org:acme/ci").len == 0 and c.listMembers("org:acme").len == 1
+      check not who(c.createApiToken("t", userScope("ann"), 0, t0).token).mayIn("run.start", "acme", "ci")
+      check c.userRoles("ann").bindings.len == 2          # the shard's ro and the organisation's
     test "D-84 a role of one's own works in the token of a user, at the shard and in an organisation, and cannot be deleted while it is given":
       discard first()
       check c.putRole("deployer", "", @["run.read", "run.start", "trigger.fire"]) == ""

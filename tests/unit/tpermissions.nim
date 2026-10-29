@@ -48,7 +48,7 @@ suite "D-84 what a request needs":
                          ("GET", "/api/v1/organizations/acme/members", "access.read"), ("PUT", "/api/v1/organizations/acme/members/ann", "access.write"),
                          ("DELETE", "/api/v1/organizations/acme/members/ann", "access.write")]:
       let n = needOf(m, p)
-      check n.permission == want and n.scope == nsOrg and n.org == "acme"
+      check n.permission == want and n.scope in {nsOrg, nsInOrg} and n.org == "acme"
   test "the shard's own things need a binding at the shard":
     for (m, p, want) in [("GET", "/api/v1/users", "user.manage"), ("POST", "/api/v1/users", "user.manage"), ("PUT", "/api/v1/roles/deployer", "role.manage"),
                          ("GET", "/api/v1/tokens", "token.manage"), ("GET", "/api/v1/audit", "audit.read"), ("POST", "/api/v1/stores:check", "store.manage"),
@@ -78,6 +78,51 @@ suite "D-84 what a request needs":
                    ("PUT", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/stores"), ("GET", "/api/v1/users"), ("PUT", "/api/v1/roles/r"), ("GET", "/api/v1/tokens"), ("GET", "/api/v1/audit")]:
       used.incl needOf(m, p).permission
     for p in catalogue: check p.name in used
+
+suite "D-84 groups and projects":
+  test "the routes of a group name its path (variables, settings and hold are not part of it), the lists name only the organisation":
+    for (m, p, want, grp, sc) in [("GET", "/api/v1/organizations/acme/groups/ci/cinim", "group.read", "ci/cinim", nsOrg), ("PUT", "/api/v1/organizations/acme/projects/ci/cinim", "group.write", "ci/cinim", nsOrg),
+                                  ("DELETE", "/api/v1/organizations/acme/groups/ci", "group.write", "ci", nsOrg),
+                                  ("GET", "/api/v1/organizations/acme/groups/ci/cinim/variables", "variable.read", "ci/cinim", nsOrg),
+                                  ("PUT", "/api/v1/organizations/acme/groups/ci/variables/URL", "variable.write", "ci", nsOrg),
+                                  ("PUT", "/api/v1/organizations/acme/groups/ci/cinim/hold", "hold.write", "ci/cinim", nsOrg), ("GET", "/api/v1/organizations/acme/projects/ci/cinim/hold", "hold.read", "ci/cinim", nsOrg),
+                                  ("PUT", "/api/v1/organizations/acme/groups/ci/settings", "group.write", "ci", nsOrg),
+                                  ("GET", "/api/v1/organizations/acme/groups/ci/cinim/members", "access.read", "ci/cinim", nsOrg), ("PUT", "/api/v1/organizations/acme/projects/ci/members/ann", "access.write", "ci", nsOrg),
+                                  ("GET", "/api/v1/organizations/acme/groups", "group.read", "", nsInOrg), ("GET", "/api/v1/organizations/acme/projects", "group.read", "", nsInOrg),
+                                  ("GET", "/api/v1/organizations/acme/holds", "hold.read", "", nsOrg), ("GET", "/api/v1/organizations/acme/triggers", "trigger.read", "", nsInOrg),
+                                  ("POST", "/api/v1/organizations/acme/triggers/t1:fire", "trigger.fire", "", nsInOrg), ("DELETE", "/api/v1/organizations/acme/triggers/t1", "trigger.write", "", nsInOrg)]:
+      let n = needOf(m, p)
+      check n.permission == want and n.group == grp and n.scope == sc and n.org == "acme"
+  test "a binding on a group holds for that group and everything under it, not for a sibling, a parent, or a group whose name only starts the same":
+    let u = g(); var x = u
+    x.addRole("org:acme/ci", builtinPermissions("dev"))
+    for grp in ["ci", "ci/cinim", "ci/cinim/deep"]: check x.holds("run.start", "acme", grp)
+    for grp in ["", "cinema", "ci2", "ci2/x", "team", "team/ci"]: check not x.holds("run.start", "acme", grp)
+    check not x.holds("run.start", "beta", "ci") and not x.holds("run.start", "acme")
+  test "on a group only what is about the tree of groups does anything: not the caches, the secrets, the locks, the members or the shard":
+    var x: Grants
+    x.addRole("org:acme/ci", builtinPermissions("admin"))
+    for p in ["run.start", "run.abort", "trigger.write", "trigger.fire", "variable.write", "group.write", "hold.write", "log.read", "access.write", "access.read"]: check x.holds(p, "acme", "ci/app")
+    for p in ["cache.delete", "secret.write", "secret.read", "lock.write", "storage.read", "user.manage", "shard.write"]:
+      check not x.holds(p, "acme", "ci/app") and not x.holdsAnywhere(p)
+  test "a role in the organisation holds for every group of it; a role on a group adds to it; the gate lets a list through for whoever holds the permission on some group of it":
+    var x: Grants
+    x.addRole("org:acme", builtinPermissions("ro"))
+    x.addRole("org:acme/ci", builtinPermissions("dev"))
+    check x.holds("run.read", "acme", "anything/at/all") and x.holds("run.start", "acme", "ci/app") and not x.holds("run.start", "acme", "other")
+    check x.allows(needOf("GET", "/api/v1/organizations/acme/groups/ci/app")) and x.allows(needOf("POST", "/api/v1/organizations/acme/triggers/t:fire"))
+    var y: Grants
+    y.addRole("org:acme/ci", builtinPermissions("dev"))
+    check y.allows(needOf("POST", "/api/v1/organizations/acme/triggers/t:fire")) and y.allows(needOf("GET", "/api/v1/organizations/acme/groups"))
+    check not y.allows(needOf("POST", "/api/v1/organizations/acme/triggers")) and not y.allows(needOf("GET", "/api/v1/organizations/beta/groups"))
+    check y.allows(needOf("PUT", "/api/v1/organizations/acme/groups/ci/variables/V")) == false         # dev does not write variables
+    check y.allows(needOf("POST", "/api/v1/runs")) and y.allows(needOf("POST", "/api/v1/runs/x:abort")) and not y.allows(needOf("GET", "/api/v1/components"))
+    check y.groupsWith("run.start") == @[("acme", "ci")] and y.orgsTouched == @["acme"] and y.orgsWith("run.start").len == 0
+  test "a binding on a group with a path that is not one is nothing":
+    var x: Grants
+    x.addRole("org:acme/", builtinPermissions("dev"))
+    x.addRole("org:/ci", builtinPermissions("dev"))
+    check not x.holdsAnywhere("run.start")
 
 suite "D-84 what a user holds":
   test "a role at the shard holds in every organisation, a role in an organisation in that one only":
