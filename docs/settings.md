@@ -105,6 +105,11 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_ORG_RECONCILE_INTERVAL` | 300 | seconds between two passes of the reconciliation (SHD-008; the Helm value `organizations.reconcileInterval`, at least 10); a pass also runs at start |
 | `CINIM_ORG_RETENTION` | 1209600 (14 days) | seconds a switched-off organisation is kept before it is deleted for good with its namespace (the Helm value `organizations.retention`); `0` deletes it at once, a negative value never |
 | `CINIM_LDAP_SYNC_SECONDS` | 900 | seconds between two looks at the accounts that the directories (LDAP) of the organisations vouch for: one gone from its directory is switched off, the roles from its groups are made what the groups give (D-87; the Helm value `auth.ldapSyncSeconds`); `0` does not sync by the clock |
+| `CINIM_CLIENT_ADDR_HEADER` | empty | the header in which the proxy in front puts the address of the person (`X-Real-IP`); the core throttles the logins by it, the UI passes it on (`auth.clientAddrHeader`; D-97) |
+| `CINIM_MFA_REQUIRE_FOR` | empty | `admin` or `all`: who must have a second factor (TOTP) at the login; others may have it if they set it up (`auth.mfaRequireFor`; D-101) |
+| `CINIM_MFA_ISSUER` | `CiNim` | the name an authenticator app shows for the account (`auth.mfaIssuer`) |
+| `CINIM_OIDC_PROXY` | empty | an HTTP proxy (CONNECT) for the calls to OpenID Connect providers (`auth.oidcProxy`; D-102) |
+| `CINIM_AUDIT_TOKEN_<NAME>` | none | the bearer token of an HTTP sink of the audit log, named in its `token_env` (set from a Secret of Kubernetes; D-97) |
 | `CINIM_UI_URL` | empty | the address of the UI that the statuses told to the host of a repository link to (`<address>/runs/<id>`; the Helm value `status.uiUrl`; D-96) |
 | `CINIM_STATUS_API_URLS` | `https://api.github.com,https://gitlab.com/api/v4` | the addresses of the APIs of hosts that a project may name in its `status` setting, comma separated: the core sends a token to the address, so a project cannot choose one the shard does not allow (`status.apiUrls`; D-96) |
 | `CINIM_STATUS_PROXY` | empty | an HTTP proxy (`http://host:port`, CONNECT) for the calls to the host of a repository (`status.proxy`) |

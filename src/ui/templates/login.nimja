@@ -10,6 +10,10 @@
 </select></label>
 {% endif %}<label>User <input type="text" name="user" value="{{ h(user) }}" autocomplete="username" required autofocus></label>
 <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+<label>Code <span class="detail">(only if you have turned on two-step login)</span> <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label>
 <input type="hidden" name="next" value="{{ h(next) }}">
 <button type="submit">Log in</button>
-</form>{% endblock %}
+</form>
+{% if oidc.len > 0 %}<h2>Or log in with</h2>
+<ul class="plain">{% for o in oidc %}<li><a href="{{ h(base) }}/login/oidc/start?organization={{ h(o.organization) }}&amp;provider={{ h(o.provider) }}">{{ h(o.name) }}</a> <span class="detail">({{ h(o.organizationName) }})</span></li>
+{% endfor %}</ul>{% endif %}{% endblock %}

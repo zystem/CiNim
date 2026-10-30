@@ -1,5 +1,5 @@
 ## D-93, D-95: ci.trigger in the sandbox: what the script asks of the host (the payload of the `trigger` call), the answer it gets, and what it refuses before the host is asked.
-import std/[unittest, options, strutils, json]
+import std/[unittest, options, strutils, json, sequtils]
 import executor/[sandbox, journal, replay]
 
 proc run(script: string): tuple[r: ExecResult, calls: seq[(string, string)]] =
@@ -8,6 +8,7 @@ proc run(script: string): tuple[r: ExecResult, calls: seq[(string, string)]] =
   var calls: seq[(string, string)]
   let host: HostCallProc = proc (seq: int; kind, payload: string): Option[string] =
     calls.add (kind, payload)
+    if kind == "job_sh": return some("0\nout")
     some("s1_child" & $calls.len)
   (sb.execute(j, script, host), calls)
 
@@ -41,3 +42,14 @@ suite "D-93 D-95 ci.trigger":
     check sb.execute(j, "return ci.trigger('a.lua')", host).value == "s1_once"
     var sb2 = newSandbox()
     check sb2.execute(j, "return ci.trigger('a.lua')", host).value == "s1_once" and asked == 1
+
+suite "D-99 api on a step":
+  test "a step that names the permissions of the API asks for the token the way it asks for a secret":
+    let (r, calls) = run("ci.single['01']{ image = 'a', body = function(j) j:run(step.sh['0a']{ cmd = 'x', api = { 'run.read', 'log.read' } }) end }")
+    check r.code == "ok"
+    let opts = calls.filterIt(it[0] == "job_sh")[0][1]
+    check "\"api\":[\"log.read\",\"run.read\"]" in opts and "\"secrets\":[\"CINIM_API_TOKEN\"]" in opts
+  test "a bad list of permissions is the author\'s error":
+    for bad in ["api = 'run.read'", "api = {}", "api = { 5 }", "api = { 'Run Read' }"]:
+      let (r, _) = run("ci.single['01']{ image = 'a', body = function(j) j:run(step.sh['0a']{ cmd = 'x', " & bad & " }) end }")
+      check r.code == "script_error"

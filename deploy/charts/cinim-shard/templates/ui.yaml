@@ -34,6 +34,9 @@ spec:
             - {name: CINIM_UI_CORE_URL, value: "http://cinim-core:80"}
             - {name: CINIM_UI_BASE, value: {{ .Values.ui.path | quote }}}
             - {name: CINIM_UI_COOKIE_SECURE, value: {{ if .Values.ui.cookieSecure }}"on"{{ else }}"off"{{ end }}}
+            {{- if .Values.auth.clientAddrHeader }}
+            - {name: CINIM_CLIENT_ADDR_HEADER, value: {{ .Values.auth.clientAddrHeader | quote }}}
+            {{- end }}
           ports:
             - {name: http, containerPort: 18100}
           readinessProbe:

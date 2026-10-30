@@ -32,7 +32,7 @@ const ddl = [
   """CREATE TABLE IF NOT EXISTS api_tokens (
        id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL, scope TEXT NOT NULL,
        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, last_used_at INTEGER NOT NULL DEFAULT 0,
-       revoked_at INTEGER NOT NULL DEFAULT 0)""",
+       revoked_at INTEGER NOT NULL DEFAULT 0, restrict TEXT NOT NULL DEFAULT '')""",
   # VAR-001, core/orgvars.nim: the plain variables of an organisation, put into the environment of its steps
   """CREATE TABLE IF NOT EXISTS org_variables (
        tenant_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, name))""",
@@ -83,6 +83,26 @@ const ddl = [
   # D-93: who approved or rejected a run that waited for approval, and when (one answer from each person)
   """CREATE TABLE IF NOT EXISTS run_approvals (
        run_id TEXT NOT NULL, user_name TEXT NOT NULL, decision TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL, PRIMARY KEY (run_id, user_name))""",
+  # D-102: the OpenID Connect providers of an organisation (core/oidc.nim; the client secret is sealed in the vault), which claim values give which role, and the logins that are under way
+  """CREATE TABLE IF NOT EXISTS oidc_providers (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, issuer TEXT NOT NULL, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT 'openid profile email',
+       user_claim TEXT NOT NULL DEFAULT 'preferred_username', groups_claim TEXT NOT NULL DEFAULT 'groups', auto_create INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS oidc_providers_name ON oidc_providers (tenant_id, name)",
+  """CREATE TABLE IF NOT EXISTS oidc_group_map (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, provider_id TEXT NOT NULL, claim_value TEXT NOT NULL, role TEXT NOT NULL, created_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS oidc_group_map_key ON oidc_group_map (tenant_id, provider_id, claim_value, role)",
+  """CREATE TABLE IF NOT EXISTS oidc_pending (
+       state TEXT PRIMARY KEY, provider_id TEXT NOT NULL, verifier TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL)""",
+  # D-101: the second factor of a person (core/mfa.nim); the TOTP secret itself is sealed in the vault of the core, here are the flag, the last counter that was used and the hashes of the recovery codes
+  """CREATE TABLE IF NOT EXISTS user_mfa (
+       user_name TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, last_counter INTEGER NOT NULL DEFAULT 0, recovery TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)""",
+  # D-100: who a login of the host of a repository is in CiNim (set by an administrator of the organisation; what a person writes in a pull request counts as theirs only through this)
+  """CREATE TABLE IF NOT EXISTS vcs_identities (
+       tenant_id TEXT NOT NULL, provider TEXT NOT NULL, login TEXT NOT NULL, user_name TEXT NOT NULL, PRIMARY KEY (tenant_id, provider, login))""",
+  # D-97: where the audit log is sent (core/auditexport.nim); `cursor` is the id of the last event the receiver was given
+  """CREATE TABLE IF NOT EXISTS audit_sinks (
+       name TEXT PRIMARY KEY, url TEXT NOT NULL, token_env TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, cursor INTEGER NOT NULL DEFAULT 0,
+       last_ok_at INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '')""",
   """CREATE TABLE IF NOT EXISTS teams (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', group_dn TEXT NOT NULL DEFAULT '', server_id TEXT NOT NULL DEFAULT '',
        created_at INTEGER NOT NULL)""",
@@ -268,6 +288,7 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("runs", "script_pending", "INTEGER NOT NULL DEFAULT 0"),                # ... and its script is not read yet (the core reads it from the repository; the run is not led until it is)
   ("runs", "approval_deadline", "INTEGER NOT NULL DEFAULT 0"),             # ... and the time (unix seconds) after which it is TIMED_OUT
   ("groups", "required_approvals", "INTEGER NOT NULL DEFAULT 1"),
+  ("api_tokens", "restrict", "TEXT NOT NULL DEFAULT ''"),               # D-99: a token with a subset of the permissions of its user (JSON: permissions, organization?, group?), or a token of one step (scope run:<id>)
   ("groups", "status_target", "TEXT NOT NULL DEFAULT ''"),               # D-96: where the state of the runs of a project is told (the host of its repository: github or gitlab), as JSON
   ("runs", "status_sent", "TEXT NOT NULL DEFAULT ''"),                     # ... and the state that was told last
   ("groups", "allowed_callers", "TEXT NOT NULL DEFAULT ''"),              # D-93: the projects (or groups of them) whose pipelines may start runs of this project with ci.trigger, one path to a line          # D-93: how many approvals the runs of a project that ask for approval need

@@ -1,0 +1,44 @@
+<!-- D-97: rules for the events that CiNim sends (decoders: cinim_decoders.xml). Copy to /var/ossec/etc/rules/; the ids 100500-100599 are free in a default Wazuh.
+     `action` and `id` are static fields of Wazuh (a rule cannot name them with <field>), so the rules look for the action in the text of the event. -->
+<group name="cinim,audit,">
+  <rule id="100500" level="3">
+    <decoded_as>cinim-audit</decoded_as>
+    <description>CiNim audit: $(action) $(target) by $(actor) ($(outcome))</description>
+  </rule>
+
+  <rule id="100501" level="8">
+    <if_sid>100500</if_sid>
+    <field name="outcome">^denied$</field>
+    <description>CiNim: $(actor) was refused $(target)</description>
+    <group>access_denied,</group>
+  </rule>
+
+  <rule id="100502" level="8">
+    <if_sid>100500</if_sid>
+    <match>"action":"login"</match>
+    <field name="outcome">^failed$</field>
+    <description>CiNim: a wrong password for $(target)</description>
+    <group>authentication_failed,</group>
+  </rule>
+
+  <rule id="100503" level="10">
+    <if_sid>100500</if_sid>
+    <match>"action":"login"</match>
+    <field name="outcome">^throttled$</field>
+    <description>CiNim: logins of $(target) are refused for a while (too many wrong passwords)</description>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <rule id="100504" level="10" frequency="8" timeframe="120">
+    <if_matched_sid>100502</if_matched_sid>
+    <description>CiNim: many wrong passwords in two minutes</description>
+    <group>authentication_failures,</group>
+  </rule>
+
+  <rule id="100510" level="6">
+    <if_sid>100500</if_sid>
+    <regex type="pcre2">"action":"(user|role|member|token|ldap|team)\.</regex>
+    <description>CiNim: access was changed: $(action) $(target) by $(actor)</description>
+    <group>policy_changed,</group>
+  </rule>
+</group>

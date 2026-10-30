@@ -147,6 +147,16 @@ spec:
             {{- if .Values.auth.enabled }}
             # IAM-003: without a token or CINIM_AUTH=on the API is open
             - {name: CINIM_AUTH, value: "on"}
+            {{- if .Values.auth.clientAddrHeader }}
+            - {name: CINIM_CLIENT_ADDR_HEADER, value: {{ .Values.auth.clientAddrHeader | quote }}}
+            {{- end }}
+            {{- if .Values.auth.mfaRequireFor }}
+            - {name: CINIM_MFA_REQUIRE_FOR, value: {{ .Values.auth.mfaRequireFor | quote }}}
+            {{- end }}
+            - {name: CINIM_MFA_ISSUER, value: {{ .Values.auth.mfaIssuer | quote }}}
+            {{- if .Values.auth.oidcProxy }}
+            - {name: CINIM_OIDC_PROXY, value: {{ .Values.auth.oidcProxy | quote }}}
+            {{- end }}
             - {name: CINIM_LDAP_SYNC_SECONDS, value: {{ int64 .Values.auth.ldapSyncSeconds | quote }}}     # D-87: the accounts that directories vouch for, against the directories
             - {name: CINIM_PWNED_CHECK, value: {{ .Values.auth.pwnedCheck | quote }}}     # IAM-001: a new password is looked up in Pwned Passwords (k-anonymity); "off" for a shard with no way out
             {{- if .Values.auth.pwnedUrl }}

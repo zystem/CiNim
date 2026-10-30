@@ -1,0 +1,52 @@
+# A Gitea for the tests of the webhooks and of the statuses (D-96, D-100): helm install gitea gitea-charts/gitea --version 12.7.0 -n gitea --create-namespace -f values.yaml
+# Single pod, SQLite, no Valkey and no PostgreSQL: it is a test fixture, not a service. The admin is read from the Secret `gitea-admin` (keys username, password, email), made before the install:
+#   kubectl --context <cluster> -n gitea create secret generic gitea-admin --from-literal=username=gitea_admin --from-literal=password="$(openssl rand -hex 16)" --from-literal=email=admin@gitea.example.test
+# Replace gitea.example.test below with the host of the Ingress (and ROOT_URL / DOMAIN with the same).
+strategy:
+  type: Recreate
+replicaCount: 1
+postgresql-ha:
+  enabled: false
+postgresql:
+  enabled: false
+valkey-cluster:
+  enabled: false
+valkey:
+  enabled: false
+persistence:
+  enabled: true
+  size: 5Gi
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: gitea.example.test
+      paths:
+        - path: /
+          pathType: Prefix
+service:
+  ssh:
+    type: ClusterIP
+gitea:
+  admin:
+    existingSecret: gitea-admin
+    passwordMode: keepUpdated
+  config:
+    server:
+      DOMAIN: gitea.example.test
+      ROOT_URL: http://gitea.example.test/
+      DISABLE_SSH: true
+    database:
+      DB_TYPE: sqlite3
+    session:
+      PROVIDER: memory
+    cache:
+      ADAPTER: memory
+    queue:
+      TYPE: level
+    service:
+      DISABLE_REGISTRATION: true
+    webhook:
+      ALLOWED_HOST_LIST: private,external      # the core of the TESTING cluster is a private address
+    repository:
+      DEFAULT_BRANCH: main

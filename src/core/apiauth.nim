@@ -33,6 +33,7 @@ type
     grants*: Grants          ## what the user's roles give, at the shard and in each organisation (D-84)
     bindings*: seq[tuple[role, scope, source: string, cond: BindingCondition]]       ## the roles themselves, for GET /api/v1/me (with what each is tied to, D-92)
     need*: Need              ## what the request being served needs, set by the gate: `mayUseOrg` asks it for the organisation the handler finds
+    limited*: bool           ## D-99: a token with a subset of the permissions of its user, or a token of one step: it is not an administrator whatever the user is, and it makes no token
     mustChange*: bool        ## the user's password has to be changed first: the only thing allowed is the change of it
     why*: string             ## when not ok: `missing`, `malformed`, `unknown`, `expired`, `revoked`
 
@@ -65,6 +66,15 @@ func splitToken*(token: string): tuple[ok: bool, id, secret: string] =
   for ch in rest[0 ..< 12] & rest[13 .. ^1]:
     if ch notin HexDigits: return
   (true, rest[0 ..< 12], rest[13 .. ^1])
+
+func headerOfRaw*(rawRequest, name: string): string =
+  ## the value of a header of a raw HTTP request ("" when there is none or `name` is empty); only the head is looked at, the name is case-insensitive
+  if name.len == 0: return
+  let headEnd = rawRequest.find("\r\n\r\n")
+  let head = if headEnd >= 0: rawRequest[0 ..< headEnd] else: rawRequest
+  for line in head.split("\r\n"):
+    let colon = line.find(':')
+    if colon > 0 and line[0 ..< colon].strip.toLowerAscii == name.toLowerAscii: return line[colon + 1 .. ^1].strip
 
 func bearerOf*(rawRequest: string): string =
   ## the bearer token of a raw HTTP request, "" when there is none; only the header part is looked at, the name is case-insensitive
@@ -182,6 +192,7 @@ func mayCall*(p: Principal; meth, path: string): bool =
   if not p.ok: return false
   if meth == "GET" and (path == "/api/v1/me" or path == "/api/v1/me/can"): return true          # whoever asks is told about themself
   if p.admin: return true
+  if p.user.len > 0 and not p.limited and (path == "/api/v1/me/tokens" or path.startsWith("/api/v1/me/tokens/") or path == "/api/v1/me/mfa" or path.startsWith("/api/v1/me/mfa/")): return true          # D-99: a person\'s own tokens
   if p.user.len > 0: return p.grants.allows(needOf(meth, path)) or selfService(p.user, meth, path)
   p.org.len > 0 and path.startsWith(runsBase)
 
@@ -205,6 +216,86 @@ proc rotateApiToken*(c: var RqClient; id: string; now: int64): tuple[ok: bool, i
      t.id, name, secretHash(t.secret), vals[0][1].getStr, now, vals[0][2].getBiggestInt],
     ["UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at = 0", now, id]], transaction = true)
   (true, t.id, t.token)
+
+type TokenRestrict* = object
+  permissions*: seq[string]
+  organization*, group*: string          ## the organisation (and the project or group in it) the token is for; "" for the places its user holds the permissions
+
+proc parseRestrict*(text: string): TokenRestrict =
+  if text.len == 0: return
+  try:
+    let j = parseJson(text)
+    if j.kind != JObject: return
+    if j.hasKey("permissions") and j["permissions"].kind == JArray:
+      for x in j["permissions"]: (if x.kind == JString: result.permissions.add x.getStr)
+    result.organization = j{"organization"}.getStr
+    result.group = j{"group"}.getStr
+  except JsonParsingError: discard
+
+func restrictGrants*(g: Grants; r: TokenRestrict): Grants =
+  ## D-99: what a token with a subset of its user\'s permissions holds: the permissions it names, and only where the user holds them (and only in the organisation, or the project, it is for). A role
+  ## of the shard becomes the organisation\'s when the token is for one; a token for no organisation keeps the places the user has.
+  let perms = r.permissions.toHashSet
+  if r.organization.len == 0 and r.group.len == 0:
+    for p in perms:
+      if p in g.shard: result.shard.incl p
+    for slug, set in g.orgs:
+      var kept = initHashSet[string]()
+      for p in set:
+        if p in perms: kept.incl p
+      if kept.len > 0: result.orgs[slug] = kept
+    for slug, bs in g.groups:
+      for b in bs:
+        var kept = initHashSet[string]()
+        for p in b.perms:
+          if p in perms: kept.incl p
+        if kept.len > 0: result.groups.mgetOrPut(slug, @[]).add (b.path, kept)
+    for slug, bs in g.limited:
+      for b in bs:
+        var kept = initHashSet[string]()
+        for p in b.perms:
+          if p in perms: kept.incl p
+        if kept.len > 0: result.limited.mgetOrPut(slug, @[]).add (b.path, kept, b.onlyOwn, b.refs)
+    return
+  let org = r.organization
+  if r.group.len > 0:
+    var kept = initHashSet[string]()
+    for p in perms:
+      if levelOf(p) == lvGroup and g.holds(p, org, r.group): kept.incl p
+    if kept.len > 0: result.groups[org] = @[(r.group, kept)]
+    for b in g.limited.getOrDefault(org):
+      if b.path.len == 0 or covers(b.path, r.group):
+        var lk = initHashSet[string]()
+        for p in b.perms:
+          if p in perms: lk.incl p
+        if lk.len > 0: result.limited.mgetOrPut(org, @[]).add (r.group, lk, b.onlyOwn, b.refs)
+    return
+  var kept = initHashSet[string]()
+  for p in perms:
+    if levelOf(p) != lvShard and g.holds(p, org): kept.incl p
+  if kept.len > 0: result.orgs[org] = kept
+  for b in g.groups.getOrDefault(org):
+    var gk = initHashSet[string]()
+    for p in b.perms:
+      if p in perms: gk.incl p
+    if gk.len > 0: result.groups.mgetOrPut(org, @[]).add (b.path, gk)
+  for b in g.limited.getOrDefault(org):
+    var lk = initHashSet[string]()
+    for p in b.perms:
+      if p in perms: lk.incl p
+    if lk.len > 0: result.limited.mgetOrPut(org, @[]).add (b.path, lk, b.onlyOwn, b.refs)
+
+proc listOwnTokens*(c: var RqClient; user: string): JsonNode =
+  result = newJArray()
+  let vals = c.query(%*[["SELECT id, name, created_at, expires_at, last_used_at, revoked_at, restrict FROM api_tokens WHERE scope = ? ORDER BY created_at", userScope(user)]])["results"][0]{"values"}
+  if vals != nil:
+    for v in vals:
+      var item = %*{"id": v[0].getStr, "name": v[1].getStr, "created_at": v[2].getBiggestInt, "expires_at": v[3].getBiggestInt, "last_used_at": v[4].getBiggestInt, "revoked_at": v[5].getBiggestInt}
+      if v[6].getStr.len > 0: item["restrict"] = (try: parseJson(v[6].getStr) except JsonParsingError: newJNull())
+      result.add item
+
+proc revokeOwnToken*(c: var RqClient; user, id: string; now: int64): bool =
+  c.execute(%*[["UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND scope = ? AND revoked_at = 0", now, id, userScope(user)]])["results"][0]{"rows_affected"}.getInt > 0
 
 proc listApiTokens*(c: var RqClient): JsonNode =
   ## never the secret, nor its hash
@@ -329,6 +420,8 @@ proc deleteUser*(c: var RqClient; name: string; now: int64): bool =
     ["UPDATE api_tokens SET revoked_at = ? WHERE scope = ? AND revoked_at = 0", now, userScope(name)],
     ["DELETE FROM role_bindings WHERE user_name = ?", name],
     ["DELETE FROM team_members WHERE user_name = ?", name],
+    ["DELETE FROM user_mfa WHERE user_name = ?", name],
+    ["DELETE FROM step_secrets WHERE tenant_id = '~mfa' AND name = ?", name],
     ["DELETE FROM users WHERE name = ?", name]], transaction = true)
   true
 
@@ -461,6 +554,7 @@ proc resetUserCredentials*(c: var RqClient; user: string; now: int64): tuple[ok:
   let pw = mintPassword()
   discard c.execute(%*[
     ["UPDATE users SET password_hash = ?, must_change = 1 WHERE name = ?", passwordHash(pw), user],
+    ["DELETE FROM user_mfa WHERE user_name = ?", user],          # D-101: a lost password is often a lost phone: the reset turns the second factor off, the person sets it up again
     ["UPDATE api_tokens SET revoked_at = ? WHERE scope = ? AND revoked_at = 0", now, userScope(user)]], transaction = true)
   let role = if u.roles.len > 0: u.roles[0] else: ""
   (true, UserCredential(user: user, role: role, password: pw, token: c.newUserToken(user, now)))
@@ -614,6 +708,11 @@ proc explainCall*(c: var RqClient; p: Principal; meth, path, org, group: string)
     result["allowed"] = %true
     result["reason"] = %"every user may change their own password"
     return
+  if p.limited:
+    let ok = p.mayCall(meth, path)
+    result["allowed"] = %ok
+    result["reason"] = %(if ok: "this token holds the permission" else: "this token holds a subset of its user\'s permissions and does not hold " & n.permission)
+    return
   if n.permission.len == 0:
     result["reason"] = %"this route is named for no role: only an administrator may call it"
     return
@@ -635,6 +734,59 @@ proc explainCall*(c: var RqClient; p: Principal; meth, path, org, group: string)
   result["allowed"] = %allowed
   result["reason"] = %(if allowed: "held through the roles listed" elif n.scope == nsShard: "this needs a role at the shard, and a role in an organisation does not count" else: "no role of yours has " & n.permission & " " & where)
 
+proc createRestrictedToken*(c: var RqClient; user, name: string; r: TokenRestrict; expiresAt, now: int64): tuple[id, token, error: string] =
+  ## A token of `user` that holds only the permissions named (a subset of what the user holds now; a token can lose rights with its user, never gain any). "" error when made.
+  if r.permissions.len == 0 or r.permissions.len > 40: return ("", "", "permissions is a list of 1 to 40 permissions")
+  let u = c.userRoles(user, now)
+  if not u.found: return ("", "", "no such user")
+  for p in r.permissions:
+    if not isPermission(p): return ("", "", "no such permission: " & p)
+    if r.organization.len > 0 and levelOf(p) == lvShard: return ("", "", "a token for an organisation cannot hold " & p & ", which is the shard\'s own")
+    let held = if r.organization.len > 0: u.grants.holds(p, r.organization, r.group) or (r.group.len == 0 and u.grants.holdsWithin(p, r.organization))
+               else: u.grants.holdsAnywhere(p)
+    if not held: return ("", "", "you do not hold " & p & (if r.organization.len > 0: " in " & r.organization else: ""))
+  if name.len == 0 or name.len > 100: return ("", "", "a token has a name of 1 to 100 characters")
+  let t = mintToken()
+  var j = %*{"permissions": r.permissions}
+  if r.organization.len > 0: j["organization"] = %r.organization
+  if r.group.len > 0: j["group"] = %r.group
+  discard c.execute(%*[["INSERT INTO api_tokens (id, name, secret_hash, scope, created_at, expires_at, restrict) VALUES (?, ?, ?, ?, ?, ?, ?)", t.id, name, secretHash(t.secret), userScope(user), now, expiresAt, $j]])
+  (t.id, t.token, "")
+
+const
+  stepTokenReadPermissions* = ["run.read", "log.read", "artifact.read"]
+  stepTokenPermissions* = ["run.read", "log.read", "artifact.read", "run.abort", "run.retry", "run.start", "trigger.fire", "group.read", "variable.read", "cache.read"]
+  stepTokenSeconds* = 6 * 3600'i64
+  apiTokenName* = "CINIM_API_TOKEN"
+
+proc mintStepToken*(c: var RqClient; runId: string; step, attempt: int; perms: seq[string]; now: int64): tuple[token, error: string] =
+  ## D-99: the token of a step that asked for one (`api = {...}`): for the project of the run, the permissions it named, while the run lasts. What it may name is limited: reading the run, its logs and
+  ## artifacts for any run; the rest (stopping, starting, firing) only when the person who started the run holds it where the run is, so a step never has more than the person has.
+  if perms.len == 0 or perms.len > 10: return ("", "api is a list of 1 to 10 permissions")
+  let r = c.query(%*[["SELECT COALESCE(o.slug, ''), COALESCE(g.path, ''), COALESCE(r.actor_id, '') FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id LEFT JOIN groups g ON g.id = r.group_id WHERE r.id = ?", runId]])["results"][0]{"values"}
+  if r == nil or r.len == 0: return ("", "no such run")
+  let slug = r[0][0].getStr
+  let path = r[0][1].getStr
+  let actor = r[0][2].getStr
+  if slug.len == 0: return ("", "a step token belongs to a run of an organisation")
+  var held: Grants
+  var person = false
+  if actor.startsWith("user:"):
+    let u = c.userRoles(actor[5 .. ^1], now)
+    if u.found and not u.disabled:
+      held = u.grants
+      person = true
+  for p in perms:
+    if p notin stepTokenPermissions: return ("", p & " cannot be given to a step (it may be one of " & stepTokenPermissions.join(", ") & ")")
+    if p in stepTokenReadPermissions: continue
+    if not person: return ("", p & " needs a run started by a person: this run was started by " & (if actor.len > 0: actor else: "nobody"))
+    if not held.holds(p, slug, path): return ("", "the person who started the run does not hold " & p & " for " & slug & (if path.len > 0: "/" & path else: ""))
+  let name = "step " & runId & "/" & $step & "/" & $attempt
+  let t = mintToken()
+  discard c.execute(%*[["UPDATE api_tokens SET revoked_at = ? WHERE name = ? AND revoked_at = 0", now, name],
+    ["INSERT INTO api_tokens (id, name, secret_hash, scope, created_at, expires_at, restrict) VALUES (?, ?, ?, ?, ?, ?, ?)", t.id, name, secretHash(t.secret), "run:" & runId, now, now + stepTokenSeconds, $(%*{"permissions": perms})]], transaction = true)
+  (t.token, "")
+
 proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Principal =
   ## the principal of a request. The administrator token of the chart is compared in constant time on its hash; every other token is looked up
   ## by its id and its secret compared the same way.
@@ -643,7 +795,7 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
     return Principal(ok: true, admin: true, operator: true, name: "shard administrator", id: "admin")
   let t = splitToken(bearer)
   if not t.ok: return Principal(why: "malformed")
-  let r = c.query(%*[["SELECT secret_hash, scope, name, expires_at, revoked_at, last_used_at FROM api_tokens WHERE id = ?", t.id]])
+  let r = c.query(%*[["SELECT secret_hash, scope, name, expires_at, revoked_at, last_used_at, restrict FROM api_tokens WHERE id = ?", t.id]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return Principal(why: "unknown")
   let row = vals[0]
@@ -657,6 +809,20 @@ proc authenticate*(c: var RqClient; adminToken, bearer: string; now: int64): Pri
     if not u.found or u.disabled or u.bindings.len == 0: return Principal(why: "revoked")
     result = Principal(ok: true, user: userName, roles: u.roles, admin: roleAdmin in u.roles, mustChange: u.mustChange,
                        grants: u.grants, bindings: u.bindings)
+    if row[6].getStr.len > 0:
+      # D-99: a token with a subset: what the user holds now, cut to the permissions (and the place) the token was made for; never an administrator
+      result.grants = restrictGrants(u.grants, parseRestrict(row[6].getStr))
+      result.admin = false
+      result.limited = true
+  elif row[1].getStr.startsWith("run:"):
+    # D-99: the token of one step: for the project of the run, the permissions it was made with, and only while the run has not ended
+    let rid = row[1].getStr[4 .. ^1]
+    let rs = c.query(%*[["SELECT r.state, COALESCE(o.slug, ''), COALESCE(g.path, '') FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id LEFT JOIN groups g ON g.id = r.group_id WHERE r.id = ?", rid]])["results"][0]{"values"}
+    if rs == nil or rs.len == 0 or rs[0][0].getStr in ["OK", "FAILED", "ABORTED", "SKIPPED", "TIMED_OUT", "INFRASTRUCTURE_ERROR"]: return Principal(why: "revoked")
+    let rr = parseRestrict(row[6].getStr)
+    var g: Grants
+    g.addRole("org:" & rs[0][1].getStr & (if rs[0][2].getStr.len > 0: "/" & rs[0][2].getStr else: ""), rr.permissions)
+    result = Principal(ok: true, user: "~" & t.id, grants: g, limited: true)
   else:
     result = principalOf(row[1].getStr)
   result.name = row[2].getStr

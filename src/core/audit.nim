@@ -11,6 +11,7 @@ const
   auditRetention* = 90 * 86400'i64
   loginMaxFailures* = 5                  ## wrong passwords for one name within `loginWindow` seconds, and the next attempt is refused until the oldest has aged out
   loginWindow* = 300'i64
+  loginAddrMax* = 20                     ## D-97: wrong passwords from one address within `loginWindow` seconds (all names together)
   loginGlobalMax* = 100                  ## wrong passwords for all names within a minute: somebody is trying many names, nobody may log in until it calms down
   loginGlobalWindow* = 60'i64
   maxDetail = 300
@@ -18,7 +19,8 @@ const
 
 func actorOf*(p: Principal): string =
   ## who is acting: a user by name, the operator's token, another token by its id
-  if p.user.len > 0: "user:" & p.user
+  if p.limited: "token:" & p.id                      # D-99: a token with a subset of permissions acts as itself, though it stands for a user
+  elif p.user.len > 0: "user:" & p.user
   elif p.operator: "operator"
   elif p.id.len > 0: "token:" & p.id
   else: "open"
@@ -68,11 +70,31 @@ proc loginFailures*(c: var RqClient; name: string; since: int64): tuple[count: i
 proc loginFailuresAll*(c: var RqClient; since: int64): int =
   c.query(%*[["SELECT count(*) FROM audit_log WHERE action = 'login' AND outcome = 'failed' AND at >= ?", since]])["results"][0]{"values"}[0][0].getInt
 
-proc loginRetryAfter*(c: var RqClient; name: string; now: int64): tuple[blocked: bool, seconds: int] =
-  ## whether a login of this name is refused now, and for how long (at least a second)
+func validAddress*(a: string): bool =
+  ## an IPv4 or IPv6 address as text (digits, hex digits, dots, colons, a %zone is not taken), at most 45 characters: what a proxy puts in a header, checked before it is kept or looked up
+  if a.len < 2 or a.len > 45 or not (a.contains('.') or a.contains(':')): return false
+  for ch in a:
+    if ch notin {'0' .. '9', 'a' .. 'f', 'A' .. 'F', '.', ':'}: return false
+  true
+
+func clientAddressOf*(headerValue: string): string =
+  ## D-97: the address in the header the shard names (`CINIM_CLIENT_ADDR_HEADER`, set by the proxy in front, which overwrites what a client sends); a list takes its first, one that is not an address is none
+  let first = headerValue.split(',')[0].strip
+  if validAddress(first): first else: ""
+
+proc loginFailuresFrom*(c: var RqClient; address: string; since: int64): tuple[count: int, oldest: int64] =
+  ## the wrong passwords from this address since `since` (the failed rows carry `addr=<address>` in their detail)
+  if address.len == 0: return
+  let v = c.query(%*[["SELECT count(*), COALESCE(min(at), 0) FROM audit_log WHERE action = 'login' AND outcome = 'failed' AND at >= ? AND detail LIKE ?", since, "%addr=" & address & "%"]])["results"][0]{"values"}[0]
+  (v[0].getInt, v[1].getBiggestInt)
+
+proc loginRetryAfter*(c: var RqClient; name: string; now: int64; address = ""): tuple[blocked: bool, seconds: int] =
+  ## whether a login of this name (or from this address) is refused now, and for how long (at least a second)
   let n = c.loginFailures(name, now - loginWindow)
+  let a = c.loginFailuresFrom(address, now - loginWindow)
   let all = c.loginFailuresAll(now - loginGlobalWindow)
-  if not loginBlocked(n.count, all): return (false, 0)
+  if not loginBlocked(n.count, all) and a.count < loginAddrMax: return (false, 0)
   let byName = if n.count >= loginMaxFailures: int(n.oldest + loginWindow - now) else: 0
+  let byAddr = if a.count >= loginAddrMax: int(a.oldest + loginWindow - now) else: 0
   let byAll = if all >= loginGlobalMax: int(loginGlobalWindow) else: 0
-  (true, max(1, max(byName, byAll)))
+  (true, max(1, max(byName, max(byAddr, byAll))))

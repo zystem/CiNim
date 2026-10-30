@@ -14,7 +14,7 @@ type
     secureCookie*: bool              ## the cookie says Secure: set it when the UI is reached over HTTPS
 
   UiRequest* = object
-    meth*, path*, query*, cookie*, host*, origin*, secFetchSite*: string
+    meth*, path*, query*, cookie*, host*, origin*, secFetchSite*, client*: string          ## `client`: the address a trusted proxy put in the header named by CINIM_CLIENT_ADDR_HEADER (D-97)
     form*: Table[string, string]
     formPairs*: seq[(string, string)]                  ## every name and value of a form, in order: a field that is there several times (the boxes of a list) keeps all its values
 
@@ -23,6 +23,8 @@ type
     headers*: seq[(string, string)]
     body*: string
 
+  OidcRow = object
+    organization, organizationName, provider, name: string
   OrgRow = object
     slug, name, state, namespace: string
   RunItem = object
@@ -289,7 +291,7 @@ proc setMenu(api: CoreApi; token: string) =
 
 # ------------------------------------------------------------------ the pages (templates/*.nimja: every expression through h() or raw(), tests/unit/ttemplates.nim)
 
-proc renderLogin(base, message, user, next, chosen: string; orgs: seq[OrgRow]): string =
+proc renderLogin(base, message, user, next, chosen: string; orgs: seq[OrgRow]; oidc: seq[OidcRow]): string =
   let loggedIn = false
   compileTemplateFile("login.nimja", templateDir)
 
@@ -328,6 +330,10 @@ proc renderRole(base: string; role: RoleView): string =
   let loggedIn = true
   compileTemplateFile("role.nimja", templateDir)
 
+proc renderMfa(base, message, secret, uri: string; codes: seq[string]; enabled, required: bool; left: int): string =
+  let loggedIn = true
+  compileTemplateFile("mfa.nimja", templateDir)
+
 proc renderMembers(base, scopeText, group, here, orgMembers: string; members: seq[MemberRow]; roleNames: seq[string]; canEdit: bool): string =
   let loggedIn = true
   compileTemplateFile("members.nimja", templateDir)
@@ -351,8 +357,18 @@ proc loginOrgs(api: CoreApi): seq[OrgRow] =
     let slug = o{"slug"}.getStr
     if isSlug(slug): result.add OrgRow(slug: slug, name: o{"name"}.getStr)
 
+proc loginOidc(api: CoreApi): seq[OidcRow] =
+  ## D-102: the providers of OpenID Connect that organisations offer, for the buttons of the login form
+  if api.loginOptions == nil: return
+  let r = api.loginOptions()
+  if r.status != asOk: return
+  for o in r.body{"oidc"}.getElems:
+    let org = o{"organization"}.getStr
+    let prov = o{"provider"}.getStr
+    if isSlug(org) and prov.len in 1 .. 40 and prov.allIt(it in {'a' .. 'z', '0' .. '9'}): result.add OidcRow(organization: org, organizationName: o{"organization_name"}.getStr, provider: prov, name: o{"name"}.getStr)
+
 proc loginPage(cfg: UiConfig; api: CoreApi; status: int; message, user, next: string; chosen = ""): UiResponse =
-  page(status, renderLogin(cfg.base, message, user, next, chosen, api.loginOrgs))
+  page(status, renderLogin(cfg.base, message, user, next, chosen, api.loginOrgs, api.loginOidc))
 
 proc messagePage(cfg: UiConfig; status: int; loggedIn: bool; title, text: string; detail = ""; back = ""; backText = ""): UiResponse =
   page(status, renderMessage(cfg.base, loggedIn, title, text, detail, back, backText))
@@ -403,7 +419,7 @@ proc doLogin(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
     if chosen != localAccount:
       if '@' in user: return loginPage(cfg, api, 400, "Write the login without @organisation: the organisation is chosen in the list.", user, next, chosen)
       name = user & "@" & chosen
-  let r = api.login(name, req.form.getOrDefault("password"))
+  let r = api.login(name, req.form.getOrDefault("password"), req.client, req.form.getOrDefault("code").strip)
   case r.status
   of asOk:
     if r.body{"password_change_required"}.getBool:
@@ -417,11 +433,44 @@ proc doLogin(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
     if orgs.len > 0:
       result.headers.add ("Set-Cookie", orgCookieName & "=" & chosen & "; Path=" & cookiePath(cfg) & "; SameSite=Strict; Max-Age=31536000" & (if cfg.secureCookie: "; Secure" else: ""))
   of asUnauthorized:
-    result = loginPage(cfg, api, 401, "Wrong user name or password.", user, next, chosen)
+    result = loginPage(cfg, api, 401, (if r.problem == "mfa_required": "Enter the code of your authenticator app (or a recovery code) as well." else: "Wrong user name or password, or code."), user, next, chosen)
   of asRefused:
     result = loginPage(cfg, api, (if r.code == 429: 429 else: 502), "The login was refused: " & r.message & ".", user, next, chosen)
   else:
     result = messagePage(cfg, 503, false, "The core does not answer", "Try again in a moment.", r.message, cfg.base & "/login", "Back to the login")
+
+proc oidcStart(cfg: UiConfig; api: CoreApi; query: Table[string, string]): UiResponse =
+  ## the button of a provider: the core makes the address of its login page (with a state kept for this login), and the browser goes there
+  let org = query.getOrDefault("organization")
+  let prov = query.getOrDefault("provider")
+  if not isSlug(org) or prov.len == 0 or prov.len > 40 or not prov.allIt(it in {'a' .. 'z', '0' .. '9'}):
+    return loginPage(cfg, api, 400, "That login is not known.", "", "")
+  let r = api.get("", "/api/v1/oidc/" & org & "/" & prov & "/start")
+  if r.status != asOk:
+    return loginPage(cfg, api, (if r.status == asNotFound: 404 else: 502), "The provider could not be reached: " & r.message & ".", "", "")
+  let target = r.body{"url"}.getStr
+  if not (target.startsWith("https://") or target.startsWith("http://localhost") or target.startsWith("http://127.0.0.1")):
+    return loginPage(cfg, api, 502, "The provider gave an address that cannot be followed.", "", "")
+  redirect(target)
+
+proc oidcCallback(cfg: UiConfig; api: CoreApi; query: Table[string, string]): UiResponse =
+  ## the provider sends the browser back here with a code and the state of the login; the core finishes it, and what comes is a session like the one a password gives
+  let state = query.getOrDefault("state")
+  let code = query.getOrDefault("code")
+  if query.hasKey("error") or state.len == 0 or code.len == 0:
+    return loginPage(cfg, api, 401, "The provider did not log you in" & (if query.hasKey("error"): " (" & query["error"][0 ..< min(query["error"].len, 60)].filterIt(it in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_', ' ', '-'}).join & ")" else: "") & ".", "", "")
+  let r = api.post("", "/api/v1/oidc/callback", $(%*{"state": state, "code": code}))
+  case r.status
+  of asOk:
+    let token = r.body{"token"}.getStr
+    let left = r.body{"expires_at"}.getBiggestInt(0) - getTime().toUnix()
+    result = redirect(cfg.base & "/orgs", sessionCookie(cfg, token, int(min(max(left, 60), sessionMax))))
+  of asForbidden:
+    result = loginPage(cfg, api, 403, "Logged in at the provider, but not here: " & r.message, "", "")
+  of asUnavailable:
+    result = messagePage(cfg, 503, false, "The provider or the core does not answer", "Try again in a moment.", r.message, cfg.base & "/login", "Back to the login")
+  else:
+    result = loginPage(cfg, api, 401, "The login did not go through: " & r.message & ".", "", "")
 
 proc orgsPage(cfg: UiConfig; api: CoreApi; token: string): UiResponse =
   let r = api.get(token, "/api/v1/organizations")
@@ -875,12 +924,37 @@ proc statusPage(cfg: UiConfig; api: CoreApi; token: string): UiResponse =
 proc notFound(cfg: UiConfig; loggedIn: bool): UiResponse =
   messagePage(cfg, 404, loggedIn, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
 
+proc mfaPage(cfg: UiConfig; api: CoreApi; token: string; status = 200; message, secret, uri = ""; codes: seq[string] = @[]): UiResponse =
+  let r = api.get(token, "/api/v1/me/mfa")
+  if r.status != asOk: return failed(cfg, r, "two-step login")
+  page(status, renderMfa(cfg.base, message, secret, uri, codes, r.body{"enabled"}.getBool, r.body{"required"}.getBool, r.body{"recovery_codes_left"}.getInt))
+
+proc mfaAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, action: string): UiResponse =
+  ## the forms of the page of two-step login: set up (the key and the address for an app), turn on with the first code (the recovery codes, once), turn off with a code
+  if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
+  let code = req.form.getOrDefault("code").strip
+  case action
+  of "enroll":
+    let r = api.post(token, "/api/v1/me/mfa/totp:enroll", "{}")
+    if r.status == asOk: return mfaPage(cfg, api, token, 200, "", r.body{"secret"}.getStr, r.body{"uri"}.getStr)
+    return mfaPage(cfg, api, token, 409, r.message)
+  of "confirm":
+    let r = api.post(token, "/api/v1/me/mfa/totp:confirm", $(%*{"code": code}))
+    if r.status == asOk: return mfaPage(cfg, api, token, 200, "", "", "", r.body{"recovery_codes"}.getElems.mapIt(it.getStr))
+    return mfaPage(cfg, api, token, 400, r.message)
+  of "disable":
+    let r = api.send("DELETE", token, "/api/v1/me/mfa", $(%*{"code": code}))
+    if r.status == asOk: return redirect(cfg.base & "/mfa")
+    return mfaPage(cfg, api, token, 403, r.message)
+  else: return messagePage(cfg, 404, true, "Not found", "There is no such page.")
+
 proc parseQuery(q: string): Table[string, string] =
   for k, v in decodeQuery(q): result[k] = v
 
 proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; query: Table[string, string]): UiResponse =
   api.setMenu(token)
   let parts = path.strip(chars = {'/'}).split('/')
+  if req.meth == "POST" and parts.len == 2 and parts[0] == "mfa": return mfaAction(cfg, api, req, token, parts[1])
   if req.meth == "POST" and parts.len == 3 and parts[0] == "runs" and isId(parts[1]) and parts[2] in ["abort", "retry", "approve", "reject"]:
     return runAction(cfg, api, req, token, parts[1], parts[2])
   if req.meth == "POST":
@@ -902,6 +976,7 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
     result.headers.add ("Allow", "GET")
     return
   if path == "/" or path == "": return redirect(cfg.base & "/orgs")
+  if parts == @["mfa"]: return mfaPage(cfg, api, token)
   if parts == @["roles"]: return rolesPage(cfg, api, token)
   if parts == @["new-role"]: return rolePage(cfg, api, token, "", true)
   if parts.len == 2 and parts[0] == "roles" and parts[1].isRoleName: return rolePage(cfg, api, token, parts[1], false)
@@ -948,6 +1023,8 @@ proc handle*(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
       result.headers.add ("Allow", "GET, POST")
       return
     return loginPage(cfg, api, 200, "", "", query.getOrDefault("next"), orgOfCookie(req.cookie))
+  if path == "/login/oidc/start" and req.meth == "GET": return oidcStart(cfg, api, query)
+  if path == "/login/oidc/callback" and req.meth == "GET": return oidcCallback(cfg, api, query)
   if path == "/logout":
     if not isPost:
       result = messagePage(cfg, 405, false, "Method not allowed", "POST.")

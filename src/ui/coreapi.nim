@@ -1,6 +1,8 @@
 ## What the UI knows of the core: three calls, and what they say in the terms of a page (docs/ui.md). `login` is POST /api/v1/login; `get` is a GET of any path of the API with the token of the user; `post` is a POST of an action.
 ## They are closures so that the tests give the UI a core that says what the test wants (tests/unit/tui.nim); `httpCoreApi` is the real one, over std/httpclient (plain HTTP inside the cluster).
-import std/[json, httpclient, strutils]
+import std/[json, httpclient, strutils, os]
+
+proc clientAddrHeader*(): string = getEnv("CINIM_CLIENT_ADDR_HEADER")          ## D-97: the header in which a trusted proxy puts the address of the person; the UI passes it on to the core with the login (empty: none)
 
 type
   ApiStatus* = enum
@@ -10,10 +12,11 @@ type
     status*: ApiStatus
     code*: int                       ## the HTTP status of the core's answer (0: there was none)
     body*: JsonNode                  ## the JSON of an answer that was asOk
+    problem*: string                 ## the `code` of a problem+json answer of the core (mfa_required, ...), "" when there was none
     message*: string                 ## what the core said (its `code` or `detail`) or why there was no answer; shown to a person, so plain words
 
   CoreApi* = object
-    login*: proc (user, password: string): ApiResult {.gcsafe.}
+    login*: proc (user, password, client, code: string): ApiResult {.gcsafe.}          ## `client` is the address of the person (D-97), "" when the UI is not told one
     loginOptions*: proc (): ApiResult {.gcsafe.}                       ## GET /api/v1/login/options: the organisations a person can choose at the login (D-87), asked with no token
     get*: proc (token, pathAndQuery: string): ApiResult {.gcsafe.}
     post*: proc (token, path, body: string): ApiResult {.gcsafe.}      ## a POST of an action (abort, retry) with the token of the user
@@ -29,8 +32,16 @@ proc problemText(body: string): string =
   except JsonParsingError:
     discard
 
+proc problemCode(body: string): string =
+  try:
+    let j = parseJson(body)
+    if j.kind == JObject: return j{"code"}.getStr
+  except JsonParsingError:
+    discard
+
 proc resultOf(code: int; retryAfter, body: string): ApiResult =
   result.code = code
+  if code >= 400 and code < 500: result.problem = problemCode(body)
   case code
   of 200, 201:
     result.status = asOk
@@ -51,20 +62,23 @@ proc resultOf(code: int; retryAfter, body: string): ApiResult =
 proc httpCoreApi*(url: string; timeoutMs = 10000): CoreApi =
   ## the core at `url` (http://host:port, no trailing slash)
   let base = url.strip(chars = {'/'}, leading = false)
-  proc call(meth: HttpMethod; path, token, body: string): ApiResult =
+  proc call(meth: HttpMethod; path, token, body: string; client = ""): ApiResult =
     var c: HttpClient
     try:
       c = newHttpClient(timeout = timeoutMs)
       c.headers = newHttpHeaders({"Accept": "application/json", "Content-Type": "application/json"})
       if token.len > 0: c.headers["Authorization"] = "Bearer " & token
+      if client.len > 0 and clientAddrHeader().len > 0: c.headers[clientAddrHeader()] = client
       let r = c.request(base & path, httpMethod = meth, body = body)
       result = resultOf(r.code.int, r.headers.getOrDefault("Retry-After"), r.body)
     except CatchableError as e:
       result = ApiResult(status: asUnavailable, message: "the core does not answer (" & e.msg & ")")
     finally:
       if c != nil: c.close()
-  result.login = proc (user, password: string): ApiResult {.gcsafe.} =
-    call(HttpPost, "/api/v1/login", "", $(%*{"user": user, "password": password}))
+  result.login = proc (user, password, client, code: string): ApiResult {.gcsafe.} =
+    var body = %*{"user": user, "password": password}
+    if code.len > 0: body["code"] = %code
+    call(HttpPost, "/api/v1/login", "", $body, client)
   result.loginOptions = proc (): ApiResult {.gcsafe.} =
     call(HttpGet, "/api/v1/login/options", "", "")
   result.get = proc (token, pathAndQuery: string): ApiResult {.gcsafe.} =

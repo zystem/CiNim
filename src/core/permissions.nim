@@ -56,6 +56,9 @@ const
     ("access.write", lvGroup, "give and take away roles in an organisation"),
     ("ldap.read", lvOrg, "see the directories of an organisation and which of their groups give which role"),
     ("ldap.map", lvOrg, "choose which groups of a directory give which role in the organisation, and sync now"),
+    ("oidc.read", lvOrg, "see the OpenID Connect providers of an organisation and which claims give which role"),
+    ("oidc.map", lvOrg, "choose which values of a provider's groups claim give which role in the organisation"),
+    ("oidc.write", lvShard, "add, change and remove the OpenID Connect providers of an organisation (the core connects to the address given)"),
     ("ldap.write", lvShard, "add, change, check and remove the directories of an organisation (the core connects to the address given)"),
     ("shard.read", lvShard, "see the components, the launch gate, the alerts, the router, the profile and the checks of the shard"),
     ("shard.write", lvShard, "change the profile, the launch gate and the reconciliation of the shard"),
@@ -67,7 +70,8 @@ const
     ("user.manage", lvShard, "make, delete and reset users"),
     ("role.manage", lvShard, "make and delete roles"),
     ("token.manage", lvShard, "make, list and revoke API tokens"),
-    ("audit.read", lvShard, "read the audit log")]
+    ("audit.read", lvShard, "read the audit log"),
+    ("audit.export", lvShard, "choose where the audit log is sent (syslog, an HTTP receiver)")]
 
   roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read"]
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
@@ -168,7 +172,14 @@ func orgNeed(meth, org, rest: string): Need =
   if has("/caches"): return need(if write: "cache.delete" else: "cache.read", nsOrg, org)
   if has("/secrets"): return need(if write: "secret.write" else: "secret.read", nsOrg, org)
   if has("/members"): return need(if write: "access.write" else: "access.read", nsOrg, org)
+  if has("/identities"): return need(if write: "access.write" else: "access.read", nsOrg, org)         # D-100: logins of a host of repositories
+  if has("/access"): return need(if write: "access.write" else: "access.read", nsOrg, org)           # D-98: the roles of the organisation as a document
   if has("/teams"): return need(if write: "access.write" else: "access.read", nsOrg, org)         # D-91: a team belongs to the organisation, not to a group
+  if has("/oidc"):
+    # D-102: a provider is an address the core connects to, so it is the shard\'s; which claim gives which role is the organisation\'s
+    if rest.startsWith("/oidc/providers"): return (if write: need("oidc.write", nsShard, org) else: need("oidc.read", nsOrg, org))
+    if rest.startsWith("/oidc/mappings"): return (if write: need("oidc.map", nsOrg, org) else: need("oidc.read", nsOrg, org))
+    return Need()
   if has("/ldap"):
     # D-87: the directories of an organisation. Adding one makes the core connect to an address someone typed, so it is the shard's; the map of groups to roles is the organisation's
     if rest == "/ldap" or rest == "/ldap/": return (if write: Need() else: need("ldap.read", nsOrg, org))
@@ -190,6 +201,7 @@ func needOf*(meth, path: string): Need =
   if rest == "roles" or rest.startsWith("roles/"): return (if write: need("role.manage", nsShard) else: need("access.read", nsAny))
   if rest == "permissions": return (if write: Need() else: need("access.read", nsAny))
   if rest == "tokens" or rest.startsWith("tokens/") or rest.startsWith("tokens:"): return need("token.manage", nsShard)
+  if rest.startsWith("audit/sinks/") and not isRead(meth): return need("audit.export", nsShard)
   if rest == "audit" or rest.startsWith("audit/"): return need("audit.read", nsShard)
   if rest == "stores" or rest.startsWith("stores/") or rest.startsWith("stores:"): return need("store.manage", nsShard)
   if rest in ["components", "alerts", "router", "organizations:check"]: return (if write: Need() else: need("shard.read", nsShard))

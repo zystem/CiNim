@@ -9,11 +9,15 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import prstatus, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import oidc, mfa, vcsapprove, accesscode, auditexport, prstatus, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
 import health
+
+let mfaPolicy = getEnv("CINIM_MFA_REQUIRE_FOR").toLowerAscii          ## D-101: "admin" or "all": who must have a second factor
+let mfaIssuer = getEnv("CINIM_MFA_ISSUER", "CiNim")
+let clientAddrHeaderName = getEnv("CINIM_CLIENT_ADDR_HEADER")          ## D-97: the header in which the proxy in front puts the address of the client (empty: the logins are not throttled by address)
 
 const base = "/api/v1/runs"
 const maxDownloadBytes = 64 * 1024 * 1024
@@ -240,6 +244,55 @@ proc onRequest() {.raises: [], gcsafe.} =
         if db.ok: jsonOk(Http200, %*{"status": "ready", "checks": {"database": "ok"}})
         else: reply(Http503, $(%*{"status": "not_ready", "checks": {"database": db.why}}), ["Content-Type: application/json"])
         return
+      if path.startsWith("/api/v1/vcs/"):
+        # D-100: the host of a project\'s repository tells what its reviewers say. It is no API token: the call is signed with the secret named in the project\'s status.webhook_secret, and
+        # a stranger is told nothing of which projects there are (the same answer for every reason). POST /api/v1/vcs/{organization}/{project path}
+        let notThere = proc () = problem(Http404, "not_found", "no such webhook, or the signature is not right")
+        if getMethod() != "POST":
+          problem(Http405, "method_not_allowed", "POST")
+          return
+        let vrest = path["/api/v1/vcs/".len .. ^1]
+        let vslash = vrest.find('/')
+        if vslash <= 0 or vslash == vrest.high:
+          notThere()
+          return
+        let vslug = vrest[0 ..< vslash]
+        var vc = newRq(coreRef.rqliteUrl)
+        let vorg = vc.organizationRow(vslug)
+        let vproj = if vorg.id.len > 0: vc.resolveProject(vorg.id, vrest[vslash + 1 .. ^1]) else: ResolvedProject(code: "x")
+        if vproj.code.len > 0:
+          notThere()
+          return
+        let vt = vc.statusTargetOf(vproj.id)
+        let vk = vaultKek()
+        if vt.provider.len == 0 or vt.webhookSecret.len == 0 or not vk.ready:
+          notThere()
+          return
+        let vsec = vc.getSecrets(vk.kek, vorg.id, @[vt.webhookSecret], vproj.id, true)
+        if not vsec.ok or vsec.values.len == 0:
+          notThere()
+          return
+        let vraw = getRequest()
+        let vbody = getBody()
+        let signed = if vt.provider == "github": verifyGithub(vsec.values[0][1], vbody, headerOfRaw(vraw, "x-hub-signature-256"))
+                     else: verifyGitlab(vsec.values[0][1], headerOfRaw(vraw, "x-gitlab-token"))
+        if not signed:
+          notThere()
+          return
+        let vj = try: parseJson(vbody) except JsonParsingError: nil
+        var ev = if vt.provider == "github": parseGithub(headerOfRaw(vraw, "x-github-event"), vj) else: parseGitlab(headerOfRaw(vraw, "x-gitlab-event"), vj)
+        if not ev.relevant or ev.repository.toLowerAscii != vt.repository.toLowerAscii:
+          jsonOk(Http202, %*{"ignored": "this event asks for nothing"})
+          return
+        if ev.sha.len == 0 and ev.prNumber > 0:
+          let tok = vc.getSecrets(vk.kek, vorg.id, @[vt.secret], vproj.id, true)
+          ev.sha = if tok.ok and tok.values.len > 0: prHead(vt, tok.values[0][1], ev.prNumber) else: ""
+          if ev.sha.len == 0:
+            problem(Http502, "host_unreachable", "the commit of the pull request could not be asked of the host (status.secret)")
+            return
+        let vres = vc.answerFromHost(vorg.id, vslug, vproj.id, vproj.path, vt.provider, ev, getTime().toUnix())
+        jsonOk(HttpCode(vres.status), vres.body)
+        return
       if path.startsWith("/api/v1/hooks/"):
         # a webhook is called with the secret of its own trigger, which is no API token (core/triggers.nim): it starts that trigger's run and nothing else
         if getMethod() != "POST":
@@ -272,6 +325,57 @@ proc onRequest() {.raises: [], gcsafe.} =
         else:
           problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         return
+      if path.startsWith("/api/v1/oidc/") and getMethod() in ["GET", "POST"] and (path == "/api/v1/oidc/callback" or path.endsWith("/start")):
+        # D-102: the login by an OpenID Connect provider (core/oidc.nim). GET /oidc/{organization}/{provider}/start gives the address of the provider\'s login page; the browser comes back to the UI, which
+        # gives the state and the code to POST /oidc/callback and gets what a login gives. Neither wants a token.
+        var oc = newRq(coreRef.rqliteUrl)
+        let onow = getTime().toUnix()
+        if path == "/api/v1/oidc/callback":
+          let cj = try: parseJson(getBody()) except JsonParsingError: nil
+          if getMethod() != "POST" or cj == nil or not cj.isString("state") or not cj.isString("code"):
+            problem(Http400, "invalid_request", "POST {\"state\": \"...\", \"code\": \"...\"} is required")
+            return
+          let vk = vaultKek()
+          let res = oc.finishLogin(vk.kek, vk.ready, cj["state"].getStr, cj["code"].getStr, onow)
+          case res.outcome
+          of olOk:
+            let ses = oc.sessionFor(res.user, onow)
+            if not ses.ok:
+              unauthorized("bad_credentials")
+              return
+            oc.record(onow, "user:" & res.user, "login", res.user, "ok", "oidc " & res.detail)
+            jsonOk(Http200, %*{"token": ses.token, "user": res.user, "roles": ses.roles, "expires_at": ses.expiresAt, "password_change_required": false})
+          of olBadState:
+            oc.record(onow, "login", "login", "oidc", "failed", res.detail)
+            problem(Http400, "bad_state", res.detail)
+          of olRefused:
+            oc.record(onow, "login", "login", "oidc", "failed", res.detail)
+            problem(Http401, "oidc_refused", res.detail)
+          of olNoAccount, olNameTaken:
+            oc.record(onow, "user:" & res.user, "login", res.user, "no_account", res.detail)
+            problem(Http403, "no_account", res.detail)
+          of olNoRole:
+            oc.record(onow, "user:" & res.user, "login", res.user, "no_role", res.detail)
+            problem(Http403, "no_role", res.detail)
+          of olUnavailable:
+            oc.record(onow, "login", "login", "oidc", "directory_unavailable", res.detail)
+            problem(Http503, "oidc_unavailable", res.detail)
+          return
+        let sparts = path["/api/v1/oidc/".len .. ^1].split('/')
+        if getMethod() != "GET" or sparts.len != 3:
+          problem(Http404, "not_found", "no such route")
+          return
+        let sorg = oc.organizationRow(sparts[0])
+        let sprov = if sorg.id.len > 0 and sorg.state == "active": oc.providerById(sorg.id, sparts[1]) else: OidcProvider()
+        if sprov.id.len == 0 or not sprov.enabled:
+          problem(Http404, "not_found", "no such login")
+          return
+        let began = oc.beginLogin(sprov, onow)
+        if not began.ok:
+          problem(Http503, "oidc_unavailable", began.error)
+          return
+        jsonOk(Http200, %*{"url": began.url})
+        return
       if path == "/api/v1/login/options":
         # D-87: what a login form offers before anyone is known: the organisations that have a directory (slug and name), so that a person picks theirs instead of typing `login@slug`.
         # Nothing else is told, and an organisation with no directory is not listed.
@@ -284,7 +388,12 @@ proc onRequest() {.raises: [], gcsafe.} =
           let vals = oc.query(%*[["SELECT DISTINCT o.slug, o.name FROM organizations o JOIN ldap_servers s ON s.tenant_id = o.id WHERE o.state = 'active' AND s.enabled = 1 ORDER BY o.slug"]])["results"][0]{"values"}
           if vals != nil:
             for v in vals: os.add %*{"slug": v[0].getStr, "name": v[1].getStr}
-        jsonOk(Http200, %*{"organizations": os})
+        var oidcList = newJArray()
+        if authOn:
+          let pv = oc.query(%*[["SELECT o.slug, o.name, p.id, p.name FROM oidc_providers p JOIN organizations o ON o.id = p.tenant_id WHERE o.state = 'active' AND p.enabled = 1 ORDER BY o.slug, p.name"]])["results"][0]{"values"}
+          if pv != nil:
+            for v in pv: oidcList.add %*{"organization": v[0].getStr, "organization_name": v[1].getStr, "provider": v[2].getStr, "name": v[3].getStr}
+        jsonOk(Http200, %*{"organizations": os, "oidc": oidcList})
         return
       if path == "/api/v1/login":
         # IAM-001: a user proves the password and gets a token with the rights of the user's roles (it needs no token itself)
@@ -308,9 +417,11 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           loginName = loginName & "@" & lj["organization"].getStr
         # too many wrong passwords for this name, or for all names together, and nobody is let in for a while (the audit is what is counted)
-        let wait = lc.loginRetryAfter(loginName, now)
+        let clientAddr = clientAddressOf(headerOfRaw(getRequest(), clientAddrHeaderName))           # D-97
+        let addrNote = if clientAddr.len > 0: "addr=" & clientAddr else: ""
+        let wait = lc.loginRetryAfter(loginName, now, clientAddr)
         if wait.blocked:
-          lc.record(now, "login", "login", loginName, "throttled", "retry after " & $wait.seconds & " s")
+          lc.record(now, "login", "login", loginName, "throttled", "retry after " & $wait.seconds & " s " & addrNote)
           reply(Http429, $(%*{"type": "about:blank", "status": 429, "code": "too_many_attempts",
                               "detail": "too many wrong passwords; try again in " & $wait.seconds & " seconds"}),
                 ["Content-Type: application/problem+json", "Retry-After: " & $wait.seconds])
@@ -323,6 +434,16 @@ proc onRequest() {.raises: [], gcsafe.} =
           case ld.outcome
           of loNoDirectory: discard                                    # the organisation has no directory: the name is tried among the local users, which it will not be
           of loOk:
+            let ldMfa = lc.checkSecondFactor(vaultKek().kek, ld.user, lj{"code"}.getStr(""), now)          # D-101
+            if ldMfa == mcMissing:
+              lc.record(now, "login", "login", ld.user, "mfa_required", addrNote)
+              reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "mfa_required", "detail": "the directory accepts the password; send the code of the authenticator app (or a recovery code) as \"code\""}),
+                    ["Content-Type: application/problem+json", "WWW-Authenticate: Bearer"])
+              return
+            if ldMfa == mcWrong:
+              lc.record(now, "login", "login", ld.user, "failed", "second factor " & addrNote)
+              unauthorized("bad_credentials")
+              return
             let ses = lc.sessionFor(ld.user, now)
             if ses.ok:
               lc.record(now, "user:" & ld.user, "login", ld.user, "ok", "directory " & ld.detail)
@@ -343,12 +464,25 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem(Http403, "no_account", "the directory knows you, but the organisation " & loginName[atAt + 1 .. ^1] & " has no account for you: ask its administrator to make one")
             return
           of loBadCredentials, loNameTaken:
-            lc.record(now, "login", "login", loginName, "failed", ld.detail)
+            lc.record(now, "login", "login", loginName, "failed", (if ld.detail.len > 0: ld.detail & " " else: "") & addrNote)
             unauthorized("bad_credentials")
             return
         let li = lc.login(loginName, lj["password"].getStr, now)
         if not li.ok:
-          lc.record(now, "login", "login", loginName, "failed")
+          lc.record(now, "login", "login", loginName, "failed", addrNote)
+          unauthorized("bad_credentials")
+          return
+        # D-101: the second factor, when the person has turned it on
+        let mfaCode = lj{"code"}.getStr("")
+        case lc.checkSecondFactor(vaultKek().kek, loginName, mfaCode, now)
+        of mcNotNeeded, mcOk: discard
+        of mcMissing:
+          lc.record(now, "login", "login", loginName, "mfa_required", addrNote)
+          reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "mfa_required", "detail": "the password is right; send the code of the authenticator app (or a recovery code) as \"code\""}),
+                ["Content-Type: application/problem+json", "WWW-Authenticate: Bearer"])
+          return
+        of mcWrong:
+          lc.record(now, "login", "login", loginName, "failed", "second factor " & addrNote)
           unauthorized("bad_credentials")
           return
         lc.record(now, "user:" & loginName, "login", loginName, "ok")
@@ -365,6 +499,11 @@ proc onRequest() {.raises: [], gcsafe.} =
           unauthorized(who.why)
           return
         who.need = needOf(getMethod(), path)          # D-84: what this request needs; `mayUseOrg` asks it again for the organisation a handler finds
+        # D-101: where the shard requires a second factor, a person who has none may set it up and do nothing else
+        if who.user.len > 0 and not who.limited and mfaRequired(mfaPolicy, who.admin) and not ac.mfaEnabled(who.user) and path != "/api/v1/me" and path != "/api/v1/me/can" and
+           not path.startsWith("/api/v1/me/mfa") and not selfService(who.user, getMethod(), path):
+          problem(Http403, "mfa_enrollment_required", "this shard requires two-step login: set it up first (POST /api/v1/me/mfa/totp:enroll, then :confirm)")
+          return
         if who.mustChange and path != "/api/v1/me" and not selfService(who.user, getMethod(), path):
           # IAM-001: the password of this user has to be changed first (the administrator after the first login): that is the one thing allowed
           problem(Http403, "password_change_required", "change the password first: PUT " & passwordPath(who.user) & " {\"current_password\": \"...\", \"password\": \"...\"}")
@@ -393,6 +532,101 @@ proc onRequest() {.raises: [], gcsafe.} =
           else:
             problem(Http403, "forbidden", "this token is for the runs of one organisation only")
           return
+      if path == "/api/v1/me/mfa" or path.startsWith("/api/v1/me/mfa/"):
+        # D-101: two-step login of the person. GET the state; POST /me/mfa/totp:enroll gives the secret and the address for an app; POST /me/mfa/totp:confirm {"code"} turns it on and gives the recovery codes
+        # once; DELETE /me/mfa {"code"} turns it off (a code of the app, or a recovery code)
+        if who.user.len == 0 or who.limited:
+          problem(Http403, "forbidden", "two-step login is the setting of a person, made with the person\'s own login")
+          return
+        var mc = newRq(coreRef.rqliteUrl)
+        let mnow = getTime().toUnix()
+        let mk = vaultKek()
+        let mj = if getBody().strip.len > 0: (try: parseJson(getBody()) except JsonParsingError: nil) else: newJObject()
+        if path == "/api/v1/me/mfa" and getMethod() == "GET":
+          jsonOk(Http200, %*{"enabled": mc.mfaEnabled(who.user), "required": mfaRequired(mfaPolicy, who.admin), "recovery_codes_left": mc.recoveryLeft(who.user)})
+        elif path == "/api/v1/me/mfa/totp:enroll" and getMethod() == "POST":
+          if not mk.ready:
+            problem(Http503, "secrets_unavailable", "the secrets of the core are not available")
+            return
+          let e = mc.enrollTotp(mk.kek, who.user, mfaIssuer, mnow)
+          if not e.ok:
+            problem(Http409, "mfa_enroll", e.error)
+            return
+          mc.record(mnow, actorOf(who), "mfa.enroll", who.user, "ok")
+          jsonOk(Http200, %*{"secret": e.secret, "uri": e.uri, "note": "add it to an authenticator app, then confirm with the code it shows"})
+        elif path == "/api/v1/me/mfa/totp:confirm" and getMethod() == "POST":
+          if mj == nil or not mj.isString("code"):
+            problem(Http400, "invalid_request", "{\"code\": \"123456\"} is required")
+            return
+          if not mk.ready:
+            problem(Http503, "secrets_unavailable", "the secrets of the core are not available")
+            return
+          let cf = mc.confirmTotp(mk.kek, who.user, mj["code"].getStr, mnow)
+          if not cf.ok:
+            problem(Http400, "mfa_confirm", cf.error)
+            return
+          mc.record(mnow, actorOf(who), "mfa.on", who.user, "ok")
+          jsonOk(Http200, %*{"enabled": true, "recovery_codes": cf.recovery, "recovery_note": "shown only now; each is good once"})
+        elif path == "/api/v1/me/mfa" and getMethod() == "DELETE":
+          if mj == nil or not mj.isString("code"):
+            problem(Http400, "invalid_request", "{\"code\": \"...\"} is required: a code of the app, or a recovery code")
+            return
+          if mc.mfaEnabled(who.user):
+            let chk = mc.checkSecondFactor(mk.kek, who.user, mj["code"].getStr, mnow)
+            if chk != mcOk:
+              mc.record(mnow, actorOf(who), "mfa.off", who.user, "denied", "the code was not right")
+              problem(Http403, "bad_code", "that code is not right")
+              return
+          mc.disableMfa(who.user)
+          mc.record(mnow, actorOf(who), "mfa.off", who.user, "ok")
+          jsonOk(Http200, %*{"enabled": false})
+        else:
+          problem(Http405, "method_not_allowed", "GET /me/mfa, POST /me/mfa/totp:enroll and :confirm, DELETE /me/mfa")
+        return
+      if path == "/api/v1/me/tokens" or path.startsWith("/api/v1/me/tokens/"):
+        # D-99: a person\'s own tokens with a subset of their permissions. POST {name, permissions: [...], organization?, group?, expires_in?} (seconds, a day to a year, 30 days when left out) gives the token once;
+        # GET lists them; DELETE /me/tokens/{id} revokes one. A token with a subset makes no token, and an administrator\'s token is the same as any other here (it is cut to what it names).
+        if who.user.len == 0 or who.limited:
+          problem(Http403, "forbidden", "tokens of a person are made with the person\'s own login, not with a token of the operator, of an organisation or with a subset")
+          return
+        var tc = newRq(coreRef.rqliteUrl)
+        let tnow = getTime().toUnix()
+        let tid = if path.len > "/api/v1/me/tokens/".len: path["/api/v1/me/tokens/".len .. ^1] else: ""
+        if tid.len == 0 and getMethod() == "GET":
+          jsonOk(Http200, %*{"tokens": tc.listOwnTokens(who.user)})
+        elif tid.len == 0 and getMethod() == "POST":
+          let tj = try: parseJson(getBody()) except JsonParsingError: nil
+          if tj == nil or tj.kind != JObject or not tj.isString("name") or tj{"permissions"}.isNil or tj["permissions"].kind != JArray:
+            problem(Http400, "invalid_request", "{\"name\": \"...\", \"permissions\": [\"run.read\", ...], \"organization\"?: \"slug\", \"group\"?: \"path\", \"expires_in\"?: seconds} is required")
+            return
+          var rs = TokenRestrict(organization: tj{"organization"}.getStr, group: normalPath(tj{"group"}.getStr))
+          for x in tj["permissions"].elems:
+            if x.kind != JString:
+              problem(Http400, "invalid_request", "permissions are strings")
+              return
+            rs.permissions.add x.getStr
+          if rs.group.len > 0 and rs.organization.len == 0:
+            problem(Http400, "invalid_request", "a group needs its organisation")
+            return
+          let secs = if tj.hasKey("expires_in") and tj["expires_in"].kind == JInt: tj["expires_in"].getBiggestInt else: 30'i64 * 86400
+          if secs < 86400 or secs > 365'i64 * 86400:
+            problem(Http400, "invalid_request", "expires_in is between a day and a year (in seconds)")
+            return
+          let made = tc.createRestrictedToken(who.user, tj["name"].getStr, rs, tnow + secs, tnow)
+          if made.error.len > 0:
+            problem(Http400, "invalid_token", made.error)
+            return
+          tc.record(tnow, actorOf(who), "token.create", made.id, "ok", rs.permissions.join(","))
+          jsonOk(Http201, %*{"id": made.id, "token": made.token, "permissions": rs.permissions, "expires_at": tnow + secs, "token_note": "shown only now"})
+        elif tid.len > 0 and getMethod() == "DELETE":
+          if not tc.revokeOwnToken(who.user, tid, tnow):
+            problem(Http404, "not_found", "no such token of yours")
+            return
+          tc.record(tnow, actorOf(who), "token.revoke", tid, "ok")
+          jsonOk(Http200, %*{"id": tid, "revoked": true})
+        else:
+          problem(Http405, "method_not_allowed", "GET and POST on /me/tokens, DELETE on /me/tokens/{id}")
+        return
       if path == "/api/v1/me" or path == "/api/v1/me/can":
         # the caller, as the core sees them: roles, permissions, organisations (/me); and whether one call would be allowed, which permission it needs and which role gives it (/me/can)
         if getMethod() != "GET":
@@ -507,6 +741,54 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"user": name, "changed": true, "sessions_revoked": done.sessionsRevoked, "breach_check": verdict.breachCheck})
         else:
           problem(Http404, "not_found", "no such route")
+        return
+      if path == "/api/v1/audit/export":
+        # D-97: the events as lines of JSON, the oldest first, after the id given: for a system that fetches (?after=<id>&limit=<n>, at most 500); the last id is in X-Audit-Last-Id
+        if getMethod() != "GET":
+          problem(Http405, "method_not_allowed", "GET")
+          return
+        var after = 0'i64
+        var lim = maxBatch
+        if qpos >= 0:
+          for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+            try:
+              if k == "after": after = parseBiggestInt(v)
+              if k == "limit": lim = parseInt(v)
+            except ValueError:
+              problem(Http400, "invalid_request", k & " must be a whole number")
+              return
+        var ec = newRq(coreRef.rqliteUrl)
+        let evs = ec.eventsAfter(after, lim)
+        reply(Http200, ndjson(evs), ["Content-Type: application/x-ndjson", "X-Audit-Last-Id: " & (if evs.len > 0: $evs[^1].id else: $after)])
+        return
+      if path == "/api/v1/audit/sinks" or path.startsWith("/api/v1/audit/sinks/"):
+        # D-97: where the audit log is sent. GET the sinks (audit.read); PUT /sinks/{name} {"url": ..., "token_env"?, "enabled"?, "from_start"?} and DELETE /sinks/{name} (audit.export)
+        var sc = newRq(coreRef.rqliteUrl)
+        let sname = if path.len > "/api/v1/audit/sinks/".len: path["/api/v1/audit/sinks/".len .. ^1] else: ""
+        if sname.len == 0:
+          if getMethod() != "GET":
+            problem(Http405, "method_not_allowed", "GET")
+            return
+          var arr = newJArray()
+          for s in sc.listSinks(): arr.add s.view
+          jsonOk(Http200, %*{"sinks": arr})
+        elif getMethod() == "PUT":
+          let sj = try: parseJson(getBody()) except JsonParsingError: nil
+          let ps = parseSink(sname, sj)
+          if ps.error.len > 0:
+            problem(Http400, "invalid_request", ps.error)
+            return
+          sc.putSink(ps.sink, sj{"from_start"}.getBool(false))
+          sc.record(getTime().toUnix(), actorOf(who), "audit.sink", sname, "ok", ps.sink.url)
+          jsonOk(Http200, %*{"name": sname, "url": ps.sink.url, "enabled": ps.sink.enabled})
+        elif getMethod() == "DELETE":
+          if not sc.deleteSink(sname):
+            problem(Http404, "not_found", "no such sink")
+            return
+          sc.record(getTime().toUnix(), actorOf(who), "audit.sink.delete", sname, "ok")
+          jsonOk(Http200, %*{"name": sname, "deleted": true})
+        else:
+          problem(Http405, "method_not_allowed", "GET, PUT or DELETE")
         return
       if path == "/api/v1/audit":
         # IAM-001, D-52: who did what to whom (administrator): ?limit=100 (at most 1000), ?actor=, ?action=, ?target=; the newest first
@@ -1088,6 +1370,124 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"id": partsL[3], "deleted": true})
         else:
           problem(Http404, "not_found", "no such route")
+        return
+      if path.startsWith("/api/v1/organizations/") and "/oidc/" in path:
+        # D-102: the providers of an organisation (GET; PUT|DELETE .../oidc/providers/{id|new}, the shard\'s) and the map of claim values to roles (GET, POST, DELETE .../oidc/mappings[/{id}])
+        let oparts = path["/api/v1/organizations/".len .. ^1].split('/')
+        var xc = newRq(coreRef.rqliteUrl)
+        let xorg = xc.organizationRow(oparts[0])
+        if xorg.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & oparts[0])
+          return
+        let xnow = getTime().toUnix()
+        if oparts.len >= 3 and oparts[2] == "providers":
+          if oparts.len == 3 and getMethod() == "GET":
+            var arr = newJArray()
+            for p in xc.providersOf(xorg.id): arr.add p.view
+            jsonOk(Http200, %*{"providers": arr})
+          elif oparts.len == 4 and getMethod() == "PUT":
+            let pj = try: parseJson(getBody()) except JsonParsingError: nil
+            let vk = vaultKek()
+            let made = xc.putProvider(vk.kek, vk.ready, xorg.id, (if oparts[3] == "new": "" else: oparts[3]), pj, xnow)
+            if made.error.len > 0:
+              problem(Http400, "invalid_provider", made.error)
+              return
+            xc.record(xnow, actorOf(who), "oidc.provider", oparts[0] & ": " & made.id, "ok")
+            jsonOk(Http200, xc.providerById(xorg.id, made.id).view)
+          elif oparts.len == 4 and getMethod() == "DELETE":
+            if not xc.deleteProvider(xorg.id, oparts[3]):
+              problem(Http404, "not_found", "no such provider")
+              return
+            xc.record(xnow, actorOf(who), "oidc.provider.delete", oparts[0] & ": " & oparts[3], "ok")
+            jsonOk(Http200, %*{"deleted": true})
+          else:
+            problem(Http405, "method_not_allowed", "GET /providers, PUT and DELETE /providers/{id} (PUT /providers/new makes one)")
+        elif oparts.len >= 3 and oparts[2] == "mappings":
+          if oparts.len == 3 and getMethod() == "GET":
+            jsonOk(Http200, %*{"mappings": xc.listOidcMappings(xorg.id)})
+          elif oparts.len == 3 and getMethod() == "POST":
+            let mj = try: parseJson(getBody()) except JsonParsingError: nil
+            if mj == nil or not mj.isString("provider") or not mj.isString("claim_value") or not mj.isString("role"):
+              problem(Http400, "invalid_request", "{\"provider\": \"id\", \"claim_value\": \"group\", \"role\": \"dev\"} is required")
+              return
+            let made = xc.putOidcMapping(xorg.id, mj["provider"].getStr, mj["claim_value"].getStr, mj["role"].getStr, xnow)
+            if made.error.len > 0:
+              problem(Http400, "invalid_mapping", made.error)
+              return
+            xc.record(xnow, actorOf(who), "oidc.map", oparts[0] & ": " & mj["claim_value"].getStr & " -> " & mj["role"].getStr, "ok")
+            jsonOk(Http201, %*{"id": made.id})
+          elif oparts.len == 4 and getMethod() == "DELETE":
+            if not xc.deleteOidcMapping(xorg.id, oparts[3]):
+              problem(Http404, "not_found", "no such mapping")
+              return
+            xc.record(xnow, actorOf(who), "oidc.unmap", oparts[0] & ": " & oparts[3], "ok")
+            jsonOk(Http200, %*{"deleted": true})
+          else:
+            problem(Http405, "method_not_allowed", "GET and POST /mappings, DELETE /mappings/{id}")
+        else:
+          problem(Http404, "not_found", "no such route")
+        return
+      if path.startsWith("/api/v1/organizations/") and "/identities" in path:
+        # D-100: who a login of the host of the repositories is in CiNim. GET /organizations/{slug}/identities; PUT|DELETE .../identities/{provider}/{login} ({"user": "..."})
+        let iparts = path["/api/v1/organizations/".len .. ^1].split('/')
+        if iparts.len < 2 or iparts[1] != "identities" or iparts.len notin [2, 4]:
+          problem(Http404, "not_found", "no such route")
+          return
+        var ic = newRq(coreRef.rqliteUrl)
+        let iorg = ic.organizationRow(iparts[0])
+        if iorg.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & iparts[0])
+          return
+        if iparts.len == 2:
+          if getMethod() != "GET":
+            problem(Http405, "method_not_allowed", "GET")
+            return
+          jsonOk(Http200, %*{"identities": ic.listIdentities(iorg.id)})
+        elif getMethod() == "PUT":
+          let ij = try: parseJson(getBody()) except JsonParsingError: nil
+          if ij == nil or not ij.isString("user"):
+            problem(Http400, "invalid_request", "{\"user\": \"account\"} is required")
+            return
+          let bad = ic.setIdentity(iorg.id, iparts[2], iparts[3], ij["user"].getStr)
+          if bad.len > 0:
+            problem(Http400, "invalid_identity", bad)
+            return
+          ic.record(getTime().toUnix(), actorOf(who), "identity.set", iparts[0] & ": " & iparts[2] & ":" & iparts[3], "ok", ij["user"].getStr)
+          jsonOk(Http200, %*{"provider": iparts[2], "login": iparts[3].toLowerAscii, "user": ij["user"].getStr})
+        elif getMethod() == "DELETE":
+          if not ic.deleteIdentity(iorg.id, iparts[2], iparts[3]):
+            problem(Http404, "not_found", "no such identity")
+            return
+          ic.record(getTime().toUnix(), actorOf(who), "identity.delete", iparts[0] & ": " & iparts[2] & ":" & iparts[3], "ok")
+          jsonOk(Http200, %*{"deleted": true})
+        else:
+          problem(Http405, "method_not_allowed", "PUT or DELETE")
+        return
+      if path.startsWith("/api/v1/organizations/") and path.endsWith("/access") and path.count('/') == 5:
+        # D-98: the roles of an organisation as a document (core/accesscode.nim). GET writes it; PUT reads it: ?dry_run=true says what would change, ?prune=true also takes away the hand-given roles it does not name
+        let accSlug = path["/api/v1/organizations/".len ..< path.len - "/access".len]
+        var xc = newRq(coreRef.rqliteUrl)
+        let accOrg = xc.organizationRow(accSlug)
+        if accOrg.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & accSlug)
+          return
+        if getMethod() == "GET":
+          jsonOk(Http200, xc.exportAccess(accOrg.id, accSlug))
+        elif getMethod() == "PUT":
+          var prune, dry = false
+          if qpos >= 0:
+            for k, v in decodeQuery(uri[qpos + 1 .. ^1]):
+              if k == "prune": prune = v == "true"
+              if k == "dry_run": dry = v == "true"
+          let doc = try: parseJson(getBody()) except JsonParsingError: nil
+          let done = xc.applyAccess(accOrg.id, accSlug, doc, prune, dry, who.user, getTime().toUnix())
+          if done.errors.len > 0:
+            problem(Http400, "invalid_access", done.errors.join("; "))
+            return
+          if not dry: xc.record(getTime().toUnix(), actorOf(who), "access.apply", accSlug, "ok", $done.changes.len & " changes" & (if prune: ", prune" else: ""))
+          jsonOk(Http200, %*{"dry_run": dry, "changes": done.changes})
+        else:
+          problem(Http405, "method_not_allowed", "GET or PUT")
         return
       if path.startsWith("/api/v1/organizations/") and "/members" in path:
         # D-84: who has which role in an organisation, or on a group or project of it. Read with `access.read`, changed with `access.write` (the gate has checked it for this organisation

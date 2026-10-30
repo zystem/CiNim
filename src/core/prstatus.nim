@@ -13,7 +13,7 @@ const
   statusWindowSeconds = 3'i64 * 86400         ## runs older than this are not told any more
 
 type StatusTarget* = object
-  provider*, repository*, secret*, apiUrl*: string           ## provider is "" when the project tells nobody
+  provider*, repository*, secret*, apiUrl*, webhookSecret*: string           ## `webhookSecret`: the name of the secret that signs the events of the host (D-100); provider is "" when the project tells nobody
 
 func allowedApiUrls*(): seq[string] =
   let e = getEnv("CINIM_STATUS_API_URLS")
@@ -30,11 +30,13 @@ proc parseStatusTarget*(j: JsonNode): tuple[target: StatusTarget, error: string]
   for k in ["provider", "repository", "secret"]:
     if not j.hasKey(k) or j[k].kind != JString or j[k].getStr.len == 0: return (StatusTarget(), "status." & k & " is required")
   let t = StatusTarget(provider: j["provider"].getStr, repository: j["repository"].getStr, secret: j["secret"].getStr,
+                       webhookSecret: (if j.hasKey("webhook_secret") and j["webhook_secret"].kind == JString: j["webhook_secret"].getStr else: ""),
                        apiUrl: (if j.hasKey("api_url") and j["api_url"].kind == JString and j["api_url"].getStr.len > 0: j["api_url"].getStr.strip(leading = false, chars = {'/'}) else: defaultApiUrl(j["provider"].getStr)))
   if t.provider notin ["github", "gitlab"]: return (StatusTarget(), "status.provider is github or gitlab")
   if t.repository.len > 200 or t.repository.count('/') < 1 or t.repository.startsWith("/") or t.repository.endsWith("/"): return (StatusTarget(), "status.repository is owner/name (a GitLab project may have groups: group/sub/name)")
   for ch in t.repository:
     if ch notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '.', '_', '-', '/'}: return (StatusTarget(), "status.repository has a character a repository name does not")
+  if t.webhookSecret.len > 100 or t.webhookSecret.contains({' ', '\n'}): return (StatusTarget(), "status.webhook_secret is the name of a secret of the organisation or of the project")
   if t.secret.len > 100 or t.secret.contains({' ', '\n'}): return (StatusTarget(), "status.secret is the name of a secret of the organisation or of the project")
   if t.apiUrl notin allowedApiUrls(): return (StatusTarget(), "status.api_url is not one the shard allows (" & allowedApiUrls().join(", ") & ")")
   (t, "")
@@ -54,10 +56,10 @@ proc setStatusTarget*(c: var RqClient; groupId: string; j: JsonNode): string =
     return
   let p = parseStatusTarget(j)
   if p.error.len > 0: return p.error
-  discard c.execute(%*[["UPDATE groups SET status_target = ? WHERE id = ?", $(%*{"provider": p.target.provider, "repository": p.target.repository, "secret": p.target.secret, "api_url": p.target.apiUrl}), groupId]])
+  discard c.execute(%*[["UPDATE groups SET status_target = ? WHERE id = ?", $(%*{"provider": p.target.provider, "repository": p.target.repository, "secret": p.target.secret, "api_url": p.target.apiUrl, "webhook_secret": p.target.webhookSecret}), groupId]])
 
 func viewOf*(t: StatusTarget): JsonNode =
-  if t.provider.len == 0: newJNull() else: %*{"provider": t.provider, "repository": t.repository, "secret": t.secret, "api_url": t.apiUrl}
+  if t.provider.len == 0: newJNull() else: %*{"provider": t.provider, "repository": t.repository, "secret": t.secret, "api_url": t.apiUrl, "webhook_secret": t.webhookSecret}
 
 func pick(gh: bool; a, b: string): string = (if gh: a else: b)
 

@@ -16,6 +16,7 @@ var
   sent: seq[string]                        # "METHOD path body" of every call made with `send` (PUT, DELETE, POST of the access pages)
   sendAnswer: ApiResult                    # what the stand-in core answers to it
   directoryOrgs: JsonNode                  # what GET /api/v1/login/options says
+  oidcOptions: JsonNode                    # ... and its `oidc` list
   postAnswer: ApiResult                    # what the stand-in core answers to a POST
 
 proc ok(body: JsonNode): ApiResult = ApiResult(status: asOk, code: 200, body: body)
@@ -24,17 +25,24 @@ proc fakeCore(): CoreApi =
   result.loginOptions = proc (): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
-      ok(%*{"organizations": directoryOrgs})
-  result.login = proc (user, password: string): ApiResult {.gcsafe.} =
+      ok(%*{"organizations": directoryOrgs, "oidc": oidcOptions})
+  result.login = proc (user, password, client, code: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
-      loginCalls.add user
+      loginCalls.add user & (if client.len > 0: "/" & client else: "")
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if password == "throttled": return ApiResult(status: asRefused, code: 429, message: "retry after 30 s")
+      if user == "twostep" and password == "right-password-1234":
+        if code.len == 0: return ApiResult(status: asUnauthorized, code: 401, problem: "mfa_required", message: "send the code")
+        if code == "123456": return ok(%*{"token": "tok-ann", "user": "twostep", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
+        return ApiResult(status: asUnauthorized, code: 401, problem: "bad_credentials", message: "bad_credentials")
       if user == "new" and password == "right-password-1234": return ok(%*{"token": "tok-new", "user": "new", "roles": ["admin"], "expires_at": 1800000000, "password_change_required": true})
       if (user == "ann" or user == "ann@acme") and password == "right-password-1234": return ok(%*{"token": "tok-ann", "user": "ann", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
       ApiResult(status: asUnauthorized, code: 401, message: "bad_credentials")
   result.get = proc (token, path: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
+      if path.startsWith("/api/v1/oidc/"):                      # D-102: no token wanted
+        calls.add "- " & path
+        return (if path in routes: ok(routes[path]) else: ApiResult(status: asNotFound, code: 404, message: "no such login"))
       if path != "/api/v1/me": calls.add token & " " & path            # the menu asks who the caller is on every page: not counted with what a page asked
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if token != "tok-ann": return ApiResult(status: asUnauthorized, code: 401, message: "bad token")
@@ -48,6 +56,7 @@ proc fakeCore(): CoreApi =
   result.post = proc (token, path, body: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
       posted.add token & " " & path & " " & body
+      if path == "/api/v1/oidc/callback": return postAnswer
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if token != "tok-ann": return ApiResult(status: asUnauthorized, code: 401, message: "bad token")
       postAnswer
@@ -73,6 +82,7 @@ proc reset() =
   sent = @[]
   sendAnswer = ok(%*{"ok": true})
   directoryOrgs = newJArray()
+  oidcOptions = newJArray()
   postAnswer = ok(%*{"id": "s1_b", "state": "ABORTED"})
   routes = initTable[string, JsonNode]()
   down = false
@@ -580,6 +590,53 @@ suite "the actions of a run":
     let r = handle(cfg, fakeCore(), req("POST", "/ui/runs/s1_b/abort", cookie = session, origin = "http://ui.example"))
     check r.status == 303 and r.header("Location") == "/ui/runs/s1_b"
     check posted == @["tok-ann /api/v1/runs/s1_b:abort {}"]
+  test "D-102 the login form offers the providers of OpenID Connect; the button starts a login at the provider; the way back gives a session, or says why not":
+    oidcOptions = %*[{"organization": "acme", "organization_name": "Acme <Corp>", "provider": "o12ab", "name": "Corp SSO"}, {"organization": "Bad Org", "organization_name": "x", "provider": "o1", "name": "no"}]
+    let form = handle(cfg, fakeCore(), req("GET", "/ui/login")).body
+    check "href=\"/ui/login/oidc/start?organization=acme&amp;provider=o12ab\"" in form and "Corp SSO" in form and "Acme &lt;Corp&gt;" in form and "Bad Org" notin form
+    routes["/api/v1/oidc/acme/o12ab/start"] = %*{"url": "https://sso.example/authorize?state=abc"}
+    let started = handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/start", query = "organization=acme&provider=o12ab"))
+    check started.status == 303 and started.header("Location") == "https://sso.example/authorize?state=abc" and calls == @["- /api/v1/oidc/acme/o12ab/start"]
+    routes["/api/v1/oidc/acme/o12ab/start"] = %*{"url": "javascript:alert(1)"}
+    check handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/start", query = "organization=acme&provider=o12ab")).status == 502
+    check handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/start", query = "organization=acme&provider=nope")).status == 404
+    check handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/start", query = "organization=Bad%20Org&provider=o1")).status == 400
+    postAnswer = ok(%*{"token": "tok-ann", "user": "ann@acme", "roles": ["dev"], "expires_at": 1800000000, "password_change_required": false})
+    let back = handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback", query = "code=c1&state=s1"))
+    check back.status == 303 and back.header("Location") == "/ui/orgs" and back.header("Set-Cookie").startsWith("cinim_ui=tok-ann") and posted[^1] == " /api/v1/oidc/callback {\"state\":\"s1\",\"code\":\"c1\"}"
+    postAnswer = ApiResult(status: asForbidden, code: 403, message: "the provider knows ann, but acme has no account for them")
+    check "has no account for them" in handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback", query = "code=c1&state=s1")).body
+    check handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback", query = "error=access_denied&state=s1")).status == 401 and "access_denied" in handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback", query = "error=access_denied&state=s1")).body
+    check handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback")).status == 401
+  test "D-101 the login asks for the code when the core says so, and passes it on":
+    var f = {"user": "twostep", "password": "right-password-1234"}.toTable
+    let first = handle(cfg, fakeCore(), req("POST", "/ui/login", form = f))
+    check first.status == 401 and "code of your authenticator app" in first.body and "name=\"code\"" in first.body
+    f["code"] = "000000"
+    check handle(cfg, fakeCore(), req("POST", "/ui/login", form = f)).status == 401 and "or code" in handle(cfg, fakeCore(), req("POST", "/ui/login", form = f)).body
+    f["code"] = " 123456 "
+    let ok = handle(cfg, fakeCore(), req("POST", "/ui/login", form = f))
+    check ok.status == 303 and ok.header("Set-Cookie").startsWith("cinim_ui=tok-ann")
+  test "D-101 the page of two-step login: off, set up, turned on with the recovery codes once, turned off":
+    routes["/api/v1/me/mfa"] = %*{"enabled": false, "required": true, "recovery_codes_left": 0}
+    var p = handle(cfg, fakeCore(), req("GET", "/ui/mfa", cookie = session))
+    check p.status == 200 and "<strong>off</strong>" in p.body and "This shard requires it" in p.body and "action=\"/ui/mfa/enroll\"" in p.body
+    postAnswer = ok(%*{"secret": "JBSWY3DPEHPK3PXP", "uri": "otpauth://totp/CiNim:ann?secret=JBSWY3DPEHPK3PXP"})
+    p = handle(cfg, fakeCore(), req("POST", "/ui/mfa/enroll", cookie = session, origin = "http://ui.example"))
+    check "JBSWY3DPEHPK3PXP" in p.body and "action=\"/ui/mfa/confirm\"" in p.body and posted == @["tok-ann /api/v1/me/mfa/totp:enroll {}"]
+    postAnswer = ok(%*{"enabled": true, "recovery_codes": ["K7QD2-M4XPA", "AAAAA-BBBBB"]})
+    p = handle(cfg, fakeCore(), req("POST", "/ui/mfa/confirm", cookie = session, origin = "http://ui.example", pairs = @[("code", " 123456 ")]))
+    check "K7QD2-M4XPA" in p.body and "shown only now" in p.body and posted[^1] == "tok-ann /api/v1/me/mfa/totp:confirm {\"code\":\"123456\"}"
+    routes["/api/v1/me/mfa"] = %*{"enabled": true, "required": false, "recovery_codes_left": 9}
+    check "<strong>on</strong>" in handle(cfg, fakeCore(), req("GET", "/ui/mfa", cookie = session)).body and "9 recovery codes" in handle(cfg, fakeCore(), req("GET", "/ui/mfa", cookie = session)).body
+    check handle(cfg, fakeCore(), req("POST", "/ui/mfa/disable", cookie = session, origin = "http://ui.example", pairs = @[("code", "654321")])).status == 303
+    check sent[^1] == "DELETE /api/v1/me/mfa {\"code\":\"654321\"}"
+    check handle(cfg, fakeCore(), req("POST", "/ui/mfa/enroll", cookie = session, origin = "https://evil.example")).status == 403
+  test "D-97 the login passes on the address that the proxy put in the header":
+    var r = req("POST", "/ui/login", form = {"user": "ann", "password": "right-password-1234"}.toTable)
+    r.client = "203.0.113.9"
+    discard handle(cfg, fakeCore(), r)
+    check loginCalls.len == 1 and loginCalls[0].endsWith("/203.0.113.9")
   test "D-93 a run that waits for approval says what it waits for; the buttons come when the core says so; the comment goes with the answer":
     routes["/api/v1/runs/s1_w"] = %*{"id": "s1_w", "organization": "acme", "state": "WAITING", "steps": [], "actions": {"approve": true, "reject": true},
                                      "approval": {"required": 2, "approved_by": ["bob"], "rejected_by": [], "deadline": 1_800_000_000, "waiting": true}}

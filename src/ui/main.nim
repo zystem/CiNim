@@ -33,6 +33,7 @@ proc onRequest() {.gcsafe, nimcall, raises: [].} =
       req.host = headerOf(raw, "host")
       req.origin = headerOf(raw, "origin")
       req.secFetchSite = headerOf(raw, "sec-fetch-site")
+      if clientAddrHeader().len > 0: req.client = headerOf(raw, clientAddrHeader())
       if req.meth == "POST":
         for k, v in decodeQuery(getBody()):
           req.form[k] = v

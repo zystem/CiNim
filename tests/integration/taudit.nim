@@ -66,4 +66,17 @@ suite "IAM-001 the audit and the throttle of the login":
       check actorOf(Principal(ok: true, operator: true, id: "admin")) == "operator"
       check actorOf(Principal(ok: true, id: "abc123")) == "token:abc123"
       check actorOf(Principal(ok: true, admin: true, name: "open API")) == "open"
+    test "D-97 twenty wrong passwords from one address, whatever the names, and that address is refused; another address and a login with no address are not":
+      clear()
+      for i in 0 ..< 19: c.record(t0 - 200 + i, "login", "login", "n" & $i & "-" & sfx, "failed", "addr=203.0.113.9")
+      check not c.loginRetryAfter("fresh-" & sfx, t0, "203.0.113.9").blocked
+      c.record(t0 - 150, "login", "login", "last-" & sfx, "failed", "directory x addr=203.0.113.9")
+      let w = c.loginRetryAfter("fresh-" & sfx, t0, "203.0.113.9")
+      check w.blocked and w.seconds >= 95 and w.seconds <= 105                  # the oldest (200 s ago) leaves the window of 300 s in 100 s
+      check not c.loginRetryAfter("fresh-" & sfx, t0, "203.0.113.10").blocked and not c.loginRetryAfter("fresh-" & sfx, t0).blocked
+      check not c.loginRetryAfter("fresh-" & sfx, t0, "203.0.113.99").blocked         # 203.0.113.9 is not a prefix of another address in the count
+    test "D-97 the address is the one in the header the proxy sets; anything that is not an address is none":
+      check clientAddressOf("203.0.113.9") == "203.0.113.9" and clientAddressOf(" 2001:db8::1 , 10.0.0.1") == "2001:db8::1"
+      for bad in ["", "unknown", "1.2.3.4; drop", "999", "a".repeat(60), "%addr%", "::1%eth0"]: check clientAddressOf(bad) == ""
+      check validAddress("::1") and validAddress("10.0.0.1") and not validAddress("x.y") and not validAddress("")
     clear()

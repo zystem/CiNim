@@ -80,7 +80,7 @@ suite "D-84 what a request needs":
                    ("GET", "/api/v1/organizations/o/caches"), ("DELETE", "/api/v1/organizations/o/caches"), ("GET", "/api/v1/organizations/o/locks"), ("PUT", "/api/v1/organizations/o/locks/l"),
                    ("GET", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/organizations"), ("GET", "/api/v1/roles"), ("PUT", "/api/v1/organizations/o/members/u"),
                    ("GET", "/api/v1/components"), ("PUT", "/api/v1/profile"), ("PUT", "/api/v1/variables/V"), ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/o"),
-                   ("PUT", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/stores"), ("GET", "/api/v1/users"), ("PUT", "/api/v1/roles/r"), ("GET", "/api/v1/tokens"), ("GET", "/api/v1/audit"),
+                   ("PUT", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/stores"), ("GET", "/api/v1/users"), ("PUT", "/api/v1/roles/r"), ("GET", "/api/v1/tokens"), ("GET", "/api/v1/audit"), ("PUT", "/api/v1/audit/sinks/s"), ("GET", "/api/v1/organizations/o/oidc/providers"), ("PUT", "/api/v1/organizations/o/oidc/providers/p"), ("POST", "/api/v1/organizations/o/oidc/mappings"),
                    ("GET", "/api/v1/organizations/o/ldap"), ("POST", "/api/v1/organizations/o/ldap/mappings"), ("PUT", "/api/v1/organizations/o/ldap/servers/s")]:
       used.incl needOf(m, p).permission
     for p in catalogue: check p.name in used or p.name in checkedByHandlers
@@ -237,3 +237,12 @@ suite "D-93 approval":
     check "run.approve" in builtinPermissions("rw") and "run.approve" in builtinPermissions("admin")
     check "run.approve" notin builtinPermissions("dev") and "run.approve" notin builtinPermissions("ro")
     check isRunPermission("run.approve") and "approval.configure" in checkedByHandlers and "approval.configure" in builtinPermissions("rw")
+
+suite "D-97 D-98 D-99 D-100 D-102 the routes of this day":
+  test "audit sinks, tokens of a person, the access document, identities, OIDC: who needs what":
+    check needOf("PUT", "/api/v1/audit/sinks/x").permission == "audit.export" and needOf("GET", "/api/v1/audit/sinks").permission == "audit.read" and needOf("GET", "/api/v1/audit/export").permission == "audit.read"
+    check needOf("GET", "/api/v1/organizations/acme/access") == Need(permission: "access.read", scope: nsOrg, org: "acme") and needOf("PUT", "/api/v1/organizations/acme/access").permission == "access.write"
+    check needOf("PUT", "/api/v1/organizations/acme/identities/github/ann").permission == "access.write" and needOf("GET", "/api/v1/organizations/acme/identities").permission == "access.read"
+    check needOf("PUT", "/api/v1/organizations/acme/oidc/providers/p") == Need(permission: "oidc.write", scope: nsShard, org: "acme") and needOf("GET", "/api/v1/organizations/acme/oidc/providers").permission == "oidc.read"
+    check needOf("POST", "/api/v1/organizations/acme/oidc/mappings") == Need(permission: "oidc.map", scope: nsOrg, org: "acme") and needOf("DELETE", "/api/v1/organizations/acme/oidc/mappings/m").permission == "oidc.map"
+    check not grantsOfRoles(["rw"]).allows(needOf("PUT", "/api/v1/audit/sinks/x")) and not grantsOfRoles(["rw"]).allows(needOf("PUT", "/api/v1/organizations/acme/oidc/providers/p"))

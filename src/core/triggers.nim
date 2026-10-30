@@ -14,7 +14,7 @@
 import std/[json, strutils, times, atomics, os, tables]
 import health
 import ../common/[rqlite, states, cron, ctrlauth, luaapi]
-import prstatus, workkick, schema, scheduler, runparams, orgrules, apiauth, groups, preflight, projectpolicy
+import auditexport, prstatus, workkick, schema, scheduler, runparams, orgrules, apiauth, groups, preflight, projectpolicy
 from ../common/scriptsource import Source, defaultPath, validRepository, validRef, validPath
 
 const
@@ -364,7 +364,8 @@ proc runTriggerLoop*(a: tuple[co: Core, stop: ptr Atomic[bool]]) {.thread.} =
           var ac = newRq(a.co.rqliteUrl)
           discard ac.sweepApprovals(getTime().toUnix())
           discard fillScripts(a.co, getTime().toUnix())
-          discard syncStatuses(a.co.rqliteUrl, getTime().toUnix())          # D-96: the state of the runs, told to the host of the repository          # D-93: the scripts of runs started by ci.trigger          # D-93: runs that wait for approval past their time, or with nobody left to approve
+          discard syncStatuses(a.co.rqliteUrl, getTime().toUnix())
+          discard deliverAudit(a.co.rqliteUrl, getTime().toUnix())          # D-97: the audit log, to the sinks of the shard          # D-96: the state of the runs, told to the host of the repository          # D-93: the scripts of runs started by ci.trigger          # D-93: runs that wait for approval past their time, or with nobody left to approve
         discard pollTriggers(a.co, getTime().toUnix(), conductorResolver(a.co))
       except Exception as e: stderr.writeLine "core: triggers: " & $e.name & ": " & e.msg & "\n" & e.getStackTrace()
       for _ in 0 ..< loopEverySeconds * 10:

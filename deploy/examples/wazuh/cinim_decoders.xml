@@ -1,0 +1,10 @@
+<!-- D-97: decoders for the audit log of CiNim sent as syslog (RFC 3164, the tag `cinim-audit`, the event as one line of JSON).
+     Copy to /var/ossec/etc/decoders/ on the Wazuh manager and restart it; the syslog listener (<remote><connection>syslog</connection>) must allow the core\'s address. -->
+<decoder name="cinim-audit">
+  <program_name>^cinim-audit</program_name>
+</decoder>
+
+<decoder name="cinim-audit-json">
+  <parent>cinim-audit</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

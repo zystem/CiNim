@@ -23,7 +23,7 @@ import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[zmqcurve, rqlite, shimstate, states]
 import crunchy
-import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets
+import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, apiauth
 import common/[ctrlauth]
 import scheduler   ## for stopServers*, the shared shutdown flag every core REP-server thread polls
 
@@ -199,13 +199,27 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
   let v = r["results"][0]{"values"}
   if v == nil or v.len == 0 or v[0][0].getStr notin [protoName(ssStarting), protoName(ssRunning)]:
     return refuse("not_current", "this attempt of the step is not running")
-  let names = secretNamesOf(v[0][1].getStr)
+  var names = secretNamesOf(v[0][1].getStr)
+  # D-99: the token of the API that the step asked for with `api = {...}` is made here, not read from the vault
+  let wantsToken = apiTokenName in names
+  names.keepItIf(it != apiTokenName)
   let vk = vaultKek()
   if names.len > 0 and not vk.ready: return refuse("secrets_unavailable", "core's secrets are not available")
-  let got = c.getSecrets(vk.kek, v[0][2].getStr, names, v[0][3].getStr, v[0][4].getInt > 0)       # D-86: the run's project and whether its ref is protected
+  let got = if names.len > 0: c.getSecrets(vk.kek, v[0][2].getStr, names, v[0][3].getStr, v[0][4].getInt > 0)       # D-86: the run's project and whether its ref is protected
+            else: (ok: true, retry: false, values: newSeq[(string, string)](), error: "")
   if not got.ok: return refuse(if got.retry: "secrets_unavailable" else: "unknown_secret", got.error)
   result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
   for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)
+  if wantsToken:
+    var perms: seq[string]
+    try:
+      let oj = parseJson(v[0][1].getStr)
+      if oj.kind == JObject and oj.hasKey("api") and oj["api"].kind == JArray:
+        for x in oj["api"]: (if x.kind == JString: perms.add x.getStr)
+    except JsonParsingError: discard
+    let made = c.mintStepToken(req.step.run_id, int(req.step.seq), int(req.step.attempt), perms, getTime().toUnix())
+    if made.error.len > 0: return refuse("api_token_refused", made.error)
+    result.secrets.add StepSecret(name: apiTokenName, value: made.token)
 
 proc handleStepReport(c: var RqClient; req: StepReport; profileId: string): StepReportAck =
   ## The completion handshake (D-29): the shim reports its result and waits for this answer before it exits. The result is

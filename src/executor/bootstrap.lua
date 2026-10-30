@@ -401,6 +401,23 @@ local function merge_secrets(a, b)
   return names
 end
 
+-- D-99: `api = { "run.read", "log.read" }` on a step gives it a token of the API in the variable CINIM_API_TOKEN, for the project of its run and only while the run lasts, holding the permissions named
+-- (and no more than the person who started the run holds: the core decides when the step asks)
+local API_TOKEN_NAME = "CINIM_API_TOKEN"
+local function norm_api(v, depth)
+  if v == nil then return nil end
+  if type(v) ~= "table" then error("api: a list of permissions, for example {\"run.read\"}", depth) end
+  local names, seen = {}, {}
+  for i = 1, rawlen(v) do
+    local n = v[i]
+    if type(n) ~= "string" or #n > 40 or not n:match("^[a-z]+[a-z0-9_.]*$") then error("api: a permission is a name such as run.read", depth) end
+    if not seen[n] then seen[n] = true; names[#names + 1] = n end
+  end
+  if #names == 0 or #names > 10 then error("api: from 1 to 10 permissions", depth) end
+  tsort(names)
+  return names
+end
+
 local function secrets_json(names)
   local parts = {}
   for i = 1, #names do parts[i] = '"' .. names[i] .. '"' end
@@ -618,11 +635,16 @@ local function step_opts(job, opts)
   local artifacts = job.__artifacts
   local env, step_env = job.__env, nil
   local cache = job.__cache
+  local api = nil
   if opts then
     if opts.env ~= nil then step_env = norm_env(opts.env, "Job:sh env", 4) end
     if opts.cache ~= nil then cache = merge_cache(cache, norm_cache(opts.cache, 4)) end
     if opts.artifacts ~= nil then artifacts = merge_artifacts(artifacts, norm_artifacts(opts.artifacts, 4)) end
     if opts.secrets ~= nil then secrets = merge_secrets(secrets, norm_secrets(opts.secrets, 4)) end
+    if opts.api ~= nil then
+      api = norm_api(opts.api, 4)
+      secrets = merge_secrets(secrets, { API_TOKEN_NAME })            -- the shim asks the core for it the way it asks for a secret
+    end
     if opts.metrics ~= nil then metrics = norm_metrics(opts.metrics) end
     if opts.mask ~= nil then mask = norm_mask(opts.mask) end
     if opts.timeout ~= nil then timeout = norm_timeout(opts.timeout) end
@@ -635,6 +657,7 @@ local function step_opts(job, opts)
   if mask ~= "" then parts[#parts + 1] = '"mask":' .. mask end
   if metrics ~= "" then parts[#parts + 1] = '"metrics":' .. metrics end
   if secrets and #secrets > 0 then parts[#parts + 1] = '"secrets":' .. secrets_json(secrets) end
+  if api then parts[#parts + 1] = '"api":' .. secrets_json(api) end
   if job.__shm then parts[#parts + 1] = '"shm":' .. jstr(job.__shm) end
   if step_env then parts[#parts + 1] = '"step_env":' .. env_json(step_env) end
   if timeout then parts[#parts + 1] = '"timeout":' .. timeout end
@@ -656,7 +679,7 @@ end
 -- The id is the index (D-67), so a step without one cannot be written; it is checked at once, with the line. A job runs its list of steps in order (`steps = { ... }`) or, for the logic
 -- that needs a result of a step to go on (`body = function(j) ... end`), runs them one by one with `j:run(step)`. A step that fails (a code other than 0, unless `ignore_failure`) fails the job.
 local STEP_FIELDS = {
-  sh = { cmd = true, name = true, ignore_failure = true, capture = true, image = true, env = true, cache = true, artifacts = true, secrets = true, metrics = true, mask = true, timeout = true },
+  sh = { cmd = true, name = true, ignore_failure = true, capture = true, image = true, env = true, cache = true, artifacts = true, secrets = true, api = true, metrics = true, mask = true, timeout = true },
   cache_restore = { keys = true, name = true },
   cache_save = { key = true, paths = true, name = true },
 }

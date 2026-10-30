@@ -154,6 +154,14 @@ auth:
   # D-87: the people the directories (LDAP) of the organisations vouch for are looked at again every `ldapSyncSeconds`: one that is gone from its directory is switched off, the roles from its groups are made
   # what the groups give now. 0 does not sync by the clock (a login still brings the roles up to date). The directories are set per organisation through the API, not here.
   ldapSyncSeconds: 900
+  # D-97: the header in which the proxy in front of the API and the UI puts the address of the person (for example X-Real-IP; the proxy must overwrite what a client sends). With it the logins are
+  # throttled by address too; empty: not by address.
+  clientAddrHeader: ""
+  # D-101: who must have a second factor (TOTP) at the login: "admin", "all", or "" for nobody; `mfaIssuer` is the name an authenticator app shows
+  mfaRequireFor: ""
+  mfaIssuer: "CiNim"
+  # D-102: an HTTP proxy (CONNECT) for the calls to OpenID Connect providers; empty: none
+  oidcProxy: ""
 
 # D-96: the state of a run is told to the host of its repository as a status of the commit (a project says where, with a secret that holds the token). `uiUrl` is the address of the UI that the status
 # links to (empty: no link); `apiUrls` the addresses of hosts' APIs a project may name, because the core sends a token there (empty: api.github.com and gitlab.com); `proxy` an HTTP proxy that takes CONNECT.

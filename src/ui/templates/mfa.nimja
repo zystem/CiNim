@@ -1,0 +1,22 @@
+{% extends "layout.nimja" %}
+{% block title %}Two-step login - CiNim{% endblock %}
+{% block content %}<h1>Two-step login</h1>
+{% if message.len > 0 %}<p class="error" role="alert">{{ h(message) }}</p>{% endif %}
+{% if codes.len > 0 %}<h2>Recovery codes</h2>
+<p class="detail">Two-step login is on. Keep these codes somewhere safe: each is good once, in place of the code of the app, and they are shown only now.</p>
+<pre>{% for c in codes %}{{ h(c) }}
+{% endfor %}</pre>
+{% elif secret.len > 0 %}<h2>Set up</h2>
+<p>Add this to an authenticator app (scan the address as a code or type the key), then give the first code it shows.</p>
+<p>Key: <code>{{ h(secret) }}</code></p>
+<p class="detail">Address: <code>{{ h(uri) }}</code></p>
+<form method="post" action="{{ h(base) }}/mfa/confirm" class="stack">
+<label>Code <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required autofocus></label>
+<div class="actions"><button type="submit">Turn on</button></div></form>
+{% elif enabled %}<p>Two-step login is <strong>on</strong>. {{ h(left) }} recovery codes are left.{% if required %} This shard requires it.{% endif %}</p>
+<form method="post" action="{{ h(base) }}/mfa/disable" class="stack">
+<label>Code of the app, or a recovery code <input type="text" name="code" autocomplete="one-time-code" required></label>
+<div class="actions"><button type="submit">Turn off</button></div></form>
+{% else %}<p>Two-step login is <strong>off</strong>.{% if required %} This shard requires it: set it up to go on.{% endif %}</p>
+<form method="post" action="{{ h(base) }}/mfa/enroll"><div class="actions"><button type="submit">Set up</button></div></form>
+{% endif %}{% endblock %}
