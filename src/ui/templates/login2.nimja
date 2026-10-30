@@ -1,0 +1,21 @@
+{% extends "layout.nimja" %}
+{% block title %}Second step - CiNim{% endblock %}
+{% block content %}<h1>Second step</h1>
+{% if message.len > 0 %}<p class="error" role="alert">{{ h(message) }}</p>{% endif %}
+<p>The password is right. Now prove it is you.</p>
+<form method="post" action="{{ h(base) }}/login" class="login" id="second-step">
+{% if options.len > 0 %}<div class="key-box" data-webauthn="login" data-options="{{ h(options) }}">
+<p>Touch your security key <span class="detail">(or Touch ID, Windows Hello, a phone: whatever you registered)</span>.</p>
+<button type="button" class="webauthn-go">Use a security key</button>
+<p class="detail webauthn-status" role="status"></p>
+<noscript><p class="error">A security key needs JavaScript. Use a code instead.</p></noscript>
+</div>
+<p class="detail">Or, instead of a key:</p>
+{% endif %}<label>Code of the authenticator app, or a recovery code <input type="text" name="code" autocomplete="one-time-code"{% if options.len == 0 %} required autofocus{% endif %}></label>
+<input type="hidden" name="ticket" value="{{ h(ticket) }}">
+<input type="hidden" name="assertion" value="">
+<input type="hidden" name="organization" value="{{ h(chosen) }}">
+<input type="hidden" name="next" value="{{ h(next) }}">
+<button type="submit">Log in</button>
+</form>
+{% if options.len > 0 %}<script src="{{ h(base) }}/static/webauthn.js?v={{ h(jsVersion) }}"></script>{% endif %}{% endblock %}

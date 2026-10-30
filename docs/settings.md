@@ -108,6 +108,9 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_CLIENT_ADDR_HEADER` | empty | the header in which the proxy in front puts the address of the person (`X-Real-IP`); the core throttles the logins by it, the UI passes it on (`auth.clientAddrHeader`; D-97) |
 | `CINIM_MFA_REQUIRE_FOR` | empty | `admin` or `all`: who must have a second factor (TOTP) at the login; others may have it if they set it up (`auth.mfaRequireFor`; D-101) |
 | `CINIM_MFA_ISSUER` | `CiNim` | the name an authenticator app shows for the account (`auth.mfaIssuer`) |
+| `CINIM_WEBAUTHN_RP_ID` | empty | D-103: the site name security keys are made for, without a scheme (`ci.example.org`); a key works only while it is the same (`auth.webauthnRpId`). With `CINIM_WEBAUTHN_ORIGINS`; without either no key can be added or asked for |
+| `CINIM_WEBAUTHN_ORIGINS` | empty | D-103: the addresses a page of the UI may have, a comma between several (`https://ci.example.org`); the browser signs the one it is on and the core compares (`auth.webauthnOrigins`). Browsers allow keys over HTTPS and on `localhost` only |
+| `CINIM_WEBAUTHN_RP_NAME` | `CiNim` | D-103: the name a browser shows when it asks for the key (`auth.webauthnRpName`) |
 | `CINIM_OIDC_PROXY` | empty | an HTTP proxy (CONNECT) for the calls to OpenID Connect providers (`auth.oidcProxy`; D-102) |
 | `CINIM_AUDIT_TOKEN_<NAME>` | none | the bearer token of an HTTP sink of the audit log, named in its `token_env` (set from a Secret of Kubernetes; D-97) |
 | `CINIM_UI_URL` | empty | the address of the UI that the statuses told to the host of a repository link to (`<address>/runs/<id>`; the Helm value `status.uiUrl`; D-96) |

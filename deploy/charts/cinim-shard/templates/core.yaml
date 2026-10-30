@@ -154,6 +154,11 @@ spec:
             - {name: CINIM_MFA_REQUIRE_FOR, value: {{ .Values.auth.mfaRequireFor | quote }}}
             {{- end }}
             - {name: CINIM_MFA_ISSUER, value: {{ .Values.auth.mfaIssuer | quote }}}
+            {{- if and .Values.auth.webauthnRpId .Values.auth.webauthnOrigins }}
+            - {name: CINIM_WEBAUTHN_RP_ID, value: {{ .Values.auth.webauthnRpId | quote }}}
+            - {name: CINIM_WEBAUTHN_ORIGINS, value: {{ .Values.auth.webauthnOrigins | quote }}}
+            - {name: CINIM_WEBAUTHN_RP_NAME, value: {{ .Values.auth.webauthnRpName | quote }}}
+            {{- end }}
             {{- if .Values.auth.oidcProxy }}
             - {name: CINIM_OIDC_PROXY, value: {{ .Values.auth.oidcProxy | quote }}}
             {{- end }}

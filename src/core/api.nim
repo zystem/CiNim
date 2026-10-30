@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import oidc, mfa, vcsapprove, accesscode, auditexport, prstatus, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -17,6 +17,11 @@ import health
 
 let mfaPolicy = getEnv("CINIM_MFA_REQUIRE_FOR").toLowerAscii          ## D-101: "admin" or "all": who must have a second factor
 let mfaIssuer = getEnv("CINIM_MFA_ISSUER", "CiNim")
+proc webauthnConfig(): WebauthnConfig =
+  ## D-103: the site name of the keys (`ci.example.org`, no scheme) and the addresses a page may have (`https://ci.example.org`, a comma between several); without both, keys are not offered
+  result = WebauthnConfig(rpId: getEnv("CINIM_WEBAUTHN_RP_ID").strip.toLowerAscii, rpName: getEnv("CINIM_WEBAUTHN_RP_NAME", "CiNim"))
+  for o in getEnv("CINIM_WEBAUTHN_ORIGINS").split(','):
+    if o.strip.len > 0: result.origins.add o.strip.strip(chars = {'/'}, leading = false)
 let clientAddrHeaderName = getEnv("CINIM_CLIENT_ADDR_HEADER")          ## D-97: the header in which the proxy in front puts the address of the client (empty: the logins are not throttled by address)
 
 const base = "/api/v1/runs"
@@ -404,6 +409,37 @@ proc onRequest() {.raises: [], gcsafe.} =
           problem(Http409, "auth_off", "this API is open (neither CINIM_AUTH=on nor CINIM_ADMIN_TOKEN is set): there is nothing to log in to")
           return
         let lj = try: parseJson(getBody()) except JsonParsingError: nil
+        if lj != nil and lj.kind == JObject and lj{"ticket"}.getStr("").len > 0:
+          # D-103: the second step of a login whose password was right (the answer said `mfa_required` and gave a ticket)
+          var tc = newRq(coreRef.rqliteUrl)
+          let tnow = getTime().toUnix()
+          let tAddr = clientAddressOf(headerOfRaw(getRequest(), clientAddrHeaderName))
+          let tNote = if tAddr.len > 0: "addr=" & tAddr else: ""
+          let ticket = lj["ticket"].getStr
+          let tUser = if ticket.len <= 100: tc.ticketUser(ticket, tnow) else: ""
+          if tUser.len == 0:
+            tc.record(tnow, "login", "login", "ticket", "failed", "unknown, old or used up ticket " & tNote)
+            unauthorized("bad_credentials")
+            return
+          let twait = tc.loginRetryAfter(tUser, tnow, tAddr)
+          if twait.blocked:
+            tc.record(tnow, "login", "login", tUser, "throttled", "retry after " & $twait.seconds & " s " & tNote)
+            reply(Http429, $(%*{"type": "about:blank", "status": 429, "code": "too_many_attempts", "detail": "too many wrong attempts; try again in " & $twait.seconds & " seconds"}),
+                  ["Content-Type: application/problem+json", "Retry-After: " & $twait.seconds])
+            return
+          let tCheck = tc.checkSecondFactor(vaultKek().kek, tUser, lj{"code"}.getStr(""), tnow, lj{"assertion"}, webauthnConfig())
+          if tCheck notin {mcOk, mcNotNeeded}:
+            tc.record(tnow, "login", "login", tUser, "failed", "second factor " & tNote)
+            unauthorized("bad_credentials")
+            return
+          discard tc.spendTicket(ticket)
+          let tSes = tc.sessionFor(tUser, tnow)
+          if not tSes.ok:
+            unauthorized("bad_credentials")
+            return
+          tc.record(tnow, "user:" & tUser, "login", tUser, "ok", "second factor")
+          jsonOk(Http200, %*{"token": tSes.token, "user": tUser, "roles": tSes.roles, "expires_at": tSes.expiresAt, "password_change_required": tSes.mustChange and not tUser.contains('@')})
+          return
         if lj == nil or lj.kind != JObject or lj{"user"}.getStr("").len == 0 or lj{"password"}.getStr("").len == 0:
           problem(Http400, "invalid_request", "{\"user\": \"...\", \"password\": \"...\"} is required")
           return
@@ -434,10 +470,14 @@ proc onRequest() {.raises: [], gcsafe.} =
           case ld.outcome
           of loNoDirectory: discard                                    # the organisation has no directory: the name is tried among the local users, which it will not be
           of loOk:
-            let ldMfa = lc.checkSecondFactor(vaultKek().kek, ld.user, lj{"code"}.getStr(""), now)          # D-101
+            let ldMfa = lc.checkSecondFactor(vaultKek().kek, ld.user, lj{"code"}.getStr(""), now, lj{"assertion"}, webauthnConfig())          # D-101, D-103
             if ldMfa == mcMissing:
               lc.record(now, "login", "login", ld.user, "mfa_required", addrNote)
-              reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "mfa_required", "detail": "the directory accepts the password; send the code of the authenticator app (or a recovery code) as \"code\""}),
+              var needBody = %*{"type": "about:blank", "status": 401, "code": "mfa_required", "detail": "the directory accepts the password; send the code of the authenticator app (or a recovery code) as \"code\", or the answer of a security key as \"assertion\""}
+              let ldKeys = lc.loginOptions(webauthnConfig(), ld.user, now)
+              if ldKeys != nil: needBody["webauthn"] = ldKeys
+              needBody["mfa_ticket"] = %lc.issueTicket(ld.user, now)
+              reply(Http401, $needBody,
                     ["Content-Type: application/problem+json", "WWW-Authenticate: Bearer"])
               return
             if ldMfa == mcWrong:
@@ -474,11 +514,15 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         # D-101: the second factor, when the person has turned it on
         let mfaCode = lj{"code"}.getStr("")
-        case lc.checkSecondFactor(vaultKek().kek, loginName, mfaCode, now)
+        case lc.checkSecondFactor(vaultKek().kek, loginName, mfaCode, now, lj{"assertion"}, webauthnConfig())
         of mcNotNeeded, mcOk: discard
         of mcMissing:
           lc.record(now, "login", "login", loginName, "mfa_required", addrNote)
-          reply(Http401, $(%*{"type": "about:blank", "status": 401, "code": "mfa_required", "detail": "the password is right; send the code of the authenticator app (or a recovery code) as \"code\""}),
+          var needBody = %*{"type": "about:blank", "status": 401, "code": "mfa_required", "detail": "the password is right; send the code of the authenticator app (or a recovery code) as \"code\", or the answer of a security key as \"assertion\""}
+          let keyOptions = lc.loginOptions(webauthnConfig(), loginName, now)
+          if keyOptions != nil: needBody["webauthn"] = keyOptions
+          needBody["mfa_ticket"] = %lc.issueTicket(loginName, now)
+          reply(Http401, $needBody,
                 ["Content-Type: application/problem+json", "WWW-Authenticate: Bearer"])
           return
         of mcWrong:
@@ -534,7 +578,8 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
       if path == "/api/v1/me/mfa" or path.startsWith("/api/v1/me/mfa/"):
         # D-101: two-step login of the person. GET the state; POST /me/mfa/totp:enroll gives the secret and the address for an app; POST /me/mfa/totp:confirm {"code"} turns it on and gives the recovery codes
-        # once; DELETE /me/mfa {"code"} turns it off (a code of the app, or a recovery code)
+        # once; DELETE /me/mfa {"code"} turns it off (a code of the app, or a recovery code). D-103: POST /me/mfa/webauthn:begin gives the options for a security key, :finish keeps what the browser answers,
+        # DELETE /me/mfa/webauthn/{id} {"code"} removes a key
         if who.user.len == 0 or who.limited:
           problem(Http403, "forbidden", "two-step login is the setting of a person, made with the person\'s own login")
           return
@@ -543,7 +588,40 @@ proc onRequest() {.raises: [], gcsafe.} =
         let mk = vaultKek()
         let mj = if getBody().strip.len > 0: (try: parseJson(getBody()) except JsonParsingError: nil) else: newJObject()
         if path == "/api/v1/me/mfa" and getMethod() == "GET":
-          jsonOk(Http200, %*{"enabled": mc.mfaEnabled(who.user), "required": mfaRequired(mfaPolicy, who.admin), "recovery_codes_left": mc.recoveryLeft(who.user)})
+          jsonOk(Http200, %*{"enabled": mc.mfaEnabled(who.user), "totp": mc.totpEnabled(who.user), "keys": mc.listKeys(who.user), "webauthn_available": webauthnConfig().enabled,
+                             "required": mfaRequired(mfaPolicy, who.admin), "recovery_codes_left": mc.recoveryLeft(who.user)})
+        elif path == "/api/v1/me/mfa/webauthn:begin" and getMethod() == "POST":
+          let wb = mc.beginKey(webauthnConfig(), who.user, mnow)
+          if not wb.ok:
+            problem(Http409, "webauthn_unavailable", wb.error)
+            return
+          jsonOk(Http200, %*{"publicKey": wb.options})
+        elif path == "/api/v1/me/mfa/webauthn:finish" and getMethod() == "POST":
+          if mj == nil or mj.kind != JObject:
+            problem(Http400, "invalid_request", "{\"id\", \"clientDataJSON\", \"attestationObject\"} (base64url, as the browser gives them) and an optional \"name\" are required")
+            return
+          let wf = mc.finishKey(webauthnConfig(), who.user, mj{"name"}.getStr(""), mj, mnow)
+          if not wf.ok:
+            mc.record(mnow, actorOf(who), "mfa.key.add", who.user, "denied", wf.error)
+            problem(Http400, "webauthn_register", wf.error)
+            return
+          mc.record(mnow, actorOf(who), "mfa.key.add", who.user, "ok")
+          jsonOk(Http200, %*{"keys": mc.listKeys(who.user), "recovery_codes": wf.recovery,
+                             "recovery_note": (if wf.recovery.len > 0: "shown only now; each is good once" else: "")})
+        elif path.startsWith("/api/v1/me/mfa/webauthn/") and getMethod() == "DELETE":
+          let keyId = path["/api/v1/me/mfa/webauthn/".len .. ^1]
+          if mj == nil or not mj.isString("code") or keyId.len == 0 or keyId.len > 200 or not keyId.allCharsInSet({'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}):
+            problem(Http400, "invalid_request", "{\"code\": \"...\"} is required: a code of the app, or a recovery code")
+            return
+          if mc.checkSecondFactor(mk.kek, who.user, mj["code"].getStr, mnow) != mcOk:
+            mc.record(mnow, actorOf(who), "mfa.key.remove", who.user, "denied", "the code was not right")
+            problem(Http403, "bad_code", "that code is not right")
+            return
+          if not mc.removeKey(who.user, keyId):
+            problem(Http404, "not_found", "no such key")
+            return
+          mc.record(mnow, actorOf(who), "mfa.key.remove", who.user, "ok")
+          jsonOk(Http200, %*{"keys": mc.listKeys(who.user)})
         elif path == "/api/v1/me/mfa/totp:enroll" and getMethod() == "POST":
           if not mk.ready:
             problem(Http503, "secrets_unavailable", "the secrets of the core are not available")
@@ -581,7 +659,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           mc.record(mnow, actorOf(who), "mfa.off", who.user, "ok")
           jsonOk(Http200, %*{"enabled": false})
         else:
-          problem(Http405, "method_not_allowed", "GET /me/mfa, POST /me/mfa/totp:enroll and :confirm, DELETE /me/mfa")
+          problem(Http405, "method_not_allowed", "GET /me/mfa, POST /me/mfa/totp:enroll and :confirm, POST /me/mfa/webauthn:begin and :finish, DELETE /me/mfa/webauthn/{id}, DELETE /me/mfa")
         return
       if path == "/api/v1/me/tokens" or path.startsWith("/api/v1/me/tokens/"):
         # D-99: a person\'s own tokens with a subset of their permissions. POST {name, permissions: [...], organization?, group?, expires_in?} (seconds, a day to a year, 30 days when left out) gives the token once;

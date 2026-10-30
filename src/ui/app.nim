@@ -23,6 +23,8 @@ type
     headers*: seq[(string, string)]
     body*: string
 
+  KeyRow = object
+    id, name, created, used: string
   OidcRow = object
     organization, organizationName, provider, name: string
   OrgRow = object
@@ -90,6 +92,8 @@ const
   sessionMax = 8 * 3600
   templateDir = currentSourcePath().parentDir / "templates"
   css = staticRead("ui.css")
+  webauthnJs = staticRead("webauthn.js")
+  jsVersion = toHex(int64(hash(webauthnJs)), 8)
   cssVersion = toHex(int64(hash(css)), 8)       # in the link: a new style sheet is a new address, and the day of caching does not hold back a change
   runStates = ["QUEUED", "WAITING", "RUNNING", "OK", "FAILED", "ABORTED", "TIMED_OUT"]   # the core's word (RUN_STATE_ABORTED); a state that is spelled two ways is a filter that matches nothing
 
@@ -190,7 +194,7 @@ func ago(seconds: float): string =
   else: $int(seconds / 3600) & " h ago"
 
 proc security(r: var UiResponse) =
-  r.headers.add ("Content-Security-Policy", "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+  r.headers.add ("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
   r.headers.add ("X-Content-Type-Options", "nosniff")
   r.headers.add ("Referrer-Policy", "same-origin")
   r.headers.add ("Cache-Control", "no-store")
@@ -330,7 +334,11 @@ proc renderRole(base: string; role: RoleView): string =
   let loggedIn = true
   compileTemplateFile("role.nimja", templateDir)
 
-proc renderMfa(base, message, secret, uri: string; codes: seq[string]; enabled, required: bool; left: int): string =
+proc renderLogin2(base, message, ticket, next, chosen, options: string): string =
+  let loggedIn = false
+  compileTemplateFile("login2.nimja", templateDir)
+
+proc renderMfa(base, message, secret, uri: string; codes: seq[string]; enabled, required, totp, available: bool; left: int; keys: seq[KeyRow]): string =
   let loggedIn = true
   compileTemplateFile("mfa.nimja", templateDir)
 
@@ -370,6 +378,10 @@ proc loginOidc(api: CoreApi): seq[OidcRow] =
 proc loginPage(cfg: UiConfig; api: CoreApi; status: int; message, user, next: string; chosen = ""): UiResponse =
   page(status, renderLogin(cfg.base, message, user, next, chosen, api.loginOrgs, api.loginOidc))
 
+proc secondStepPage(cfg: UiConfig; status: int; message, ticket, next, chosen, options: string): UiResponse =
+  ## D-103: the password was right and a second factor is to come: the code of an app (or a recovery code), or a security key, with the ticket the core gave and no password
+  page(status, renderLogin2(cfg.base, message, ticket, next, chosen, options))
+
 proc messagePage(cfg: UiConfig; status: int; loggedIn: bool; title, text: string; detail = ""; back = ""; backText = ""): UiResponse =
   page(status, renderMessage(cfg.base, loggedIn, title, text, detail, back, backText))
 
@@ -406,12 +418,43 @@ proc failed(cfg: UiConfig; r: ApiResult; what: string): UiResponse =
 
 const localAccount = "local"          ## the value of the list for a user of the shard itself (no organisation)
 
+proc openSession(cfg: UiConfig; r: ApiResult; fallbackUser, next, chosen: string; orgs: seq[OrgRow]): UiResponse =
+  ## the core said yes: the cookie, and on to the page that was wanted
+  if r.body{"password_change_required"}.getBool:
+    return messagePage(cfg, 403, false, "Change the password first",
+      "This user has to change the password before anything else; the UI does not do that. Use the API:", "PUT /api/v1/users/" & r.body{"user"}.getStr(fallbackUser) & "/password",
+      cfg.base & "/login", "Back to the login")
+  let token = r.body{"token"}.getStr
+  let left = r.body{"expires_at"}.getBiggestInt(0) - getTime().toUnix()
+  let maxAge = int(min(max(left, 60), sessionMax))
+  result = redirect(safeNext(cfg, next), sessionCookie(cfg, token, maxAge))
+  if orgs.len > 0 and chosen.len > 0:
+    result.headers.add ("Set-Cookie", orgCookieName & "=" & chosen & "; Path=" & cookiePath(cfg) & "; SameSite=Strict; Max-Age=31536000" & (if cfg.secureCookie: "; Secure" else: ""))
+
+proc secondStepFrom(cfg: UiConfig; r: ApiResult; next, chosen: string): UiResponse =
+  ## the core wants a second factor: its ticket, and the options for a key when the person has one
+  let ticket = r.body{"mfa_ticket"}.getStr
+  if ticket.len == 0 or ticket.len > 100 or not ticket.allIt(it in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}):
+    return page(401, renderLogin(cfg.base, "The core asks for a second factor but gave no way to answer it.", "", next, chosen, @[], @[]))
+  let keys = r.body{"webauthn"}
+  secondStepPage(cfg, 401, "", ticket, next, chosen, (if keys.isKind(JObject): $keys else: ""))
+
 proc doLogin(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
   let user = req.form.getOrDefault("user")
   let next = req.form.getOrDefault("next")
   # D-87: when some organisation has a directory the form has a list to choose the organisation from, and a choice is required (`local`: a user of the shard); the core is given `login@organisation`
   let orgs = api.loginOrgs
   let chosen = req.form.getOrDefault("organization")
+  # D-103: the second step of a login (the page that asks for the code or the key) comes back with the ticket and no password
+  let ticket = req.form.getOrDefault("ticket")
+  if ticket.len > 0:
+    if api.loginSecond == nil: return loginPage(cfg, api, 400, "Log in again.", "", next, chosen)
+    let r2 = api.loginSecond(ticket, req.form.getOrDefault("code").strip, req.form.getOrDefault("assertion"), req.client)
+    case r2.status
+    of asOk: return openSession(cfg, r2, "", next, chosen, orgs)
+    of asUnauthorized: return loginPage(cfg, api, 401, "That code or key was not accepted. Log in again.", "", next, chosen)
+    of asRefused: return loginPage(cfg, api, (if r2.code == 429: 429 else: 502), "The login was refused: " & r2.message & ".", "", next, chosen)
+    else: return messagePage(cfg, 503, false, "The core does not answer", "Try again in a moment.", r2.message, cfg.base & "/login", "Back to the login")
   var name = user
   if orgs.len > 0:
     if chosen.len == 0 or (chosen != localAccount and not orgs.anyIt(it.slug == chosen)):
@@ -422,18 +465,10 @@ proc doLogin(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
   let r = api.login(name, req.form.getOrDefault("password"), req.client, req.form.getOrDefault("code").strip)
   case r.status
   of asOk:
-    if r.body{"password_change_required"}.getBool:
-      return messagePage(cfg, 403, false, "Change the password first",
-        "This user has to change the password before anything else; the UI does not do that. Use the API:", "PUT /api/v1/users/" & r.body{"user"}.getStr(user) & "/password",
-        cfg.base & "/login", "Back to the login")
-    let token = r.body{"token"}.getStr
-    let left = r.body{"expires_at"}.getBiggestInt(0) - getTime().toUnix()
-    let maxAge = int(min(max(left, 60), sessionMax))
-    result = redirect(safeNext(cfg, next), sessionCookie(cfg, token, maxAge))
-    if orgs.len > 0:
-      result.headers.add ("Set-Cookie", orgCookieName & "=" & chosen & "; Path=" & cookiePath(cfg) & "; SameSite=Strict; Max-Age=31536000" & (if cfg.secureCookie: "; Secure" else: ""))
+    result = openSession(cfg, r, user, next, chosen, orgs)
   of asUnauthorized:
-    result = loginPage(cfg, api, 401, (if r.problem == "mfa_required": "Enter the code of your authenticator app (or a recovery code) as well." else: "Wrong user name or password, or code."), user, next, chosen)
+    if r.problem == "mfa_required" and r.body.isKind(JObject) and r.body{"mfa_ticket"}.getStr.len > 0: result = secondStepFrom(cfg, r, next, chosen)
+    else: result = loginPage(cfg, api, 401, (if r.problem == "mfa_required": "Enter the code of your authenticator app (or a recovery code) as well." else: "Wrong user name or password, or code."), user, next, chosen)
   of asRefused:
     result = loginPage(cfg, api, (if r.code == 429: 429 else: 502), "The login was refused: " & r.message & ".", user, next, chosen)
   else:
@@ -924,13 +959,27 @@ proc statusPage(cfg: UiConfig; api: CoreApi; token: string): UiResponse =
 proc notFound(cfg: UiConfig; loggedIn: bool): UiResponse =
   messagePage(cfg, 404, loggedIn, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
 
+proc whenText(t: int64): string = (if t <= 0: "never" else: fromUnix(t).utc.format("yyyy-MM-dd HH:mm") & " UTC")
+
 proc mfaPage(cfg: UiConfig; api: CoreApi; token: string; status = 200; message, secret, uri = ""; codes: seq[string] = @[]): UiResponse =
   let r = api.get(token, "/api/v1/me/mfa")
   if r.status != asOk: return failed(cfg, r, "two-step login")
-  page(status, renderMfa(cfg.base, message, secret, uri, codes, r.body{"enabled"}.getBool, r.body{"required"}.getBool, r.body{"recovery_codes_left"}.getInt))
+  var keys: seq[KeyRow]
+  for k in r.body{"keys"}.getElems:
+    let id = k{"id"}.getStr
+    if id.len in 1 .. 200 and id.allIt(it in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}):
+      keys.add KeyRow(id: id, name: k{"name"}.getStr, created: whenText(k{"created_at"}.getBiggestInt), used: whenText(k{"last_used_at"}.getBiggestInt))
+  page(status, renderMfa(cfg.base, message, secret, uri, codes, r.body{"enabled"}.getBool, r.body{"required"}.getBool, r.body{"totp"}.getBool, r.body{"webauthn_available"}.getBool,
+                         r.body{"recovery_codes_left"}.getInt, keys))
+
+proc jsonResponse(status: int; body: JsonNode): UiResponse =
+  result = UiResponse(status: status, body: $body)
+  result.headers.add ("Content-Type", "application/json")
+  security(result)
 
 proc mfaAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, action: string): UiResponse =
-  ## the forms of the page of two-step login: set up (the key and the address for an app), turn on with the first code (the recovery codes, once), turn off with a code
+  ## the forms of the page of two-step login: set up (the key and the address for an app), turn on with the first code (the recovery codes, once), turn off with a code; and (D-103) the keys:
+  ## `webauthn-begin` is asked by the script of the page and answers JSON, `webauthn-finish` is the form the script fills in with what the browser made, `key-remove` removes one
   if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
   let code = req.form.getOrDefault("code").strip
   case action
@@ -944,6 +993,22 @@ proc mfaAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, action: strin
     return mfaPage(cfg, api, token, 400, r.message)
   of "disable":
     let r = api.send("DELETE", token, "/api/v1/me/mfa", $(%*{"code": code}))
+    if r.status == asOk: return redirect(cfg.base & "/mfa")
+    return mfaPage(cfg, api, token, 403, r.message)
+  of "webauthn-begin":
+    let r = api.post(token, "/api/v1/me/mfa/webauthn:begin", "{}")
+    if r.status == asOk: return jsonResponse(200, r.body)
+    return jsonResponse(if r.status == asUnauthorized: 401 else: 409, %*{"error": r.message})
+  of "webauthn-finish":
+    var answer = %*{"name": req.form.getOrDefault("name")}
+    for k in ["id", "clientDataJSON", "attestationObject"]: answer[k] = %req.form.getOrDefault(k)
+    let r = api.post(token, "/api/v1/me/mfa/webauthn:finish", $answer)
+    if r.status == asOk: return mfaPage(cfg, api, token, 200, "", "", "", r.body{"recovery_codes"}.getElems.mapIt(it.getStr))
+    return mfaPage(cfg, api, token, 400, r.message)
+  of "key-remove":
+    let id = req.form.getOrDefault("id")
+    if id.len notin 1 .. 200 or not id.allIt(it in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}): return messagePage(cfg, 400, true, "Not a key", "That is not the id of a key.")
+    let r = api.send("DELETE", token, "/api/v1/me/mfa/webauthn/" & id, $(%*{"code": code}))
     if r.status == asOk: return redirect(cfg.base & "/mfa")
     return mfaPage(cfg, api, token, 403, r.message)
   else: return messagePage(cfg, 404, true, "Not found", "There is no such page.")
@@ -1007,6 +1072,13 @@ proc handle*(cfg: UiConfig; api: CoreApi; req: UiRequest): UiResponse =
   let query = parseQuery(req.query)
   let isPost = req.meth == "POST"
   # the places that need no session
+  if path == "/static/webauthn.js":
+    if req.meth != "GET": return messagePage(cfg, 405, false, "Method not allowed", "GET.")
+    result = UiResponse(status: 200, body: webauthnJs)
+    result.headers.add ("Content-Type", "text/javascript; charset=utf-8")
+    result.headers.add ("Cache-Control", "public, max-age=86400")
+    result.headers.add ("X-Content-Type-Options", "nosniff")
+    return
   if path == "/static/ui.css":
     if req.meth != "GET": return messagePage(cfg, 405, false, "Method not allowed", "GET.")
     result = UiResponse(status: 200, body: css)

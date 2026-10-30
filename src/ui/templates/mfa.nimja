@@ -3,20 +3,40 @@
 {% block content %}<h1>Two-step login</h1>
 {% if message.len > 0 %}<p class="error" role="alert">{{ h(message) }}</p>{% endif %}
 {% if codes.len > 0 %}<h2>Recovery codes</h2>
-<p class="detail">Two-step login is on. Keep these codes somewhere safe: each is good once, in place of the code of the app, and they are shown only now.</p>
+<p class="detail">Two-step login is on. Keep these codes somewhere safe: each is good once, in place of the code of the app or the key, and they are shown only now.</p>
 <pre>{% for c in codes %}{{ h(c) }}
 {% endfor %}</pre>
-{% elif secret.len > 0 %}<h2>Set up</h2>
+<p><a href="{{ h(base) }}/mfa">Back to the two-step login</a></p>
+{% elif secret.len > 0 %}<h2>Set up the app</h2>
 <p>Add this to an authenticator app (scan the address as a code or type the key), then give the first code it shows.</p>
 <p>Key: <code>{{ h(secret) }}</code></p>
 <p class="detail">Address: <code>{{ h(uri) }}</code></p>
 <form method="post" action="{{ h(base) }}/mfa/confirm" class="stack">
 <label>Code <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required autofocus></label>
 <div class="actions"><button type="submit">Turn on</button></div></form>
-{% elif enabled %}<p>Two-step login is <strong>on</strong>. {{ h(left) }} recovery codes are left.{% if required %} This shard requires it.{% endif %}</p>
+{% else %}{% if enabled %}<p>Two-step login is <strong>on</strong>. {{ h(left) }} recovery codes are left.{% if required %} This shard requires it.{% endif %}</p>
+{% else %}<p>Two-step login is <strong>off</strong>.{% if required %} This shard requires it: set up an app or a key to go on.{% endif %}</p>
+{% endif %}<h2>Authenticator app</h2>
+{% if totp %}<p>On.</p>
+{% else %}<p>Off.</p>
+<form method="post" action="{{ h(base) }}/mfa/enroll"><div class="actions"><button type="submit">Set up an app</button></div></form>
+{% endif %}<h2>Security keys</h2>
+{% if keys.len > 0 %}<table><thead><tr><th>Name</th><th>Added</th><th>Last used</th><th>Remove (give a code of the app, or a recovery code)</th></tr></thead><tbody>
+{% for k in keys %}<tr><td>{{ h(k.name) }}</td><td>{{ h(k.created) }}</td><td>{{ h(k.used) }}</td>
+<td><form method="post" action="{{ h(base) }}/mfa/key-remove" class="inline"><input type="hidden" name="id" value="{{ h(k.id) }}"><input type="text" name="code" autocomplete="one-time-code" required aria-label="Code"> <button type="submit">Remove</button></form></td></tr>
+{% endfor %}</tbody></table>
+{% else %}<p>None.</p>
+{% endif %}{% if available %}<form method="post" action="{{ h(base) }}/mfa/webauthn-finish" class="stack" id="add-key" data-begin="{{ h(base) }}/mfa/webauthn-begin" data-webauthn="register">
+<label>Name <input type="text" name="name" maxlength="40" placeholder="my phone"></label>
+<input type="hidden" name="id" value=""><input type="hidden" name="clientDataJSON" value=""><input type="hidden" name="attestationObject" value="">
+<div class="actions"><button type="button" class="webauthn-go">Add a security key</button></div>
+<p class="detail webauthn-status" role="status"></p>
+<noscript><p class="error">Adding a key needs JavaScript.</p></noscript>
+</form>
+<script src="{{ h(base) }}/static/webauthn.js?v={{ h(jsVersion) }}"></script>
+{% else %}<p class="detail">This shard is not set up for security keys (the core needs CINIM_WEBAUTHN_RP_ID and CINIM_WEBAUTHN_ORIGINS).</p>
+{% endif %}{% if enabled %}<h2>Turn it all off</h2>
 <form method="post" action="{{ h(base) }}/mfa/disable" class="stack">
 <label>Code of the app, or a recovery code <input type="text" name="code" autocomplete="one-time-code" required></label>
-<div class="actions"><button type="submit">Turn off</button></div></form>
-{% else %}<p>Two-step login is <strong>off</strong>.{% if required %} This shard requires it: set it up to go on.{% endif %}</p>
-<form method="post" action="{{ h(base) }}/mfa/enroll"><div class="actions"><button type="submit">Set up</button></div></form>
-{% endif %}{% endblock %}
+<div class="actions"><button type="submit">Turn off the app, the keys and the codes</button></div></form>
+{% endif %}{% endif %}{% endblock %}

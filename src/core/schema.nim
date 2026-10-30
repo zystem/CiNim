@@ -96,6 +96,16 @@ const ddl = [
   # D-101: the second factor of a person (core/mfa.nim); the TOTP secret itself is sealed in the vault of the core, here are the flag, the last counter that was used and the hashes of the recovery codes
   """CREATE TABLE IF NOT EXISTS user_mfa (
        user_name TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, last_counter INTEGER NOT NULL DEFAULT 0, recovery TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)""",
+  # D-103: security keys (WebAuthn) of a person: the public key as base64url of x || y, the counter the key last showed; the challenges are asked for a registration or a login and spent by the answer
+  """CREATE TABLE IF NOT EXISTS webauthn_credentials (
+       id TEXT PRIMARY KEY, user_name TEXT NOT NULL, public_key TEXT NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL DEFAULT '',
+       created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0)""",
+  "CREATE INDEX IF NOT EXISTS webauthn_credentials_user ON webauthn_credentials (user_name)",
+  """CREATE TABLE IF NOT EXISTS webauthn_challenges (
+       challenge TEXT PRIMARY KEY, user_name TEXT NOT NULL, kind TEXT NOT NULL, expires_at INTEGER NOT NULL)""",
+  # D-103: the ticket a login is given when the password was right and a second factor is still to come (the hash of it, the person, the end, the tries left to count)
+  """CREATE TABLE IF NOT EXISTS login_tickets (
+       hash TEXT PRIMARY KEY, user_name TEXT NOT NULL, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0)""",
   # D-100: who a login of the host of a repository is in CiNim (set by an administrator of the organisation; what a person writes in a pull request counts as theirs only through this)
   """CREATE TABLE IF NOT EXISTS vcs_identities (
        tenant_id TEXT NOT NULL, provider TEXT NOT NULL, login TEXT NOT NULL, user_name TEXT NOT NULL, PRIMARY KEY (tenant_id, provider, login))""",

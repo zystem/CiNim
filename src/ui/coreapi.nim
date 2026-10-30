@@ -17,6 +17,7 @@ type
 
   CoreApi* = object
     login*: proc (user, password, client, code: string): ApiResult {.gcsafe.}          ## `client` is the address of the person (D-97), "" when the UI is not told one
+    loginSecond*: proc (ticket, code, assertion, client: string): ApiResult {.gcsafe.}          ## D-103: the second step of a login that answered `mfa_required` with a ticket: the code, or the JSON answer of a security key
     loginOptions*: proc (): ApiResult {.gcsafe.}                       ## GET /api/v1/login/options: the organisations a person can choose at the login (D-87), asked with no token
     get*: proc (token, pathAndQuery: string): ApiResult {.gcsafe.}
     post*: proc (token, path, body: string): ApiResult {.gcsafe.}      ## a POST of an action (abort, retry) with the token of the user
@@ -46,7 +47,11 @@ proc resultOf(code: int; retryAfter, body: string): ApiResult =
   of 200, 201:
     result.status = asOk
     result.body = try: parseJson(body) except JsonParsingError: newJObject()
-  of 401: (result.status = asUnauthorized; result.message = problemText(body))
+  of 401:
+    result.status = asUnauthorized
+    result.message = problemText(body)
+    if result.problem == "mfa_required":                                  # D-103: the ticket and the options for a key are in the body
+      result.body = try: parseJson(body) except JsonParsingError: newJObject()
   of 403: (result.status = asForbidden; result.message = problemText(body))
   of 404: (result.status = asNotFound; result.message = problemText(body))
   of 429:
@@ -78,6 +83,13 @@ proc httpCoreApi*(url: string; timeoutMs = 10000): CoreApi =
   result.login = proc (user, password, client, code: string): ApiResult {.gcsafe.} =
     var body = %*{"user": user, "password": password}
     if code.len > 0: body["code"] = %code
+    call(HttpPost, "/api/v1/login", "", $body, client)
+  result.loginSecond = proc (ticket, code, assertion, client: string): ApiResult {.gcsafe.} =
+    var body = %*{"ticket": ticket}
+    if code.len > 0: body["code"] = %code
+    if assertion.len > 0:
+      try: body["assertion"] = parseJson(assertion)
+      except JsonParsingError: body["assertion"] = newJObject()
     call(HttpPost, "/api/v1/login", "", $body, client)
   result.loginOptions = proc (): ApiResult {.gcsafe.} =
     call(HttpGet, "/api/v1/login/options", "", "")

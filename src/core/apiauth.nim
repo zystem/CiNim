@@ -421,6 +421,8 @@ proc deleteUser*(c: var RqClient; name: string; now: int64): bool =
     ["DELETE FROM role_bindings WHERE user_name = ?", name],
     ["DELETE FROM team_members WHERE user_name = ?", name],
     ["DELETE FROM user_mfa WHERE user_name = ?", name],
+    ["DELETE FROM webauthn_credentials WHERE user_name = ?", name],
+    ["DELETE FROM webauthn_challenges WHERE user_name = ?", name],
     ["DELETE FROM step_secrets WHERE tenant_id = '~mfa' AND name = ?", name],
     ["DELETE FROM users WHERE name = ?", name]], transaction = true)
   true
@@ -554,6 +556,7 @@ proc resetUserCredentials*(c: var RqClient; user: string; now: int64): tuple[ok:
   let pw = mintPassword()
   discard c.execute(%*[
     ["UPDATE users SET password_hash = ?, must_change = 1 WHERE name = ?", passwordHash(pw), user],
+    ["DELETE FROM webauthn_credentials WHERE user_name = ?", user],
     ["DELETE FROM user_mfa WHERE user_name = ?", user],          # D-101: a lost password is often a lost phone: the reset turns the second factor off, the person sets it up again
     ["UPDATE api_tokens SET revoked_at = ? WHERE scope = ? AND revoked_at = 0", now, userScope(user)]], transaction = true)
   let role = if u.roles.len > 0: u.roles[0] else: ""

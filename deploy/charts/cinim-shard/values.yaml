@@ -160,6 +160,11 @@ auth:
   # D-101: who must have a second factor (TOTP) at the login: "admin", "all", or "" for nobody; `mfaIssuer` is the name an authenticator app shows
   mfaRequireFor: ""
   mfaIssuer: "CiNim"
+  # D-103: security keys (WebAuthn). `webauthnRpId` is the site name the keys are made for (no scheme: `ci.example.org`; keys keep working only while it stays), `webauthnOrigins` the addresses a page
+  # of the UI may have (`https://ci.example.org`, a comma between several); without both, keys are not offered. Browsers allow keys only over HTTPS (and on `localhost`).
+  webauthnRpId: ""
+  webauthnOrigins: ""
+  webauthnRpName: "CiNim"
   # D-102: an HTTP proxy (CONNECT) for the calls to OpenID Connect providers; empty: none
   oidcProxy: ""
 

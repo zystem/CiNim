@@ -31,13 +31,22 @@ proc fakeCore(): CoreApi =
       loginCalls.add user & (if client.len > 0: "/" & client else: "")
       if down: return ApiResult(status: asUnavailable, message: "the core does not answer")
       if password == "throttled": return ApiResult(status: asRefused, code: 429, message: "retry after 30 s")
+      if user == "keyed" and password == "right-password-1234":
+        return ApiResult(status: asUnauthorized, code: 401, problem: "mfa_required", message: "send the code",
+                         body: %*{"mfa_ticket": "tk-keyed", "webauthn": {"rpId": "ui.example", "challenge": "abc_-", "allowCredentials": [{"type": "public-key", "id": "cred1"}], "timeout": 1000}})
       if user == "twostep" and password == "right-password-1234":
-        if code.len == 0: return ApiResult(status: asUnauthorized, code: 401, problem: "mfa_required", message: "send the code")
+        if code.len == 0: return ApiResult(status: asUnauthorized, code: 401, problem: "mfa_required", message: "send the code", body: %*{"mfa_ticket": "tk-two"})
         if code == "123456": return ok(%*{"token": "tok-ann", "user": "twostep", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
         return ApiResult(status: asUnauthorized, code: 401, problem: "bad_credentials", message: "bad_credentials")
       if user == "new" and password == "right-password-1234": return ok(%*{"token": "tok-new", "user": "new", "roles": ["admin"], "expires_at": 1800000000, "password_change_required": true})
       if (user == "ann" or user == "ann@acme") and password == "right-password-1234": return ok(%*{"token": "tok-ann", "user": "ann", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
       ApiResult(status: asUnauthorized, code: 401, message: "bad_credentials")
+  result.loginSecond = proc (ticket, code, assertion, client: string): ApiResult {.gcsafe.} =
+    {.cast(gcsafe).}:
+      loginCalls.add "second:" & ticket & ":" & code & ":" & assertion
+      if ticket == "tk-two" and code == "123456": return ok(%*{"token": "tok-ann", "user": "twostep", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
+      if ticket == "tk-keyed" and assertion.len > 0 and "cred1" in assertion: return ok(%*{"token": "tok-ann", "user": "keyed", "roles": ["ro"], "expires_at": 1800000000, "password_change_required": false})
+      ApiResult(status: asUnauthorized, code: 401, problem: "bad_credentials", message: "bad_credentials")
   result.get = proc (token, path: string): ApiResult {.gcsafe.} =
     {.cast(gcsafe).}:
       if path.startsWith("/api/v1/oidc/"):                      # D-102: no token wanted
@@ -608,15 +617,50 @@ suite "the actions of a run":
     check "has no account for them" in handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback", query = "code=c1&state=s1")).body
     check handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback", query = "error=access_denied&state=s1")).status == 401 and "access_denied" in handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback", query = "error=access_denied&state=s1")).body
     check handle(cfg, fakeCore(), req("GET", "/ui/login/oidc/callback")).status == 401
-  test "D-101 the login asks for the code when the core says so, and passes it on":
-    var f = {"user": "twostep", "password": "right-password-1234"}.toTable
+  test "D-101 the login asks for the code when the core says so; the second step comes back with the ticket and no password":
+    let f = {"user": "twostep", "password": "right-password-1234", "organization": "", "next": "/ui/runs"}.toTable
     let first = handle(cfg, fakeCore(), req("POST", "/ui/login", form = f))
-    check first.status == 401 and "code of your authenticator app" in first.body and "name=\"code\"" in first.body
-    f["code"] = "000000"
-    check handle(cfg, fakeCore(), req("POST", "/ui/login", form = f)).status == 401 and "or code" in handle(cfg, fakeCore(), req("POST", "/ui/login", form = f)).body
-    f["code"] = " 123456 "
-    let ok = handle(cfg, fakeCore(), req("POST", "/ui/login", form = f))
-    check ok.status == 303 and ok.header("Set-Cookie").startsWith("cinim_ui=tok-ann")
+    check first.status == 401 and "Code of the authenticator app" in first.body and "name=\"code\"" in first.body and "name=\"ticket\" value=\"tk-two\"" in first.body
+    check "type=\"password\"" notin first.body and "right-password" notin first.body and "<script" notin first.body          # no password in the page, and no script when there is no key
+    check "name=\"next\" value=\"/ui/runs\"" in first.body
+    let wrong = handle(cfg, fakeCore(), req("POST", "/ui/login", form = {"ticket": "tk-two", "code": "000000"}.toTable))
+    check wrong.status == 401 and "not accepted" in wrong.body and "type=\"password\"" in wrong.body                           # back to the start
+    let ok = handle(cfg, fakeCore(), req("POST", "/ui/login", form = {"ticket": "tk-two", "code": " 123456 ", "next": "/ui/runs"}.toTable))
+    check ok.status == 303 and ok.header("Set-Cookie").startsWith("cinim_ui=tok-ann") and ok.header("Location") == "/ui/runs"
+    check loginCalls[^1] == "second:tk-two:123456:"
+  test "D-103 a person with a key gets the script, the options in an attribute, and the answer of the key goes to the core":
+    let first = handle(cfg, fakeCore(), req("POST", "/ui/login", form = {"user": "keyed", "password": "right-password-1234"}.toTable))
+    check first.status == 401 and "data-webauthn=\"login\"" in first.body and "src=\"/ui/static/webauthn.js?v=" in first.body and "name=\"assertion\"" in first.body
+    check "&quot;challenge&quot;:&quot;abc_-&quot;" in first.body and "<script>" notin first.body                                   # the options are escaped into an attribute, nothing inline
+    check "script-src 'self'" in first.header("Content-Security-Policy") and "'unsafe-inline'" notin first.header("Content-Security-Policy")
+    let answer = $(%*{"id": "cred1", "clientDataJSON": "x", "authenticatorData": "y", "signature": "z"})
+    let ok = handle(cfg, fakeCore(), req("POST", "/ui/login", form = {"ticket": "tk-keyed", "assertion": answer, "code": ""}.toTable))
+    check ok.status == 303 and loginCalls[^1] == "second:tk-keyed::" & answer
+    check handle(cfg, fakeCore(), req("POST", "/ui/login", form = {"ticket": "tk-keyed", "assertion": "{}"}.toTable)).status == 401
+    check handle(cfg, fakeCore(), req("POST", "/ui/login", form = {"ticket": "tk-keyed", "assertion": "{}"}.toTable)).body.contains("Log in again")
+  test "D-103 the script is served without a session, as a script of this host":
+    let js = handle(cfg, fakeCore(), req("GET", "/ui/static/webauthn.js"))
+    check js.status == 200 and js.header("Content-Type").startsWith("text/javascript") and "navigator.credentials.get" in js.body and "navigator.credentials.create" in js.body
+    check handle(cfg, fakeCore(), req("POST", "/ui/static/webauthn.js")).status == 405
+  test "D-103 the page of keys: the list, the form that the script fills, begin as JSON, finish with the recovery codes, remove with a code":
+    routes["/api/v1/me/mfa"] = %*{"enabled": true, "totp": false, "webauthn_available": true, "required": false, "recovery_codes_left": 10,
+                                  "keys": [{"id": "cred1", "name": "my <phone>", "created_at": 1800000000, "last_used_at": 0}]}
+    var p = handle(cfg, fakeCore(), req("GET", "/ui/mfa", cookie = session))
+    check p.status == 200 and "my &lt;phone&gt;" in p.body and "name=\"id\" value=\"cred1\"" in p.body and "action=\"/ui/mfa/key-remove\"" in p.body
+    check "data-begin=\"/ui/mfa/webauthn-begin\"" in p.body and "action=\"/ui/mfa/webauthn-finish\"" in p.body and "never" in p.body and "Set up an app" in p.body
+    routes["/api/v1/me/mfa"] = %*{"enabled": false, "totp": false, "webauthn_available": false, "required": false, "recovery_codes_left": 0, "keys": []}
+    check "not set up for security keys" in handle(cfg, fakeCore(), req("GET", "/ui/mfa", cookie = session)).body
+    postAnswer = ok(%*{"publicKey": {"challenge": "abc", "rp": {"id": "ui.example"}}})
+    let b = handle(cfg, fakeCore(), req("POST", "/ui/mfa/webauthn-begin", cookie = session, origin = "http://ui.example"))
+    check b.status == 200 and b.header("Content-Type") == "application/json" and parseJson(b.body)["publicKey"]["challenge"].getStr == "abc" and posted[^1] == "tok-ann /api/v1/me/mfa/webauthn:begin {}"
+    check handle(cfg, fakeCore(), req("POST", "/ui/mfa/webauthn-begin", cookie = session, origin = "https://evil.example")).status == 403
+    postAnswer = ok(%*{"keys": [], "recovery_codes": ["K7QD2-M4XPA"]})
+    p = handle(cfg, fakeCore(), req("POST", "/ui/mfa/webauthn-finish", cookie = session, origin = "http://ui.example",
+                                   pairs = @[("name", "laptop"), ("id", "cred2"), ("clientDataJSON", "cd"), ("attestationObject", "ao"), ("extra", "dropped")]))
+    check "K7QD2-M4XPA" in p.body and posted[^1] == "tok-ann /api/v1/me/mfa/webauthn:finish " & $(%*{"name": "laptop", "id": "cred2", "clientDataJSON": "cd", "attestationObject": "ao"})
+    check handle(cfg, fakeCore(), req("POST", "/ui/mfa/key-remove", cookie = session, origin = "http://ui.example", pairs = @[("id", "cred1"), ("code", "ABCDE-FGHIJ")])).status == 303
+    check sent[^1] == "DELETE /api/v1/me/mfa/webauthn/cred1 {\"code\":\"ABCDE-FGHIJ\"}"
+    check handle(cfg, fakeCore(), req("POST", "/ui/mfa/key-remove", cookie = session, origin = "http://ui.example", pairs = @[("id", "../x"), ("code", "1")])).status == 400
   test "D-101 the page of two-step login: off, set up, turned on with the recovery codes once, turned off":
     routes["/api/v1/me/mfa"] = %*{"enabled": false, "required": true, "recovery_codes_left": 0}
     var p = handle(cfg, fakeCore(), req("GET", "/ui/mfa", cookie = session))
