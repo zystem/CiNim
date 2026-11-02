@@ -70,19 +70,19 @@ samples were `system.add`, `system.setLen` and slicing of `seq[byte]` (Nim's ele
 with `copyMem` into uninitialised buffers, builds a received message straight from the DATA chunks and keeps the 5-byte frame prefix apart on send. In nim-grpc's own loopback benchmark, pinned,
 the TLS throughput is about 370 MB/s and plain about 600 MB/s.
 
-**Many shims at once** (32 clients, 100 requests of 64 KiB each, `--opt:speed`): the whole batch took about 1.0 s on ZeroMQ (one REP thread) and about 0.8 s on gRPC (the TLS work of the
-connections spreads over the cores; the handler itself is still one at a time). A server is not the limit for the log of a few shims; the CPU is.
+**Many shims at once** (32 clients in parallel, 100 requests of 64 KiB each, `--opt:speed`, three runs each): the whole batch took 0.70-0.77 s on ZeroMQ (one REP thread) and 0.22-0.37 s on gRPC
+(the TLS work of the connections spreads over the cores; the handler itself is still one at a time). A server is not the limit for the log of a few shims; the CPU is.
 
-**Connected shims, idle** (the core's side; each held one connection after one request):
+**Connected shims, idle** (the core's side; each held one connection after one request, `--opt:speed`):
 
 | connections | ZeroMQ: threads, RSS | gRPC (blocking server): threads, RSS |
 |--:|--:|--:|
-| 0 | 3, 4 MB | 2, 3.6 MB |
-| 100 | 3, 7.8 MB | 205, 28 MB |
-| 400 | 3, 18.5 MB | 631, 84 MB |
+| 0 | 3, 6.5 MB | 2, 5.9 MB |
+| 100 | 3, 9.5 MB | 205, 31 MB |
+| 400 | 3, 18 MB | 805, 103 MB |
 
 nim-grpc's blocking server gives every connection a reader and a writer thread. A step has up to three connections (log, state, a report or an artifact call), so 500 steps at once would be about
-1500 connections and 2500 threads, and 300 MB. nim-grpc also has a chronos server that serves many connections on one thread (its documentation says so; **not tried here**); the core would then
+1500 connections and 3000 threads, and 390 MB (the 1 MiB window and the buffers cost about 0.25 MB a connection now, against 0.2 before). nim-grpc also has a chronos server that serves many connections on one thread (its documentation says so; **not tried here**); the core would then
 call its blocking database client from a worker, which is another piece of work.
 
 ## What was found on the way
