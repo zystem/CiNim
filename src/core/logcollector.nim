@@ -21,7 +21,8 @@ import std/[json, tables, strutils, httpclient, locks, atomics, times, options, 
 import health
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, rqlite, shimstate, states]
+import common/[rqlite, shimstate, states]
+import grpcserve
 import crunchy
 import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, apiauth
 import common/[ctrlauth]
@@ -315,18 +316,39 @@ proc answerStatus*(c: var RqClient; body: string): string =
       StatusAck(header: Header(protocol: 1), failure: Failure(code: "retry_later", detail: e.msg))
   wireString(Protobuf.encode(ack))
 
+var
+  statusLock, ingestLock, reportLock: Lock
+  statusC, ingestC, reportC: RqClient
+  ingestCo: Collector
+  reportMaster, reportProfile: string
+initLock(statusLock)
+initLock(ingestLock)
+initLock(reportLock)
+
+proc statusHandler(ctx: var ServerContext; req: seq[byte]): seq[byte] {.nimcall, gcsafe, raises: [CatchableError].} =
+  {.cast(gcsafe).}:
+    {.cast(raises: [CatchableError]).}:
+      withLock statusLock: result = toBytes(answerStatus(statusC, toStr(req)))
+
+proc ingestHandler(ctx: var ServerContext; req: seq[byte]): seq[byte] {.nimcall, gcsafe, raises: [CatchableError].} =
+  {.cast(gcsafe).}:
+    {.cast(raises: [CatchableError]).}:
+      withLock ingestLock: result = toBytes(answerLogBatch(ingestC, ingestCo, toStr(req)))
+
+proc reportHandler(ctx: var ServerContext; req: seq[byte]): seq[byte] {.nimcall, gcsafe, raises: [CatchableError].} =
+  {.cast(gcsafe).}:
+    {.cast(raises: [CatchableError]).}:
+      withLock reportLock: result = toBytes(answerStepReport(reportC, reportMaster, reportProfile, toStr(req)))
+
 proc serveStatus*(rqliteUrl, certs: string; port: int) {.thread.} =
   ## D-75: the state, the heartbeat and the metrics of the shims, on a port and a thread of their own, so that a database that is slow delays these and not the log.
   {.cast(gcsafe).}:
-    var c = newRq(rqliteUrl)
-    let (_, secretKey) = loadKeypair(certs, "core")
-    let conn = listenRep(port, secretKey)
+    statusC = newRq(rqliteUrl)
+    let srv = startShimServer(port, certs, statusMethod, statusHandler)
     while not stopServers.load:
       beat(bStatus)
-      let body = conn.receive()
-      if body.len == 0: continue
-      conn.send(answerStatus(c, body))
-    conn.close()
+      sleep 200
+    srv.stop(graceMs = 1000)
 
 proc serveBookkeeping*(rqliteUrl: string) {.thread.} =
   ## D-75: writes the row of log_streams of each stream the log has opened (the first batch only notes it), apart from the log. A database that does not answer is tried again a second later;
@@ -359,25 +381,21 @@ proc serveBookkeeping*(rqliteUrl: string) {.thread.} =
 
 proc serveLogIngest*(co: Collector; certs: string; port: int) {.thread.} =
   {.cast(gcsafe).}:
-    var c = newRq(co.rqliteUrl)
-    let (_, secretKey) = loadKeypair(certs, "core")
-    let conn = listenRep(port, secretKey)
+    ingestC = newRq(co.rqliteUrl)
+    ingestCo = co
+    let srv = startShimServer(port, certs, logIngestMethod, ingestHandler)
     while not stopServers.load:
       beat(bLogIngest)
-      let body = conn.receive()
-      if body.len == 0: continue
-      conn.send(answerLogBatch(c, co, body))
-    conn.close()
+      sleep 200
+    srv.stop(graceMs = 1000)
 
 proc serveStepReport*(rqliteUrl, certs: string; port: int; profileId: string) {.thread.} =
   {.cast(gcsafe).}:
-    var c = newRq(rqliteUrl)
-    let master = coreSecretKey(certs)
-    let (_, secretKey) = loadKeypair(certs, "core")
-    let conn = listenRep(port, secretKey)
+    reportC = newRq(rqliteUrl)
+    reportMaster = coreSecretKey(certs)
+    reportProfile = profileId
+    let srv = startShimServer(port, certs, stepReportMethod, reportHandler)
     while not stopServers.load:
       beat(bStepReport)
-      let body = conn.receive()
-      if body.len == 0: continue
-      conn.send(answerStepReport(c, master, profileId, body))
-    conn.close()
+      sleep 200
+    srv.stop(graceMs = 1000)

@@ -11,12 +11,13 @@
 ## no bytes is one request, `put_object`, without data. Nothing is kept in the core between the requests but the row of the artifact (state `uploading`, the upload id), so a core that restarts
 ## in the middle loses nothing; the shim sends the part again. An artifact is `stored` only when the store itself says that the object is there with the size announced. A shard without the
 ## module's port for shims (`storage.directUrl`) stores no artifact and no cache: the request is refused (`direct_required`).
-import std/[json, strutils, times, tables, sequtils, atomics]
+import std/[json, strutils, times, tables, sequtils, atomics, locks, os]
 import health
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import crunchy
-import ../common/[zmqcurve, rqlite, states, ctrlauth]
+import ../common/[rqlite, states, ctrlauth]
+import grpcserve
 import schema, objectstore, scheduler, drains, cachestore
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
@@ -279,23 +280,33 @@ proc handleArtifact*(c: var RqClient; req: ArtifactRequest; master: string; ss: 
   else:
     return refuse("bad_request", "the op is put_object (a file of no bytes), put_begin, put_end, put_abort or get_list")
 
+proc answerArtifact*(c: var RqClient; master, body: string): string =
+  ## The answer to one request of ArtifactIngest, encoded. An error in one request is the answer to that request; it does not end the core.
+  let resp = try: handleArtifact(c, Protobuf.decode(cast[seq[byte]](body), ArtifactRequest), master, newStoreSet())
+             except CatchableError as e:
+               stderr.writeLine "core: artifact ingest: " & e.msg
+               refuse("internal", e.msg)
+  let outb = Protobuf.encode(resp)
+  result = newString(outb.len)
+  if outb.len > 0: copyMem(addr result[0], unsafeAddr outb[0], outb.len)
+
+var
+  artifactLock: Lock
+  artifactC: RqClient
+  artifactMaster: string
+initLock(artifactLock)
+
+proc artifactHandler(ctx: var ServerContext; req: seq[byte]): seq[byte] {.nimcall, gcsafe, raises: [CatchableError].} =
+  {.cast(gcsafe).}:
+    {.cast(raises: [CatchableError]).}:
+      withLock artifactLock: result = toBytes(answerArtifact(artifactC, artifactMaster, toStr(req)))
+
 proc serveArtifactIngest*(rqliteUrl, certs: string; port: int) {.thread.} =
   {.cast(gcsafe).}:
-    var c = newRq(rqliteUrl)
-    let master = coreSecretKey(certs)
-    let (_, secretKey) = loadKeypair(certs, "core")
-    let conn = listenRep(port, secretKey)
+    artifactC = newRq(rqliteUrl)
+    artifactMaster = coreSecretKey(certs)
+    let srv = startShimServer(port, certs, artifactMethod, artifactHandler)
     while not stopServers.load:
       beat(bArtifactIngest)
-      let body = conn.receive()
-      if body.len == 0: continue
-      # an error in one request is the answer to that request; it does not end the core, and a REP socket needs its answer to go on
-      let resp = try: handleArtifact(c, Protobuf.decode(cast[seq[byte]](body), ArtifactRequest), master, newStoreSet())
-                 except CatchableError as e:
-                   stderr.writeLine "core: artifact ingest: " & e.msg
-                   refuse("internal", e.msg)
-      let outb = Protobuf.encode(resp)
-      var s = newString(outb.len)
-      if outb.len > 0: copyMem(addr s[0], unsafeAddr outb[0], outb.len)
-      conn.send(s)
-    conn.close()
+      sleep 200
+    srv.stop(graceMs = 1000)

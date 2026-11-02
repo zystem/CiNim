@@ -56,10 +56,13 @@ suite "D-61 the shim sends its bytes straight to the storage module":
     check false
   else:
     let caddy = getCurrentDir() / "build" / "caddy-store"
-    let certs = getCurrentDir() / "tests" / "certs"
     let base = getTempDir() / ("tshimdirect-" & $getCurrentProcessId())
     removeDir(base)
     createDir(base)
+    # the keys: the master key comes from curve/core.key of tests/certs; the shim's channel to the core is gRPC with TLS keys made here
+    let certs = base / "certs"
+    copyDir(getCurrentDir() / "tests" / "certs" / "curve", certs / "curve")
+    check execCmd("sh tools/grpc/gen_tls.sh " & quoteShell(certs) & " 2") == 0
     for port in [modulePort, shimPort, port1, port2, ingestPort]:
       if listening(port): quit "something listens on " & $port & " already (a process of an earlier run?)"
     var c = newRq(url)
