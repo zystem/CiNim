@@ -45,19 +45,30 @@ uses and an echo server, so what is measured is the transport and nothing the co
 | shim, UPX | 639 144 B | 396 572 B (-38%) |
 | core | 9 983 224 B | 10 409 720 B (+4.3%) |
 
-**One channel, a request after a request** (what a shim does; `-d:release --opt:size`, as the images are built):
+**One channel, a request after a request** (what a shim does; `-d:release --opt:size`, as the images are built; nim-grpc with the copy fixes, session resumption, fewer copies and a 1 MiB HTTP/2
+window, PR #11; the container pinned to cores 0-3, three runs, medians; without pinning the same binaries varied 30-40% from run to run):
 
 | | ZeroMQ + CURVE | gRPC + mTLS |
 |:--|--:|--:|
-| new channel and its first request, median (p95) | 3.6 ms (4.5) | 18 ms (21) |
-| 256 B, median (p99) | 0.073 ms (0.19) | 0.19 ms (0.52) |
-| 64 KiB, median; throughput | 0.88 ms; 64 MB/s | 5.7 ms; 12 MB/s |
-| 900 KB, median; throughput | 6.9 ms; 107 MB/s | 65 ms; 14 MB/s |
-| CPU of the client for the series (about 250 MB each way) | 1.7 s | 12.2 s |
-| CPU of the server for the same | 3.1 s | 22 s |
+| new channel and its first request, median | 1.0-1.3 ms | 0.6-0.8 ms (a connection after the first one of the process, see below) |
+| 256 B, median | 0.038-0.041 ms | 0.041-0.045 ms |
+| 64 KiB, median; throughput | 0.45-0.48 ms; 134-143 MB/s | 0.26 ms; 235-251 MB/s |
+| 900 KB, median; throughput | 5.9-6.1 ms; 146-152 MB/s | 2.7 ms; 323-332 MB/s |
+| CPU of the client for the series | 1.01-1.05 s | 0.85-0.89 s |
+| CPU of the server for the same | 1.00-1.04 s | 0.80-0.84 s |
+| peak RSS, client / server | 6 / 5 MB | 14-15 / 13-15 MB |
+| threads, client / server | 1 / 3 | 3 / 7 |
 
-With `--opt:speed` gRPC is up to twice as fast (64 KiB: 24 MB/s; 900 KB: 18 MB/s; first request 8 ms) and the order of the two does not change. The cost is BearSSL (TLS 1.2, software
-crypto) and the HTTP/2 framing, against libsodium's CURVE; where the time goes inside was not profiled.
+gRPC is now faster than ZeroMQ on 64 KiB and larger, uses about 17% less CPU for the series, and is within 10% on 256 B; it takes more memory (the 1 MiB window lets a peer leave up to 1 MiB unread
+per connection) and more threads. **The first request** is fast because the 40 repeats of the benchmark share one `TlsConfig` (`common/corechannel.nim` keeps one per directory of keys), so every
+channel after the first resumes the TLS session of the previous one (ten minutes in nim-grpc, `setSessionLifetime`) and skips the public-key work; the first connection of a process, and one after
+the shim restarted, still takes about 3 ms. A resumed session is not checked against the certificate again, so a revoked shim certificate keeps working for up to ten minutes. For comparison,
+before the fixes gRPC took 18 ms for the first request, 5.7 ms for 64 KiB, 65 ms for 900 KB and 12 s of CPU on the client (`--opt:size`, unpinned).
+
+**Where the time went** (`perf record` on a gRPC echo of 900 KB messages with TLS, before the fixes; the first reading, that BearSSL's crypto is the cost, was wrong): 36.5% + 30.7% + 4.7% of the
+samples were `system.add`, `system.setLen` and slicing of `seq[byte]` (Nim's element-by-element copy and byte-wise zero fill), against 2% + 1.8% for AES-GCM with AES-NI and PCLMUL. nim-grpc now copies
+with `copyMem` into uninitialised buffers, builds a received message straight from the DATA chunks and keeps the 5-byte frame prefix apart on send. In nim-grpc's own loopback benchmark, pinned,
+the TLS throughput is about 370 MB/s and plain about 600 MB/s.
 
 **Many shims at once** (32 clients, 100 requests of 64 KiB each, `--opt:speed`): the whole batch took about 1.0 s on ZeroMQ (one REP thread) and about 0.8 s on gRPC (the TLS work of the
 connections spreads over the cores; the handler itself is still one at a time). A server is not the limit for the log of a few shims; the CPU is.
@@ -78,7 +89,7 @@ call its blocking database client from a worker, which is another piece of work.
 
 1. **nim-grpc's `dial` blocks in `connect(2)` with no deadline** (and name resolution too): a core behind a rule that drops packets would hold a shim for minutes, where a ZeroMQ connect returns at
    once. `corechannel.nim` makes a probe connect with a 5 s deadline first (one extra TCP connection per channel). The right fix is a connect timeout in nim-grpc.
-2. **TLS 1.2 only**, with BearSSL's software crypto. CURVE has no version and no certificates. Certificates expire: a set made for two years is an operational item (rotation, a clock that is
+2. **TLS 1.2 only** (BearSSL has no 1.3; the cipher in use is hardware AES-GCM, see above). CURVE has no version and no certificates. Certificates expire: a set made for two years is an operational item (rotation, a clock that is
    right in the Pod) that CURVE keys never were.
 3. **The REP socket serialised requests for free;** now a lock does (`grpcserve.nim`), so the state a handler touches (the database client of the thread, the collector) is used by one request at a
    time, as before. Real concurrency is possible but needs a database client per worker and a look at the shared state in `logcollector.nim`.
@@ -95,10 +106,10 @@ call its blocking database client from a worker, which is another piece of work.
 
 ## Reading of the numbers
 
-* The shim gets smaller and simpler to build (no C++, no libsodium, no libzmq); that is real and it is the strongest argument. Its bytes go through a TLS stack that costs about 7 times more
-  expensive per byte, which does not matter for the sizes a step sends (compressed log blocks, a report of a few hundred bytes) and matters for the fallback path that carries artifact bytes
-  through the core (the direct path of D-61 does not use this channel for bytes).
-* The core pays for connections: with the blocking server it is the number of threads, with CPU about 7 times per byte on top. For a shard with many steps at once the blocking server is not a
+* The shim gets smaller and simpler to build (no C++, no libsodium, no libzmq); that is real and it is the strongest argument. Its bytes cost about 7 times more CPU in nim-grpc as it is;
+  the profile says that is the copying of `seq[byte]` and not the crypto, so most of it can be got back by a change in the library. It does not matter for the sizes a step sends (compressed
+  log blocks, a report of a few hundred bytes) and matters for the fallback path that carries artifact bytes through the core (the direct path of D-61 does not use this channel for bytes).
+* The core pays for connections: with the blocking server it is the number of threads, with CPU about 7 times per byte on top (the same copying; the server pays it too). For a shard with many steps at once the blocking server is not a
   choice; the chronos one has to be tried, and that is a bigger piece of work than this branch.
 * Mutual TLS gives what CURVE did not: certificates with names and expiry, revocation by replacing the CA, standard tooling. It costs a certificate lifecycle.
 

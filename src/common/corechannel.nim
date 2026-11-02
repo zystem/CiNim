@@ -8,7 +8,7 @@
 ##
 ## nim-grpc's `dial` connects at once and blocks in `connect(2)` without a deadline (a core behind a rule that drops packets would hold the shim for minutes), so a connect with a deadline
 ## is made first as a probe. The probe is a second TCP connection made and closed; the cost is one round trip when a channel is made.
-import std/[os, net]
+import std/[os, net, locks, tables]
 import grpc
 
 const
@@ -54,9 +54,20 @@ proc drop(c: CoreChannel) =
 
 proc close*(c: CoreChannel) = c.drop()
 
+var
+  configLock: Lock
+  configs {.guard: configLock.}: Table[string, TlsConfig]
+initLock(configLock)
+
 proc loadKeys(c: CoreChannel) =
+  ## One TlsConfig per directory of keys for the whole process, not one per channel: nim-grpc keeps the TLS session of the last connection in the config and resumes it (for ten minutes) on the
+  ## next connection with the same config and server name, which skips the public-key work of the handshake. A channel made for each report or secrets request would otherwise start from scratch.
   if c.tls == nil:
-    c.tls = tlsClientConfig(readFile(c.certs / "tls" / "ca.pem"), readFile(c.certs / "tls" / "client.pem"), readFile(c.certs / "tls" / "client.key"))
+    {.cast(gcsafe).}:
+      withLock configLock:
+        if c.certs notin configs:
+          configs[c.certs] = tlsClientConfig(readFile(c.certs / "tls" / "ca.pem"), readFile(c.certs / "tls" / "client.pem"), readFile(c.certs / "tls" / "client.key"))
+        c.tls = configs[c.certs]
 
 proc connectNow(c: CoreChannel) =
   var probe = newSocket(buffered = false)
