@@ -6,9 +6,9 @@
 ## still touched by one request at a time. nim-grpc runs every call on a worker thread of its own; `maxWorkers` is small because the rest would only wait on the lock.
 ## The files: `<certs>/tls/core.pem`, `core.key` (the certificate must carry the DNS name `cinim-core`, which the shims check) and `ca.pem` (what the shims' certificate must chain to).
 import std/os
-import grpc
+import nimgrpc
 import ../common/corechannel
-export grpc, corechannel
+export nimgrpc, corechannel
 
 proc toBytes*(s: string): seq[byte] =
   result = newSeq[byte](s.len)

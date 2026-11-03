@@ -10,7 +10,7 @@ Only the transport is replaced.
 
 | Part | Before | Now |
 |:--|:--|:--|
-| Shim client | `connectReq` / `send` / `waitForReceive` (`common/zmqcurve.nim`) at six places of `shim/logclient.nim` | `dialCore` / `exchange` (`common/corechannel.nim`, 89 lines): the same call sites, one line each |
+| Shim client | `connectReq` / `send` / `waitForReceive` (`common/zmqcurve.nim`) at six places of `shim/logclient.nim` | `dialCore` / `exchange` (`common/corechannel.nim`, about 100 lines): the same call sites, one line each |
 | Core servers | a REP socket and a thread per channel (`serveLogIngest`, `serveStepReport`, `serveStatus`, `serveArtifactIngest`) | a gRPC server per channel and port (`core/grpcserve.nim`, 26 lines); the handlers `answerLogBatch`, `answerStepReport`, `answerStatus` and the new `answerArtifact` are the same code, called under a lock |
 | Identity | CURVE keypairs `curve/core.*`, `curve/client.*`, one client identity for all shims | mutual TLS: `tls/ca.pem`, `tls/core.{pem,key}`, `tls/client.{pem,key}`; one client identity for all shims, as before (SEC-010 is still deferred); made by `tools/grpc/gen_tls.sh` |
 | Methods | the socket | `/cicd.LogIngest/Send`, `/cicd.StepReport/Report`, `/cicd.Status/Report`, `/cicd.ArtifactIngest/Call` (nim-grpc's untyped API: the bytes of the existing messages; no `service` was added to `proto/`) |
@@ -19,8 +19,8 @@ Only the transport is replaced.
 The shim checks the core's certificate against the fixed name `cinim-core`, not against the address it dials, so one certificate serves every namespace. A step Pod needs `ca.pem`, `client.pem`
 and `client.key`, never `core.key`.
 
-Build: nim-grpc needs a static nghttp2 (`-d:nghttp2Prefix`), zlib and the Nim package `bearssl`; `config.nims` reads `NIM_GRPC` (the checkout), `NIM_BEARSSL` and `NGHTTP2_PREFIX`. The shim no longer
-needs libzmq, libsodium or a C++ toolchain.
+Build: nim-grpc (the repository is now `zystem/nimgrpc`, the Nim package and the modules `nimgrpc`: `import nimgrpc`; version 0.2.0 was used) needs a static nghttp2 1.57 or later (`-d:nghttp2Prefix`), zlib and the Nim package
+`bearssl`; `config.nims` reads `NIM_GRPC` (the checkout), `NIM_BEARSSL` and `NGHTTP2_PREFIX`. The shim no longer needs libzmq, libsodium or a C++ toolchain.
 
 ## Tests
 
@@ -39,11 +39,15 @@ uses and an echo server, so what is measured is the transport and nothing the co
 
 **Size** (static, stripped; the shim is also UPX-packed because it travels in a ConfigMap):
 
-| | `main` | `shim-grpc` |
-|:--|--:|--:|
-| shim | 1 883 608 B | 1 053 808 B (-44%) |
-| shim, UPX | 639 144 B | 396 572 B (-38%) |
-| core | 9 983 224 B | 10 409 720 B (+4.3%) |
+| | `main` | `shim-grpc`, `--opt:size` (as built) | `shim-grpc`, `--opt:speed` |
+|:--|--:|--:|--:|
+| shim | 1 883 608 B | 1 062 000 B (-44%) | 1 344 624 B (-29%) |
+| shim, UPX | 639 144 B | 398 456 B (-38%) | 498 760 B (-22%) |
+| core | 9 983 224 B | 10 409 720 B (+4.3%) | |
+
+The shim with nimgrpc 0.2.0 (the figures of the first two columns of `shim-grpc` before were 1 053 808 and 396 572 B). **`--opt:speed` fits** the limit of RUN-010 (1 MiB packed) with room to spare: 487 KiB, and
+it is still smaller than the ZeroMQ shim of `main`. It buys nothing measurable, though: the transport benchmark below, built both ways, gave the same medians within the noise (900 KB: 4.7 ms with `size`, 5.4 ms with `speed`;
+64 KiB: 0.88 and 0.94 ms; unpinned, one run each), because the copying that used to cost the time is `copyMem` now and the crypto is C. The images stay on `--opt:size`.
 
 **One channel, a request after a request** (what a shim does; `-d:release --opt:size`, as the images are built; nim-grpc with the copy fixes, session resumption, fewer copies and a 1 MiB HTTP/2
 window, PR #11; the container pinned to cores 0-3, three runs, medians; without pinning the same binaries varied 30-40% from run to run):
@@ -87,8 +91,8 @@ call its blocking database client from a worker, which is another piece of work.
 
 ## What was found on the way
 
-1. **nim-grpc's `dial` blocks in `connect(2)` with no deadline** (and name resolution too): a core behind a rule that drops packets would hold a shim for minutes, where a ZeroMQ connect returns at
-   once. `corechannel.nim` makes a probe connect with a 5 s deadline first (one extra TCP connection per channel). The right fix is a connect timeout in nim-grpc.
+1. **nim-grpc's `dial` blocked in `connect(2)` with no deadline** (and name resolution too): a core behind a rule that drops packets would hold a shim for minutes, where a ZeroMQ connect returns at
+   once. Fixed in the library (`connectTimeoutMs`, 20 s by default); `corechannel.nim` passes 5 s and no longer makes a probe connection first. Resolving the name is still not covered.
 2. **TLS 1.2 only** (BearSSL has no 1.3; the cipher in use is hardware AES-GCM, see above). CURVE has no version and no certificates. Certificates expire: a set made for two years is an operational item (rotation, a clock that is
    right in the Pod) that CURVE keys never were.
 3. **The REP socket serialised requests for free;** now a lock does (`grpcserve.nim`), so the state a handler touches (the database client of the thread, the collector) is used by one request at a
@@ -106,11 +110,11 @@ call its blocking database client from a worker, which is another piece of work.
 
 ## Reading of the numbers
 
-* The shim gets smaller and simpler to build (no C++, no libsodium, no libzmq); that is real and it is the strongest argument. Its bytes cost about 7 times more CPU in nim-grpc as it is;
-  the profile says that is the copying of `seq[byte]` and not the crypto, so most of it can be got back by a change in the library. It does not matter for the sizes a step sends (compressed
-  log blocks, a report of a few hundred bytes) and matters for the fallback path that carries artifact bytes through the core (the direct path of D-61 does not use this channel for bytes).
-* The core pays for connections: with the blocking server it is the number of threads, with CPU about 7 times per byte on top (the same copying; the server pays it too). For a shard with many steps at once the blocking server is not a
+* The shim gets smaller and simpler to build (no C++, no libsodium, no libzmq); that is real and it is the strongest argument. With the copy fixes of nimgrpc its bytes no longer cost more CPU than
+  ZeroMQ's (the table above: 17% less for the series, faster from 64 KiB up), so the fallback path that carries artifact bytes through the core (the direct path of D-61 does not use this channel
+  for bytes) is not a reason against it any more. Before the fixes it was about 7 times more.
+* The core pays for connections: with the blocking server it is the number of threads (and about 0.25 MB each); the CPU per byte is no longer the problem. For a shard with many steps at once the blocking server is not a
   choice; the chronos one has to be tried, and that is a bigger piece of work than this branch.
 * Mutual TLS gives what CURVE did not: certificates with names and expiry, revocation by replacing the CA, standard tooling. It costs a certificate lifecycle.
 
-Nothing in the branch is committed or pushed.
+The branch is committed and not pushed.

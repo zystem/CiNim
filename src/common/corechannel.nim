@@ -6,10 +6,10 @@
 ## certificate is checked against the fixed name `cinim-core`, not against the address the shim dials, so one certificate serves every namespace. The core needs the CA to check the shims
 ## and `tls/core.pem`, `tls/core.key` (`tools/grpc/gen_tls.sh` makes the set).
 ##
-## nim-grpc's `dial` connects at once and blocks in `connect(2)` without a deadline (a core behind a rule that drops packets would hold the shim for minutes), so a connect with a deadline
-## is made first as a probe. The probe is a second TCP connection made and closed; the cost is one round trip when a channel is made.
-import std/[os, net, locks, tables]
-import grpc
+## nim-grpc's `dial` connects at once; its `connectTimeoutMs` bounds the TCP connect (a core behind a rule that drops packets would otherwise hold the shim for the system's timeout, minutes).
+## Resolving the name is not covered by it.
+import std/[os, locks, tables]
+import nimgrpc
 
 const
   coreServerName* = "cinim-core"
@@ -17,7 +17,7 @@ const
   stepReportMethod* = "/cicd.StepReport/Report"
   statusMethod* = "/cicd.Status/Report"
   artifactMethod* = "/cicd.ArtifactIngest/Call"
-  probeTimeoutMs = 5000
+  connectTimeoutMs = 5000
 
 type
   CoreChannel* = ref object
@@ -70,10 +70,7 @@ proc loadKeys(c: CoreChannel) =
         c.tls = configs[c.certs]
 
 proc connectNow(c: CoreChannel) =
-  var probe = newSocket(buffered = false)
-  try: probe.connect(c.host, Port(c.port), probeTimeoutMs)
-  finally: probe.close()
-  c.ch = dial(c.host, c.port, c.tls, serverName = coreServerName)
+  c.ch = dial(c.host, c.port, c.tls, serverName = coreServerName, connectTimeoutMs = connectTimeoutMs)
   c.open = true
 
 proc toBytes(s: string): seq[byte] =
