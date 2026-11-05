@@ -34,6 +34,22 @@ suite "sealing a value":
     check not unseal(k, flipped, "cinim/secret/v1|t1|A|1").ok
     check not unseal(k, "v1." & s[3 .. ^1], "cinim/secret/v1|t1|A|1").ok and not unseal(k, "", "a").ok and not unseal(k, "v2.zz", "a").ok
 
+suite "D-106 the key service has to honour the context":
+  test "a key that ignores the context (a Vault or OpenBao key that is not derived) is refused, with what to do about it":
+    let ignoring = KekProvider(id: "transit:plain",
+      wrap: proc (plain: seq[byte]; aad: string): WrapResult {.gcsafe.} = (true, false, "", "sealed:" & cast[string](plain)),
+      unwrap: proc (wrapped: string; aad: string): UnwrapResult {.gcsafe.} = (true, false, "", @(wrapped[7 .. ^1].toOpenArrayByte(0, wrapped.len - 8))))
+    let r = verifyContextBinding(ignoring)
+    check not r.ok and not r.retry and "derived=true" in r.error
+  test "a key that binds the text to the context passes":
+    check verifyContextBinding(derivedKek("a-key")).ok
+  test "a key service that is away is a retry, not a refusal":
+    let away = KekProvider(id: "transit:away",
+      wrap: proc (plain: seq[byte]; aad: string): WrapResult {.gcsafe.} = (false, true, "the service is away", ""),
+      unwrap: proc (wrapped: string; aad: string): UnwrapResult {.gcsafe.} = unavailable("away"))
+    let r = verifyContextBinding(away)
+    check not r.ok and r.retry
+
 suite "the master key":
   test "a data key is wrapped and unwrapped by a key derived from the core's key; another core key unwraps nothing":
     let a = derivedKek("core-secret-A")

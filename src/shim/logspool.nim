@@ -1,7 +1,7 @@
 ## Log spool (D-27): the shim turns the step's output into VictoriaLogs jsonline records, compresses them in
 ## independent gzip blocks and queues the blocks as files on the Pod's ephemeral storage; a sender drains the files to
 ## core. Core forwards each block to vlagent untouched (vlagent reads independently compressed blocks glued into one body -
-## checked on the live vlagent), so nothing is ever recompressed. Pure module (no ZeroMQ): unit-tested in tlogspool.nim.
+## checked on the live vlagent), so nothing is ever recompressed. Pure module (no gRPC): unit-tested in tlogspool.nim.
 ##
 ## Secrets (DAT-002, second half) are masked here, before compression - core never sees the plain text. Only values
 ## known when the step starts (`--secrets-file`) and at least `minSecretLen` characters long are masked (shorter ones

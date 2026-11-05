@@ -4,9 +4,10 @@
 import std/[unittest, json, os, osproc, atomics, strutils, times, strtabs]
 import common/[rqlite, ctrlauth, scriptsource]
 import core/[schema, scheduler, loggate, logcircuit, streamhub, retrypolicy, preflight]
+import ../support/testcerts
 
 let url = getEnv("CINIM_RQLITE_URL")
-let certs = getCurrentDir() / "tests" / "certs"
+let certs = testCerts()
 const port = 29848
 
 proc runStream(a: tuple[co: Core, port: int]) {.thread.} = serveStream(a.co, a.port, workers = 2)

@@ -1,13 +1,13 @@
-## Compares the two transports of the shim's channels on a loopback, one against the other, with the code the shim uses: ZeroMQ REQ/REP with CURVE (`common/zmqcurve`, the old one) and gRPC
-## with mutual TLS (`common/corechannel`, nim-grpc). The server only echoes: what is measured is the transport and nothing the core does with a message.
+## Measures the shim's channel to the core on a loopback with the code the shim uses: gRPC with mutual TLS (`common/corechannel`, nimgrpc). The server only echoes: what is measured is the
+## transport and nothing the core does with a message. (It compared this with ZeroMQ REQ/REP with CURVE, the transport before; the numbers are in docs/shim-grpc.md.)
 ##
-##   shimtransport server zmq|grpc PORT KEYS        (stops, and prints its own numbers, on a request "QUIT")
-##   shimtransport client zmq|grpc PORT KEYS        (the series: first request on a new channel, latency, throughput; then the client's own numbers)
-##   shimtransport bulk   zmq|grpc PORT KEYS N SIZE (N requests of SIZE bytes on one channel; prints one line, for several clients at once)
+##   shimtransport server grpc PORT KEYS        (stops, and prints its own numbers, on a request "QUIT")
+##   shimtransport client grpc PORT KEYS        (the series: first request on a new channel, latency, throughput; then the client's own numbers)
+##   shimtransport bulk   grpc PORT KEYS N SIZE (N requests of SIZE bytes on one channel; prints one line, for several clients at once)
+##   shimtransport hold   grpc PORT KEYS N SECS (N channels, each used once and kept open for SECS seconds)
 ##
-## KEYS holds curve/{core,client}.{pub,key} (tools/zmq/gen_curve_keys.sh) and tls/* (tools/grpc/gen_tls.sh).
+## KEYS holds tls/* (tools/grpc/gen_tls.sh).
 import std/[os, strutils, algorithm, monotimes, times, atomics]
-import ../../src/common/zmqcurve
 import ../../src/core/grpcserve
 
 var quitting: Atomic[bool]
@@ -32,16 +32,6 @@ proc echoHandler(ctx: var ServerContext; req: seq[byte]): seq[byte] {.nimcall, g
   if req.len == 4 and toStr(req) == "QUIT": quitting.store(true)
   req
 
-proc serverZmq(port: int; keys: string) =
-  let (_, secret) = loadKeypair(keys, "core")
-  let conn = listenRep(port, secret)
-  while true:
-    let body = conn.receive()
-    if body.len == 0: continue
-    conn.send(body)
-    if body == "QUIT": break
-  own("server_zmq")
-
 proc serverGrpc(port: int; keys: string) =
   let srv = startShimServer(port, keys, logIngestMethod, echoHandler)
   while not quitting.load: sleep 20
@@ -53,21 +43,12 @@ type Call = proc (msg: string): bool
 
 proc withChannel(kind: string; port: int; keys: string; body: proc (call: Call)) =
   let addr0 = "tcp://127.0.0.1:" & $port
-  if kind == "zmq":
-    let conn = connectReq(addr0, loadPublicKey(keys, "core"), loadKeypair(keys, "client"), recvTimeoutMs = 10000, sendTimeoutMs = 10000)
-    defer: conn.close()
-    proc call(msg: string): bool =
-      conn.send(msg)
-      let (avail, _, reply) = waitForReceive(conn.socket)
-      avail and reply.len == msg.len
-    body(call)
-  else:
-    let c = dialCore(addr0, keys)
-    defer: c.close()
-    proc call(msg: string): bool =
-      let (avail, reply) = c.exchange(logIngestMethod, msg, 10000)
-      avail and reply.len == msg.len
-    body(call)
+  let c = dialCore(addr0, keys)
+  defer: c.close()
+  proc call(msg: string): bool =
+    let (avail, reply) = c.exchange(logIngestMethod, msg, 10000)
+    avail and reply.len == msg.len
+  body(call)
 
 proc pct(v: var seq[float]; p: float): float =
   v.sort()
@@ -122,28 +103,20 @@ proc hold(kind: string; port: int; keys: string; n, secs: int) =
   ## n channels, each used once, then kept open for `secs` seconds: what a core carries when n shims are connected
   let addr0 = "tcp://127.0.0.1:" & $port
   var chans: seq[CoreChannel]
-  var conns: seq[ZConnection]
   var failed = 0
   for i in 0 ..< n:
-    if kind == "zmq":
-      let conn = connectReq(addr0, loadPublicKey(keys, "core"), loadKeypair(keys, "client"), recvTimeoutMs = 20000, sendTimeoutMs = 20000)
-      conn.send("x".repeat(256))
-      let (avail, _, _) = waitForReceive(conn.socket)
-      if not avail: inc failed
-      conns.add conn
-    else:
-      let c = dialCore(addr0, keys)
-      if not c.exchange(logIngestMethod, "x".repeat(256), 20000).avail: inc failed
-      chans.add c
+    let c = dialCore(addr0, keys)
+    if not c.exchange(logIngestMethod, "x".repeat(256), 20000).avail: inc failed
+    chans.add c
   echo "held n=", n, " failed=", failed
   sleep secs * 1000
   own("holder_" & kind)
 
 let a = commandLineParams()
-if a.len < 4: quit "usage: shimtransport server|client|bulk zmq|grpc PORT KEYS [N SIZE]"
+if a.len < 4: quit "usage: shimtransport server|client|bulk|hold grpc PORT KEYS [N SIZE]"
 case a[0]
 of "server":
-  if a[1] == "zmq": serverZmq(parseInt(a[2]), a[3]) else: serverGrpc(parseInt(a[2]), a[3])
+  serverGrpc(parseInt(a[2]), a[3])
 of "client":
   series(a[1], parseInt(a[2]), a[3])
   proc quitCall(call: Call) = discard call("QUIT")

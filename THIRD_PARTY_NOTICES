@@ -30,7 +30,7 @@ Build-time native libraries
 ---------------------------
 
 Some CiNim build and integration-test configurations link native libraries
-that are installed separately rather than vendored here: libzmq (LGPL-3.0, dynamically
-loaded), libsodium, libcurl, libyaml, libwebsockets, OpenSSL, and their dependencies.
+that are installed separately rather than vendored here: nghttp2 (MIT, linked statically),
+BearSSL (MIT, compiled in by the nim-bearssl package), libsodium, libcurl, libyaml, libwebsockets, OpenSSL, and their dependencies.
 Binary distributors must include the notices and source/relinking materials
 required by the exact versions and link modes they select.

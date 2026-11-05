@@ -11,7 +11,7 @@ type
     name*, image*, runId*: string
     volume*: string              ## "" = the run's volume; else the id of the job whose volume the step mounts (`workspace = "isolated"`, STO-002)
     cmd*: seq[string]            ## the container's command: the shim, its flags, `--` and the step's command
-    logging*: bool               ## the shim streams logs: it needs the CURVE keys (its spool is on the run's volume)
+    logging*: bool               ## the shim streams logs: it needs the TLS keys (its spool is on the run's volume)
     spoolBytes*: int
     secrets*: seq[string]        ## the names of the step's secrets: the Pod's environment holds a placeholder for each, the shim fetches the values from core
     env*: seq[(string, string)]  ## plain environment of the step: the run's launch parameters (VAR-002); never a secret

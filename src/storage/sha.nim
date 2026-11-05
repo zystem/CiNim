@@ -1,4 +1,4 @@
-## SHA-256 of the store from libsodium, which the node already links for the CURVE transport (D-24): the pure-Nim hash is several times slower, and the node hashes every object it
+## SHA-256 of the store from libsodium, which the module already links for the sealing of its secrets: the pure-Nim hash is several times slower, and the node hashes every object it
 ## writes, every part it assembles and every file it is asked the `hash` of. A program that imports this module links `-lsodium`.
 {.passL: "-lsodium".}
 import std/strutils

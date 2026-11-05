@@ -33,7 +33,7 @@ message ShimMetric {
 
 message ShimStatus {
   // The shim's state exactly as written to the Pod log (the JSON after "CICD-SHIM "): D-29 keeps one definition
-  // (common/shimstate.nim) for the Pod log, ZeroMQ and rqlite, numbered by event (`n`), so the sources reconcile by n.
+  // (common/shimstate.nim) for the Pod log, the channel and rqlite, numbered by event (`n`), so the sources reconcile by n.
   string state_json = 1;
   // operational, not part of the Pod-log line
   uint64 spool_bytes = 2;            // queued, undelivered compressed bytes

@@ -1,11 +1,11 @@
 ## The identity of a job controller (IAM-003, SHD-007, T-46): which namespace it may serve. Nothing is stored but a generation number:
 ## the bootstrap token and the credential of a namespace are HMAC-SHA256 of the namespace and the generation under the core's own
-## secret key (the CURVE `core` key, which never leaves the core), so the core can make the token again when a provisioning is
+## secret (`tls/master.key`, which never leaves the core), so the core can make the token again when a provisioning is
 ## retried, and a rotation is a new generation. The bootstrap token (in a Secret of the namespace) is good until the controller has
 ## once polled with the credential that it gave in exchange, or until it expires; the credential is what every poll carries.
 ## A namespace that has no row is **not enrolled** and is refused: whoever holds the transport's `client` key could otherwise pose as the controller of a namespace the core has
 ## never provisioned and be handed its steps (and, through them, the secrets they ask for). Development and tests that run a controller without an identity say so (`unenrolled`).
-import std/strutils
+import std/[strutils, atomics, os]
 import crunchy
 
 type
@@ -43,9 +43,26 @@ proc conductorCredential*(master, namespace, conductorId: string): string =
   ## boundary between the namespace and the id cannot be moved.
   toHex(hmacSha256(master, "cinim/conductor/v1|" & $namespace.len & "|" & namespace & "|" & conductorId))
 
+var
+  masterBuf: array[256, char]      ## the secret from the database (core/vaultsetup.nim `resolveMasterSecret`), in a fixed array: it is read by threads of every kind and a Nim string made in one is freed in another
+  masterLen: Atomic[int]           ## 0: not set, the file is read
+
+proc setMasterSecret*(s: string) =
+  ## set once at the start, before any thread that uses it
+  doAssert s.len > 0 and s.len <= masterBuf.len, "the master secret is 1 to 256 characters"
+  for i in 0 ..< s.len: masterBuf[i] = s[i]
+  masterLen.store(s.len)
+
 proc coreSecretKey*(certs: string): string =
-  ## the core's own secret key (the CURVE `core` key): the master of the controller identities and the step credentials; it leaves the core nowhere
-  readFile(certs & "/curve/core.key").strip
+  ## the core's own secret: the master of the controller identities and the step credentials; it leaves the core nowhere. With a key service or a key file for the secrets it is kept in the database,
+  ## sealed by that key (`vault_meta`, secretvault.nim `ensureMasterSecret`) and set at the start by `setMasterSecret`; otherwise it is the file `<certs>/tls/master.key`
+  ## (tools/grpc/gen_tls.sh), from which the key of the secrets is derived. It is not a TLS key, so a new certificate does not change the identities.
+  let n = masterLen.load
+  if n > 0:
+    result = newString(n)
+    for i in 0 ..< n: result[i] = masterBuf[i]
+  else:
+    result = readFile(certs / "tls" / "master.key").strip
 
 proc stepToken*(master, runId: string; seq, attempt: int): string =
   ## The credential of one step for fetching its own secrets from core (6.7): HMAC-SHA256 under the core's key of the run, step and attempt, so a Pod

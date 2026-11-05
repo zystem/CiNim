@@ -2,12 +2,13 @@
 ## itself, says how many runs it can take, and the core pushes it the runs of its organisation within that; its calls are answered, and it can
 ## call only for the runs it holds. Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
 import std/[unittest, json, os, options, atomics, sequtils, strutils]
-import common/[rqlite, stream, zmqcurve, ctrlauth]
+import common/[rqlite, stream, ctrlauth]
 import core/[schema, scheduler, loggate, logcircuit, streamhub, workkick, retrypolicy, hubmetrics]
 import protobuf_serialization
+import ../support/testcerts
 
 let url = getEnv("CINIM_RQLITE_URL")
-let certs = getCurrentDir() / "tests" / "certs"
+let certs = testCerts()
 const port = 29847
 
 proc runStream(a: tuple[co: Core, port: int]) {.thread.} = serveStream(a.co, a.port, workers = 4)
@@ -26,8 +27,6 @@ suite "RUN-016 conductors on the push channel":
     safetyPassSeconds = 3.0
     var th: Thread[tuple[co: Core, port: int]]
     createThread(th, runStream, (co, port))
-    let corePub = loadPublicKey(certs, "core")
-    let clientKeys = loadKeypair(certs, "client")
     let master = coreSecretKey(certs)
     let serverAddr = "tcp://127.0.0.1:" & $port
     sleep 300
@@ -59,7 +58,7 @@ suite "RUN-016 conductors on the push channel":
       ExecutorRequest(header: Header(protocol: 1), body: ExecutorRequestBody(kind: ExecutorRequestBodyKind.finish,
         finish: FinishRun(run_id: runId, state: RUN_STATE_OK, lease_token: token)))
 
-    proc nextKind(cl: ZConnection; kind: string; ms = 8000): Option[StreamFrame] =
+    proc nextKind(cl: StreamClient; kind: string; ms = 8000): Option[StreamFrame] =
       for _ in 0 ..< 20:
         let f = cl.receive(ms)
         if f.isNone: return f
@@ -72,7 +71,7 @@ suite "RUN-016 conductors on the push channel":
     test "a conductor with a wrong credential is refused and gets no run":
       let o = newOrg()
       discard co.createRun("return 1", "t1", o.profile)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(hello("cd-bad-" & sfx, "c-bad", o.ns, 5, credential = "nope"))
       let w = cl.nextKind("conductor.welcome")
       check w.isSome and w.get.payload == "unauthorized" and w.get.re == 1
@@ -80,7 +79,7 @@ suite "RUN-016 conductors on the push channel":
       cl.close()
     test "a conductor that names no version of the Lua API is refused as too old":
       let o = newOrg()
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let bare = frame("cd-v-" & sfx, "conductor.hello", encodeHello(ConductorHello(conductor_id: "c-v", namespace: o.ns,
         credential: conductorCredential(master, o.ns, "c-v"), free_places: 5)), id = 1, key = o.ns)
       check cl.sendFrame(bare)
@@ -90,7 +89,7 @@ suite "RUN-016 conductors on the push channel":
     test "the credential of another namespace, or of another conductor, is refused":
       let a = newOrg()
       let b = newOrg()
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(hello("cd-x-" & sfx, "c-x", a.ns, 5, credential = conductorCredential(master, b.ns, "c-x")))
       check cl.nextKind("conductor.welcome").get.payload == "unauthorized"
       check cl.sendFrame(hello("cd-y-" & sfx, "c-y", a.ns, 5, credential = conductorCredential(master, a.ns, "c-other")))
@@ -100,7 +99,7 @@ suite "RUN-016 conductors on the push channel":
       let o = newOrg()
       var ids: seq[string]
       for i in 0 ..< 3: ids.add co.createRun("return " & $i, "t1", o.profile)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let ses = "cd-a-" & sfx
       check cl.sendFrame(hello(ses, "c-a", o.ns, 2))
       let w = cl.nextKind("conductor.welcome")
@@ -120,7 +119,7 @@ suite "RUN-016 conductors on the push channel":
       cl.close()
     test "a run made later is pushed without the conductor asking":
       let o = newOrg()
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(hello("cd-b-" & sfx, "c-b", o.ns, 3))
       check cl.nextKind("conductor.welcome").isSome
       let r = co.createRun("return 1", "t1", o.profile)
@@ -129,8 +128,8 @@ suite "RUN-016 conductors on the push channel":
       cl.close()
     test "D-63 an organisation with several conductors: a check (or the reading of a script) goes to the one with the fewest under way, and to a free one when the first is busy":
       let o = newOrg()
-      var c1 = connectStream(serverAddr, corePub, clientKeys)
-      var c2 = connectStream(serverAddr, corePub, clientKeys)
+      var c1 = connectStream(serverAddr, certs)
+      var c2 = connectStream(serverAddr, certs)
       check c1.sendFrame(hello("cd-k1-" & sfx, "c-k1", o.ns, 2, key = o.ns & "#conductors"))
       check c1.nextKind("conductor.welcome").isSome
       check c2.sendFrame(hello("cd-k2-" & sfx, "c-k2", o.ns, 2, key = o.ns & "#conductors"))
@@ -149,7 +148,7 @@ suite "RUN-016 conductors on the push channel":
       let a = newOrg()
       let b = newOrg()
       let rb = co.createRun("return 1", "t1", b.profile)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(hello("cd-c-" & sfx, "c-c", a.ns, 3))
       check cl.nextKind("conductor.welcome").isSome
       check cl.nextKind("conductor.lease", 1500).isNone
@@ -158,7 +157,7 @@ suite "RUN-016 conductors on the push channel":
     test "the calls of the holder are answered; a finish ends the run":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let ses = "cd-d-" & sfx
       check cl.sendFrame(hello(ses, "c-d", o.ns, 1))
       let lease = decodeLeaseGranted(cl.nextKind("conductor.lease").get.payload)
@@ -175,7 +174,7 @@ suite "RUN-016 conductors on the push channel":
     test "a step call suspends the run, makes the step, and gives the lease back":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let ses = "cd-e-" & sfx
       check cl.sendFrame(hello(ses, "c-e", o.ns, 1))
       let lease = decodeLeaseGranted(cl.nextKind("conductor.lease").get.payload)
@@ -193,11 +192,11 @@ suite "RUN-016 conductors on the push channel":
       let b = newOrg()
       let rb = co.createRun("return 1", "t1", b.profile)
       let ra = co.createRun("return 1", "t1", a.profile)
-      var held = connectStream(serverAddr, corePub, clientKeys)
+      var held = connectStream(serverAddr, certs)
       check held.sendFrame(hello("cd-h1-" & sfx, "c-h1", a.ns, 1))
       let lease = decodeLeaseGranted(held.nextKind("conductor.lease").get.payload)
       check lease.run_id == ra
-      var other = connectStream(serverAddr, corePub, clientKeys)
+      var other = connectStream(serverAddr, certs)
       let ses = "cd-h2-" & sfx
       check other.sendFrame(hello(ses, "c-h2", a.ns, 0))
       check other.nextKind("conductor.welcome").isSome
@@ -210,18 +209,18 @@ suite "RUN-016 conductors on the push channel":
       other.close()
     test "a call from a session the core does not know is answered with resync":
       let o = newOrg()
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(call("nobody-" & sfx, o.ns, 1, hostCall("r", "t", "params", "{}")))
       check cl.nextKind("resync", 3000).isSome
       cl.close()
     test "the same conductor on a new connection: what was pushed to the old one and never acknowledged is given back, and goes to the new":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
-      var old = connectStream(serverAddr, corePub, clientKeys)
+      var old = connectStream(serverAddr, certs)
       check old.sendFrame(hello("cd-old-" & sfx, "c-f", o.ns, 1))
       check decodeLeaseGranted(old.nextKind("conductor.lease").get.payload).run_id == r
       old.close()                                                  # gone before it acknowledged anything
-      var fresh = connectStream(serverAddr, corePub, clientKeys)
+      var fresh = connectStream(serverAddr, certs)
       check fresh.sendFrame(hello("cd-new-" & sfx, "c-f", o.ns, 1))
       let again = fresh.nextKind("conductor.lease")
       check again.isSome and decodeLeaseGranted(again.get.payload).run_id == r
@@ -230,12 +229,12 @@ suite "RUN-016 conductors on the push channel":
     test "a restarted conductor that holds nothing gets back the runs the core thought it held":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
-      var first = connectStream(serverAddr, corePub, clientKeys)
+      var first = connectStream(serverAddr, certs)
       check first.sendFrame(hello("cd-g1-" & sfx, "c-g", o.ns, 1))
       let l1 = first.nextKind("conductor.lease")
       check first.sendFrame(frame("cd-g1-" & sfx, "ping", ack = l1.get.id, key = o.ns))     # acknowledged: it holds the run
       first.close()
-      var second = connectStream(serverAddr, corePub, clientKeys)
+      var second = connectStream(serverAddr, certs)
       check second.sendFrame(hello("cd-g2-" & sfx, "c-g", o.ns, 1, held = @[]))             # it holds nothing: the process was restarted
       let l2 = second.nextKind("conductor.lease")
       check l2.isSome and decodeLeaseGranted(l2.get.payload).run_id == r
@@ -244,8 +243,8 @@ suite "RUN-016 conductors on the push channel":
       let o = newOrg()                                     # nothing to do: one conductor is wanted (conductor_min 1)
       conductorIdleSeconds = 1.0
       drainPassSeconds = 1.0
-      var keep = connectStream(serverAddr, corePub, clientKeys)
-      var extra = connectStream(serverAddr, corePub, clientKeys)
+      var keep = connectStream(serverAddr, certs)
+      var extra = connectStream(serverAddr, certs)
       check keep.sendFrame(hello("cd-k1-" & sfx, "cond-1", o.ns, 0))
       check extra.sendFrame(hello("cd-k2-" & sfx, "cond-2", o.ns, 5))
       check extra.nextKind("conductor.drain", 8000).isSome
@@ -263,9 +262,9 @@ suite "RUN-016 conductors on the push channel":
       conductorImage = "reg/cinim-conductor:new"
       conductorIdleSeconds = 300.0
       drainPassSeconds = 10.0                                       # no pass until all three are known: their frames come over three connections, in no set order
-      var old1 = connectStream(serverAddr, corePub, clientKeys)
-      var old2 = connectStream(serverAddr, corePub, clientKeys)
-      var fresh = connectStream(serverAddr, corePub, clientKeys)
+      var old1 = connectStream(serverAddr, certs)
+      var old2 = connectStream(serverAddr, certs)
+      var fresh = connectStream(serverAddr, certs)
       check old1.sendFrame(hello("cd-i1-" & sfx, "cond-1", o.ns, 5, image = "reg/cinim-conductor:old"))
       check old2.sendFrame(hello("cd-i2-" & sfx, "cond-2", o.ns, 5, image = "reg/cinim-conductor:old"))
       check fresh.sendFrame(hello("cd-i3-" & sfx, "cond-3", o.ns, 5, image = "reg/cinim-conductor:new"))
@@ -282,7 +281,7 @@ suite "RUN-016 conductors on the push channel":
     test "a hello from a session the core does not know, with an acknowledgement above 0, is told to start again, and is welcomed when it does":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let ses = "cd-rs-" & sfx
       check cl.sendFrame(hello(ses, "c-rs", o.ns, 3, ack = 4))
       check cl.nextKind("resync", 8000).isSome

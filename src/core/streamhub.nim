@@ -17,7 +17,8 @@
 import std/[tables, options, times, os, atomics, sequtils, json, hashes]
 import health
 import std/strutils
-import common/[stream, streamstate, rqlite, zmqcurve, states, shmq, podcpu, ctrlauth, conductorplan]
+import common/[stream, streamstate, rqlite, states, shmq, podcpu, ctrlauth, conductorplan]
+import grpcserve
 import scheduler, schema, workkick, hubmetrics, components, retrypolicy, checkmail
 
 const
@@ -534,8 +535,7 @@ proc runWorker(a: WorkerArgs) {.thread.} =
   {.cast(gcsafe).}:
     var h = Hub(co: a.co, c: newRq(a.co.rqliteUrl), defaultProfile: a.co.profileId, peers: initTable[string, Peer](), conds: initTable[string, Cond](),
                 checks: initTable[string, tuple[session: string, at: float]](), outq: a.outq, idx: a.idx)
-    let (_, secretKey) = loadKeypair(a.co.certs, "core")
-    h.master = secretKey
+    h.master = coreSecretKey(a.co.certs)
     var lastTick = epochTime()
     var kind: int
     var x, y: string
@@ -572,8 +572,8 @@ proc serveStream*(co: Core; port: int; workers = 0) {.thread.} =
   ## the I/O thread of the push channel and its pool; `workers` 0: CINIM_STREAM_WORKERS, else the cores of the Pod
   {.cast(gcsafe).}:
     let n = if workers > 0: workers else: workerCount(getEnv("CINIM_STREAM_WORKERS"))
-    let (_, secretKey) = loadKeypair(co.certs, "core")
-    let conn = listenStream(port, secretKey)
+    var conn = listenStream(port, co.certs)
+    var keysGen = certGeneration.load
     let inq = cast[ptr UncheckedArray[ShmQueue]](allocShared0(n * sizeof(ShmQueue)))
     let outq = cast[ptr ShmQueue](allocShared0(sizeof(ShmQueue)))
     for i in 0 ..< n: initShmQueue(inq[i])
@@ -589,6 +589,12 @@ proc serveStream*(co: Core; port: int; workers = 0) {.thread.} =
     var x, y: string
     while not stopServers.load:
       beat(bStream)
+      if certGeneration.load != keysGen:
+        # the files of the keys changed (core/certwatch.nim): the channel listens again with the new ones; the clients connect again and say `hello` / are told `resync`, as after a restart of the core
+        keysGen = certGeneration.load
+        conn.close()
+        conn = listenStream(port, co.certs)
+        echo "core: the push channel restarted with the new keys"
       # what the workers have to say first; then kicks, so that work just made goes out before the next report is read
       var sent = 0
       while sent < 256 and outq[].pop(0, kind, x, y):

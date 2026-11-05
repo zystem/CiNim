@@ -1,13 +1,16 @@
-## The sockets of the push channel (docs/conductors.md section 12): a CURVE ROUTER for the core and a CURVE DEALER for a client.
-## The client opens the connection and the core never dials; both sides send at any moment. A frame is one Protobuf `StreamFrame`
-## (proto/cicd/internal/v1/stream.proto) in one ZeroMQ message; a ROUTER prepends the peer's routing id, which changes at every
-## reconnect, so the core identifies a peer by the `session` in its frames and keeps the routing id only as the address of its last frame.
+## The push channel (docs/conductors.md section 12) over gRPC with mutual TLS (docs/shim-grpc.md): the core listens, a client keeps a connection to it, and both sides send at any moment.
+## A frame is one Protobuf `StreamFrame` (proto/cicd/internal/v1/stream.proto) in one gRPC message. A client opens two calls on one HTTP/2 connection, each used by one thread in one
+## direction: `/cicd.Stream/Down` (server streaming: the core pushes frames) and `/cicd.Stream/Up` (client streaming: the client sends frames). Both carry the metadata `cinim-peer`, a
+## token the client makes at every connect, which is the routing id of the peer: it changes at every reconnect, so the core identifies a peer by the `session` in its frames and keeps
+## the routing id only as the address of its last frame. The core never dials.
 ##
-## Heartbeats are ZeroMQ's own (ZMTP): a peer that disappears is noticed and its connection closed; the client's DEALER then connects again by
-## itself, and the first frame it sends tells the core to ask for its state (`resync`). `ROUTER_MANDATORY` makes a send to a routing id that is
-## gone or has a full queue fail (we are told) instead of being dropped silently.
-import std/options
-import zmqcurve
+## Dead peers are noticed by HTTP/2 PINGs (a keepalive of 3 s and a timeout of 10 s, the heartbeats ZeroMQ had before) and the client connects again by itself with a growing pause; the first
+## frame it sends tells the core to ask for its state (`resync`). A send to a routing id that is gone or has a full queue fails (we are told) instead of being dropped silently.
+##
+## Between threads frames go through `ShmQueue` (common/shmq.nim), never as Nim strings: the gRPC workers that read and write are threads of nimgrpc.
+import std/[options, locks, atomics, os, sysrand, strutils]
+import nimgrpc
+import corechannel, shmq
 
 ## The envelope of one frame (the payload is a Protobuf message of the kind named in `kind`; the envelope itself is plain bytes so that the
 ## modules that carry their own generated message types need no second copy of the generator's output):
@@ -108,86 +111,273 @@ proc decodeFrame*(s: string): Option[StreamFrame] =
 proc frame*(session, kind: string; payload = ""; id = 0'u64; ack = 0'u64; re = 0'u64; key = ""): StreamFrame =
   StreamFrame(session: session, kind: kind, id: id, ack: ack, re: re, payload: payload, key: key)
 
-proc newContext*(ioThreads: int): ZContext =
-  ## A ZeroMQ context with that many I/O threads. CURVE is encrypted in the I/O thread of the connection, about 55 MB/s a thread (measured: docs/store.md), so a peer that moves
-  ## big blocks over several connections wants several: the connections are spread over the threads.
-  result = ctx_new()
-  if result == nil: raise newException(OSError, "could not make a ZeroMQ context")
-  discard ctx_set(result, ZMQ_IO_THREADS, cint(max(1, ioThreads)))
+# ------------------------------------------------------------------ transport
 
-proc listenStream*(port: int; secretKey: string; sendTimeoutMs = 200; ioThreads = 1; curve = true): ZConnection =
-  ## the core's side: a ROUTER that anyone with the shared client key can connect to
-  if curve: doAssert hasCurve(), "libzmq was not built with CURVE (libsodium) support"
-  proc configure(s: ZSocket) =
-    if curve: s.setCurveServer(secretKey)           # `curve` false is for a link inside a network that is encrypted anyway (docs/store.md); the peer is then told apart by a token in the request
-    s.setsockopt(ROUTER_MANDATORY, 1)
-    s.setsockopt(HEARTBEAT_IVL, heartbeatIntervalMs.cint)
-    s.setsockopt(HEARTBEAT_TIMEOUT, heartbeatTimeoutMs.cint)
-    s.setsockopt(HEARTBEAT_TTL, heartbeatTimeoutMs.cint)
-    s.setsockopt(SNDTIMEO, sendTimeoutMs.cint)
-  if ioThreads > 1: return listen("tcp://0.0.0.0:" & $port, ROUTER, newContext(ioThreads), configure)
-  result = listen("tcp://0.0.0.0:" & $port, ROUTER, configure)
+const
+  upMethod* = "/cicd.Stream/Up"
+  downMethod* = "/cicd.Stream/Down"
+  peerKey = "cinim-peer"
+  maxMessageBytes = maxPayload + 64 * 1024     ## a frame and its envelope
+  peerQueueCap = 4096                          ## frames waiting for one peer: past it a send fails
+  inboxHigh = 100_000                          ## frames read and not yet taken by the core: past it the readers wait, and the senders with them (flow control)
+  keepalive = Keepalive(timeMs: heartbeatIntervalMs, timeoutMs: heartbeatTimeoutMs, withoutCalls: true)
 
-proc connectStream*(address, serverPublicKey: string; client: CurveKeypair; sendTimeoutMs = 2000): ZConnection =
-  ## a client's side: a DEALER that connects (and reconnects) by itself
-  doAssert hasCurve(), "libzmq was not built with CURVE (libsodium) support"
-  result = connect(address, DEALER) do (s: ZSocket) -> void:
-    s.setCurveClient(serverPublicKey, client.publicKey, client.secretKey)
-    s.setsockopt(HEARTBEAT_IVL, heartbeatIntervalMs.cint)
-    s.setsockopt(HEARTBEAT_TIMEOUT, heartbeatTimeoutMs.cint)
-    s.setsockopt(RECONNECT_IVL, 500.cint)
-    s.setsockopt(RECONNECT_IVL_MAX, 5000.cint)
-    # A connect that gets no answer is given up after 5 s and tried again with a new source port. Without this the attempt lasts as long as the operating system retries the
-    # SYN (about two minutes): a conductor, whose Pod is under a network policy, was seen to stay out for that long after the core's Pod was replaced.
-    s.setsockopt(CONNECT_TIMEOUT, 5000.cint)
-    s.setsockopt(SNDTIMEO, sendTimeoutMs.cint)
+proc toBytes(s: string): seq[byte] =
+  result = newSeq[byte](s.len)
+  if s.len > 0: copyMem(addr result[0], unsafeAddr s[0], s.len)
 
-proc sendFrame*(c: ZConnection; f: StreamFrame): bool =
-  ## a client sends to the core; false if the frame could not be queued
+proc toStr(b: seq[byte]): string =
+  result = newString(b.len)
+  if b.len > 0: copyMem(addr result[0], unsafeAddr b[0], b.len)
+
+proc newToken(): string =
+  var raw: array[16, byte]
+  discard urandom(raw)
+  for b in raw: result.add toHex(int(b), 2).toLowerAscii
+
+# ---- the core's side
+
+type
+  PeerSlot = object
+    inUse: bool
+    idLen: int
+    id: array[32, char]
+    q: ShmQueue                      ## frames for the Down call of this peer
+
+  ServerState = object
+    lock: Lock
+    inbox: ShmQueue                  ## (kind 0, routing id, frame bytes) from the Up calls
+    slots: ptr UncheckedArray[PeerSlot]
+    nslots: int
+    closing: Atomic[bool]
+
+  StreamServer* = ref object
+    st: ptr ServerState
+    srv: GrpcServer
+
+proc idStr(s: PeerSlot): string =
+  result = newString(s.idLen)
+  for i in 0 ..< s.idLen: result[i] = s.id[i]
+
+proc attach(st: ptr ServerState; peer: string): ptr PeerSlot =
+  ## a slot for the Down call of `peer`; nil if the id is in use or the table is full
+  acquire(st.lock)
+  defer: release(st.lock)
+  var free = -1
+  for i in 0 ..< st.nslots:
+    if st.slots[i].inUse:
+      if st.slots[i].idStr == peer: return nil
+    elif free < 0: free = i
+  if free < 0: return nil
+  let sl = addr st.slots[free]
+  sl.inUse = true
+  sl.idLen = peer.len
+  for i in 0 ..< peer.len: sl.id[i] = peer[i]
+  initShmQueue(sl.q)
+  sl
+
+proc detach(st: ptr ServerState; sl: ptr PeerSlot) =
+  acquire(st.lock)
+  sl.inUse = false
+  destroy(sl.q)
+  release(st.lock)
+
+proc peerOf(ctx: ServerContext): string {.raises: [CatchableError].} =
+  result = ctx.metadata.get(peerKey)
+  if result.len == 0 or result.len > 32 or not result.allCharsInSet(HexDigits):
+    raise newGrpcError(scInvalidArgument, "the metadata " & peerKey & " is a token of 1 to 32 hexadecimal digits")
+
+proc downHandler(ctx: var ServerContext; call: var ServerCall; userData: pointer) {.nimcall, gcsafe, raises: [CatchableError].} =
+  ## the core pushes: frames queued for this peer go down the call until it ends
+  let st = cast[ptr ServerState](userData)
+  let peer = peerOf(ctx)
+  var hello: seq[byte]
+  discard call.recv(hello)                        # the one request message, empty
+  let sl = attach(st, peer)
+  if sl == nil: raise newGrpcError(scAlreadyExists, "the peer id is in use or the table of peers is full")
   try:
-    c.send(encodeFrame(f))
-    true
-  except CatchableError: false
+    call.send(newSeq[byte]())                     # an empty message: the headers go out, and the client knows it is registered before it sends anything
+    var kind: int
+    var a, b: string
+    while not st.closing.load:
+      ctx.checkCancelled()
+      if sl.q.pop(500, kind, a, b): call.send(toBytes(b))
+  finally:
+    detach(st, sl)
 
-proc sendRawTo*(c: ZConnection; routingId, bytes: string): bool =
-  ## the core sends an encoded frame to the peer last heard at `routingId`
-  try:
-    c.sendAll(routingId, bytes)
-    true
-  except CatchableError: false
+proc upHandler(ctx: var ServerContext; call: var ServerCall; userData: pointer) {.nimcall, gcsafe, raises: [CatchableError].} =
+  ## the peer sends: every frame goes to the inbox with the peer's id
+  let st = cast[ptr ServerState](userData)
+  let peer = peerOf(ctx)
+  var msg: seq[byte]
+  while not st.closing.load and call.recv(msg):
+    while st.inbox.len > inboxHigh and not st.closing.load:
+      ctx.checkCancelled()
+      sleep 5
+    st.inbox.push(0, peer, toStr(msg))
 
-proc sendTo*(c: ZConnection; routingId: string; f: StreamFrame): bool =
-  ## the core sends to the peer last heard at `routingId`; false if that peer is gone or its queue is full (the frame stays unacknowledged
-  ## and goes out again with the next contact)
-  try:
-    c.sendAll(routingId, encodeFrame(f))
-    true
-  except CatchableError: false
+proc listenStream*(port: int; certs: string; maxPeers = 2048): StreamServer =
+  ## the core's side: anyone with a certificate of the CA in `<certs>/tls` may connect. Every peer holds two calls (two workers of nimgrpc) for as long as it is connected.
+  let st = cast[ptr ServerState](allocShared0(sizeof(ServerState)))
+  initLock(st.lock)
+  initShmQueue(st.inbox)
+  st.nslots = maxPeers
+  st.slots = cast[ptr UncheckedArray[PeerSlot]](allocShared0(maxPeers * sizeof(PeerSlot)))
+  let srv = newGrpcServer(port = port, address = "0.0.0.0", maxWorkers = maxPeers * 2 + 8, maxMessage = maxMessageBytes, tls = serverTls(certs), keepalive = keepalive)
+  srv.addStreamingRaw(downMethod, downHandler, st)
+  srv.addStreamingRaw(upMethod, upHandler, st)
+  srv.start()
+  StreamServer(st: st, srv: srv)
 
-proc receiveRaw*(c: ZConnection; timeoutMs: int): Option[tuple[routingId, bytes: string]] =
-  ## the core receives one message: the routing id and the bytes of the frame, not decoded; none after `timeoutMs`, or for a message of another shape
-  let first = c.waitForReceive(timeoutMs)
-  if not first.msgAvailable: return none(tuple[routingId, bytes: string])
-  var parts = @[first.msg]
-  var more = first.moreAvailable
-  while more:
-    let nxt = c.waitForReceive(1000)
-    if not nxt.msgAvailable: break
-    parts.add nxt.msg
-    more = nxt.moreAvailable
-  if parts.len != 2: return none(tuple[routingId, bytes: string])
-  some((parts[0], parts[1]))
+proc port*(s: StreamServer): int = s.srv.port
 
-proc receiveFrom*(c: ZConnection; timeoutMs: int): Option[FrameIn] =
+proc close*(s: StreamServer) =
+  s.st.closing.store(true)
+  s.srv.stop(graceMs = 1000)
+  destroy(s.st.inbox)
+  deinitLock(s.st.lock)
+  deallocShared(s.st.slots)
+  deallocShared(s.st)
+
+proc sendRawTo*(s: StreamServer; routingId, bytes: string): bool =
+  ## the core sends an encoded frame to the peer last heard at `routingId`; false if that peer is gone or its queue is full (the frame stays unacknowledged and goes out again with the next contact)
+  let st = s.st
+  acquire(st.lock)
+  defer: release(st.lock)
+  for i in 0 ..< st.nslots:
+    if st.slots[i].inUse and st.slots[i].idStr == routingId:
+      if st.slots[i].q.len >= peerQueueCap: return false
+      st.slots[i].q.push(0, "", bytes)
+      return true
+  false
+
+proc sendTo*(s: StreamServer; routingId: string; f: StreamFrame): bool =
+  s.sendRawTo(routingId, encodeFrame(f))
+
+proc receiveRaw*(s: StreamServer; timeoutMs: int): Option[tuple[routingId, bytes: string]] =
+  ## the core receives one message: the routing id and the bytes of the frame, not decoded; none after `timeoutMs`
+  var kind: int
+  var a, b: string
+  if s.st.inbox.pop(timeoutMs, kind, a, b): some((a, b)) else: none(tuple[routingId, bytes: string])
+
+proc receiveFrom*(s: StreamServer; timeoutMs: int): Option[FrameIn] =
   ## the core receives: the routing id and the frame of one message; none after `timeoutMs`, or if the message was not a frame
-  let raw = c.receiveRaw(timeoutMs)
+  let raw = s.receiveRaw(timeoutMs)
   if raw.isNone: return none(FrameIn)
   let f = decodeFrame(raw.get.bytes)
   if f.isNone: return none(FrameIn)
   some((raw.get.routingId, f.get))
 
-proc receive*(c: ZConnection; timeoutMs: int): Option[StreamFrame] =
+# ---- a client's side
+
+type
+  ClientState = object
+    inq, outq: ShmQueue              ## frames from the core, frames for the core
+    stop: Atomic[bool]
+    connected: Atomic[bool]
+    port: int
+    host: array[256, char]
+    certs: array[512, char]
+
+  StreamClient* = ref object
+    st: ptr ClientState
+    thread: Thread[ptr ClientState]
+
+  ReaderArgs = tuple[st: ptr ClientState, call: ptr ClientCall, broken: ptr Atomic[bool]]
+
+proc cstr(a: openArray[char]): string =
+  for c in a:
+    if c == '\0': break
+    result.add c
+
+proc readLoop(a: ReaderArgs) {.thread.} =
+  {.cast(gcsafe).}:
+    try:
+      var msg: seq[byte]
+      while not a.st.stop.load and a.call[].recv(msg):
+        a.st.inq.push(0, "", toStr(msg))
+    except CatchableError: discard
+    a.broken[].store(true)
+
+proc clientMain(st: ptr ClientState) {.thread.} =
+  {.cast(gcsafe).}:
+    let host = cstr(st.host)
+    let certs = cstr(st.certs)
+    var pause = 500
+    var pending = ""
+    var havePending = false
+    while not st.stop.load:
+      var broken: Atomic[bool]
+      var reader: Thread[ReaderArgs]
+      var readerOn = false
+      var ch: GrpcChannel
+      var chOpen = false
+      try:
+        ch = dial(host, st.port, clientTls(certs), serverName = coreServerName, keepalive = keepalive, connectTimeoutMs = 5000)
+        chOpen = true
+        let token = newToken()
+        var down = ch.newCall(downMethod, @[(peerKey, token)], maxMessage = maxMessageBytes)
+        down.send(newSeq[byte]())
+        down.closeSend()
+        var first: seq[byte]
+        if not down.recv(first): raise newGrpcError(scUnavailable, "the core ended the call")      # the empty message: this peer is registered
+        var up = ch.newCall(upMethod, @[(peerKey, token)], maxMessage = maxMessageBytes)
+        st.connected.store(true)
+        pause = 500
+        createThread(reader, readLoop, (st, addr down, addr broken))
+        readerOn = true
+        var kind: int
+        var a, b: string
+        while not st.stop.load and not broken.load:
+          if not havePending and st.outq.pop(200, kind, a, b):
+            pending = b
+            havePending = true
+          if havePending:
+            up.send(toBytes(pending))
+            havePending = false
+        try: up.closeSend() except CatchableError: discard
+      except CatchableError: discard
+      st.connected.store(false)
+      if chOpen: (try: ch.close() except CatchableError: discard)          # ends the reader's wait
+      if readerOn: joinThread(reader)
+      if not st.stop.load:
+        var waited = 0
+        while waited < pause and not st.stop.load:
+          sleep 100
+          waited += 100
+        pause = min(pause * 2, 5000)
+
+proc connectStream*(address, certs: string): StreamClient =
+  ## a client's side: connects (and reconnects) by itself; frames sent while it is not connected wait in a queue. `address` is `tcp://host:port` or `host:port`; the keys are `<certs>/tls/{ca.pem,client.pem,client.key}`.
+  let (host, port) = parseTarget(address)
+  doAssert host.len < 256 and certs.len < 512
+  let st = cast[ptr ClientState](allocShared0(sizeof(ClientState)))
+  initShmQueue(st.inq)
+  initShmQueue(st.outq)
+  st.port = port
+  for i in 0 ..< host.len: st.host[i] = host[i]
+  for i in 0 ..< certs.len: st.certs[i] = certs[i]
+  result = StreamClient(st: st)
+  createThread(result.thread, clientMain, st)
+
+proc connected*(c: StreamClient): bool = c.st.connected.load
+
+proc sendFrame*(c: StreamClient; f: StreamFrame): bool =
+  ## a client sends to the core; false if the frame could not be queued
+  if c.st.outq.len >= peerQueueCap: return false
+  c.st.outq.push(0, "", encodeFrame(f))
+  true
+
+proc receive*(c: StreamClient; timeoutMs: int): Option[StreamFrame] =
   ## a client receives one frame; none after `timeoutMs`
-  let r = c.waitForReceive(timeoutMs)
-  if not r.msgAvailable: return none(StreamFrame)
-  decodeFrame(r.msg)
+  var kind: int
+  var a, b: string
+  if not c.st.inq.pop(timeoutMs, kind, a, b): return none(StreamFrame)
+  decodeFrame(b)
+
+proc close*(c: StreamClient) =
+  c.st.stop.store(true)
+  joinThread(c.thread)
+  destroy(c.st.inq)
+  destroy(c.st.outq)
+  deallocShared(c.st)

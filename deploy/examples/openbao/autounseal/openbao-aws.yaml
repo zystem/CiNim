@@ -1,0 +1,53 @@
+# OpenBao for the key of the shard, unsealed by itself with AWS KMS (deploy/examples/openbao/autounseal/README.md). The official chart, `openbao/openbao`; the same as ../openbao-values.yaml
+# but for the seal stanza, the plugin that carries it and how the Pod proves who it is to the cloud. Replace what is in <angle brackets>.
+global:
+  tlsDisable: false
+injector:
+  enabled: false
+server:
+  standalone:
+    enabled: true
+    config: |
+      ui = false
+      listener "tcp" {
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_cert_file   = "/openbao/userconfig/openbao-tls/tls.crt"
+        tls_key_file    = "/openbao/userconfig/openbao-tls/tls.key"
+      }
+      storage "pebbledb" {
+        path = "/openbao/data/pebbledb"
+      }
+
+      # OpenBao 2.7 carries no cloud seals itself: the plugin is an OCI image that OpenBao downloads at its start (needs ghcr.io from the Pod; pinned by digest).
+      # To go without the network, copy the image to your registry and name that here. The name of the plugin is the name of the seal.
+      plugin_directory     = "/openbao/plugins"
+      plugin_auto_download = true
+      plugin "kms" "awskms" {
+        image = "ghcr.io/openbao/openbao-plugin-kms-aws:v0.1.1@sha256:24a0a1294385a34224848d0d6ff2c9287f9c9b0ded1de953cc539dc76ced160c"
+      }
+      seal "awskms" {
+        region     = "<us-east-1>"
+        kms_key_id = "<key id, ARN or alias/name>"      # a symmetric key, ENCRYPT_DECRYPT; the identity needs kms:Encrypt, kms:Decrypt, kms:DescribeKey on it
+      }
+  volumes:
+    - name: openbao-tls
+      secret: {secretName: openbao-tls}
+    - name: plugins
+      emptyDir: {}
+  volumeMounts:
+    - {name: openbao-tls, mountPath: /openbao/userconfig/openbao-tls, readOnly: true}
+    - {name: plugins, mountPath: /openbao/plugins}
+  extraEnvironmentVars:
+    BAO_CACERT: /openbao/userconfig/openbao-tls/ca.crt      # for `bao` inside the Pod (the chart sets BAO_ADDR)
+  # Who the Pod is, one of the two. The seal reads the usual AWS variables, so nothing else is written in the config.
+  # (a) outside AWS, or without IRSA: the access key of an IAM user that may use the key, in a Secret (`kubectl create secret generic aws-kms --from-literal=access_key=... --from-literal=secret_key=...`)
+  extraSecretEnvironmentVars:
+    - {envName: AWS_ACCESS_KEY_ID, secretName: aws-kms, secretKey: access_key}
+    - {envName: AWS_SECRET_ACCESS_KEY, secretName: aws-kms, secretKey: secret_key}
+  # (b) on EKS: the role of the service account (IRSA) and no Secret; delete (a), uncomment:
+  # serviceAccount:
+  #   annotations:
+  #     eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<role that may use the key>
+  dataStorage:
+    size: 1Gi

@@ -1,0 +1,56 @@
+# OpenBao for the key of the shard, unsealed by itself with Google Cloud KMS (deploy/examples/openbao/autounseal/README.md). The official chart, `openbao/openbao`; the same as ../openbao-values.yaml
+# but for the seal stanza, the plugin that carries it and how the Pod proves who it is to the cloud. Replace what is in <angle brackets>.
+global:
+  tlsDisable: false
+injector:
+  enabled: false
+server:
+  standalone:
+    enabled: true
+    config: |
+      ui = false
+      listener "tcp" {
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_cert_file   = "/openbao/userconfig/openbao-tls/tls.crt"
+        tls_key_file    = "/openbao/userconfig/openbao-tls/tls.key"
+      }
+      storage "pebbledb" {
+        path = "/openbao/data/pebbledb"
+      }
+
+      # OpenBao 2.7 carries no cloud seals itself: the plugin is an OCI image that OpenBao downloads at its start (needs ghcr.io from the Pod; pinned by digest).
+      # To go without the network, copy the image to your registry and name that here. The name of the plugin is the name of the seal.
+      plugin_directory     = "/openbao/plugins"
+      plugin_auto_download = true
+      plugin "kms" "gcpckms" {
+        image = "ghcr.io/openbao/openbao-plugin-kms-gcp:v0.1.1@sha256:8cdd065e849c9e2efa95806292d130b332976761e253a42723289ca6f9be3790"
+      }
+      seal "gcpckms" {
+        project    = "<project id>"
+        region     = "<global>"        # the location of the key ring
+        key_ring   = "<key ring>"
+        crypto_key = "<key>"           # a symmetric key; the identity needs roles/cloudkms.cryptoKeyEncrypterDecrypter and cloudkms.cryptoKeys.get (roles/cloudkms.viewer) on it
+      }
+  # Who the Pod is, one of the two. The seal finds the credentials as Google's libraries do (GOOGLE_APPLICATION_CREDENTIALS, or the identity of the workload).
+  # (a) outside GCP: the JSON key of a service account that may use the key, in a Secret (`kubectl create secret generic gcp-kms --from-file=credentials.json=<file>`)
+  volumes:
+    - name: openbao-tls
+      secret: {secretName: openbao-tls}
+    - name: plugins
+      emptyDir: {}
+    - name: gcp-kms
+      secret: {secretName: gcp-kms}
+  volumeMounts:
+    - {name: openbao-tls, mountPath: /openbao/userconfig/openbao-tls, readOnly: true}
+    - {name: plugins, mountPath: /openbao/plugins}
+    - {name: gcp-kms, mountPath: /openbao/userconfig/gcp-kms, readOnly: true}
+  extraEnvironmentVars:
+    BAO_CACERT: /openbao/userconfig/openbao-tls/ca.crt      # for `bao` inside the Pod (the chart sets BAO_ADDR)
+    GOOGLE_APPLICATION_CREDENTIALS: /openbao/userconfig/gcp-kms/credentials.json
+  # (b) on GKE: Workload Identity and no Secret; delete (a) (the `gcp-kms` volume and mount, and GOOGLE_APPLICATION_CREDENTIALS), uncomment:
+  # serviceAccount:
+  #   annotations:
+  #     iam.gke.io/gcp-service-account: <service account>@<project>.iam.gserviceaccount.com
+  dataStorage:
+    size: 1Gi

@@ -1,5 +1,5 @@
 // Shared types of the internal channels (package cicd.internal.v1). Version 0.
-// Transport: ZeroMQ REQ/REP over tcp with CURVE (D-24). One ZeroMQ
+// Transport: gRPC over tcp with mutual TLS (docs/shim-grpc.md). One gRPC
 // message = one Protobuf message.
 syntax = "proto3";
 

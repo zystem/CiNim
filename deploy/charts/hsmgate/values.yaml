@@ -1,0 +1,33 @@
+# hsmgate with a software token (`type: soft`: the private key is a file of 64 hexadecimal digits on a volume). It is made for the shard chart (deploy/charts/cinim-shard), which turns it on by default
+# and wires the core to it; it also stands alone. A card behind a service of its own, a Vault or an OpenBao is the other way (the shard chart's secrets.keyService), and this chart is then off.
+# THE KEY IS ON THE VOLUME: whoever has it opens every secret of the shard, and a shard whose volume is lost cannot read its secrets. Back the volume up apart from the database (a snapshot of the claim).
+image:
+  repository: ghcr.io/zystem/hsmgate
+  tag: v0.7.0
+  pullPolicy: IfNotPresent
+initImage: docker.io/library/busybox:1.37.0     # makes the key file at the first start; no shell is in the image of hsmgate
+
+keyName: cinim-shard                             # the name of the key in the Transit face, the one that the core asks for
+# The contexts the core may use with the key (the additional data of what it seals): the data keys of the organisations, the check text of the vault and the core's own secret (D-80, D-105)
+allow: ["cinim/dek/v1|", "cinim/kek-check/v1", "cinim/master-secret/v1"]
+# The clients: who may use the key. The core of the shard comes with a client certificate whose CN is this (the shard chart issues it)
+clients:
+  - name: cinim-core
+    cn: cinim-core-ks
+    ops: [encrypt, decrypt, rewrap]
+    perMinute: 600
+
+tls:
+  # the issuer of the certificates (the service's own, and the one that clients are checked against): the CA of the shard chart by default
+  issuerRef: {name: cinim-ca, kind: Issuer, group: cert-manager.io}
+  duration: 17520h
+  renewBefore: 720h
+
+persistence:
+  size: 64Mi
+  storageClass: ""                               # empty is the cluster's default class
+  existingClaim: ""                              # a claim of yours, with the file m1.key in it (or empty: the chart makes one and the key)
+
+resources:
+  requests: {cpu: 20m, memory: 32Mi}
+  limits: {memory: 128Mi}

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["shard", "mode", "domain", "basePath", "namespacePrefix", "image", "curve"],
+  "required": ["shard", "mode", "domain", "basePath", "namespacePrefix", "image"],
   "properties": {
     "shard": {"type": "string", "pattern": "^[0-9]{1,16}$"},
     "mode": {"enum": ["single", "multi"]},
@@ -13,7 +13,8 @@
     "routerKey": {"type": "string"},
     "routerInterval": {"type": "integer", "minimum": 10},
     "image": {"type": "object", "required": ["repository"], "properties": {"repository": {"type": "string", "minLength": 1}}},
-    "curve": {"type": "object", "required": ["secretName"], "properties": {"secretName": {"type": "string", "minLength": 1}}},
+    "hsmgate": {"type": "object", "properties": {"enabled": {"type": "boolean"}}},
+    "tls": {"type": "object", "properties": {"masterKeySecret": {"type": "string"}, "secretName": {"type": "string"}, "masterKeyInSecret": {"type": "boolean"}, "reloadSeconds": {"type": "integer", "minimum": 0}, "certManager": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "issuerRef": {"type": "object", "properties": {"name": {"type": "string"}, "kind": {"enum": ["Issuer", "ClusterIssuer"]}, "group": {"type": "string"}}}, "duration": {"type": "string", "pattern": "^[0-9]+h$"}, "renewBefore": {"type": "string", "pattern": "^[0-9]+h$"}, "caDuration": {"type": "string", "pattern": "^[0-9]+h$"}}}}},
     "rqliteUrl": {"type": "string", "pattern": "^(https?://.+)?$"},
     "storage": {"type": "object", "properties": {"url": {"type": "string", "pattern": "^(https?://.+)?$"}, "directUrl": {"type": "string", "pattern": "^(https?://.+)?$"}, "tokenSecret": {"type": "object", "properties": {"name": {"type": "string"}, "key": {"type": "string"}}}}},
     "logs": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "victoriaLogsUrls": {"type": "array", "items": {"type": "string"}}, "vlagentUrl": {"type": "string"}}},
@@ -26,7 +27,7 @@
               "ingress": {"oneOf": [{"type": "array", "items": {"type": "object"}}, {"const": "all"}]},
               "capabilities": {"type": "array", "items": {"enum": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETFCAP", "SETGID", "SETUID"]}},
               "memoryLimit": {"type": "string"}, "ephemeralStorageLimit": {"type": "string"}}},
-    "secrets": {"type": "object", "properties": {"keySecret": {"type": "string"}, "keyService": {"type": "object", "properties": {"url": {"type": "string"}, "keyName": {"type": "string"}, "mount": {"type": "string"}, "proxy": {"type": "string"}, "tlsSecret": {"type": "string"}}}, "newKeyService": {"type": "object", "properties": {"url": {"type": "string"}, "keyName": {"type": "string"}, "mount": {"type": "string"}, "proxy": {"type": "string"}, "tlsSecret": {"type": "string"}}}}},
+    "secrets": {"type": "object", "properties": {"keyService": {"type": "object", "properties": {"url": {"type": "string"}, "keyName": {"type": "string"}, "mount": {"type": "string"}, "proxy": {"type": "string"}, "tlsSecret": {"type": "string"}}}, "newKeyService": {"type": "object", "properties": {"url": {"type": "string"}, "keyName": {"type": "string"}, "mount": {"type": "string"}, "proxy": {"type": "string"}, "tlsSecret": {"type": "string"}}}}},
     "auth": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "adminToken": {"type": "string"}, "adminTokenSecret": {"type": "string"}, "ldapSyncSeconds": {"type": "integer", "minimum": 0}}},
     "steps": {"type": "object", "properties": {"ephemeralStorageLimit": {"type": "string"}}},
     "deploy": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "kubeApiServer": {"type": "boolean"}, "egress": {"type": ["array", "string"]}}},

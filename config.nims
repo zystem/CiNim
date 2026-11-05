@@ -4,7 +4,5 @@ switch("path", "$projectDir/../../src")
 when defined(release):
   switch("opt", "size")
 
-# nim-grpc (github.com/zystem/nim-grpc, the shim's transport on the branch shim-grpc): a checkout named by NIM_GRPC, and the prefix of a static nghttp2 (include/ and lib/libnghttp2.a)
-if existsEnv("NIM_GRPC"): switch("path", getEnv("NIM_GRPC") & "/src")
-if existsEnv("NIM_BEARSSL"): switch("path", getEnv("NIM_BEARSSL"))
+# nimgrpc (nimble package; the shim's transport on the branch shim-grpc) links a static nghttp2 from /opt/nghttp2 (include/ and lib/libnghttp2.a); NGHTTP2_PREFIX names another place
 if existsEnv("NGHTTP2_PREFIX"): switch("define", "nghttp2Prefix=" & getEnv("NGHTTP2_PREFIX"))

@@ -3,13 +3,13 @@
 ## restart, retention of finished Pods, orphan sweep, pulling an undelivered spool out of a Pod), `backend.nim` is the seam to
 ## Kubernetes (the only implementation that talks to the API server is `k8s.nim`, on the official C client, A.6), and
 ## `ctrlstate.nim` is the controller's sqlite memory. Pod status is polled, not watched. SEC-010 per-job projected tokens are
-## deferred: the shim gets the shared CURVE "client" identity through a Secret. The shim binary reaches the Pod through a ConfigMap
+## deferred: the shim gets the shared TLS "client" identity through a Secret. The shim binary reaches the Pod through a ConfigMap
 ## mount (A.6). The step namespace must be dedicated to this controller (docs/settings.md).
 import std/[os, json, strutils, times, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import std/options
-import common/[zmqcurve, stream, streamstate]
+import common/[stream, streamstate, corechannel]
 import backend, ctrlstate, logic, k8s, podverdict, shardsettings, reportcadence, conductors, drain
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
@@ -37,7 +37,7 @@ const pollIntervalMs = 1000
 # ---- the push channel: a controller's end
 type
   Push = object
-    conn: ZConnection
+    conn: StreamClient
     inbox: Inbox                     ## the numbered frames of the core applied so far
     backlog: seq[PollResponse]       ## work pushed since the last report, applied with the next answer
     session: string                  ## our session id
@@ -47,8 +47,8 @@ type
     wake: bool                       ## the core asked for our state again (`resync`)
     plan: ConductorPlan              ## the conductors the core last asked for; taken from every frame as it comes, so that an answer that arrived late and was merged into another is not lost
 
-proc connectPush(): ZConnection =
-  connectStream(streamAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"))
+proc connectPush(): StreamClient =
+  connectStream(streamAddr, certs)
 
 proc decodeWork(payload: string): PollResponse =
   Protobuf.decode(cast[seq[byte]](payload), PollResponse)
@@ -157,7 +157,7 @@ proc main() =
   let k = connectK8s(ns, kubeconfig)
   # the shim of a step reaches the core with the controller's transport keys, which it gets as a Secret of the namespace; whether the steps stream their logs is the core's to say
   # (the addresses in ControllerConfig), so the Secret is made whenever the keys are there
-  k.ensureShimAssets(shimBinPath, certs, withCerts = fileExists(certs / "curve" / "client.key"))
+  k.ensureShimAssets(shimBinPath, certs, withCerts = fileExists(certs / "tls" / "client.key"))
   let be = backendOf(k)
   var cfg = defaultConfig()
   let st = openState(stateDir / "controller.sqlite")
@@ -174,6 +174,8 @@ proc main() =
   var ackSeq = 0'u64
   var lastSweep = 0.0
   var lastConductors = 0.0
+  var keysStamp = clientKeysStamp(certs)         # the files of the transport keys as they were when the Secret of the shims was made
+  var lastKeysLook = 0.0
   var lastQuota = 0.0
   var quota: tuple[used, hard: uint64]       # the storage quota of the namespace as last read (every 30 s): the core keeps the volumes of failed runs shorter when it is nearly full
   var conductorTried: Table[int, float]
@@ -183,6 +185,19 @@ proc main() =
   echo "jobcontroller: push channel to ", streamAddr, ", session=", sessionId
   while true:
     let now = epochTime()
+    if now - lastKeysLook >= 60.0:
+      # a renewed pair (the core puts it in the Secret of this namespace, the kubelet in our files): the Secret of the shims is made again with it, for the step Pods that start from now on; this
+      # controller's own channel takes it up when it connects again (common/corechannel.nim `clientTls`)
+      lastKeysLook = now
+      let stamp = clientKeysStamp(certs)
+      if stamp != keysStamp and fileExists(certs / "tls" / "client.key"):
+        keysStamp = stamp
+        try:
+          k.ensureShimAssets(shimBinPath, certs, withCerts = true)
+          echo "jobcontroller: the transport keys changed: the Secret of the shims was made again"
+        except CatchableError as e:
+          stderr.writeLine "jobcontroller: the transport keys changed and the Secret of the shims could not be made again: " & e.msg
+          keysStamp = ""                                 # tried again at the next look
     if be.readStorageQuota != nil and now - lastQuota >= 30.0:
       lastQuota = now
       quota = be.readStorageQuota()
@@ -243,7 +258,7 @@ proc main() =
       lastConductors = epochTime()
       let spec = ConductorSpec(image: conductorPlan.image, runsPerConductor: int(conductorPlan.runs_per_conductor),
                                drainSeconds: int(conductorPlan.drain_seconds), streamAddr: streamAddr, namespace: ns,
-                               curveSecret: "cinim-controller-curve")      # the Secret the core made with the namespace (core/orgprovision.nim: curveSecretName)
+                               tlsSecret: "cinim-controller-tls")      # the Secret the core made with the namespace (core/orgprovision.nim: tlsSecretName)
       try:
         let r = reconcile(be, spec, int(conductorPlan.desired), conductorPlan.credentials.mapIt((it.id, it.credential)), epochTime(), conductorTried)
         if r.created.len > 0 or r.deleted.len > 0:

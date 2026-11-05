@@ -1,5 +1,5 @@
 ## RUN-007, D-29, DAT-003: the shim's channels to the core over gRPC with mutual TLS (src/common/corechannel.nim, src/core/grpcserve.nim): an answer comes back byte for byte, a core that does not
-## answer in time or is not there is "no answer" (as a ZeroMQ REQ that timed out was), the keys decide who may talk, and the address forms are the ones the controller gives.
+## answer in time or is not there is "no answer" (as it was with ZeroMQ), the keys decide who may talk, and the address forms are the ones the controller gives.
 import std/[os, osproc, strutils]
 import unittest2
 import ../../src/core/grpcserve
@@ -68,6 +68,19 @@ suite "RUN-007 the shim's gRPC channel":
     let ok = dialCore("127.0.0.1:" & $srv.port, keys)
     defer: ok.close()
     check ok.exchange(artifactMethod, "x", 2000) == (true, "x")
+
+  test "DAT-003 a client with no certificate at all is not served":
+    let srv = startShimServer(0, keys, artifactMethod, echo)
+    defer: srv.stop()
+    let tls = tlsClientConfig(readFile(keys / "tls" / "ca.pem"))          # trusts the core, presents nothing
+    var served = false
+    try:
+      let ch = dial("127.0.0.1", srv.port, tls, serverName = coreServerName)
+      defer: ch.close()
+      served = ch.unaryCall(artifactMethod, toBytes("x"), timeoutMs = 2000).message.len > 0
+    except CatchableError: discard
+    check not served
+    check dialCore("127.0.0.1:" & $srv.port, keys).exchange(artifactMethod, "x", 2000) == (true, "x")      # the right client is served by the same server
 
   test "DAT-003 keys that cannot be read are an error that the caller sees":
     let c = dialCore("127.0.0.1:1", getTempDir() / "no-such-keys")

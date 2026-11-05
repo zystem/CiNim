@@ -1,4 +1,4 @@
-## D-29: the shim's state vocabulary - one definition shared by the Pod log, ZeroMQ and rqlite. Pure.
+## D-29: the shim's state vocabulary - one definition shared by the Pod log, the channel and rqlite. Pure.
 import std/[unittest, json, options, strutils, os, osproc, sequtils]
 import common/[shimstate, states]
 

@@ -1,14 +1,14 @@
 # The master key of the step secrets on a SmartCard-HSM
 
 The step secrets of an organisation are sealed in the shard's database (D-45, docs/secrets-masking.md). A data key per organisation seals them, and a **master
-key** wraps the data keys. By default the master key is a file or is derived from the core's CURVE key. This page is about keeping it on a hardware token, so
+key** wraps the data keys. The master key is a key service's (by default the software hsmgate of the release), or a file; there is no mode without one (D-106). This page is about keeping it on a hardware token, so
 that the key that opens everything is on a device that cannot give it away.
 
 What exists today and what does not:
 
 | | State |
 |---|---|
-| Master key from a file (`CINIM_SECRETS_KEY_FILE`) or derived from the CURVE key | built |
+| Master key from a file (`CINIM_SECRETS_KEY_FILE`), or in a key service: the software hsmgate of the chart, a card, a Vault or an OpenBao (D-106) | built |
 | `KekProvider` seam in `core/kekprovider.nim` (wrap, unwrap, key id, "may pass or final" failures) | built |
 | The core's client of a key service next to the token (`CINIM_KEYSERVICE_URL`, the Transit API, mutual TLS, retry, cache, a component in `/api/v1/components`) | built, tested against a stand-in and against the real service with a software token (sections 9 and 10) |
 | The service itself, **hsmgate** (a project of its own, section 9), with ECDH on the card | built; run on this card by the owner (the unwrap, the audit); the core on it in a cluster: not yet |
@@ -165,8 +165,8 @@ The service that holds the card and answers the core is a project of its own, **
 - **The door.** TLS 1.3 with a **client certificate required**, identified by a URI SAN, a pin or a CN that the service's policy maps to a client (the service no longer sits behind a TLS front and believes a header). A client may use only the keys and
   operations (`encrypt`, `decrypt`, `rewrap`) that its policy lists, with the contexts it lists, at the rates it lists; everything else is refused and written to the audit. The ZeroMQ links of the platform do not check which client is on the
   other side and the address of a Pod is not an identity, so neither is used for this. A token that a Vault client presents is never an authentication.
-- **The key.** The shard's master key is a key of the service under a name (`cinim-shard` by default: `secrets.keyService.keyName`). It must let the core use the contexts **`cinim/dek/v1|<tenant>`** (the additional data of an organisation's data key) and
-  **`cinim/kek-check/v1`** (the check text of the vault): `aad: {mode: context, allow: ["cinim/dek/v1|", "cinim/kek-check/v1"]}`. The service seals with the master public key (it needs no PIN to wrap) and opens with the card; the card does only the ECDH,
+- **The key.** The shard's master key is a key of the service under a name (`cinim-shard` by default: `secrets.keyService.keyName`). It must let the core use the contexts **`cinim/dek/v1|<tenant>`** (the additional data of an organisation's data key), **`cinim/kek-check/v1`** (the check text of the vault) and
+  **`cinim/master-secret/v1`** (the core's own secret, which the service seals and the database keeps, D-105): `aad: {mode: context, allow: ["cinim/dek/v1|", "cinim/kek-check/v1", "cinim/master-secret/v1"]}`. A policy made before D-105 lacks the last: the core stops at its start (403) until it is added. The service seals with the master public key (it needs no PIN to wrap) and opens with the card; the card does only the ECDH,
   so a card without AES works.
 - **Failures.** The service says in `X-Hsmgate-Retryable` whether a failure may pass (a locked card, a rate limit, a card that is out: yes; a wrong key, a wrong context, a key that is not granted: no). The core reads it, and, for a service that does not say
   (Vault, OpenBao), takes 429, 5xx and no answer as passing and the other statuses as final. A failure that may pass leaves `secrets_unavailable` for the shims to wait out; a final one stops the core's secret store and a person must look.
@@ -174,8 +174,7 @@ The service that holds the card and answers the core is a project of its own, **
 
 ## 10. What is built on the core's side
 
-- `core/transitclient.nim` (the provider of `core/kekprovider.nim` over the Transit API: `GET keys/<name>` once, `PUT encrypt/<name>` and `decrypt/<name>` with the context), `core/vaultsetup.nim` (the choice of the master key at start: the key service, a key file, or derived from
-  the CURVE key; the master key has to be there when the core starts (see below); a component `keyservice` in `/api/v1/components` and `/metrics`; an organisation's opened data key is kept for `CINIM_SECRETS_DEK_CACHE` seconds, so that steps that
+- `core/transitclient.nim` (the provider of `core/kekprovider.nim` over the Transit API: `GET keys/<name>` once, `PUT encrypt/<name>` and `decrypt/<name>` with the context), `core/vaultsetup.nim` (the choice of the master key at start: the key service or a key file, and nothing else, D-106; the master key has to be there when the core starts (see below); a component `keyservice` in `/api/v1/components` and `/metrics`; an organisation's opened data key is kept for `CINIM_SECRETS_DEK_CACHE` seconds, so that steps that
   start while the service is down still get their secrets; a service whose key is not the one that sealed the database is refused for good with the reason, nothing new is written, and the core exits with an error at its start (`core: FATAL: ...`, exit code 1): Kubernetes shows CrashLoopBackOff, which is how a person is told that nothing in the shard can open its secrets; the same for a service that refuses the core, a proxy that answers with its own page and a damaged setting. The same when the key service does not answer at the start (it restarts, the card waits for a PIN): the core says so and exits, and Kubernetes starts it again with a growing pause, which is the retry; a core that is already running waits for a service that goes away: the shims get `secrets_unavailable` and ask again, and the data keys it has opened are kept for `CINIM_SECRETS_DEK_CACHE` seconds).
 - Settings: `CINIM_KEYSERVICE_URL`, `_KEY_NAME`, `_MOUNT`, `_CA`, `_CERT`, `_KEY`, `_TOKEN_FILE`, `_PROXY`, `_TIMEOUT_MS` (docs/settings.md; the proxy, a CONNECT one such as tinyproxy, is for a cluster with no road to the service: the TLS runs through it, from the core to the service; the core's client is the `std/httpclient` of Nim (>= 2.2.8: the 2.2.6 one writes a wrong request line inside the tunnel, and `transitclient.nim` does not compile with it), and the proxy is told to allow one host and port only: `ConnectPort`, a `Filter` of `host:port` with `FilterURLs On` and `FilterDefaultDeny Yes`, so that a plain HTTP request to the host is refused too); the chart value `secrets.keyService` (the address, the key's name, a Secret with `ca.crt`, `tls.crt`, `tls.key`).
 - Tests: `tests/unit/ttransitclient.nim` (the client against a stand-in with faults: `tests/support/transitemu.nim`: locked, throttled, down, slow, another key put in, a service that does not say whether a failure may pass; a proxy that refuses CONNECT: `tests/support/connectproxy.nim`), and, with the real service when
@@ -188,7 +187,7 @@ The service that holds the card and answers the core is a project of its own, **
 
 ### Moving to another key service, or to another key (D-80)
 
-`/core rekey` moves the master key: every data key of an organisation and the check text of the vault are opened with the key the core runs with and sealed with the new one, in the same database, with the secrets themselves untouched. The new key is another service (another hsmgate, a Vault or an OpenBao), the same service with another key, or a key file; from a file or the key derived from the CURVE key to a service too. It is not `rewrap`: the data key is opened by the old key and sealed by the new, in this process (it is wiped after), because two services cannot see each other's keys.
+`/core rekey` moves the master key: every data key of an organisation and the check text of the vault are opened with the key the core runs with and sealed with the new one, in the same database, with the secrets themselves untouched. The new key is another service (another hsmgate, a Vault or an OpenBao), the same service with another key, or a key file; from a file to a service too; `/core rekey` run with no key given reads the old mode's key derived from `master.key` (once, to leave it). It is not `rewrap`: the data key is opened by the old key and sealed by the new, in this process (it is wiped after), because two services cannot see each other's keys.
 
 1. Make the new key and let the core use it in the new service (the same contexts: `cinim/dek/v1|<tenant>` and `cinim/kek-check/v1`; for hsmgate `encrypt` and `decrypt`).
 2. Give the core the new service next to the old: the chart value `secrets.newKeyService` (`url`, `keyName`, `mount`, `proxy`, `tlsSecret` with `ca.crt`, `tls.crt`, `tls.key`), or `CINIM_NEW_KEYSERVICE_*` / `CINIM_NEW_SECRETS_KEY_FILE` by hand. `helm upgrade` restarts the core, which goes on with the old key.

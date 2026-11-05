@@ -1,0 +1,52 @@
+# OpenBao for the key of the shard, unsealed by itself with Azure Key Vault (deploy/examples/openbao/autounseal/README.md). The official chart, `openbao/openbao`; the same as ../openbao-values.yaml
+# but for the seal stanza, the plugin that carries it and how the Pod proves who it is to the cloud. Replace what is in <angle brackets>.
+global:
+  tlsDisable: false
+injector:
+  enabled: false
+server:
+  standalone:
+    enabled: true
+    config: |
+      ui = false
+      listener "tcp" {
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_cert_file   = "/openbao/userconfig/openbao-tls/tls.crt"
+        tls_key_file    = "/openbao/userconfig/openbao-tls/tls.key"
+      }
+      storage "pebbledb" {
+        path = "/openbao/data/pebbledb"
+      }
+
+      # OpenBao 2.7 carries no cloud seals itself: the plugin is an OCI image that OpenBao downloads at its start (needs ghcr.io from the Pod; pinned by digest).
+      # To go without the network, copy the image to your registry and name that here. The name of the plugin is the name of the seal.
+      plugin_directory     = "/openbao/plugins"
+      plugin_auto_download = true
+      plugin "kms" "azurekeyvault" {
+        image = "ghcr.io/openbao/openbao-plugin-kms-azure:v0.1.1@sha256:505c99420e6c55722f7892e0ab367ab36712ddd54fe554c80b225e405e3f3a78"
+      }
+      seal "azurekeyvault" {
+        tenant_id  = "<tenant id>"
+        vault_name = "<name of the Key Vault>"
+        key_name   = "<key>"          # an RSA key with the operations get, wrapKey, unwrapKey for the identity (the role "Key Vault Crypto Service Encryption User")
+        # client_id and client_secret are not here: the plugin takes AZURE_CLIENT_ID and AZURE_CLIENT_SECRET (below), or the managed identity of the node when it finds neither
+      }
+  volumes:
+    - name: openbao-tls
+      secret: {secretName: openbao-tls}
+    - name: plugins
+      emptyDir: {}
+  volumeMounts:
+    - {name: openbao-tls, mountPath: /openbao/userconfig/openbao-tls, readOnly: true}
+    - {name: plugins, mountPath: /openbao/plugins}
+  extraEnvironmentVars:
+    BAO_CACERT: /openbao/userconfig/openbao-tls/ca.crt      # for `bao` inside the Pod (the chart sets BAO_ADDR)
+  # Who the Pod is, one of the two.
+  # (a) a service principal that may use the key, in a Secret (`kubectl create secret generic azure-kms --from-literal=client_id=... --from-literal=client_secret=...`)
+  extraSecretEnvironmentVars:
+    - {envName: AZURE_CLIENT_ID, secretName: azure-kms, secretKey: client_id}
+    - {envName: AZURE_CLIENT_SECRET, secretName: azure-kms, secretKey: client_secret}
+  # (b) on AKS, the managed identity of the node pool (or a pod identity) that has the role above: delete (a); the plugin uses the managed identity when no client id is given.
+  dataStorage:
+    size: 1Gi

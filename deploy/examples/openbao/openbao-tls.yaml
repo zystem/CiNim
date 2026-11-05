@@ -1,0 +1,15 @@
+# The certificate of the OpenBao, from the CA of the shard (the Issuer `cinim-ca`, which the shard chart makes in its namespace; install OpenBao in that namespace).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao
+spec:
+  commonName: openbao
+  dnsNames: [openbao, openbao.cinim-001, openbao.cinim-001.svc, openbao.cinim-001.svc.cluster.local, localhost]      # the namespace is the shard's; localhost for `bao` inside the Pod
+  ipAddresses: ["127.0.0.1"]
+  usages: [digital signature, server auth]
+  secretName: openbao-tls
+  duration: 17520h
+  renewBefore: 720h
+  privateKey: {algorithm: ECDSA, size: 256, encoding: PKCS8}
+  issuerRef: {name: cinim-ca, kind: Issuer, group: cert-manager.io}

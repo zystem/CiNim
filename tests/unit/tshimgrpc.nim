@@ -24,7 +24,6 @@ suite "RUN-007 the shim talks to the core's servers over gRPC":
   test "setup: keys, a stand-in for vlagent, the three servers":
     removeDir base
     createDir base
-    copyDir(getCurrentDir() / "tests" / "certs" / "curve", certs / "curve")      # the master key of the core is made from it
     haveKeys = execCmd("sh " & quoteShell(getCurrentDir() / "tools" / "grpc" / "gen_tls.sh") & " " & quoteShell(certs) & " 2") == 0
     if not haveKeys: skip()
     startFakeVlagent(vlPort)

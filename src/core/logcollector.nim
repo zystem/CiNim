@@ -1,4 +1,4 @@
-## Log collector (RUN-007, DAT-001, D-27): the LogIngest and StepReport ZeroMQ+CURVE REP servers. Lives inside the
+## Log collector (RUN-007, DAT-001, D-27): the LogIngest and StepReport gRPC servers (mutual TLS). Lives inside the
 ## `core` process (spec 7.3: scheduler + log collector + log-circuit are one process).
 ##
 ## Since D-27 the collector is a transparent proxy. The shim (not core) turns output into VictoriaLogs jsonline
@@ -119,9 +119,9 @@ proc freshness(c: var RqClient; key: StreamKey; open = false): StreamState =
 proc applyStatus(c: var RqClient; step: StepRef; status: ShimStatus) =
   ## The shim's state, recorded through the one function that reconciles it with what the Pod log said (D-29). It comes on the status channel (D-75) or, from a shim of an older controller, in a batch of
   ## the log. The database is asked here and nowhere on the path of the log.
-  let rec = recordShimState(c, step.run_id, int(step.seq), int(step.attempt), status.state_json, "zmq")
+  let rec = recordShimState(c, step.run_id, int(step.seq), int(step.attempt), status.state_json, "channel")
   if rec.judgement == jInconsistent:
-    stderr.writeLine "core: inconsistent shim state for " & step.run_id & "/" & $step.seq & " (zmq): " & status.state_json
+    stderr.writeLine "core: inconsistent shim state for " & step.run_id & "/" & $step.seq & " (channel): " & status.state_json
   # the state is the shim's heartbeat (D-29): a shim that stops sending it shows up as a component that went down
   if rec.state.isSome and rec.judgement in {jApply, jStale}:
     discard registryTouch("shim", step.run_id & "/" & $step.seq & "/" & $step.attempt, epochTime(),
@@ -242,7 +242,7 @@ proc handleStepReport(c: var RqClient; req: StepReport; profileId: string): Step
       return StepReportAck(header: Header(protocol: 1), accepted: false, may_exit: true, disposition: "superseded",
                            failure: Failure(code: "stale_attempt"))
     if req.state_json.len > 0:
-      let rec = recordShimState(c, req.step.run_id, int(req.step.seq), int(req.step.attempt), req.state_json, "zmq")
+      let rec = recordShimState(c, req.step.run_id, int(req.step.seq), int(req.step.attempt), req.state_json, "channel")
       if rec.judgement == jInconsistent:
         stderr.writeLine "core: inconsistent shim state for " & req.step.run_id & "/" & $req.step.seq & " (step report): " & req.state_json
       let parsed = try: fromJson(parseJson(req.state_json)) except CatchableError: none(ShimState)
@@ -344,11 +344,12 @@ proc serveStatus*(rqliteUrl, certs: string; port: int) {.thread.} =
   ## D-75: the state, the heartbeat and the metrics of the shims, on a port and a thread of their own, so that a database that is slow delays these and not the log.
   {.cast(gcsafe).}:
     statusC = newRq(rqliteUrl)
-    let srv = startShimServer(port, certs, statusMethod, statusHandler)
+    var srv = startReloading(port, certs, statusMethod, statusHandler)
     while not stopServers.load:
       beat(bStatus)
       sleep 200
-    srv.stop(graceMs = 1000)
+      if srv.refresh(): echo "core: Status restarted with the new keys"
+    srv.stop()
 
 proc serveBookkeeping*(rqliteUrl: string) {.thread.} =
   ## D-75: writes the row of log_streams of each stream the log has opened (the first batch only notes it), apart from the log. A database that does not answer is tried again a second later;
@@ -383,19 +384,21 @@ proc serveLogIngest*(co: Collector; certs: string; port: int) {.thread.} =
   {.cast(gcsafe).}:
     ingestC = newRq(co.rqliteUrl)
     ingestCo = co
-    let srv = startShimServer(port, certs, logIngestMethod, ingestHandler)
+    var srv = startReloading(port, certs, logIngestMethod, ingestHandler)
     while not stopServers.load:
       beat(bLogIngest)
       sleep 200
-    srv.stop(graceMs = 1000)
+      if srv.refresh(): echo "core: LogIngest restarted with the new keys"
+    srv.stop()
 
 proc serveStepReport*(rqliteUrl, certs: string; port: int; profileId: string) {.thread.} =
   {.cast(gcsafe).}:
     reportC = newRq(rqliteUrl)
     reportMaster = coreSecretKey(certs)
     reportProfile = profileId
-    let srv = startShimServer(port, certs, stepReportMethod, reportHandler)
+    var srv = startReloading(port, certs, stepReportMethod, reportHandler)
     while not stopServers.load:
       beat(bStepReport)
       sleep 200
-    srv.stop(graceMs = 1000)
+      if srv.refresh(): echo "core: StepReport restarted with the new keys"
+    srv.stop()

@@ -1,0 +1,89 @@
+{{- if .Values.tls.certManager.enabled }}
+{{- /*
+The keys of the transport, issued by cert-manager (docs/shim-grpc.md, D-105): a CA of the shard unless an issuer is named, the certificate of the core and the client certificate that the controllers, the
+conductors and the shims share. EC P-256 in PKCS#8, which is what the clients (BearSSL) read. The core mounts the secrets in templates/core.yaml as the files it expects in /etc/cinim/tls.
+*/ -}}
+{{- $ns := include "cinim-shard.ns" . }}
+{{- $cm := .Values.tls.certManager }}
+{{- $issuer := dict "name" "cinim-ca" "kind" "Issuer" "group" "cert-manager.io" }}
+{{- if $cm.issuerRef.name }}{{ $issuer = $cm.issuerRef }}{{ end }}
+{{- if not $cm.issuerRef.name }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: cinim-selfsigned
+  namespace: {{ $ns }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cinim-ca
+  namespace: {{ $ns }}
+spec:
+  isCA: true
+  commonName: cinim shard {{ .Values.shard }} CA
+  secretName: cinim-ca
+  duration: {{ $cm.caDuration }}
+  privateKey: {algorithm: ECDSA, size: 256, encoding: PKCS8}
+  issuerRef: {name: cinim-selfsigned, kind: Issuer, group: cert-manager.io}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: cinim-ca
+  namespace: {{ $ns }}
+spec:
+  ca:
+    secretName: cinim-ca
+---
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cinim-core
+  namespace: {{ $ns }}
+spec:
+  commonName: cinim-core
+  dnsNames: [cinim-core]          # the fixed name the clients check, not the address they dial (src/common/corechannel.nim coreServerName)
+  usages: [digital signature, server auth]
+  secretName: cinim-core-tls
+  duration: {{ $cm.duration }}
+  renewBefore: {{ $cm.renewBefore }}
+  privateKey: {algorithm: ECDSA, size: 256, encoding: PKCS8, rotationPolicy: Always}
+  issuerRef: {{- toYaml $issuer | nindent 4 }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cinim-client
+  namespace: {{ $ns }}
+spec:
+  commonName: cinim-shim
+  usages: [digital signature, client auth]
+  secretName: cinim-client-tls
+  duration: {{ $cm.duration }}
+  renewBefore: {{ $cm.renewBefore }}
+  privateKey: {algorithm: ECDSA, size: 256, encoding: PKCS8, rotationPolicy: Always}
+  issuerRef: {{- toYaml $issuer | nindent 4 }}
+{{- if .Values.hsmgate.enabled }}
+---
+{{- /* the core's client certificate for the hsmgate of this release: the CN is the one its policy names for the core (hsmgate.clients), the secret has the names that secrets.keyService.tlsSecret has */ -}}
+{{- $cn := "cinim-core-ks" }}
+{{- range .Values.hsmgate.clients }}{{ if eq .name "cinim-core" }}{{ $cn = .cn }}{{ end }}{{ end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cinim-core-keyservice
+  namespace: {{ $ns }}
+spec:
+  commonName: {{ $cn }}
+  usages: [digital signature, client auth]
+  secretName: cinim-core-keyservice
+  duration: {{ $cm.duration }}
+  renewBefore: {{ $cm.renewBefore }}
+  privateKey: {algorithm: ECDSA, size: 256, encoding: PKCS8, rotationPolicy: Always}
+  issuerRef: {{- toYaml $issuer | nindent 4 }}
+{{- end }}
+{{- end }}

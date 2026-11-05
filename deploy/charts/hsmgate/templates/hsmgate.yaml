@@ -1,0 +1,107 @@
+{{- /*
+hsmgate with a software token (see values.yaml). One replica: the key is a file on a volume that one Pod holds. Strategy Recreate for the same reason.
+*/ -}}
+{{- $ns := .Release.Namespace }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: hsmgate
+  namespace: {{ $ns }}
+spec:
+  commonName: hsmgate
+  dnsNames: [hsmgate, "hsmgate.{{ $ns }}", "hsmgate.{{ $ns }}.svc", "hsmgate.{{ $ns }}.svc.cluster.local"]
+  usages: [digital signature, server auth]
+  secretName: hsmgate-tls
+  duration: {{ .Values.tls.duration }}
+  renewBefore: {{ .Values.tls.renewBefore }}
+  privateKey: {algorithm: ECDSA, size: 256, encoding: PKCS8, rotationPolicy: Always}
+  issuerRef: {{- toYaml .Values.tls.issuerRef | nindent 4 }}
+---
+{{- if not .Values.persistence.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hsmgate-key
+  namespace: {{ $ns }}
+  annotations:
+    helm.sh/resource-policy: keep                 # the key is on it: it is not deleted with the release
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hsmgate
+  namespace: {{ $ns }}
+  labels: {app.kubernetes.io/name: hsmgate}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: hsmgate}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: hsmgate}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        # the key of the shard's secrets is made once, here, and never again: a file that is there is left as it is
+        - name: key
+          image: {{ .Values.initImage }}
+          command: ["sh", "-c", "set -eu; umask 077; f=/var/lib/hsmgate/m1.key; if [ ! -s \"$f\" ]; then head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"$f.new\"; mv \"$f.new\" \"$f\"; echo 'hsmgate: the key was made'; fi; chmod 0400 \"$f\""]
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          volumeMounts: [{name: key, mountPath: /var/lib/hsmgate}]
+      containers:
+        - name: hsmgate
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "-config", "/etc/hsmgate/hsmgate.yaml"]
+          ports: [{name: https, containerPort: 8443}]
+          # mutual TLS is required, so an HTTP probe cannot ask; the port answering is what can be told
+          readinessProbe: {tcpSocket: {port: https}, periodSeconds: 10}
+          livenessProbe: {tcpSocket: {port: https}, periodSeconds: 20, failureThreshold: 6}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/hsmgate/hsmgate.yaml, subPath: hsmgate.yaml, readOnly: true}
+            - {name: tls, mountPath: /etc/hsmgate/tls, readOnly: true}
+            - {name: key, mountPath: /var/lib/hsmgate}
+      volumes:
+        - name: config
+          configMap: {name: hsmgate}
+        - name: tls
+          secret:
+            secretName: hsmgate-tls
+            defaultMode: 0440
+            items:
+              - {key: tls.crt, path: server.pem}
+              - {key: tls.key, path: server.key}
+              - {key: ca.crt, path: ca.pem}
+        - name: key
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default "hsmgate-key" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hsmgate
+  namespace: {{ $ns }}
+spec:
+  selector: {app.kubernetes.io/name: hsmgate}
+  ports: [{name: https, port: 8443, targetPort: https}]

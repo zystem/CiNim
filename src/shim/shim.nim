@@ -14,7 +14,7 @@
 ##   - `--drain ...` delivers what a step that has ended left on the volume (its log spool, the manifest of its artifacts), in a Pod the job-controller makes when core orders it;
 ##   - on SIGTERM (a cancelled step, a Pod being removed) stops the build (SIGTERM to its process group, SIGKILL after 20 s), delivers the log and exits.
 ## Exit code: the command's, 124 for a timeout, 70 for env_rejected, 72 for logs_undelivered, 71 for an internal error.
-## The default build has no ZeroMQ (it runs in any image); the production build is -d:shimLogging, linked statically
+## The default build has no gRPC client (it runs in any image); the production build is -d:shimLogging, linked statically
 ## (tools/shim/build_static.sh).
 
 import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options, base64, sequtils]
@@ -24,12 +24,9 @@ import ../common/[stepenv, cachedecl]
 when defined(shimLogging):
   import logclient   ## also brings in StepRef (the types of build/nimproto/protos.nim) for the calls below
 else:
-  # Default build: no ZeroMQ at all. logclient.nim pulls in zmqcurve -> zmq/bindings.nim, which dlopens
-  # libzmq at program start (a version check at import) - an arbitrary step image (busybox, ...) has no
-  # libzmq, so a shim linked against it dies before running the command, silently breaking A.6's
-  # "static, dependency-free shim" property for every step, logging or not. These stubs keep main()'s
+  # Default build: no gRPC client at all (nghttp2, BearSSL and zlib are not linked). These stubs keep main()'s
   # logging calls compiling to no-ops; the real LogIngest/StepReport client is built with -d:shimLogging
-  # (tools/shim/build_static.sh links libzmq statically, so it runs in any image).
+  # (a static binary, tools/shim/build_static.sh, so it runs in any step image: A.6's "static, dependency-free shim").
   type
     LogPipeline = object
     StepRef = object
@@ -506,7 +503,7 @@ proc main(): int =
   else:
     let logging = false
     if wantLogging:
-      stderr.writeLine "cicd-shim: log streaming requested but this build has no ZeroMQ client (-d:shimLogging); running without it"
+      stderr.writeLine "cicd-shim: log streaming requested but this build has no gRPC client (-d:shimLogging); running without it"
   var secrets: seq[string]
   if secretsFile.len > 0 and fileExists(secretsFile):
     for l in lines(secretsFile):

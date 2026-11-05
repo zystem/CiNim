@@ -1,64 +1,57 @@
 ## Soak harness (NFR-013). One process, worker threads under steady load:
-##   zmq    CURVE REQ/REP with Protobuf, half of the requests on fresh connections (D-24, A.12)
+##   grpc   gRPC with mutual TLS and Protobuf (the counters and the CSV columns are still called zmq_*), half of the requests on fresh connections (A.12)
 ##   lua    sandbox create, journaled run, "kill" and replay, destroy
 ##   rqlite optional (SOAK_RQLITE_URL): CAS updates and reads
 ## The main thread samples RSS and Nim heap into a CSV and, at the end, checks RSS growth
 ## after warm-up against SOAK_MAX_GROWTH_PCT (NFR-013: 2%).
-## Build: nim c -d:release tools/soak/soak.nim  (add -d:sanitize + asan flags for LSan). No build-time
-## prefix needed (zmqcurve.nim dlopens libzmq.so at runtime, see src/common/zmqcurve.nim).
+## Build: nim c -d:release tools/soak/soak.nim  (add -d:sanitize + asan flags for LSan). A static nghttp2 in /opt/nghttp2 (or -d:nghttp2Prefix); the keys: tools/grpc/gen_tls.sh build/soak-certs.
 import std/[os, strutils, atomics, times, options, json]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, memstats, rqlite]
+import common/[corechannel, memstats, rqlite]
+import core/grpcserve
 import executor/[sandbox, journal, replay]
 import ../../tests/unit/support/fixture
 
 import_proto3 "../../proto/vectors.proto"
 
 let port = parseInt(getEnv("SOAK_PORT", "19700"))
-let certs = getEnv("SOAK_CERTS", getCurrentDir() / "tests" / "certs")
-  ## tests/certs/curve/{core,client}.{pub,key} - the same CURVE identities the real core/job-
-  ## controller/executor-service use (tools/zmq/gen_curve_keys.sh), loaded once at startup (below)
-  ## rather than per-connection: a soak run is meant to survive for days, and anything that makes the
-  ## key files briefly unavailable (another process touching the working directory, an editor save, a
-  ## `git checkout`) must not crash the whole run (reading the files per connection once killed a day-old run).
-var serverKeys, clientKeys: CurveKeypair
-proc loadKeys() =
-  serverKeys = loadKeypair(certs, "core")
-  clientKeys = loadKeypair(certs, "client")
+let certs = getEnv("SOAK_CERTS", getCurrentDir() / "build" / "soak-certs")
+  ## `<certs>/tls/*` (tools/grpc/gen_tls.sh) - the same mutual TLS the real core and shims use. The keys are read when the process starts and cached (common/corechannel.nim `clientTls`), not at every
+  ## connection: a soak run is meant to survive for days, and anything that makes the key files briefly unavailable (another process touching the working directory, an editor save, a
+  ## `git checkout`) must not crash the whole run.
+const soakMethod = "/cicd.Soak/Echo"
 
 var stop: Atomic[bool]
 var serverReady: Atomic[bool]
 var joined: Atomic[bool]     # set once every worker thread has been joined; see the watchdog below
-var zmqOk, zmqFail, luaOk, luaFail, rqOk, rqFail: Atomic[int]
+var zmqOk, zmqFail, luaOk, luaFail, rqOk, rqFail: Atomic[int]      # the names of the counters are those of the columns of the CSV, which older runs also have (zmq_ok is the gRPC channel)
+
+proc echo(ctx: var ServerContext; body: seq[byte]): seq[byte] {.nimcall, gcsafe, raises: [CatchableError].} =
+  ## the server: a message that starts with "pb:" is a Protobuf `Inner` whose n is returned plus one, anything else comes back as it came
+  let text = toStr(body)
+  if not text.startsWith("pb:"): return body
+  let m = Protobuf.decode(cast[seq[byte]](text[3 .. ^1]), Inner)
+  let enc = Protobuf.encode(Inner(name: m.name, n: m.n + 1))
+  var reply = "pb:"
+  for c in enc: reply.add char(c)
+  toBytes(reply)
 
 proc serverLoop() {.thread.} =
-  var conn: ZConnection
-  {.cast(gcsafe).}: conn = listenRep(port, serverKeys.secretKey, recvTimeoutMs = 200)
-  serverReady.store(true)
-  while not stop.load:
-    let body = conn.receive()
-    if body.len == 0: continue
-    var reply = body
-    if body.startsWith("pb:"):
-      let m = Protobuf.decode(cast[seq[byte]](body[3 .. ^1]), Inner)
-      let enc = Protobuf.encode(Inner(name: m.name, n: m.n + 1))
-      reply = "pb:"
-      for b in enc: reply.add char(b)
-    conn.send(reply)
-  conn.close()
-
-proc dial(): ZConnection =
   {.cast(gcsafe).}:
-    connectReq("tcp://127.0.0.1:" & $port, serverKeys.publicKey, clientKeys,
-               recvTimeoutMs = 5000, sendTimeoutMs = 5000)
+    let srv = startShimServer(port, certs, soakMethod, echo)
+    serverReady.store(true)
+    while not stop.load: sleep 200
+    srv.stop(graceMs = 1000)
 
-proc roundTrip(conn: ZConnection; n: int): bool =
+proc dial(): CoreChannel =
+  dialCore("tcp://127.0.0.1:" & $port, certs)
+
+proc roundTrip(conn: CoreChannel; n: int): bool =
   let enc = Protobuf.encode(Inner(name: "step-" & $n, n: int32(n mod 1000)))
   var msg = "pb:"
   for b in enc: msg.add char(b)
-  conn.send(msg)
-  let (avail, _, body) = waitForReceive(conn.socket)
+  let (avail, body) = conn.exchange(soakMethod, msg, 5000)
   if not avail or not body.startsWith("pb:"): return false
   Protobuf.decode(cast[seq[byte]](body[3 .. ^1]), Inner).n == int32(n mod 1000) + 1
 
@@ -80,7 +73,7 @@ proc zmqClientBody(churn: bool) =
       sleep 5
   else:
     var s = dial()
-    while not stop.load:      # one long connection, but redial on any failure: a socket that
+    while not stop.load:      # one long connection, but redial on any failure: a channel that
       if roundTrip(s, n):     # goes bad must not spin (or block) forever on the same handle,
         zmqOk.atomicInc        # which once left a soak run stuck for 18+ hours
       else:                   #
@@ -138,8 +131,8 @@ proc rqWorker(url: string) {.thread.} =
 when defined(sanitize):
   proc lsanCheck(): cint {.importc: "__lsan_do_recoverable_leak_check".}
   ## Only catches leaks in code ASan's allocator takeover covers process-wide (our Nim/C code, and any
-  ## heap traffic libzmq.so does through the same malloc/free, even though it is dlopen'd, not compiled
-  ## with -fsanitize=address) - it cannot find memory corruption *inside* libzmq's own uninstrumented
+  ## heap traffic the C libraries (nghttp2, BearSSL) do through the same malloc/free, even though they are not compiled
+  ## with -fsanitize=address) - it cannot find memory corruption *inside* their own uninstrumented
   ## code. The same caveat applies to any uninstrumented native library.
 
 proc exitProc(code: cint) {.importc: "_exit", header: "<unistd.h>".}
@@ -167,7 +160,6 @@ proc main() =
   let maxGrowth = parseFloat(getEnv("SOAK_MAX_GROWTH_PCT", "2"))
   let csv = getEnv("SOAK_CSV", "soak.csv")
   let rq = getEnv("SOAK_RQLITE_URL")
-  loadKeys()
   # SOAK_ROLE splits the process to see which side owns a memory trend: "server" = only the REP loop, "client" = only the
   # request threads (against a server started elsewhere on SOAK_PORT), "both" (default) = as before
   let role = getEnv("SOAK_ROLE", "both")

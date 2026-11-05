@@ -5,6 +5,18 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 dependencies:
+  # the key of the step secrets (and with it the core's own secret) is in a key service; there is no mode without one (D-106). By default hsmgate with a software token, bundled here
+  # (`hsmgate.enabled`, on); a card, a Vault or an OpenBao is the other way: `hsmgate.enabled: false` and `secrets.keyService`
+  - name: hsmgate
+    version: 0.1.0
+    repository: file://../hsmgate
+    condition: hsmgate.enabled
+  # cert-manager, optional (`cert-manager.enabled`, off): the certificates of the channels are issued by it (tls.certManager, docs/shim-grpc.md). Most clusters have it already: install it once
+  # per cluster, not in the release of each shard (its CRDs and ClusterRoles are cluster-wide, so the second shard's release would collide with the first)
+  - name: cert-manager
+    version: v1.20.4
+    repository: https://charts.jetstack.io
+    condition: cert-manager.enabled
   # the shard's own database (D-04); official chart
   - name: rqlite
     version: 2.0.0

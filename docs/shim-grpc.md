@@ -1,36 +1,45 @@
-# The shim's channels over gRPC (experiment, branch `shim-grpc`)
+# The channels over gRPC with mutual TLS (D-104)
 
-The owner (2026-11-02) asked for the shim to be rewritten on [nim-grpc](https://github.com/zystem/nim-grpc) in a branch and compared with the ZeroMQ + CURVE it has today (D-24). This is what was
-built, how it compares, and what it would take to merge. Nothing here is a decision: the comparison is the input to one (a D-xx entry would follow).
+The owner (2026-11-02) asked for the shim to be rewritten on [nimgrpc](https://github.com/zystem/nimgrpc) in a branch and compared with the ZeroMQ + CURVE it had (D-24). The comparison below came out
+in gRPC's favour once the library had its copy fixes, and the owner (2026-11-03: "коммитить отдельно shim нет смысла. надо переключать на grpc все компоненты") had **every component** switched: the shim, the
+core's servers, the controllers and the conductors. ZeroMQ, libzmq and the fork `nim-zmq` are gone from the repository. This page keeps the comparison and the findings; the decision is D-104.
 
 ## What was changed
 
 The four channels of a step Pod to the core are unchanged in shape: one request, one answer, protobuf messages of `proto/`, the ports 19742 (report), 19743 (log), 19744 (artifacts), 19746 (state).
-Only the transport is replaced.
+The push channel of the controllers and the conductors (19745, docs/conductors.md section 12) is the same frames over two long calls of a client. Only the transport is replaced.
 
 | Part | Before | Now |
 |:--|:--|:--|
-| Shim client | `connectReq` / `send` / `waitForReceive` (`common/zmqcurve.nim`) at six places of `shim/logclient.nim` | `dialCore` / `exchange` (`common/corechannel.nim`, about 100 lines): the same call sites, one line each |
-| Core servers | a REP socket and a thread per channel (`serveLogIngest`, `serveStepReport`, `serveStatus`, `serveArtifactIngest`) | a gRPC server per channel and port (`core/grpcserve.nim`, 26 lines); the handlers `answerLogBatch`, `answerStepReport`, `answerStatus` and the new `answerArtifact` are the same code, called under a lock |
-| Identity | CURVE keypairs `curve/core.*`, `curve/client.*`, one client identity for all shims | mutual TLS: `tls/ca.pem`, `tls/core.{pem,key}`, `tls/client.{pem,key}`; one client identity for all shims, as before (SEC-010 is still deferred); made by `tools/grpc/gen_tls.sh` |
-| Methods | the socket | `/cicd.LogIngest/Send`, `/cicd.StepReport/Report`, `/cicd.Status/Report`, `/cicd.ArtifactIngest/Call` (nim-grpc's untyped API: the bytes of the existing messages; no `service` was added to `proto/`) |
-| Not touched | | the controller and conductor channels (19745 and the executor), which still use ZeroMQ; the core links both |
+| Shim client | `connectReq` / `send` / `waitForReceive` (`common/zmqcurve.nim`) at six places of `shim/logclient.nim` | `dialCore` / `exchange` (`common/corechannel.nim`): the same call sites, one line each |
+| Core servers for the shim | a REP socket and a thread per channel (`serveLogIngest`, `serveStepReport`, `serveStatus`, `serveArtifactIngest`) | a gRPC server per channel and port (`core/grpcserve.nim`); the handlers `answerLogBatch`, `answerStepReport`, `answerStatus` and the new `answerArtifact` are the same code, called under a lock |
+| The push channel | a ROUTER in the core, a DEALER in each client (`common/stream.nim`), ZeroMQ heartbeats 3 s / 10 s, `ROUTER_MANDATORY` | a gRPC server in the core and, in each client, a thread that connects and opens two calls on one connection: `/cicd.Stream/Down` (the core pushes) and `/cicd.Stream/Up` (the client sends); HTTP/2 keepalive 3 s / 10 s; the frame envelope, the numbering, the acknowledgements and `resync` are the same bytes and the same code (`streamstate.nim`, `streamhub.nim`) |
+| Identity | CURVE keypairs `curve/core.*`, `curve/client.*`, one client identity for all | mutual TLS: `tls/ca.pem`, `tls/core.{pem,key}`, `tls/client.{pem,key}`; one client identity for all, as before (SEC-010 is still deferred); made by `tools/grpc/gen_tls.sh`; the core's own secret (the identities of the controllers are made under it, and the derived master key of the secrets) is `tls/master.key`, not a TLS key |
+| Methods | the socket | `/cicd.LogIngest/Send`, `/cicd.StepReport/Report`, `/cicd.Status/Report`, `/cicd.ArtifactIngest/Call`, `/cicd.Stream/Down`, `/cicd.Stream/Up` (nimgrpc's untyped API: the bytes of the existing messages; no `service` was added to `proto/`) |
+| Secrets and mounts | the Secret `cinim-controller-curve` (`core.pub`, `client.pub`, `client.key`) at `/etc/cinim/curve`; in a step Pod `cicd-curve-certs` | the Secret `cinim-controller-tls` (`ca.pem`, `client.pem`, `client.key`) at `/etc/cinim/tls`; in a step Pod `cicd-tls-certs`; the chart value `tls.secretName` (five files) in place of `curve.secretName`, or, by default, certificates issued by cert-manager (D-105); the core's own secret is in its database |
 
-The shim checks the core's certificate against the fixed name `cinim-core`, not against the address it dials, so one certificate serves every namespace. A step Pod needs `ca.pem`, `client.pem`
-and `client.key`, never `core.key`.
+A client checks the core's certificate against the fixed name `cinim-core`, not against the address it dials, so one certificate serves every namespace. A step Pod, a controller and a conductor need `ca.pem`,
+`client.pem` and `client.key`, never `core.key` or `master.key`.
 
-Build: nim-grpc (the repository is now `zystem/nimgrpc`, the Nim package and the modules `nimgrpc`: `import nimgrpc`; version 0.2.0 was used) needs a static nghttp2 1.57 or later (`-d:nghttp2Prefix`), zlib and the Nim package
-`bearssl`; `config.nims` reads `NIM_GRPC` (the checkout), `NIM_BEARSSL` and `NGHTTP2_PREFIX`. The shim no longer needs libzmq, libsodium or a C++ toolchain.
+How a peer of the push channel is told: the client makes a token at every connect (16 random bytes) and puts it in the metadata `cinim-peer` of both calls; it is the routing id, the address of the peer's last frame, and it changes at every
+reconnect, as a ZeroMQ routing id did. The `Down` call is opened first and the core answers it with an empty message once the peer is registered, so the client sends nothing before the core can answer. Two calls and not one bidirectional call because
+each is then used by one thread on each side (a call of nimgrpc is not meant to be read and written by two). Frames cross threads in `ShmQueue` (`common/shmq.nim`), never as Nim strings. A peer takes two workers of the gRPC server for as long as it is
+connected (`maxWorkers` is twice the number of peers plus a few).
+
+Build: nimgrpc is a nimble package (`requires "nimgrpc >= 0.2.0"` in `cinim.nimble`; the repository is `zystem/nimgrpc`, the modules are `nimgrpc`: `import nimgrpc`; version 0.2.0 was used). It needs a
+static nghttp2 1.57 or later, which it looks for in `/opt/nghttp2` (`include/` and `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>`, or `NGHTTP2_PREFIX` for `config.nims`, names another place), zlib, and the Nim
+package `bearssl` that nimble brings. `tools/image/Dockerfile.deps` (and `Dockerfile.test`, `tools/soak/Dockerfile`, `tools/shim/build_static.sh`) build nghttp2 1.68.0. The shim, the conductor and the controller no longer need libzmq, libsodium or a C++ toolchain;
+libsodium stays in the core and the storage module (the sealing of the secrets), at `/opt/sodium`.
 
 ## Tests
 
+* `tests/unit/tstream.nim` (9 for the channel and 4 for the envelope): a frame reaches the core with a routing id and the core answers on it; two clients are told apart and a push goes to one; a send to a peer that is gone fails; a client with a certificate
+  of another CA, and one that does not trust the core's CA, cannot connect; frames sent before the client is connected wait and arrive in order; a client connects to a core that comes up later and again to one that was restarted; a frame of 3 MB and 500 small ones both ways.
 * `tests/unit/tcorechannel.nim` (8): an answer comes back byte for byte (empty to 1 MB), a slow core is "no answer" and the next request goes on, a core that is not there is "no answer", a
   certificate of another CA is refused (and the right one is served), unreadable keys are an error, an unknown method is an error, a restarted core is reached again within two requests.
-* `tests/unit/tshimgrpc.nim` (2 tests, and the setup and teardown that count as two more): the shim's log pipeline (2000 lines through the spool and the sender thread, with the state channel) reaches the real `serveLogIngest` and a stand-in for vlagent and is
-  acknowledged; the report and the request for secrets are answered by the real handlers.
-* `tests/integration/tshimdirect.nim`: the whole artifact chain (shim, core, storage module, Caddy nodes; upload by parts, read back, caches, the refusals) passes over the new channel.
-* `tshim`, `tdrainpod`, `tlogcollector`, `tboundaries`, `tpipelineflow` pass; `tshim` has one failure that is the same on `main` in the same image (busybox `ps` has no `-o ni=,pgid=`).
-* Not run: the rest of the suite, a real cluster, a real core with a real shim in a Pod.
+* `tests/unit/tshimgrpc.nim`: the shim's log pipeline (2000 lines through the spool and the sender thread, with the state channel) reaches the real `serveLogIngest` and a stand-in for vlagent and is acknowledged; the report and the request for secrets are answered by the real handlers.
+* `tests/integration/tstream.nim`, `tconductorhub.nim`, `tconductor.nim` (a real rqlite): the controller's and the conductor's channel as before; `tshimdirect.nim`: the whole artifact chain.
+* The keys of every test are made by `tools/grpc/gen_tls.sh` into a temporary directory (`tests/support/testcerts.nim`); `tests/certs/curve` is not used any more.
 
 ## The comparison
 
@@ -99,12 +108,12 @@ call its blocking database client from a worker, which is another piece of work.
    time, as before. Real concurrency is possible but needs a database client per worker and a look at the shared state in `logcollector.nim`.
 4. **The liveness beat** (`beat(bLogIngest)` and the others, read by the health check) used to stop when a REP loop was stuck in a handler. The serving loop now beats on its own; a handler stuck
    under the lock is not seen. A beat from the handler would restore it.
-5. **A rollout has two versions.** The controller puts the shim of its own version in the Pods; a core that only speaks gRPC cannot serve Pods made before it. A merge needs both transports on
-   different ports for one release, or a drain of the runs.
-6. **The Secrets and the chart change:** the shim's certificates directory today holds `curve/`; it would hold `tls/` (the controller mounts it, `deploy/charts/cinim-shard`), and the core's
-   needs `tls/core.*` and `tls/ca.pem`. Not done on the branch.
-7. **The images:** `tools/image/Dockerfile.deps` has no nghttp2 and no `bearssl`; the branch was built against a static nghttp2 1.68.0 made by the recipe of nim-grpc's `docs/static-build.md` and
-   against the host's Nim package. `cinim.nimble` does not list nim-grpc yet.
+5. **A rollout is one version.** The core, the controllers, the conductors and the shims speak gRPC only, with no second transport for a release: the core replaces the controller Pod of every organisation when its image changes (D-62), the new controller
+   puts the new shim into new Pods, and the conductors are replaced with it. A **step that runs through the rollout** has an old shim, which cannot reach the new core: it loses its report and its log until it ends (the spool on the run's volume keeps the log, and the
+   drain Pod delivers it, DAT-003). Roll out when few steps run, or drain the runs first. The Secrets change at the same time: with cert-manager (D-105) you make nothing: the core keeps its own secret in the database, sealed by the key of the secrets; only a shard that has secrets or identities made under the old `curve/core.key` brings it in once (`tls.masterKeySecret`); without cert-manager put the five files in the Secret named by `tls.secretName`.
+6. **The Secrets and the chart are changed:** `tls.certManager` / `tls.secretName` (the chart; `tls.masterKeySecret` only to bring in an old secret), `cinim-controller-tls` and `cicd-tls-certs` (the Secrets the core and the controller make); the old `cinim-controller-curve` and `cicd-curve-certs` stay in the cluster until someone deletes them.
+7. **The images:** `tools/image/Dockerfile.deps` builds a static nghttp2 1.68.0 into `/opt/nghttp2` and libsodium into `/opt/sodium`, and `nimble install --depsOnly` takes nimgrpc from the package list; `Dockerfile.test`, `tools/soak/Dockerfile` and
+   `tools/shim/build_static.sh` do the same for their own base. The binaries built in the deps image: core 9.45 MB (9.98 before), controller 8.5 MB, conductor 1.07 MB, shim 392 KB packed (639 KB before).
 8. **The host environment:** `import protobuf_serialization` does not compile with the Nim packages in the host's `~/.nimble/pkgs2` now (`serialization` 0.5.4 with `stew` 0.5.2 and 0.6.5:
    `readPragma` is undeclared), also on `main`; every build and test here ran in the deps image.
 
@@ -114,7 +123,5 @@ call its blocking database client from a worker, which is another piece of work.
   ZeroMQ's (the table above: 17% less for the series, faster from 64 KiB up), so the fallback path that carries artifact bytes through the core (the direct path of D-61 does not use this channel
   for bytes) is not a reason against it any more. Before the fixes it was about 7 times more.
 * The core pays for connections: with the blocking server it is the number of threads (and about 0.25 MB each); the CPU per byte is no longer the problem. For a shard with many steps at once the blocking server is not a
-  choice; the chronos one has to be tried, and that is a bigger piece of work than this branch.
+  choice; the chronos one has to be tried, and that is a bigger piece of work than this move.
 * Mutual TLS gives what CURVE did not: certificates with names and expiry, revocation by replacing the CA, standard tooling. It costs a certificate lifecycle.
-
-The branch is committed and not pushed.

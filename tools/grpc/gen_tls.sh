@@ -1,6 +1,8 @@
 #!/bin/sh
 # Makes the keys of the shim's gRPC channels (src/common/corechannel.nim, src/core/grpcserve.nim) in DIR/tls: ca.pem (the CA, its key is not kept), core.pem and core.key (the core's server
 # certificate, DNS name cinim-core, which is what the shims check), client.pem and client.key (the one identity of the shims, as curve/client.* was). EC P-256, valid for 2 years by default.
+# master.key (core only) is the secret the controller identities and the derived master key of the secrets are made under (common/ctrlauth.nim, core/orgprovision.nim): random text, not a TLS key, so that a new
+# certificate does not change the identities. An existing shard that moves from CURVE copies its old curve/core.key there instead, and its identities and derived key stay valid.
 # Usage: tools/grpc/gen_tls.sh DIR [DAYS]. The core needs core.* and ca.pem; a step Pod gets ca.pem, client.pem and client.key and never core.key.
 set -eu
 dir=${1:?usage: gen_tls.sh DIR [DAYS]}
@@ -24,4 +26,5 @@ extendedKeyUsage=serverAuth
 keyUsage=digitalSignature"
 leaf client "/CN=cinim-shim" "extendedKeyUsage=clientAuth
 keyUsage=digitalSignature"
+[ -f "$out/master.key" ] || openssl rand -hex 32 > "$out/master.key"
 chmod 600 "$out"/*.key

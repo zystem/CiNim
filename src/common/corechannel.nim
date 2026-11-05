@@ -1,5 +1,4 @@
-## The shim's side of its channels to the core over gRPC (nim-grpc) with mutual TLS, in place of the ZeroMQ REQ/REP + CURVE of `zmqcurve.nim`. The shape of the old call is kept so that the
-## code of the shim changes little: `dialCore` (lazy, like a ZeroMQ connect: nothing happens until the first request), `exchange` (one request, one answer, `avail` false when the core
+## The shim's side of its channels to the core over gRPC (nim-grpc) with mutual TLS. The shape is that of a ZeroMQ REQ socket, which the shim used before, so that the code of the shim changed little: `dialCore` (lazy: nothing happens until the first request), `exchange` (one request, one answer, `avail` false when the core
 ## did not answer in time, as `waitForReceive` said), `close`. The messages are the same protobuf bytes, the method is the name of the channel.
 ##
 ## Keys: `<certs>/tls/ca.pem` (what the core's certificate must chain to), `<certs>/tls/client.pem` and `client.key` (the shared identity of the shims, as `curve/client.*` was). The core's
@@ -8,7 +7,7 @@
 ##
 ## nim-grpc's `dial` connects at once; its `connectTimeoutMs` bounds the TCP connect (a core behind a rule that drops packets would otherwise hold the shim for the system's timeout, minutes).
 ## Resolving the name is not covered by it.
-import std/[os, locks, tables]
+import std/[os, locks, tables, times]
 import nimgrpc
 
 const
@@ -56,18 +55,37 @@ proc close*(c: CoreChannel) = c.drop()
 
 var
   configLock: Lock
-  configs {.guard: configLock.}: Table[string, TlsConfig]
+  configs {.guard: configLock.}: Table[string, tuple[stamp: string, tls: TlsConfig]]
 initLock(configLock)
 
-proc loadKeys(c: CoreChannel) =
+proc clientKeysStamp*(certs: string): string =
+  ## when the client's files were last written and how long they are: it changes when cert-manager (or a person) puts a renewed pair there; a mounted Secret is replaced as a whole, so the time of the
+  ## file that the link points to is a new one. "" for a file that is not there.
+  for name in ["ca.pem", "client.pem", "client.key"]:
+    try:
+      let i = getFileInfo(certs / "tls" / name)
+      result.add $i.lastWriteTime.toUnix & "." & $i.lastWriteTime.nanosecond & ":" & $i.size & ";"
+    except OSError: result.add "-;"
+
+proc clientTls*(certs: string): TlsConfig =
   ## One TlsConfig per directory of keys for the whole process, not one per channel: nim-grpc keeps the TLS session of the last connection in the config and resumes it (for ten minutes) on the
   ## next connection with the same config and server name, which skips the public-key work of the handshake. A channel made for each report or secrets request would otherwise start from scratch.
-  if c.tls == nil:
-    {.cast(gcsafe).}:
-      withLock configLock:
-        if c.certs notin configs:
-          configs[c.certs] = tlsClientConfig(readFile(c.certs / "tls" / "ca.pem"), readFile(c.certs / "tls" / "client.pem"), readFile(c.certs / "tls" / "client.key"))
-        c.tls = configs[c.certs]
+  ## The keys are `<certs>/tls/{ca.pem,client.pem,client.key}`; an unreadable one is an IOError.
+  ## Made again when the files have changed since it was made (`clientKeysStamp`): a process that lives for months and connects again now and then (a controller, a conductor) takes up a renewed pair at
+  ## its next connection. A connection that is up keeps what it was made with, which is good until the old certificate ends.
+  {.cast(gcsafe).}:
+    withLock configLock:
+      let stamp = clientKeysStamp(certs)
+      if certs notin configs or configs[certs].stamp != stamp:
+        configs[certs] = (stamp, tlsClientConfig(readFile(certs / "tls" / "ca.pem"), readFile(certs / "tls" / "client.pem"), readFile(certs / "tls" / "client.key")))
+      result = configs[certs].tls
+
+proc serverTls*(certs: string): TlsConfig =
+  ## the core's side of the mutual TLS: its certificate, and the CA the clients' certificates must chain to (`<certs>/tls/{core.pem,core.key,ca.pem}`)
+  tlsServerConfig(readFile(certs / "tls" / "core.pem"), readFile(certs / "tls" / "core.key"), clientCaPem = readFile(certs / "tls" / "ca.pem"))
+
+proc loadKeys(c: CoreChannel) =
+  c.tls = clientTls(c.certs)           # at every connection: the files may have been renewed since the channel was made
 
 proc connectNow(c: CoreChannel) =
   c.ch = dial(c.host, c.port, c.tls, serverName = coreServerName, connectTimeoutMs = connectTimeoutMs)
@@ -82,8 +100,7 @@ proc toStr(b: seq[byte]): string =
   if b.len > 0: copyMem(addr result[0], unsafeAddr b[0], b.len)
 
 proc exchange*(c: CoreChannel; meth, request: string; timeoutMs: int): tuple[avail: bool, body: string] =
-  ## One request and its answer. `avail` false: the core did not answer within `timeoutMs` or could not be reached; the channel is dropped and made again by the next call, as a ZeroMQ
-  ## connect that finds nobody keeps trying. A key that cannot be read is raised, as it was by `connectReq`.
+  ## One request and its answer. `avail` false: the core did not answer within `timeoutMs` or could not be reached; the channel is dropped and made again by the next call. A key that cannot be read is raised, as it was by `connectReq`.
   if not c.open:
     c.loadKeys()
     try: c.connectNow()

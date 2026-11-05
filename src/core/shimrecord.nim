@@ -1,4 +1,4 @@
-## Recording the shim's state in rqlite (D-29). The state arrives by two paths - ZeroMQ (LogBatch.status, StepReport) and
+## Recording the shim's state in rqlite (D-29). The state arrives by two paths - the channel to the core (LogBatch.status, StepReport) and
 ## the Pod log (read by the job-controller through the Kubernetes API) - as the *same* JSON (common/shimstate.nim), numbered
 ## by event. This is the one place where either path is applied, so the sources reconcile by construction:
 ##   - a state replaces what is stored only if its event number is higher (repeats and old news change nothing);
@@ -31,7 +31,7 @@ func judge*(prev: Option[ShimState]; incoming: ShimState; run: string; seq, atte
   jApply
 
 proc recordShimState*(c: var RqClient; runId: string; seq, attempt: int; stateJson, source: string): RecordResult =
-  ## `source`: "zmq" | "pod_log" (kept in steps.shim_source so the API can say where the picture came from).
+  ## `source`: "channel" | "pod_log" (kept in steps.shim_source so the API can say where the picture came from).
   var incoming: Option[ShimState]
   try: incoming = fromJson(parseJson(stateJson))
   except CatchableError: discard

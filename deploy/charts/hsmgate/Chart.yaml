@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hsmgate
+description: hsmgate (github.com/zystem/hsmgate) with a software token, for the key of the step secrets of a shard when there is no card and no Vault or OpenBao. The Transit face for the core, mutual TLS from certificates of cert-manager, the key in a file on a volume.
+type: application
+version: 0.1.0
+appVersion: "v0.7.0"

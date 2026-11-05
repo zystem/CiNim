@@ -1,10 +1,10 @@
-## D-61, end to end: a shim's client (shim/logclient.nim `putFile`, `fetchTo`) against the core's real ArtifactIngest (ZeroMQ with CURVE, on a thread), the storage module as a process (build/storage)
+## D-61, end to end: a shim's client (shim/logclient.nim `putFile`, `fetchTo`) against the core's real ArtifactIngest (gRPC with mutual TLS, on a thread), the storage module as a process (build/storage)
 ## and two real Caddy nodes. The bytes of a file go from the client to the module and never to the core, and the core completes the upload because the digests the client reported over
 ## ZeroMQ are those the module made; there is no other way: a module that cannot be reached fails the upload, and a shard without the port for shims refuses it; a part changed on its way is refused. Needs CINIM_RQLITE_URL,
-## build/caddy-store (made by tools/store/build-caddy.sh when Docker is there), tests/certs, and makes build/storage.
+## build/caddy-store (made by tools/store/build-caddy.sh when Docker is there), and makes build/storage.
 import std/[unittest, json, os, osproc, strutils, strtabs, times, net, httpclient, tables, sequtils, atomics]
 import checksums/sha2
-import common/[rqlite, ctrlauth, zmqcurve]
+import common/[rqlite, ctrlauth]
 import core/[schema, loggate, logcircuit, objectstore, storageclient]
 from core/scheduler import Core, createRun, stopServers, unenrolledControllers
 from core/artifactingest import serveArtifactIngest
@@ -59,9 +59,8 @@ suite "D-61 the shim sends its bytes straight to the storage module":
     let base = getTempDir() / ("tshimdirect-" & $getCurrentProcessId())
     removeDir(base)
     createDir(base)
-    # the keys: the master key comes from curve/core.key of tests/certs; the shim's channel to the core is gRPC with TLS keys made here
+    # the keys of the channels (TLS, and the core's master secret), made here
     let certs = base / "certs"
-    copyDir(getCurrentDir() / "tests" / "certs" / "curve", certs / "curve")
     check execCmd("sh tools/grpc/gen_tls.sh " & quoteShell(certs) & " 2") == 0
     for port in [modulePort, shimPort, port1, port2, ingestPort]:
       if listening(port): quit "something listens on " & $port & " already (a process of an earlier run?)"

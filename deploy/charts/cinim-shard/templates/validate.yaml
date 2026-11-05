@@ -7,3 +7,22 @@ Two releases of one shard collide on the cluster-scoped objects (the ClusterRole
 {{- if ne .Release.Namespace (include "cinim-shard.expectedNs" .) }}
 {{- fail (printf "install this release into the namespace %q (helm install ... -n %s --create-namespace): the namespace is <namespacePrefix>-<shard>, got %q" (include "cinim-shard.expectedNs" .) (include "cinim-shard.expectedNs" .) .Release.Namespace) }}
 {{- end }}
+{{- if and (not .Values.tls.certManager.enabled) (not .Values.tls.secretName) }}
+{{- fail "tls.secretName is required when tls.certManager.enabled is false: a Secret with ca.pem, core.pem, core.key, client.pem and client.key (tools/grpc/gen_tls.sh); the master secret is the core's own and is not in it" }}
+{{- end }}
+{{- /* D-106: no mode without a key. Exactly one place for the key of the step secrets: the hsmgate of the release, or a key service of the operator's. */ -}}
+{{- if and (not .Values.hsmgate.enabled) (not .Values.secrets.keyService.url) }}
+{{- fail "there is no mode without a key (D-106): keep hsmgate.enabled (a software hsmgate in this release) or set secrets.keyService.url (a card behind hsmgate, a Vault or an OpenBao: deploy/examples/openbao)" }}
+{{- end }}
+{{- if and .Values.hsmgate.enabled .Values.secrets.keyService.url }}
+{{- fail "give the key of the secrets in one place: hsmgate.enabled and secrets.keyService.url are alternatives (hsmgate.enabled=false for the service of yours)" }}
+{{- end }}
+{{- if and .Values.hsmgate.enabled (not .Values.tls.certManager.enabled) }}
+{{- fail "hsmgate.enabled needs tls.certManager.enabled: its certificates and the core's client certificate for it are issued by cert-manager" }}
+{{- end }}
+{{- if and .Values.hsmgate.enabled .Values.tls.certManager.issuerRef.name (ne .Values.tls.certManager.issuerRef.name .Values.hsmgate.tls.issuerRef.name) }}
+{{- fail "the certificates of hsmgate follow the issuer of the others: set hsmgate.tls.issuerRef to the same as tls.certManager.issuerRef" }}
+{{- end }}
+{{- if .Values.secrets.keySecret }}
+{{- fail "secrets.keySecret is gone (D-106): a key in a Secret that the core itself mounts is no key service. Use the hsmgate of the release (hsmgate.enabled, the default) or secrets.keyService" }}
+{{- end }}

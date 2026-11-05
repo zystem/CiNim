@@ -1,0 +1,15 @@
+# The certificate of the Vault, from the CA of the shard (the Issuer `cinim-ca`, which the shard chart makes in its namespace; install the Vault in that namespace).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault
+spec:
+  commonName: vault
+  dnsNames: [vault, vault.cinim-001, vault.cinim-001.svc, vault.cinim-001.svc.cluster.local, localhost]      # the namespace is the shard's; localhost for `vault` inside the Pod
+  ipAddresses: ["127.0.0.1"]
+  usages: [digital signature, server auth]
+  secretName: vault-tls
+  duration: 17520h
+  renewBefore: 720h
+  privateKey: {algorithm: ECDSA, size: 256, encoding: PKCS8}
+  issuerRef: {name: cinim-ca, kind: Issuer, group: cert-manager.io}

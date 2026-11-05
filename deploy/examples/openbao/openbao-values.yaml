@@ -1,0 +1,29 @@
+# One OpenBao Pod for the key of the shard, with TLS (deploy/examples/openbao/README.md). The official chart, `openbao/openbao`; its other values are left as they are.
+global:
+  tlsDisable: false
+injector:
+  enabled: false
+server:
+  standalone:
+    enabled: true
+    config: |
+      ui = false
+      disable_mlock = true
+      listener "tcp" {
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_cert_file   = "/openbao/userconfig/openbao-tls/tls.crt"
+        tls_key_file    = "/openbao/userconfig/openbao-tls/tls.key"
+      }
+      storage "pebbledb" {
+        path = "/openbao/data/pebbledb"
+      }
+  volumes:
+    - name: openbao-tls
+      secret: {secretName: openbao-tls}
+  volumeMounts:
+    - {name: openbao-tls, mountPath: /openbao/userconfig/openbao-tls, readOnly: true}
+  extraEnvironmentVars:
+    BAO_CACERT: /openbao/userconfig/openbao-tls/ca.crt      # for `bao` inside the Pod (the chart sets BAO_ADDR)
+  dataStorage:
+    size: 1Gi

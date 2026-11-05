@@ -1,10 +1,10 @@
 ## LogIngest/StepReport client of the shim (RUN-007, RUN-010, D-27). The step's output is cut into compressed
 ## jsonline blocks (logspool.nim) queued as files on the Pod's ephemeral storage; a sender thread drains them to core
-## over ZeroMQ+CURVE, oldest first, and deletes a block only after core acknowledged it (core acknowledges after vlagent
+## over gRPC with mutual TLS, oldest first, and deletes a block only after core acknowledged it (core acknowledges after vlagent
 ## accepted it, DAT-001). The step's process is never blocked by delivery, only by a *full* spool (then the shim stops
 ## reading its pipe - the backpressure of RUN-007 - and nothing is lost).
 ##
-## SEC-010 (job token) is deferred: the shared CURVE "client" identity is used, as for job-controller/executor-service.
+## SEC-010 (job token) is deferred: the shared TLS "client" identity is used, as for the job controller and the conductors.
 import std/[os, times, atomics, strutils, json]
 import ../common/corechannel
 import protobuf_serialization
@@ -58,7 +58,7 @@ const heartbeatSeconds = 5.0
 
 proc currentStatus(): ShimStatus =
   ## The shim's state exactly as it is written to the Pod log (same JSON, same event number): the reader reconciles the
-  ## ZeroMQ picture with the Pod-log one by `n` (D-29).
+  ## picture of the channel with the Pod-log one by `n` (D-29).
   result = ShimStatus(state_json: $toJson(currentState(), int64(epochTime() * 1000)), spool_bytes: uint64(max(0'i64, spoolBytes.load)))
   for (name, value) in currentMetrics(): result.metrics.add ShimMetric(name: name, value: value)
 

@@ -1,4 +1,4 @@
-## Core scheduler (RUN-002, RUN-008, RUN-015, D-24 – D-30): the ControllerAttach and ExecutorChannel ZeroMQ+CURVE REP servers and
+## Core scheduler (RUN-002, RUN-008, RUN-015, D-24 – D-30): the ControllerAttach and ExecutorChannel servers and
 ## the run logic the REST API calls into. One shard, one execution profile. Runs go CREATED -> RUNNING directly (no compile/queue
 ## split yet: there is no preflight, PIP-016, and only one executor). The launch gate (RUN-015, A.10) is real: handlePoll
 ## assigns steps only while loggate.currentGate() is open. Step results arrive from the shim (StepReport, finalizeFromShim) or,
@@ -9,7 +9,7 @@
 import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource]
+import common/[rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource]
 import ctrlpresence, logwindow, keptpods, stepsecrets, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import groups, apiauth, approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
@@ -516,7 +516,7 @@ proc applyTransition*(c: var RqClient; policy: RetryPolicy; t: PodTransition) =
         t.pod_reason, t.pod_message, t.pod_diag, t.step.run_id, int(t.step.seq), attempt]])
     return
   if t.termination_reason == "diag_only": return      # only the diagnosis of a Pod that core had already given up on; nothing to decide
-  # What the Pod's log said about the shim, applied by the same function as the ZeroMQ path - the pictures reconcile by event number
+  # What the Pod's log said about the shim, applied by the same function as the channel's path - the pictures reconcile by event number
   if t.shim_state_json.len > 0:
     let rec = recordShimState(c, t.step.run_id, int(t.step.seq), attempt, t.shim_state_json, "pod_log")
     if rec.judgement == jInconsistent:

@@ -1,5 +1,5 @@
 ## ArtifactIngest (DAT-003): the REP server where the artifacts of steps arrive and from which they are read, the same way as the log of a step reaches the
-## core: a ZeroMQ channel with CURVE, requests in blocks, each one answered (proto/cicd/internal/v1/step.proto). The core alone knows the store; what it asks of
+## core: a gRPC channel with mutual TLS, requests in blocks, each one answered (proto/cicd/internal/v1/step.proto). The core alone knows the store; what it asks of
 ## it is `ObjectBackend` (core/storagebackend.nim), so the module that talks to the store can leave the core without a step or a shim noticing.
 ##
 ## A step may only do what its own options declared (`artifacts = {upload = {...}, download = {...}}`), in its own run, and only while its attempt is running,
@@ -305,8 +305,9 @@ proc serveArtifactIngest*(rqliteUrl, certs: string; port: int) {.thread.} =
   {.cast(gcsafe).}:
     artifactC = newRq(rqliteUrl)
     artifactMaster = coreSecretKey(certs)
-    let srv = startShimServer(port, certs, artifactMethod, artifactHandler)
+    var srv = startReloading(port, certs, artifactMethod, artifactHandler)
     while not stopServers.load:
       beat(bArtifactIngest)
       sleep 200
-    srv.stop(graceMs = 1000)
+      if srv.refresh(): echo "core: ArtifactIngest restarted with the new keys"
+    srv.stop()

@@ -7,7 +7,7 @@ import std/[os, options, strutils, times, tables, sequtils, random]
 import posix
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[zmqcurve, stream, streamstate, runpipe, heartbeat, scriptsource]
+import common/[stream, streamstate, runpipe, heartbeat, scriptsource]
 import executor/[sandbox, journal, replay, pass]
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
@@ -243,7 +243,7 @@ proc main() =
   signal(SIGINT, onTerm)
   signal(SIGPIPE, SIG_IGN)
   var session = conductorId & "-" & $getCurrentProcessId() & "-" & $rand(1_000_000_000)
-  let conn = connectStream(addr0, loadPublicKey(certs, "core"), loadKeypair(certs, "client"))
+  let conn = connectStream(addr0, certs)
   var inbox = initInbox()
   var frameNo = 0'u64
   var helloDirty = true

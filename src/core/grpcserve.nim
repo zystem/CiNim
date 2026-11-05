@@ -1,11 +1,11 @@
-## The core's side of the shim's channels over gRPC (nim-grpc) with mutual TLS, in place of the ZeroMQ REP + CURVE servers. One server per channel and per port, as before (19742 report, 19743
+## The core's side of the shim's channels over gRPC (nim-grpc) with mutual TLS, One server per channel and per port (19742 report, 19743
 ## log, 19744 artifacts, 19746 state), one method on each, taking the bytes of the same protobuf message and answering with the bytes of the same reply: the handlers (`answerLogBatch` and the
 ## others) did not change.
 ##
-## What the ZeroMQ REP socket did for free is done here by a lock: one request at a time on a channel, so the state a handler uses (the database connection of the thread, the collector) is
+## A lock does what a REP socket would: one request at a time on a channel, so the state a handler uses (the database connection of the thread, the collector) is
 ## still touched by one request at a time. nim-grpc runs every call on a worker thread of its own; `maxWorkers` is small because the rest would only wait on the lock.
 ## The files: `<certs>/tls/core.pem`, `core.key` (the certificate must carry the DNS name `cinim-core`, which the shims check) and `ca.pem` (what the shims' certificate must chain to).
-import std/os
+import std/[os, atomics]
 import nimgrpc
 import ../common/corechannel
 export nimgrpc, corechannel
@@ -20,7 +20,31 @@ proc toStr*(b: seq[byte]): string =
 
 proc startShimServer*(port: int; certs, meth: string; handler: UnaryHandler): GrpcServer =
   ## listening on all addresses; the caller stops it with `stop` when the core ends
-  let tls = tlsServerConfig(readFile(certs / "tls" / "core.pem"), readFile(certs / "tls" / "core.key"), clientCaPem = readFile(certs / "tls" / "ca.pem"))
-  result = newGrpcServer(port = port, address = "0.0.0.0", maxWorkers = 4, tls = tls)
+  result = newGrpcServer(port = port, address = "0.0.0.0", maxWorkers = 4, tls = serverTls(certs))
   result.addUnary(meth, handler)
   result.start()
+
+var certGeneration*: Atomic[int]
+  ## raised by core/certwatch.nim when the files of the keys have changed and the new ones can be used; every server of a channel looks at it and starts again with them
+
+type ReloadingServer* = object
+  srv*: GrpcServer
+  gen: int
+  port: int
+  certs, meth: string
+  handler: UnaryHandler
+
+proc startReloading*(port: int; certs, meth: string; handler: UnaryHandler): ReloadingServer =
+  ## `startShimServer` that can be started again with new keys: `refresh` in the loop that keeps it
+  ReloadingServer(srv: startShimServer(port, certs, meth, handler), gen: certGeneration.load, port: port, certs: certs, meth: meth, handler: handler)
+
+proc refresh*(r: var ReloadingServer): bool =
+  ## true when the keys have changed and the server was started again with them. The calls in progress get a second to end; the shims connect again (a report or a request is repeated by them, as for a core that was restarted).
+  let g = certGeneration.load
+  if g == r.gen: return false
+  r.srv.stop(graceMs = 1000)
+  r.srv = startShimServer(r.port, r.certs, r.meth, r.handler)
+  r.gen = g
+  true
+
+proc stop*(r: var ReloadingServer; graceMs = 1000) = r.srv.stop(graceMs = graceMs)

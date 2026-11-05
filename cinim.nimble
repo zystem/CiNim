@@ -18,11 +18,8 @@ requires "nimja >= 0.10.0"  # server-side HTML templates of the UI (src/ui/rende
 # HTTP layer (D-25). 9.0.1 has our two fixes (the ~200 ms delay of a chunked response, olliNiinivaara/GuildenStern#35, and the delivered-byte
 # count under backpressure, #36), which were a local patch on 9.0.0.
 requires "guildenstern >= 9.0.2"
-# ZeroMQ+CURVE transport (D-24): our fork, not upstream, while
-# nim-lang/nim-zmq#57 (high-level CURVE: connect/listen configure callback) is open. Branch `cinim` of the fork is
-# upstream master (which already has #58, the setsockopt value-width fix, and #59, the `=destroy` leak fix) plus #57;
-# switch back to upstream once #57 is released.
-requires "https://github.com/zystem/nim-zmq#cinim"
+# gRPC (nghttp2 + BearSSL) for every channel of the platform: shim, controllers, conductors (docs/shim-grpc.md). It links a static nghttp2 1.57 or later from /opt/nghttp2 (Dockerfile.deps; `-d:nghttp2Prefix=<dir>` for another place).
+requires "nimgrpc >= 0.2.0"
 
 import std/os
 
@@ -39,7 +36,6 @@ task testcontract, "Run protocol contract tests (need buf and the Python protoc 
   exec "nim c -r --hints:off --warnings:off --outdir:build/tests tests/contract/tproto_compat.nim"
 
 task testint, "Run integration tests (need a cluster: CINIM_RQLITE_URL, K8S_PREFIX, kubeconfig; see README)":
-  exec "tools/zmq/gen_curve_keys.sh"
   # cluster tests (current kubeconfig context): the Kubernetes exec primitive and the job-controller's spool fallback against a
   # real Pod (need K8S_PREFIX from tools/k8s/build_client.sh and build/cicd-shim-logging-static, see tools/shim/build_static.sh)
   for t in ["texec", "tdrain"]:
@@ -48,8 +44,8 @@ task testint, "Run integration tests (need a cluster: CINIM_RQLITE_URL, K8S_PREF
   exec "nim c -r --hints:off --warnings:off -p:src --outdir:build/tests tests/integration/torgruns.nim"     # needs CINIM_RQLITE_URL: a scratch rqlite
   # The end-to-end suite builds and runs core, job-controller and executor-service itself (see the header of
   # tests/integration/tm1skeleton.nim); only the job-controller links the Kubernetes client, so K8S_PREFIX is read from
-  # the environment there. All ZeroMQ+CURVE channels (D-24) and the HTTP layer (GuildenStern, D-25) need no
-  # build-time prefix: libzmq is loaded at run time.
+  # the environment there. The channels (gRPC with mutual TLS; the tests make their own keys, tools/grpc/gen_tls.sh) need a static
+  # nghttp2 in /opt/nghttp2 (or -d:nghttp2Prefix); the HTTP layer (GuildenStern, D-25) needs no build-time prefix.
   exec "nim c -r --hints:off --warnings:off --outdir:build/tests tests/integration/tm1skeleton.nim"
 
 task testsan, "Run unit tests under AddressSanitizer/LeakSanitizer (E-004)":

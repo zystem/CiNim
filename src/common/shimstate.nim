@@ -1,7 +1,7 @@
 ## The shim's state, in one vocabulary used everywhere (D-29). Three places describe what the shim is doing, and they
 ## must never disagree:
 ##   1. the Pod log - one `CICD-SHIM {...}` line per transition (shimlog.nim writes, the job-controller reads);
-##   2. ZeroMQ - the same state in LogBatch.status (heartbeat) and in StepReport (shim -> core);
+##   2. the channel to the core - the same state in LogBatch.status (heartbeat) and in StepReport (shim -> core);
 ##   3. rqlite - steps.shim_n / shim_phase / shim_json, and steps.state derived from it.
 ## All three carry the same `ShimState`, numbered by the event that produced it (`n`, +1 per event). A reader that sees a
 ## state with a higher `n` than it knows replaces its picture; a lower or equal `n` is old news and ignored - so the sources
