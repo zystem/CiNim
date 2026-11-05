@@ -1,6 +1,7 @@
 ## Runner shim (RUN-010, STO-003, SEC-011): runs the step command, then validates CICD_ENV and CICD_OUTPUT with the dotenv parser.
 import std/[unittest, os, osproc, json, strutils, times, sequtils, streams, algorithm]
 import zippy
+import ../support/testcerts
 
 let shimExe = getTempDir() / "cinim-shim-test"
 
@@ -222,14 +223,14 @@ suite "D-29: timeout, SIGTERM, exit codes, the Pod-log events":
 
 suite "secret masking through the log pipeline (docs/secrets-masking.md)":
   # The logging build writes the masked records into its spool; with a core that cannot be reached they stay there, so the
-  # test reads what *would* have been sent. Needs libzmq on the machine (the dlopen build) and the test CURVE keys.
+  # test reads what *would* have been sent. Needs the test TLS keys (tests/support/testcerts.nim).
   let logExe = getTempDir() / "cinim-shim-log-test"
-  let certs = getCurrentDir() / "tests" / "certs"
+  let certs = testCerts()
   var available = false
 
   test "setup: compile the logging shim":
     available = execCmd("nim c --hints:off --warnings:off -d:shimLogging --nimcache:" & logExe & ".nc -o:" & logExe & " src/shim/shim.nim") == 0 and
-                dirExists(certs / "curve")
+                certs.len > 0
     if not available: skip()
 
   proc spooled(dir: string; cmd: string; extra: seq[string] = @[]): string =
@@ -279,10 +280,10 @@ suite "secret masking through the log pipeline (docs/secrets-masking.md)":
 
 suite "the log spool of the shim (D-53: it is on the run's volume, so that it outlives the Pod)":
   let logExe = getTempDir() / "cinim-shim-log-test"
-  let certs = getCurrentDir() / "tests" / "certs"
+  let certs = testCerts()
 
   test "a shim that cannot deliver leaves every block in its spool directory, whole and numbered, for the drain Pod to deliver":
-    if not fileExists(logExe) or not dirExists(certs / "curve"): skip()
+    if not fileExists(logExe) or not certs.len > 0: skip()
     else:
       let d = getTempDir() / "shim-spool-left"
       removeDir d
@@ -303,7 +304,7 @@ suite "the log spool of the shim (D-53: it is on the run's volume, so that it ou
         check uncompress(readFile(sp / n)).len > 0
       check lines == 20000
   test "a spool that cannot be written degrades the log, never the step":
-    if not fileExists(logExe) or not dirExists(certs / "curve"): skip()
+    if not fileExists(logExe) or not certs.len > 0: skip()
     else:
       let d = getTempDir() / "shim-spool-broken"
       removeDir d

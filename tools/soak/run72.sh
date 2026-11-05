@@ -3,9 +3,7 @@
 # Build first: nim c -d:release -o:build/soak tools/soak/soak.nim
 #              nim c -d:sanitize --passC:-fsanitize=address --passL:-fsanitize=address \
 #                --passC:-fno-omit-frame-pointer -o:build/soak-san tools/soak/soak.nim
-# (soak.nim needs
-# tests/certs/curve/{core,client}.{pub,key}, see tools/zmq/gen_curve_keys.sh, and a libzmq.so with
-# CURVE support on the loader path at run time.)
+# (soak.nim needs the TLS keys in SOAK_CERTS, default build/soak-certs: tools/grpc/gen_tls.sh build/soak-certs, and a static nghttp2 in /opt/nghttp2 to build with.)
 # 1) build/soak: one continuous run, RSS growth after a 1 h warm-up must stay <= 2%.
 # 2) build/soak-san: hourly ASan/LSan runs back to back (ASan's allocator keeps freed memory, so RSS
 #    grows ~0.8 MB/s under connect churn; an hour-long run keeps it bounded); LSan reports at each exit.

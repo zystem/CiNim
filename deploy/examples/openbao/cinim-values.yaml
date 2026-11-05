@@ -1,0 +1,9 @@
+# The values of the shard chart for the key in an OpenBao (deploy/examples/openbao/README.md): no hsmgate of the release, the service named here.
+hsmgate:
+  enabled: false
+secrets:
+  keyService:
+    url: https://openbao:8200          # the Service of the chart of OpenBao, in the namespace of the shard
+    keyName: cinim-shard
+    tlsSecret: bao-ca                  # a Secret with ca.crt: the CA that the certificate of OpenBao is checked against (setup.sh makes it from the CA of the shard)
+    tokenSecret: bao-token             # a Secret with the key `token` (setup.sh makes it)

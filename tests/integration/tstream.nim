@@ -1,13 +1,14 @@
 ## RUN-016 / docs/conductors.md section 12: a controller keeps a connection to the core and the core pushes work to it at once (against a real
-## rqlite and real CURVE sockets). Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
+## rqlite and a real gRPC channel). Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
 import std/[unittest, json, os, options, atomics, sequtils]
-import common/[rqlite, stream, zmqcurve]
+import common/[rqlite, stream]
 import core/[schema, scheduler, loggate, logcircuit, streamhub, workkick, retrypolicy, hubmetrics]
 import std/strutils
+import ../support/testcerts
 
 let url = getEnv("CINIM_RQLITE_URL")
 unenrolledControllers = true       # the controllers of these tests have no identity (T-46: the core refuses such a controller unless it is told to serve it)
-let certs = getCurrentDir() / "tests" / "certs"
+let certs = testCerts()
 const port = 29846
 
 proc addStep(c: var RqClient; runId, profileId: string; ordinal: int) =
@@ -41,8 +42,6 @@ suite "RUN-016 the push channel":
     safetyPassSeconds = 6.0           # the test of a quiet report must be able to tell it from the safety pass, with a database that answers slowly
     var th: Thread[tuple[co: Core, port: int]]
     createThread(th, runStream, (co, port))
-    let corePub = loadPublicKey(certs, "core")
-    let clientKeys = loadKeypair(certs, "client")
     let serverAddr = "tcp://127.0.0.1:" & $port
     sleep 300
     var n = 0
@@ -56,7 +55,7 @@ suite "RUN-016 the push channel":
       s.jobPodLimitPercent = 100
       co.setProfileSettings(s, prof)
       (prof, ns)
-    proc next(cl: ZConnection; ms = 8000): Option[StreamFrame] =
+    proc next(cl: StreamClient; ms = 8000): Option[StreamFrame] =
       ## the next frame that is not just 'heard you'
       for _ in 0 ..< 10:
         let f = cl.receive(ms)
@@ -64,7 +63,7 @@ suite "RUN-016 the push channel":
         if f.get.kind != "ping": return f
       none(StreamFrame)
 
-    proc nextStarts(cl: ZConnection; ms = 8000): Option[StreamFrame] =
+    proc nextStarts(cl: StreamClient; ms = 8000): Option[StreamFrame] =
       ## the next frame that carries steps to start (the answer to a report holds the settings; the steps are pushed after it)
       for _ in 0 ..< 10:
         let f = cl.next(ms)
@@ -76,7 +75,7 @@ suite "RUN-016 the push channel":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 3: c.addStep(r, o.profile, i)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(report("s-a-" & sfx, o.ns, 10))
       let a = cl.next()
       check a.isSome and a.get.kind == "controller.work" and a.get.id == 1
@@ -87,7 +86,7 @@ suite "RUN-016 the push channel":
       cl.close()
     test "work created later is pushed without the controller asking":
       let o = newOrg()
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let ses = "s-b-" & sfx
       check cl.sendFrame(report(ses, o.ns, 10))
       discard cl.next(8000)                                     # the answer to the report: the settings
@@ -107,7 +106,7 @@ suite "RUN-016 the push channel":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
       for i in 1 .. 5: c.addStep(r, o.profile, i)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let ses = "s-c-" & sfx
       check cl.sendFrame(report(ses, o.ns, 2))
       let w = cl.nextStarts()
@@ -123,24 +122,24 @@ suite "RUN-016 the push channel":
       let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
       let ses = "s-d-" & sfx
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(report(ses, o.ns, 10))
       let w = cl.nextStarts()
       check w.isSome and w.get.id == 2                             # 1: the settings, 2: the step
       cl.close()                                                   # the controller lost the frames (or its connection) without acknowledging
-      var again = connectStream(serverAddr, corePub, clientKeys)
+      var again = connectStream(serverAddr, certs)
       check again.sendFrame(report(ses, o.ns, 10, ack = 0))
       let w2 = again.nextStarts()
       check w2.isSome and w2.get.id == 2 and w2.get.starts == @[r]    # the same frame, the same number
       check again.sendFrame(report(ses, o.ns, 10, ack = 2))
-      var third = connectStream(serverAddr, corePub, clientKeys)
+      var third = connectStream(serverAddr, certs)
       check third.sendFrame(report(ses, o.ns, 10, ack = 2))
       check third.nextStarts(1500).isNone                          # acknowledged: not sent again
       again.close()
       third.close()
     test "a quiet report hands out nothing; the step waiting without a kick is found by the safety pass":
       let o = newOrg()
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       let ses = "s-q-" & sfx
       check cl.sendFrame(report(ses, o.ns, 10, id = 1))
       discard cl.next(8000)                                       # the settings
@@ -164,7 +163,7 @@ suite "RUN-016 the push channel":
       cl.close()
     test "a controller that was replaced: the newest session of an organisation is the only one, and what was pushed to the old one unacknowledged goes to it":
       let o = newOrg()
-      var old = connectStream(serverAddr, corePub, clientKeys)
+      var old = connectStream(serverAddr, certs)
       let sOld = "s-old-" & sfx
       check old.sendFrame(report(sOld, o.ns, 10))
       discard old.next(8000)                                       # the settings
@@ -175,7 +174,7 @@ suite "RUN-016 the push channel":
       check pushed.isSome and pushed.get.starts == @[r]            # the step is claimed for the old controller
       check c.query(%*[["SELECT state, controller_id FROM steps WHERE run_id = ?", r]])["results"][0]["values"][0][0].getStr == "STARTING"
       old.close()                                                  # the controller is replaced before it acknowledged anything
-      var fresh = connectStream(serverAddr, corePub, clientKeys)
+      var fresh = connectStream(serverAddr, certs)
       check fresh.sendFrame(report("s-new-" & sfx, o.ns, 10))
       let again = fresh.nextStarts()
       check again.isSome and again.get.starts == @[r]              # the step was taken back from the old session and pushed to the new one
@@ -183,7 +182,7 @@ suite "RUN-016 the push channel":
       check now[0].getStr == "STARTING" and now[1].getStr == "s-new-" & sfx
       fresh.close()
     test "a frame from a session the core does not know is answered with resync":
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(frame("nobody-" & sfx, "ping"))
       let f = cl.receive(3000)
       check f.isSome and f.get.kind == "resync"
@@ -193,7 +192,7 @@ suite "RUN-016 the push channel":
       let b = newOrg()
       let ra = co.createRun("return 1", "t1", a.profile)
       c.addStep(ra, a.profile, 1)
-      var cb = connectStream(serverAddr, corePub, clientKeys)
+      var cb = connectStream(serverAddr, certs)
       check cb.sendFrame(report("s-e-" & sfx, b.ns, 10))
       let w = cb.next(1500)                                        # at most its settings: no step of the other organisation
       check w.isNone or w.get.starts.len == 0
@@ -211,9 +210,9 @@ suite "RUN-016 the push channel":
         for k in 1 .. 2: c.addStep(r, o.profile, k)
         orgs.add o
         runs.add r
-      var cls: seq[ZConnection]
+      var cls: seq[StreamClient]
       for i, o in orgs:
-        cls.add connectStream(serverAddr, corePub, clientKeys)
+        cls.add connectStream(serverAddr, certs)
         check cls[i].sendFrame(report("s-p" & $i & "-" & sfx, o.ns, 10))
       for i in 0 ..< orgs.len:
         let w = cls[i].nextStarts(15000)
@@ -233,7 +232,7 @@ suite "RUN-016 the push channel":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
-      var cl = connectStream(serverAddr, corePub, clientKeys)
+      var cl = connectStream(serverAddr, certs)
       check cl.sendFrame(report("jc-9100.5", o.ns, 10, ack = 5, id = 7))
       let answer = cl.receive(8000)
       check answer.isSome and answer.get.kind == "resync"
@@ -246,8 +245,8 @@ suite "RUN-016 the push channel":
       let o = newOrg()
       let r = co.createRun("return 1", "t1", o.profile)
       c.addStep(r, o.profile, 1)
-      var fresh = connectStream(serverAddr, corePub, clientKeys)
-      var old = connectStream(serverAddr, corePub, clientKeys)
+      var fresh = connectStream(serverAddr, certs)
+      var old = connectStream(serverAddr, certs)
       check fresh.sendFrame(report("jc-9300.5", o.ns, 10))
       let first = fresh.nextStarts()
       check first.isSome and first.get.starts == @[r]

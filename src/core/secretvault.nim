@@ -2,13 +2,12 @@
 ##
 ## Envelope encryption with XChaCha20-Poly1305 (libsodium, common/sodiumaead.nim; D-45). A master key (the KEK) wraps one data key (DEK) per organisation; a DEK encrypts the values of that organisation
 ## only. Every ciphertext binds what it is to its place (the additional data holds the tenant, the name and the version), so a row cannot be swapped for
-## another. The KEK is not in the database: it is a file the operator provides (`CINIM_SECRETS_KEY_FILE`, 64 hex digits) or, when none is given, derived from
-## the core's own CURVE key, which the operator already keeps; it has to be backed up apart from the database (a database restored without it holds
-## nothing readable; GitLab and Drone say the same of their keys). A check value is stored with the first secret, so that a core that starts with another
+## another. The KEK is not in the database: it is a key service (hsmgate, Vault or OpenBao, core/transitclient.nim) that the operator runs apart from it; a database restored without that
+## service holds nothing readable (GitLab and Drone say the same of their keys). A check value is stored with the first secret, so that a core that starts with another
 ## key refuses to serve secrets instead of writing new ones that the old ones cannot be read with.
 ##
-## `KekProvider` is the seam for a key that lives elsewhere (a PKCS#11 token behind p11-kit or a YubiHSM connector, Vault or OpenBao Transit, a cloud KMS):
-## the vault only asks it to wrap and unwrap a data key. Built so far: `fileKek` and `derivedKek`.
+## `KekProvider` (kekprovider.nim) is the seam for the key: the vault only asks it to wrap and unwrap a data key. There is no key in a file and none derived from a file (D-106); the tests use a key
+## in memory (tests/support/testkek.nim).
 import std/[strutils, json, atomics, locks, tables]
 import std/times
 import crunchy
@@ -45,35 +44,6 @@ proc unseal*(key: openArray[byte]; sealed, aad: string): tuple[ok: bool, plain: 
   if not raw.ok or raw.bytes.len < nonceBytes + tagBytes: return
   decrypt(key, raw.bytes[0 ..< nonceBytes], raw.bytes[nonceBytes .. ^1], aad)
 
-# ------------------------------------------------------------------ the master key
-
-proc kekFromBytes(id: string; key: seq[byte]): KekProvider =
-  let k = key
-  KekProvider(id: id,
-    wrap: proc (plain: seq[byte]; aad: string): WrapResult {.gcsafe.} =
-      var t = newString(plain.len)
-      if plain.len > 0: copyMem(addr t[0], unsafeAddr plain[0], plain.len)
-      (true, false, "", seal(k, t, aad)),
-    unwrap: proc (wrapped: string; aad: string): UnwrapResult {.gcsafe.} =
-      let u = unseal(k, wrapped, aad)
-      if not u.ok: return refused("the key is not the one that wrapped this")
-      result.ok = true
-      for ch in u.plain: result.plain.add byte(ch))
-
-proc fileKek*(path: string): tuple[ok: bool, kek: KekProvider, error: string] =
-  ## the key from a file of 64 hex digits (the operator's own, kept apart from the database)
-  let text = try: readFile(path).strip except IOError: return (false, KekProvider(), "cannot read " & path)
-  let raw = fromHex(text)
-  if not raw.ok or raw.bytes.len != keyBytes: return (false, KekProvider(), path & " must hold 64 hexadecimal digits (32 bytes)")
-  (true, kekFromBytes("file", raw.bytes), "")
-
-proc derivedKek*(coreSecretKey: string): KekProvider =
-  ## no key given: HMAC-SHA256 of a fixed text under the core's own CURVE key (the operator keeps that key already; changing it loses the secrets)
-  let d = hmacSha256(coreSecretKey, "cinim/secrets/kek/v1")
-  var k = newSeq[byte](keyBytes)
-  for i in 0 ..< keyBytes: k[i] = d[i]
-  kekFromBytes("derived-from-core-key", k)
-
 # ------------------------------------------------------------------ the rows
 
 func dekAad(tenant: string): string = "cinim/dek/v1|" & tenant
@@ -103,6 +73,41 @@ var deks = initDekCache(600.0)          ## see core/dekcache.nim; the time can b
 
 proc setDekCacheSeconds*(seconds: float) =
   deks.ttl = seconds
+
+const masterAad = "cinim/master-secret/v1"
+
+proc newMasterMaterial*(): string = toHex(randomBytes(keyBytes))
+  ## a new master secret: 64 hexadecimal digits
+
+proc ensureMasterSecret*(c: var RqClient; kek: KekProvider): tuple[ok, retry: bool, secret, error: string] =
+  ## The core's own secret (the identities of the controllers are made under it), kept in the database sealed by the key of the secrets, so that a key service (hsmgate) holds the only secret that
+  ## is not in the database. The first start makes a random one and stores it, and a later start opens what is stored; a core that was first
+  ## writes it, another reads it. Moved to another key with the rest by `rekeySealed`.
+  let cur = c.query(%*[["SELECT value FROM vault_meta WHERE key = 'master_secret'"]])["results"][0]{"values"}
+  var text = if cur != nil and cur.len > 0: cur[0][0].getStr else: ""
+  if text.len == 0:
+    let material = newMasterMaterial()
+    let w = kek.wrap(@(material.toOpenArrayByte(0, material.high)), masterAad)
+    told(w.ok or not w.retry)
+    if not w.ok: return (false, w.retry, "", "the key of the secrets (" & kek.id & ") cannot seal the master secret: " & w.error)
+    discard c.execute(%*[["INSERT OR IGNORE INTO vault_meta (key, value) VALUES ('master_secret', ?)", w.wrapped]])
+    text = c.query(%*[["SELECT value FROM vault_meta WHERE key = 'master_secret'"]])["results"][0]{"values"}[0][0].getStr      # another core may have been first: that one is the secret
+  let u = kek.unwrap(text, masterAad)
+  told(u.ok or not u.retry)
+  if not u.ok: return (false, u.retry, "", "the master secret cannot be opened by the key of the secrets (" & kek.id & "): " & u.error)
+  var s = newString(u.plain.len)
+  for i in 0 ..< s.len: s[i] = char(u.plain[i])
+  (true, false, s, "")
+
+proc verifyContextBinding*(kek: KekProvider): tuple[ok, retry: bool, error: string] =
+  ## A key service that ignores the context would let a sealed text open anywhere, and the binding of a data key to its organisation (and of the master secret to its place) would be a word: a Vault or
+  ## an OpenBao key that is not `derived` does exactly that. A text sealed for one organisation must not open for another; if it does, the key is refused.
+  let w = kek.wrap(randomBytes(16), dekAad("binding-probe-a"))
+  if not w.ok: return (false, w.retry, "the key of the secrets (" & kek.id & ") cannot be tried for the binding to the context: " & w.error)
+  let u = kek.unwrap(w.wrapped, dekAad("binding-probe-b"))
+  if u.ok: return (false, false, "the key of the secrets (" & kek.id & ") ignores the context: a text sealed for one organisation opens for another. In a Vault or an OpenBao the Transit key must be made with derived=true")
+  if u.retry: return (false, true, "the key of the secrets (" & kek.id & ") did not answer when tried for the binding to the context: " & u.error)
+  (true, false, "")
 
 proc ensureKeyCheck*(c: var RqClient; kek: KekProvider): tuple[ok, retry: bool, error: string] =
   ## the first start stores a value sealed under the key; a later start with another key finds that it cannot read it
@@ -165,6 +170,9 @@ proc rekeySealed*(c: var RqClient; oldKek, newKek: KekProvider; dryRun = false):
   if orgs != nil:
     for o in orgs.elems:
       if not c.rekeyRow(oldKek, newKek, dryRun, "org_keys", "tenant_id", o[0].getStr, "wrapped", dekAad(o[0].getStr), rep): inc rep.failed
+  if rep.failed == 0:
+    # the master secret (absent in a shard that keeps it in a file), then the check text last:
+    if not c.rekeyRow(oldKek, newKek, dryRun, "vault_meta", "key", "master_secret", "value", masterAad, rep): inc rep.failed
   if rep.failed == 0:
     # the check text last: with it moved the core starts with the new key only
     if not c.rekeyRow(oldKek, newKek, dryRun, "vault_meta", "key", "kek_check", "value", checkAad, rep): inc rep.failed

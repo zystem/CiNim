@@ -6,7 +6,7 @@
 import std/[times, os, strutils, posix, atomics, uri]
 import common/[rqlite, ctrlauth]
 import health
-import ldapauth, apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub, vaultsetup, secretvault, kekprovider
+import ldapauth, apiauth, artifactsweep, cachestore, objectstore, schema, scheduler, triggers, artifactingest, api, logcollector, logcircuit, loggate, routerclient, orgrules, streamhub, vaultsetup, secretvault, kekprovider, certwatch
 
 if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   # `kubectl -n <ns> exec deploy/cinim-core -- /core admin-password-reset`: a new password and a new token for the user `admin` (IAM-001, D-50), written as the line
@@ -21,16 +21,22 @@ if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   quit 0
 
 if paramCount() >= 1 and paramStr(1) == "rekey":
-  # `kubectl -n <ns> exec deploy/cinim-core -- /core rekey [--dry-run]` (D-80, docs/hardware-key.md): the master key moves to another, the new one given by CINIM_NEW_KEYSERVICE_* or
-  # CINIM_NEW_SECRETS_KEY_FILE next to the old one that the core runs with. Every data key of an organisation and the check text of the vault are opened with the old key and sealed with the new
+  # `kubectl -n <ns> exec deploy/cinim-core -- /core rekey [--dry-run]` (D-80, docs/hardware-key.md): the master key moves to another key service, the new one given by CINIM_NEW_KEYSERVICE_*
+  # next to the old one that the core runs with. Every data key of an organisation and the check text of the vault are opened with the old key and sealed with the new
   # one (the secrets themselves are not touched); with --dry-run nothing changes. Then the core is started with the new key. Safe to run again.
   let dry = paramCount() >= 2 and paramStr(2) == "--dry-run"
-  let certsDir = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
-  let oldK = buildKek(certsDir)
+  if not keyGiven():
+    stderr.writeLine "core: " & noKeyText & ": nothing to move from"
+    quit 1
+  let mo = resolveMasterSecret(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
+  if not mo.ok:
+    stderr.writeLine "core: the master secret: " & mo.error
+    quit 1
+  let oldK = buildKek()
   if not oldK.ok:
     stderr.writeLine "core: the old key: " & oldK.error
     quit 1
-  let newK = buildNewKek(certsDir)
+  let newK = buildNewKek()
   if not newK.ok:
     stderr.writeLine "core: the new key: " & newK.error
     quit 1
@@ -48,7 +54,12 @@ if paramCount() >= 1 and paramStr(1) == "rekey":
 if paramCount() >= 3 and paramStr(1) == "conductor-credential":
   # `/core conductor-credential <namespace> <conductor id>`: what a conductor of that organisation proves itself with (IAM-003). The controller will
   # hand it to the conductors it makes (docs/conductors.md phase 3); a conductor started by hand is given it this way.
-  echo conductorCredential(coreSecretKey(getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")), paramStr(2), paramStr(3))
+  let certsDir = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
+  let m = resolveMasterSecret(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
+  if not m.ok:
+    stderr.writeLine "core: the master secret: " & m.error
+    quit 1
+  echo conductorCredential(coreSecretKey(certsDir), paramStr(2), paramStr(3))
   quit 0
 
 if unenrolledControllers:
@@ -92,14 +103,17 @@ proc runLogBookkeeping(rqliteUrl: string) {.thread.} = serveBookkeeping(rqliteUr
 const
   artifactSweepSeconds = 600.0       ## how often the artifacts are looked at (DAT-006)
 
-proc runWatchdog(a: tuple[rqliteUrl, profileId: string, startedAt: int64]) {.thread.} =
+proc runWatchdog(a: tuple[rqliteUrl, profileId, certs: string, startedAt: int64]) {.thread.} =
   ## every few seconds: steps whose Pod never came up or whose shim went quiet (liveness_timeout, D-29)
   {.cast(gcsafe).}:
     var c = newRq(a.rqliteUrl)
     var lastSweep = 0.0
+    var certs: CertWatch
+    let certEvery = reloadSecondsFromEnv()
     while not stopServers.load:
       beat(bWatchdog)
       try:
+        discard certs.checkCerts(a.certs, certEvery)          # the files of the keys changed: the channels start again with them (core/certwatch.nim)
         probeAndAge(c, a.startedAt)
         watchdogPass(c, a.profileId, a.startedAt)
         if epochTime() - lastSweep >= artifactSweepSeconds:
@@ -143,10 +157,18 @@ proc main() =
     # in a cluster this happens while rqlite is still starting: say what failed, exit, and let Kubernetes start the core again
     stderr.writeLine "core: cannot use the database at " & rqliteUrl & " (CINIM_RQLITE_URL): " & e.msg
     quit 1
-  for f in ["core.pub", "core.key"]:
-    if not fileExists(certs / "curve" / f):
-      stderr.writeLine "core: the transport key " & (certs / "curve" / f) & " is missing (CINIM_CERTS; in a cluster the Secret named by curve.secretName)"
+  for f in ["ca.pem", "core.pem", "core.key"]:
+    if not fileExists(certs / "tls" / f):
+      stderr.writeLine "core: the transport key " & (certs / "tls" / f) & " is missing (CINIM_CERTS; in a cluster the chart's tls values: cert-manager, or tls.secretName; tools/grpc/gen_tls.sh makes the set)"
       quit 2
+  # the master secret: in the database, sealed by the key of the secrets (a key service). Before any thread that uses it.
+  block:
+    let m = resolveMasterSecret(rqliteUrl)
+    if not m.ok:
+      stderr.writeLine "core: FATAL: the master secret: " & m.error
+      stderr.writeLine (if m.retry: "core: exiting; the key service may be back in a moment: Kubernetes starts the core again" else: "core: exiting; waiting will not help, a person must look")
+      flushFile(stderr)
+      quit 1
   let co = Core(rqliteUrl: rqliteUrl, profileId: profileId, namespace: namespace, certs: certs,
                 orgPrefix: getEnv("CINIM_NAMESPACE_PREFIX", "cinim"), orgShard: shardName, buildOn: getEnv("CINIM_BUILD", "off") == "on", deployOn: getEnv("CINIM_DEPLOY", "off") == "on",
                 victoriaLogsUrl: victoriaLogsUrl)
@@ -191,8 +213,8 @@ proc main() =
   createThread(artifactThread, runArtifactIngest, (rqliteUrl, certs, artifactPort))
   var triggerThread: Thread[tuple[co: Core, stop: ptr Atomic[bool]]]
   createThread(triggerThread, runTriggerLoop, (co, addr stopServers))
-  var watchdogThread: Thread[tuple[rqliteUrl, profileId: string, startedAt: int64]]
-  createThread(watchdogThread, runWatchdog, (rqliteUrl, profileId, getTime().toUnix()))
+  var watchdogThread: Thread[tuple[rqliteUrl, profileId, certs: string, startedAt: int64]]
+  createThread(watchdogThread, runWatchdog, (rqliteUrl, profileId, certs, getTime().toUnix()))
   echo "core: LogIngest on ", logIngestPort, ", ArtifactIngest on ", artifactPort, ", the push channel on ", streamPort, ", StepReport on ", stepReportPort, ", Status on ", statusPort, ", API on ", apiPort
   serveApi(co, apiPort)   # returns immediately: GuildenStern runs its own thread pool (D-25)
   # GuildenStern installs its own SIGTERM/SIGINT handler that only stops *its* threads, and the loop that

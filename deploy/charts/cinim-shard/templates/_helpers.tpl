@@ -77,3 +77,13 @@ cinim.io/shard: {{ .Values.shard | quote }}
 {{- define "cinim-shard.podMonitorKind" -}}
 {{- if eq .Values.metrics.monitor.operator "victoriametrics" -}}VMPodScrape{{- else -}}PodMonitor{{- end -}}
 {{- end -}}
+
+{{/* the key service the core speaks to, as a JSON object {url, keyName, mount, proxy, tlsSecret}: the hsmgate of this release, or the one in secrets.keyService (a card behind a service, a Vault, an OpenBao). Empty url: none (a key file, or nothing) */}}
+{{- define "cinim-shard.keyService" -}}
+{{- if .Values.hsmgate.enabled -}}
+{{- dict "url" "https://hsmgate:8443" "keyName" (.Values.hsmgate.keyName | default "cinim-shard") "mount" "transit" "proxy" "" "tlsSecret" "cinim-core-keyservice" "tokenSecret" "" | toJson -}}
+{{- else -}}
+{{- dict "url" .Values.secrets.keyService.url "keyName" .Values.secrets.keyService.keyName "mount" .Values.secrets.keyService.mount "proxy" .Values.secrets.keyService.proxy "tlsSecret" .Values.secrets.keyService.tlsSecret "tokenSecret" .Values.secrets.keyService.tokenSecret | toJson -}}
+{{- end -}}
+{{- end -}}
+

@@ -17,7 +17,7 @@ type
     runsPerConductor*, drainSeconds*: int
     streamAddr*: string                        ## the core's push channel as the Pods of this namespace reach it
     namespace*: string                         ## the organisation's namespace: the identity the conductor proves
-    curveSecret*: string                       ## the Secret with the keys of the transport (core.pub, client.pub, client.key) that the core made for the controller
+    tlsSecret*: string                         ## the Secret with the keys of the transport (ca.pem, client.pem, client.key) that the core made for the controller
 
   ActionKind* = enum akCreate, akDelete
 
@@ -81,12 +81,12 @@ func conductorPodBody*(spec: ConductorSpec; n: int): JsonNode =
            {"name": "CINIM_RUNS_PER_CONDUCTOR", "value": $spec.runsPerConductor},
            {"name": "CINIM_DRAIN_SECONDS", "value": $spec.drainSeconds},
            {"name": "CINIM_STATE_DIR", "value": "/tmp"}],                      # where the heartbeat for the probe is written
-         "volumeMounts": [{"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true}, {"name": "tmp", "mountPath": "/tmp"}],
+         "volumeMounts": [{"name": "tls", "mountPath": "/etc/cinim/tls", "readOnly": true}, {"name": "tmp", "mountPath": "/tmp"}],
          # alive: the core has accepted a hello of the conductor lately (it says one every five seconds). A conductor the probe fails is ended by the kubelet and made again by the controller.
          "livenessProbe": {"exec": {"command": ["/conductor", "--healthcheck"]}, "initialDelaySeconds": 30, "periodSeconds": 20, "timeoutSeconds": 5, "failureThreshold": 3},
          "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
          "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"memory": $memoryMi & "Mi"}}}],
-       "volumes": [{"name": "curve", "secret": {"secretName": spec.curveSecret, "defaultMode": 288}}, {"name": "tmp", "emptyDir": {}}]}}     # 0440
+       "volumes": [{"name": "tls", "secret": {"secretName": spec.tlsSecret, "defaultMode": 288}}, {"name": "tmp", "emptyDir": {}}]}}     # 0440
 
 proc reconcile*(be: Backend; spec: ConductorSpec; wanted: int; credentials: seq[(string, string)]; now: float;
                 tried: var Table[int, float]): tuple[created, deleted: seq[string]] =

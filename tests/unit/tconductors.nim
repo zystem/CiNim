@@ -31,7 +31,7 @@ proc backendOf(f: Fake): Backend =
     true
 
 let spec = ConductorSpec(image: "reg/cinim-conductor:t", runsPerConductor: 10, drainSeconds: 30, streamAddr: "tcp://core.ns.svc:19745",
-                         namespace: "cinim-001-acme", curveSecret: "cinim-controller-curve")
+                         namespace: "cinim-001-acme", tlsSecret: "cinim-controller-tls")
 
 proc plan(n: int): seq[(string, string)] =
   for i in 1 .. n: result.add ("cond-" & $i, "cred-" & $i)
@@ -150,7 +150,7 @@ suite "RUN-009 what a conductor Pod is":
     check env["CINIM_CONDUCTOR_CREDENTIAL"]["valueFrom"]["secretKeyRef"]["name"].getStr == "cinim-conductor-2"
     check env["CINIM_CONDUCTOR_CREDENTIAL"]["valueFrom"]["secretKeyRef"]["key"].getStr == "credential"
   test "the keys of the transport are the organisation's, mounted read-only; the only other volume is an empty /tmp for the heartbeat":
-    check pod["spec"]["volumes"].len == 2 and pod["spec"]["volumes"][0]["secret"]["secretName"].getStr == "cinim-controller-curve"
+    check pod["spec"]["volumes"].len == 2 and pod["spec"]["volumes"][0]["secret"]["secretName"].getStr == "cinim-controller-tls"
     check pod["spec"]["volumes"][1]["name"].getStr == "tmp" and pod["spec"]["volumes"][1].hasKey("emptyDir")
     check c["volumeMounts"].len == 2 and c["volumeMounts"][0]["readOnly"].getBool and c["volumeMounts"][1]["mountPath"].getStr == "/tmp" and not c["volumeMounts"][1].hasKey("readOnly")
   test "memory grows with the runs it leads; the grace period covers the drain":

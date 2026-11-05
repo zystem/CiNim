@@ -32,7 +32,7 @@ proc cMalloc(n: csize_t): pointer {.importc: "malloc", header: "<stdlib.h>".}
 proc cFree(p: pointer) {.importc: "free", header: "<stdlib.h>".}
 
 proc shmAlloc*(n: int): pointer = cMalloc(csize_t(max(n, 1)))
-  ## memory that any thread may free, a ZeroMQ I/O thread included (it knows nothing of the allocator of Nim): plain `malloc`
+  ## memory that any thread may free, a thread of a C library included (it knows nothing of the allocator of Nim): plain `malloc`
 proc shmFree*(p: pointer) = cFree(p)
 
 proc newNode(): ptr Node =

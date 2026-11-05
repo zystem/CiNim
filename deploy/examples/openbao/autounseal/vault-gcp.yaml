@@ -1,0 +1,45 @@
+# Vault for the key of the shard, unsealed by itself with Google Cloud KMS (deploy/examples/openbao/autounseal/README.md). The official chart, `hashicorp/vault`. Vault carries the cloud seals itself (no plugin).
+# Replace what is in <angle brackets>. The Service is `vault` in the namespace of the shard, the certificate is vault-tls.yaml.
+global:
+  tlsDisable: false
+injector:
+  enabled: false
+server:
+  standalone:
+    enabled: true
+    config: |
+      ui = false
+      listener "tcp" {
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_cert_file   = "/vault/userconfig/vault-tls/tls.crt"
+        tls_key_file    = "/vault/userconfig/vault-tls/tls.key"
+      }
+      storage "file" {
+        path = "/vault/data"
+      }
+      seal "gcpckms" {
+        project    = "<project id>"
+        region     = "<global>"        # the location of the key ring
+        key_ring   = "<key ring>"
+        crypto_key = "<key>"           # a symmetric key; the identity needs roles/cloudkms.cryptoKeyEncrypterDecrypter and cloudkms.cryptoKeys.get (roles/cloudkms.viewer) on it
+      }
+  # Who the Pod is, one of the two. The seal finds the credentials as Google's libraries do (GOOGLE_APPLICATION_CREDENTIALS, or the identity of the workload).
+  # (a) outside GCP: the JSON key of a service account that may use the key, in a Secret (`kubectl create secret generic gcp-kms --from-file=credentials.json=<file>`)
+  volumes:
+    - name: vault-tls
+      secret: {secretName: vault-tls}
+    - name: gcp-kms
+      secret: {secretName: gcp-kms}
+  volumeMounts:
+    - {name: vault-tls, mountPath: /vault/userconfig/vault-tls, readOnly: true}
+    - {name: gcp-kms, mountPath: /vault/userconfig/gcp-kms, readOnly: true}
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/userconfig/vault-tls/ca.crt        # for `vault` inside the Pod (the chart sets VAULT_ADDR)
+    GOOGLE_APPLICATION_CREDENTIALS: /vault/userconfig/gcp-kms/credentials.json
+  # (b) on GKE: Workload Identity and no Secret; delete (a) (the `gcp-kms` volume and mount, and GOOGLE_APPLICATION_CREDENTIALS), uncomment:
+  # serviceAccount:
+  #   annotations:
+  #     iam.gke.io/gcp-service-account: <service account>@<project>.iam.gserviceaccount.com
+  dataStorage:
+    size: 1Gi

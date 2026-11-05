@@ -13,13 +13,48 @@ helm repo add vm https://victoriametrics.github.io/helm-charts
 helm dependency build deploy/charts/cinim-shard     # downloads the subcharts into charts/
 ```
 
-The transport keys (D-24) are a Secret with four Z85 files: `core.pub`, `core.key`, `client.pub`, `client.key`. The core gets the first two,
-the controllers and conductors of the organisations the other two and `core.pub`. `tools/zmq/gen_curve_keys.sh` makes a test pair; a real installation issues its own keys.
+The transport keys (D-104: gRPC with mutual TLS) are issued by **cert-manager** (D-105; `tls.certManager.enabled`, on by default). The chart makes a CA of the shard (a self-signed root and an Issuer on it),
+the certificate of the core (it carries the name `cinim-core`, which the clients check instead of the address they dial) and the one client certificate of the controllers, the conductors and the shims
+(EC P-256 in PKCS#8, two years, renewed 30 days before the end). The core mounts both and gives the organisations only the client pair and the CA (`ca.pem`, `client.pem`, `client.key`), never its own key.
+cert-manager has to be in the cluster (its CRDs): install it once per cluster, as you do for anything else that needs it, or set `cert-manager.enabled=true` to have the release install it (the subchart
+`cert-manager` of the chart; its cluster-wide objects collide with a second release, so only for a cluster of one shard). To sign with an issuer of your own instead of the CA of the chart, name it:
+`--set tls.certManager.issuerRef.name=corp-ca --set tls.certManager.issuerRef.kind=ClusterIssuer` (a CA kind whose Secret carries `ca.crt`, which the clients trust).
+
+**The key of the step secrets** (D-106: **there is no mode without one**) is in exactly one of two places, and the chart refuses to render with none or with two:
+
+* **hsmgate with a software token, in the release** (`hsmgate.enabled`, the default; the chart `deploy/charts/hsmgate`). One Pod, a key of 32 bytes that its init container makes at the first start on a volume of its own (`hsmgate-key`, kept when the release is
+  deleted) and never makes again; the Transit face for the core, over mutual TLS with a certificate that cert-manager issues for the core (`cinim-core-keyservice`, the CN that hsmgate's policy names). **The key is on that volume:** whoever has it opens every secret of the shard,
+  and a shard that loses it cannot read its secrets, so back the volume up (a snapshot of the claim) apart from the database. This is the mode for a cluster with no card and no Vault.
+* **A key service of your own** (`hsmgate.enabled=false`, `secrets.keyService`): a hsmgate on a SmartCard-HSM (docs/hardware-key.md), a Vault or an OpenBao Transit engine. The service holds the only secret that is not in the database. A Vault or an OpenBao needs a Transit key made with `derived=true` (a plain key ignores the context, and the core refuses it at its start) and a token that lasts (`secrets.keyService.tokenSecret`; the core does not renew it): a minimal installation of one OpenBao Pod, with the steps, is in `deploy/examples/openbao`, and the same unsealed by itself with a cloud KMS (AWS, Google Cloud, Azure; OpenBao and Vault) in `deploy/examples/openbao/autounseal`.
+
+**The master secret** is the core's own (the controllers' identities are made under it). **You do not make it and no Secret holds it:** the core of a new shard makes it at its first start and keeps it in its database **sealed by the key of the secrets** (`vault_meta`,
+moved with the rest by `/core rekey`), so a backup of the database is the only backup of it and a restore needs nothing else (the key of the secrets, as for the secrets themselves). It is not a TLS key, so renewing a certificate changes nothing in it. The key's policy has to
+allow the context `cinim/master-secret/v1` (the bundled hsmgate does; docs/hardware-key.md for a service of yours).
+
+**A shard of the earlier versions** (CURVE, D-24, or a master secret in a file with the key of the secrets derived from it) is not brought over: both modes are gone, and the core reads no key file and brings no master secret in
+from a file (`CINIM_SECRETS_KEY_FILE`, `master.key` and `tls.masterKeySecret` were removed). The secrets of a database that a derived key sealed cannot be opened by this version: move them to a key service with the version that
+still has the way (`/core rekey` with no key given) before you take this one. A database that holds identities of controllers and no master secret gets a new one: the old credentials stop working, the core replaces each controller
+it no longer hears from (about two minutes) and the new one enrols. The controllers, the conductors and the shims
+are given the new keys by the core when it provisions the organisations again (the Secret `cinim-controller-tls`; the old `cinim-controller-curve` can be deleted). A release has to be taken up by the core, the controllers, the conductors and the shims together:
+a step that runs while the core is replaced loses its channel until it ends.
+
+**A renewed certificate is taken up without a restart.** The core looks at the files of its keys every `tls.reloadSeconds` (60; `CINIM_CERT_RELOAD_SECONDS`, 0: never; the Secret volumes are updated by the kubelet in a minute or two).
+When they have changed and can be used (a half-written or a wrong set is told and the old one stays), the five channels of the core start again with the new ones; the clients connect again and, reading their files at every connection,
+have the new pair. The core also puts the new client pair and CA in the Secret `cinim-controller-tls` of each organisation (the next provisioning pass; the core may not read a Secret, T-45, so it remembers the pair it put there, in memory, and makes the Secret again when the pair it has differs from it, and once after each start of the core), the kubelet updates the files of the controller and the conductors, the controller makes
+the Secret of the shims again for the steps that start from then on, and every one of them connects with the new pair at its next connection. A CA that is renewed must be trusted in both the old and the new form for a while; that is by hand.
 
 ```bash
 kubectl create namespace cinim-001
-kubectl -n cinim-001 create secret generic cinim-curve \
-  --from-file=core.pub --from-file=core.key --from-file=client.pub --from-file=client.key
+```
+
+Without cert-manager (`--set tls.certManager.enabled=false`) the keys are a Secret of yours, named by `tls.secretName`, with five files: `ca.pem`, `core.pem`, `core.key`, `client.pem` and `client.key`.
+`tools/grpc/gen_tls.sh DIR [DAYS]` makes a set in `DIR/tls` (EC P-256, two years by default; the certificate of the core must carry the name `cinim-core`):
+
+```bash
+sh tools/grpc/gen_tls.sh ./keys            # or your own: ca.pem core.pem core.key client.pem client.key in ./keys/tls
+kubectl -n cinim-001 create secret generic cinim-tls \
+  --from-file=keys/tls/ca.pem --from-file=keys/tls/core.pem --from-file=keys/tls/core.key \
+  --from-file=keys/tls/client.pem --from-file=keys/tls/client.key
 ```
 
 ## One shard (`single` mode)
@@ -31,7 +66,7 @@ their objects into the namespace of the release and the rights of the core are b
 helm install cinim-001 deploy/charts/cinim-shard -n cinim-001 \
   --set-string shard=001 \
   --set image.repository=registry.example.com/cinim --set image.tag=1.0.0 \
-  --set domain=ci.example.com --set curve.secretName=cinim-curve
+  --set domain=ci.example.com
 ```
 
 Quote the shard name (`--set-string`, `"001"` in a values file): YAML reads an unquoted `001` as a number and the chart rejects it. A second
@@ -63,7 +98,7 @@ every cluster:
 helm install cinim-002 deploy/charts/cinim-shard -n cinim-002 --create-namespace \
   --set-string shard=002 --set mode=multi \
   --set routerUrl=http://cinim-router.cinim.svc --set routerKey=... \
-  --set image.repository=registry.example.com/cinim --set domain=ci.example.com --set curve.secretName=cinim-curve
+  --set image.repository=registry.example.com/cinim --set domain=ci.example.com
 ```
 
 `routerUrl` is the in-cluster address of the router for a shard in the same cluster, or its public `https://<domain><basePath>` for a shard in
@@ -131,10 +166,19 @@ helm install registry twuni/docker-registry -n registry --create-namespace -f de
 tools/image/build_core.sh registry.example.com/cinim:dev && docker push registry.example.com/cinim:dev
 ```
 
+**A registry that is already there: Gitea's own.** A Gitea (1.25 was tried) serves container images itself, at `<host>/<owner>/<image>:<tag>`, so a
+separate registry is not needed. Make an owner for the images (a user or an organisation) and tokens: `write:package` for the builds, and a separate
+`read:package` one for the nodes. Then `skopeo login --tls-verify=false <host>` on the workstation and `REGISTRY=<host>/<owner> tools/image/build-local.sh <tag> core ...`
+(the scripts push `<REGISTRY>/<image>:<tag>`). The name of the host must be the one in Gitea's `ROOT_URL`: the token endpoint that the client is sent to is built from it.
+With `REQUIRE_SIGNIN_VIEW` on, nothing is pulled without a login, so the nodes need the credentials. In Talos, one place for every Pod, those of the
+organisations' namespaces too (no `imagePullSecrets`): in `machine.registries`, a mirror `<host>: {endpoints: [http://<host>]}` and `config.<host>.auth` with the user and the
+`read:package` token; applied with `talosctl patch machineconfig --mode=no-reboot`, it took effect at once on all the nodes. It is plain HTTP like the registry above, so the token goes over
+the LAN in the clear.
+
 The image is built by `tools/image/build_core.sh`: the core (with TLS) is a static binary in a `scratch` image of about 8 MB
 with the CA certificates, so the image needs no libraries (`deploy/core/Dockerfile`). The image of the job controller is built by
 `tools/image/build_controller.sh <image:tag>` (`deploy/controller/Dockerfile`): the static controller, with the Kubernetes C client, libcurl,
-OpenSSL, libzmq, libsodium and SQLite linked in, and the static shim that it hands to every step Pod, in a `scratch` image of about 8 MB.
+OpenSSL, nghttp2 and SQLite linked in, and the static shim that it hands to every step Pod, in a `scratch` image of about 8 MB.
 
 ## Runs and organisations
 
@@ -295,10 +339,9 @@ A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhos
 
 ## The master key of the step secrets
 
-The step secrets (docs/secrets-masking.md) are sealed in the database with data keys that a master key wraps. **Back the master key up apart from the database** and keep it
-apart from it: a database restored without it holds nothing readable. It is a file of 64 hexadecimal digits (`secrets.keySecret`, `CINIM_SECRETS_KEY_FILE`) or, when none
-is given, it is derived from the core's CURVE key (`curve.secretName`), which then also has to be kept: a changed CURVE key loses the secrets. To keep the master key on
-a SmartCard-HSM instead, see docs/hardware-key.md (the hardware, the key and the backup; the core already speaks to a key service, the service for the card is planned).
+The step secrets (docs/secrets-masking.md) are sealed in the database with data keys that a master key wraps; there is no mode without that key (D-106). It is in a key service (the hsmgate of the release, a card behind hsmgate, a Vault or an OpenBao: "The key of the step
+secrets" above). **Back the master key up apart from the database**: a database restored without it holds nothing readable. For the bundled hsmgate that means a snapshot of its volume; for
+a service of yours, its own backup (a card: docs/hardware-key.md). To keep the master key on a SmartCard-HSM instead of the software token, see docs/hardware-key.md.
 
 ## API tokens
 
@@ -374,13 +417,13 @@ Kaniko build Pod and builds the images of the components, each from its own `too
 REGISTRY=<registry host:port as the Pods reach it, plain HTTP> TAG=1.0.0 tools/image/kaniko-build.sh
 ```
 
-A cold build takes about 12 minutes (it builds libzmq, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
+A cold build takes about 12 minutes (it builds nghttp2, libsodium, the Kubernetes C client and every binary); a rebuild after a change of the sources about 3.
 
 Every component has a Dockerfile of its own (`tools/image/Dockerfile.core`, `.storage`, `.conductor`, `.controller` with the shim, `.caddy-store`) that starts from the image of the libraries, and the binaries are compiled by `tools/image/build-static.sh`, which has the flags they share; a target builds only its own: `TARGETS="storage:cinim-storage"` compiles the module and nothing else. Do not build Go (the Caddy image) in a build Pod on a node that also runs rqlite; it starved the node once.
 
 ### Building on this machine (the quick way for iterations)
 
-`tools/image/build-local.sh <tag> [target ...]` compiles the binaries in a container of the dependencies image `cinim-deps:local` (`tools/image/Dockerfile.deps`: libzmq, libsodium, the Kubernetes client with libcurl, the nimble packages; made once, 3-4 minutes) with the working tree mounted and Nim's C files kept in `build/nimcache/<binary>`, so that the next build recompiles only what changed, then puts the images together from `tools/image/Dockerfile.local`, and with `REGISTRY=<host>` pushes them with `skopeo` (plain HTTP). Measured on a 32-core workstation: the module 3 s after a change of one file, the core 23 s, the controller with the shim and the conductor together 42 s with the push. It builds the working tree as it is, so for a release use the build Pod.
+`tools/image/build-local.sh <tag> [target ...]` compiles the binaries in a container of the dependencies image `cinim-deps:local` (`tools/image/Dockerfile.deps`: libsodium, nghttp2, the Kubernetes client with libcurl, the nimble packages; made once, 3-4 minutes) with the working tree mounted and Nim's C files kept in `build/nimcache/<binary>`, so that the next build recompiles only what changed, then puts the images together from `tools/image/Dockerfile.local`, and with `REGISTRY=<host>` pushes them with `skopeo` (plain HTTP). Measured on a 32-core workstation: the module 3 s after a change of one file, the core 23 s, the controller with the shim and the conductor together 42 s with the push. It builds the working tree as it is, so for a release use the build Pod.
 
 ```bash
 REGISTRY=registry.example.com tools/image/build-local.sh h84 core storage controller conductor
@@ -392,7 +435,7 @@ Measured on the TESTING cluster (the core's `VmRSS` read through an ephemeral co
 
 * **At start** 27-31 MiB with 34 threads (8 API threads) or 86 (64).
 * **The threads of the API.** Every thread of the HTTP server has a heap of its own that keeps what it has had: about 1 MiB at its first request, more after a big answer. 100 requests spread over 64 threads cost about 60 MiB, over 8 threads 8 MiB. After the same load (100 requests, two runs with a 20 MB artifact, a run with a cache) the core was at 134 MiB with 64 threads and 79 MiB with 8. `core.apiThreads` (`CINIM_API_THREADS`) is 8 by default.
-* **The path of the artifacts.** One thread serves all the shims, and it keeps the high-water mark of its heap: a block of 8 MiB lives in four copies at once (the message from ZeroMQ, the request decoded from Protobuf with its temporary buffer, the string made of it for the store), 33 MiB at the peak and 41 MiB kept; it appeared once, with the first big upload, and a later one did not add to it. The direct transfer from the shim (docs/storage-module.md, D-61) takes the bytes out of the core: with it on, three 20 MB runs up and down and two cache runs left the core at 34-36 MiB (it was at 71-79 MiB after the first one before), and the memory went to the module (31 MiB after six such runs, the reads streamed).
+* **The path of the artifacts.** One thread serves all the shims, and it keeps the high-water mark of its heap: a block of 8 MiB lives in four copies at once (the message from the channel, the request decoded from Protobuf with its temporary buffer, the string made of it for the store), 33 MiB at the peak and 41 MiB kept; it appeared once, with the first big upload, and a later one did not add to it. The direct transfer from the shim (docs/storage-module.md, D-61) takes the bytes out of the core: with it on, three 20 MB runs up and down and two cache runs left the core at 34-36 MiB (it was at 71-79 MiB after the first one before), and the memory went to the module (31 MiB after six such runs, the reads streamed).
 * The limit of the core's Pod, 512 MiB, is enough with room to spare.
 
 ## The storage module (the chart `cinim-storage`)

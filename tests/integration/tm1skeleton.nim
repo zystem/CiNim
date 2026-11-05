@@ -1,5 +1,5 @@
 ## End to end on a real cluster: submit runs through the REST API and watch core, job-controller, executor-service and the shim
-## in real step Pods do their work - through the real ZeroMQ+CURVE channels (D-24), the real rqlite shard, the real Lua
+## in real step Pods do their work - through the real gRPC channels with mutual TLS (docs/shim-grpc.md), the real rqlite shard, the real Lua
 ## sandbox, real VictoriaLogs and vlagent. Nothing is mocked. The pieces have their own tests (tests/unit: the Lua API, the journal,
 ## the shim, the controller logic on a fake cluster; tests/integration/tk8s*.nim, trqlite.nim: the Kubernetes and rqlite
 ## primitives); this is the suite that proves them wired together. What it covers:
@@ -16,13 +16,14 @@
 ## local process and the Pod-side scenarios are skipped.
 ##
 ## Needs: CINIM_RQLITE_URL (a shard's rqlite), a reachable Kubernetes context, K8S_PREFIX to build the job-controller (the only
-## binary that links the Kubernetes client), CINIM_VLAGENT_URL / CINIM_VICTORIALOGS_URL for the log scenarios, a libzmq.so with
-## CURVE (libsodium) on the loader path at run time (the setup step generates the keys and fails loudly without CURVE), and
+## binary that links the Kubernetes client), CINIM_VLAGENT_URL / CINIM_VICTORIALOGS_URL for the log scenarios, a static nghttp2 in
+## /opt/nghttp2 to build with (the keys of the channels are made by the test itself), and
 ## CINIM_STATIC_SHIM (tools/shim/build_static.sh's output) so the shim runs in any step image. CINIM_KUBECONFIG pins the
 ## Kubernetes context: the official C client always follows the ambient kubeconfig's current-context, which can drift. Otherwise
 ## the suite is skipped, like trqlite.nim.
 import std/[unittest, os, osproc, json, strutils, httpclient, strtabs, sequtils, times, uri]
 import common/rqlite
+import ../support/testcerts
 
 let
   rqliteUrl = getEnv("CINIM_RQLITE_URL")
@@ -30,7 +31,7 @@ let
   kubeconfig = getEnv("CINIM_KUBECONFIG")     # optional, see the module comment above
   kubectlBase = getEnv("CINIM_KUBECTL", "kubectl")
   ns = "cinim-test"
-  certs = getCurrentDir() / "tests" / "certs"
+  certs = testCerts()
   buildDir = getCurrentDir() / "build" / "tests" / "m1skeleton"
   # distinct from the ports a developer's own manual core/job-controller/conductor (default 19745/
   # 18081) might already be running on, and from the "cinim" namespace they might be using.
@@ -194,7 +195,7 @@ proc waitAttempt(runId: string; want, timeoutMs: int): bool =
   false
 
 proc waitShimEvent(runId: string; n: int; timeoutMs: int): bool =
-  ## the shim has told core (ZeroMQ) or the Pod log has (job-controller) that it got as far as event n
+  ## the shim has told core (the channel) or the Pod log has (job-controller) that it got as far as event n
   var c = newRq(rqliteUrl)
   var waited = 0
   while waited < timeoutMs:
@@ -259,8 +260,8 @@ suite "walking skeleton end to end":
     test "skipped: CINIM_RQLITE_URL/K8S_PREFIX not set":
       skip()
   else:
-    test "setup: generate CURVE keypairs, flatten proto imports, build core/job-controller/conductor/shim":
-      check execCmd("tools/zmq/gen_curve_keys.sh") == 0
+    test "setup: flatten proto imports, build core/job-controller/conductor/shim":
+      check certs.len > 0          # the TLS keys of the channels (tests/support/testcerts.nim)
       check execCmd("tools/proto/nim_flatten.sh build/nimproto") == 0
       createDir(buildDir)
       check execCmd("nim c --hints:off --warnings:off -o:" & quoteShell(buildDir / "core") &
@@ -269,12 +270,11 @@ suite "walking skeleton end to end":
         " -o:" & quoteShell(buildDir / "jobcontroller") & " src/jobcontroller/main.nim") == 0
       check execCmd("nim c --hints:off --warnings:off -p:src" &
         " -o:" & quoteShell(buildDir / "conductor") & " src/conductor/main.nim") == 0
-      # two shims: the plain one (no ZeroMQ - what job-controller mounts into the step Pod, whose image
-      # has no libzmq) and the -d:shimLogging one the local log-pipeline test below runs directly
+      # two shims: the plain one (no gRPC client - what job-controller mounts into the step Pod) and the -d:shimLogging one the local log-pipeline test below runs directly
       check execCmd("nim c --hints:off --warnings:off" &
         " -o:" & quoteShell(buildDir / "cicd-shim") & " src/shim/shim.nim") == 0
       # CINIM_STATIC_SHIM=<path to tools/shim/build_static.sh's output> swaps in the fully static musl shim
-      # (libzmq+libsodium linked in, UPX-packed - runs in any step image, needs docker to build) for both
+      # (nghttp2 linked in, UPX-packed - runs in any step image, needs docker to build) for both
       # uses below; unset, the glibc -d:shimLogging build is used for the local log test as before.
       if staticShim.len > 0:
         check fileExists(staticShim)
@@ -311,7 +311,7 @@ suite "walking skeleton end to end":
       conductor = spawn(buildDir / "conductor", buildDir / "conductor.log", svcEnv({
         "CINIM_CERTS": certs, "CINIM_CORE_STREAM_ADDR": "tcp://" & host & ":" & $streamPort, "CINIM_NAMESPACE": ns,
         "CINIM_CONDUCTOR_ID": "cond-1", "CINIM_CONDUCTOR_CREDENTIAL": credential}))
-      sleep 1000   # let both clients complete their first ZeroMQ connect before the run is submitted
+      sleep 1000   # let both clients complete their first connect before the run is submitted
       # the log wait of a finished step is a profile setting (UI); short here, so the logs_undelivered scenarios do not take 10 minutes
       if remoteCore: check putProfile(%*{"log_hold_timeout": 20}){"log_hold_timeout"}.getInt == 20
       # with the launch gate on (RUN-015) core assigns nothing until it has seen a healthy log circuit for
@@ -349,7 +349,7 @@ suite "walking skeleton end to end":
       check row[0].getStr == "OK"
       check row[1].getInt == 0
 
-      # D-29: the Pod log, ZeroMQ and rqlite tell the same story. The Pod log has every transition; what core stored in
+      # D-29: the Pod log, the channel and rqlite tell the same story. The Pod log has every transition; what core stored in
       # steps.shim_* (from either route) must be that story's last line, and the step state its mapping.
       let events = podOut.splitLines.filterIt(it.startsWith("CICD-SHIM ")).mapIt(parseJson(it["CICD-SHIM ".len .. ^1]))
       check events.mapIt(it["ev"].getStr) == @["started", "command_started", "command_exited", "logs_delivering", "logs_delivered", "done"]
@@ -359,7 +359,7 @@ suite "walking skeleton end to end":
       let srow = sr["results"][0]{"values"}[0]
       check srow[0].getInt == 6                            # the same event number as the last Pod-log line
       check srow[1].getStr == "done" and srow[4].getStr == "OK"
-      check srow[3].getStr in ["zmq", "pod_log"]
+      check srow[3].getStr in ["channel", "pod_log"]
       let stored = parseJson(srow[2].getStr)
       check stored["ev"].getStr == "done" and stored["reason"].getStr == "ok" and stored["exit"].getInt == 0
       check stored["cmd"]["exit"].getInt == events[^1]["cmd"]["exit"].getInt

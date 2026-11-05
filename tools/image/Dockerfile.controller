@@ -4,14 +4,14 @@ ARG DEPS_IMAGE
 FROM ${DEPS_IMAGE} AS build-shim
 COPY . /src
 WORKDIR /src
-RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/cicd-shim src/shim/shim.nim -d:shimLogging --passL:"-L/opt/zmq/lib -lzmq -lsodium -lstdc++ -lm"; \
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/cicd-shim src/shim/shim.nim -d:shimLogging -d:zlibStatic -d:zlibLib=/usr/lib/libz.a --passL:"-lm"; \
     strip /out/*; upx --best --lzma -q /out/cicd-shim >/dev/null
 
 FROM ${DEPS_IMAGE} AS build-controller
 COPY . /src
 WORKDIR /src
-RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/controller-static src/jobcontroller/main.nim -d:k8sPrefix=/opt/k8s -d:k8sStatic --dynlibOverride:sqlite3 \
-      --passL:"-L/opt/zmq/lib -lzmq -lsodium -lsqlite3 -lstdc++ -lm"; strip /out/*
+RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/controller-static src/jobcontroller/main.nim -d:k8sPrefix=/opt/k8s -d:k8sStatic --dynlibOverride:sqlite3 -d:zlibStatic -d:zlibLib=/usr/lib/libz.a \
+      --passL:"-lsqlite3 -lm"; strip /out/*
 
 FROM scratch
 COPY --from=build-controller /out/controller-static /controller

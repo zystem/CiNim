@@ -1,19 +1,21 @@
-# The libraries every binary of the platform is built with (libsodium, libzmq, the Kubernetes C client, the nimble packages), as one image: `cinim-deps:<hash>`, made once
+# The libraries every binary of the platform is built with (libsodium, nghttp2, the Kubernetes C client, the nimble packages), as one image: `cinim-deps:<hash>`, made once
 # (tools/image/kaniko-build.sh, deploy/examples/self-build, tools/image/build-local.sh) and named by the components' Dockerfiles with `--build-arg DEPS_IMAGE=`. The hash is
 # that of this file, cinim.nimble and tools/k8s/build_client.sh: the three things the image is made of.
 # Nim 2.2.12 on Alpine, made by github.com/zystem/nim-alpine (the official Alpine images stopped at 2.2.6, whose httpclient is wrong for https through a proxy: see CLAUDE.md)
 FROM ghcr.io/zystem/nim:2.2.12-alpine
 RUN apk add --no-cache bash coreutils upx g++ make cmake git autoconf automake libtool linux-headers curl openssl-dev openssl-libs-static \
-    zlib-dev zlib-static sqlite-dev sqlite-static ca-certificates
-# libsodium and libzmq as static archives (the ZeroMQ transport, D-24)
+    zlib-dev zlib-static sqlite-dev sqlite-static ca-certificates xz
+# libsodium as a static archive (the sealing of the secrets, common/sodiumaead.nim)
 RUN set -eu; W=$(mktemp -d); cd "$W"; \
     git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium; \
-    (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix=/opt/zmq --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null); \
-    git clone -q --depth 1 --branch v4.3.5 https://github.com/zeromq/libzmq zmq; \
-    cmake -S zmq -B zmq/b -DCMAKE_PREFIX_PATH=/opt/zmq -DCMAKE_INSTALL_PREFIX=/opt/zmq -DWITH_LIBSODIUM=ON -DWITH_LIBSODIUM_STATIC=ON \
-      -DENABLE_CURVE=ON -DBUILD_SHARED=OFF -DBUILD_STATIC=ON -DBUILD_TESTS=OFF -DWITH_DOCS=OFF -DWITH_PERFTOOL=OFF -DENABLE_DRAFTS=OFF \
-      -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" >/dev/null; \
-    cmake --build zmq/b -j"$(nproc)" --target install >/dev/null; rm -rf "$W"
+    (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix=/opt/sodium --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null); \
+    rm -rf "$W"
+# nghttp2 as a static archive, where nimgrpc looks for it by default (the shim's gRPC channels, docs/shim-grpc.md); 1.57 or later is required
+RUN set -eu; W=$(mktemp -d); cd "$W"; \
+    curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ; \
+    cmake -S nghttp2-1.68.0 -B b -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel \
+      -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" >/dev/null; \
+    cmake --build b -j"$(nproc)" --target install >/dev/null; rm -rf "$W"; test -f /opt/nghttp2/lib/libnghttp2.a
 # the Kubernetes C client with libcurl, libwebsockets, libyaml (static)
 COPY tools/k8s/build_client.sh /src/tools/k8s/build_client.sh
 RUN K8S_STATIC=1 /src/tools/k8s/build_client.sh /opt/k8s >/dev/null

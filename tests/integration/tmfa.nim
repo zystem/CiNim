@@ -4,6 +4,7 @@ import std/[unittest, json, os, strutils, times, sequtils, sets]
 import common/rqlite
 import core/[schema, apiauth, secretvault, kekprovider, mfa, totp, webauthn]
 import ../support/fakeauthn
+import ../support/testkek
 
 let url = getEnv("CINIM_RQLITE_URL")
 let sharedSfx = newId()[^6 .. ^1].toLowerAscii          # the vault of the pseudo organisation ~mfa is sealed by one key: both suites use the same

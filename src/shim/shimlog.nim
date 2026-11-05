@@ -5,7 +5,7 @@
 ## the order of events and the wire form), so any surviving line restores everything up to that point and the last one
 ## restores everything - except the build log itself, which has its own path. Kubernetes keeps only a bounded, rotating
 ## tail of a container's log; the lines are few (a handful per step) and short, the final ones are written after the command
-## has ended, and `n` shows whether the head was rotated away. The same state goes to core over ZeroMQ (heartbeat, StepReport)
+## has ended, and `n` shows whether the head was rotated away. The same state goes to core over the channel (heartbeat, StepReport)
 ## and into rqlite; the three are reconciled by `n`.
 import std/[json, locks, times, options, tables]
 import ../common/shimstate

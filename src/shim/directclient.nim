@@ -1,7 +1,7 @@
 ## The shim's side of the direct transfer (D-61, docs/storage-module.md, "Direct transfer from the shim"): the bytes of an artifact or a cache entry go to the storage module over plain
 ## HTTP, on its port for shims, with the grant that the core gave over the authenticated channel; the shim reports the digest of every part to the core over that channel, and the core
 ## completes the upload only when the module received what the shim reported. No TLS (the bytes are trusted by their digests, not by the wire); a plain `std/httpclient`, which keeps the
-## connection between requests. Pure: no ZeroMQ, so it is tested against the real module (tests/integration/tshimdirect.nim).
+## connection between requests. Pure: no gRPC, so it is tested against the real module (tests/integration/tshimdirect.nim).
 import std/[httpclient, strutils, json, times, os]
 
 type

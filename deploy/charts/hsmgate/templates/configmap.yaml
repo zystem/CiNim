@@ -1,0 +1,24 @@
+{{- $ns := .Release.Namespace }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hsmgate
+  namespace: {{ $ns }}
+data:
+  hsmgate.yaml: |
+    listen: 0.0.0.0:8443
+    tls: {cert: /etc/hsmgate/tls/server.pem, key: /etc/hsmgate/tls/server.key, client_ca: /etc/hsmgate/tls/ca.pem}
+    audit: {file: /dev/stdout}
+    tokens:
+      - {name: soft, type: soft, keys: {m1: /var/lib/hsmgate/m1.key}}
+    keys:
+      {{ .Values.keyName }}:
+        versions: [{token: soft, label: m1}]
+        aad: {mode: context, allow: {{ .Values.allow | toJson }}}
+    clients:
+    {{- range .Values.clients }}
+      - name: {{ .name }}
+        identity: {cn: {{ .cn }}}
+        keys:
+          {{ $.Values.keyName }}: {ops: {{ .ops | toJson }}, per_minute: {{ .perMinute | default 600 }}}
+    {{- end }}

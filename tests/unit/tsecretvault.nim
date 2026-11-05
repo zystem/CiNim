@@ -1,6 +1,7 @@
 ## The store of the step secrets (core/secretvault.nim): XChaCha20-Poly1305, bound to its place, a key that is not the right one opens nothing; the step credential.
 import std/[unittest, strutils, os]
 import ../../src/core/secretvault
+import ../support/testkek
 import ../../src/common/sodiumaead
 import ../../src/common/ctrlauth
 
@@ -34,8 +35,24 @@ suite "sealing a value":
     check not unseal(k, flipped, "cinim/secret/v1|t1|A|1").ok
     check not unseal(k, "v1." & s[3 .. ^1], "cinim/secret/v1|t1|A|1").ok and not unseal(k, "", "a").ok and not unseal(k, "v2.zz", "a").ok
 
+suite "D-106 the key service has to honour the context":
+  test "a key that ignores the context (a Vault or OpenBao key that is not derived) is refused, with what to do about it":
+    let ignoring = KekProvider(id: "transit:plain",
+      wrap: proc (plain: seq[byte]; aad: string): WrapResult {.gcsafe.} = (true, false, "", "sealed:" & cast[string](plain)),
+      unwrap: proc (wrapped: string; aad: string): UnwrapResult {.gcsafe.} = (true, false, "", @(wrapped[7 .. ^1].toOpenArrayByte(0, wrapped.len - 8))))
+    let r = verifyContextBinding(ignoring)
+    check not r.ok and not r.retry and "derived=true" in r.error
+  test "a key that binds the text to the context passes":
+    check verifyContextBinding(derivedKek("a-key")).ok
+  test "a key service that is away is a retry, not a refusal":
+    let away = KekProvider(id: "transit:away",
+      wrap: proc (plain: seq[byte]; aad: string): WrapResult {.gcsafe.} = (false, true, "the service is away", ""),
+      unwrap: proc (wrapped: string; aad: string): UnwrapResult {.gcsafe.} = unavailable("away"))
+    let r = verifyContextBinding(away)
+    check not r.ok and r.retry
+
 suite "the master key":
-  test "a data key is wrapped and unwrapped by a key derived from the core's key; another core key unwraps nothing":
+  test "a data key is wrapped and unwrapped by the key; another key unwraps nothing":
     let a = derivedKek("core-secret-A")
     let b = derivedKek("core-secret-B")
     let dek = keyOf(0x55)
@@ -45,12 +62,6 @@ suite "the master key":
     let wrongKey = b.unwrap(w.wrapped, "cinim/dek/v1|t1")
     check not wrongKey.ok and not wrongKey.retry                 # refused for good: waiting does not help
     check not a.unwrap(w.wrapped, "cinim/dek/v1|t2").ok
-  test "a key file holds 64 hex digits and nothing else":
-    writeFile(getTempDir() / "kek-good", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n")
-    writeFile(getTempDir() / "kek-short", "0011")
-    writeFile(getTempDir() / "kek-bad", "zz" & "00".repeat(31))
-    check fileKek(getTempDir() / "kek-good").ok and fileKek(getTempDir() / "kek-good").kek.id == "file"
-    check not fileKek(getTempDir() / "kek-short").ok and not fileKek(getTempDir() / "kek-bad").ok and not fileKek(getTempDir() / "kek-missing").ok
 
 suite "the credential of a step":
   test "it is bound to the run, the step and the attempt, and to the core's key":

@@ -1,6 +1,6 @@
 # One release per shard, installed into the namespace <namespacePrefix>-<shard> (helm install cinim-001 ./cinim-shard -n cinim-001 --create-namespace),
 # with the subcharts rqlite and the log circuit (two VictoriaLogs nodes and vlagent) in the same release.
-# Required: image.repository, domain, curve.secretName, and in the multi mode routerUrl and routerKey.
+# Required: image.repository, domain, cert-manager in the cluster (or tls.secretName), a place for the key of the step secrets (the bundled hsmgate by default), and in the multi mode routerUrl and routerKey.
 
 # The name of the shard: digits only, up to 16, immutable (SHD-001). Another cluster always means another shard name.
 shard: "001"
@@ -29,10 +29,34 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
-# The Secret that holds the CURVE keys of the transport (D-24): core.pub, core.key, client.pub, client.key. The core gets the first two,
-# the controllers and conductors of the organisations the other two and core.pub.
-curve:
+# The keys of the transport (gRPC with mutual TLS, docs/shim-grpc.md). By default cert-manager issues them (certManager.enabled): a CA of the shard (a self-signed root and an Issuer on it), the
+# certificate of the core (the name `cinim-core`, which the clients check) and the one client certificate of the controllers, conductors and shims. The core mounts both and hands the client pair
+# on to the organisations (never its own key). cert-manager must be in the cluster (CRDs): install it once per cluster, or set `cert-manager.enabled=true` to have this release install it
+# (one shard per cluster then: its cluster-wide objects collide with a second release).
+# The master secret is the core's own (the identities of the controllers are made under it). You do not make it and you do not bring one in: a new shard's core makes it and keeps it in its database sealed
+# by the key of the step secrets (the key service: hsmgate.enabled or secrets.keyService), so a backup of the database is the only backup of it and a restore from it needs nothing else.
+# A certificate is renewed 30 days before it ends. The core reads the files again (tls.reloadSeconds) and restarts its channels with the new ones; the controllers and the conductors are given the new pair by the core.
+tls:
+  certManager:
+    enabled: true
+    # Sign with an Issuer or ClusterIssuer of yours instead of the CA of the chart. It has to be a CA kind (CA, Vault, Venafi ...) whose Secret carries ca.crt, which the clients trust.
+    issuerRef:
+      name: ""
+      kind: Issuer
+      group: cert-manager.io
+    duration: 17520h         # two years, as tools/grpc/gen_tls.sh
+    renewBefore: 720h
+    caDuration: 87600h       # the CA of the chart, ten years; its renewal is by hand (every client has to trust the new one)
+  # Without cert-manager (certManager.enabled=false): a Secret with the five files ca.pem, core.pem, core.key, client.pem, client.key (tools/grpc/gen_tls.sh makes them).
   secretName: ""
+  reloadSeconds: 60          # how often the core looks at the files of the keys; 0: never
+
+# The subchart cert-manager (see above); off, and its CRDs are installed with it when it is switched on.
+cert-manager:
+  enabled: false
+  crds:
+    enabled: true
+    keep: true
 
 # Where the core finds rqlite and the log circuit. Empty: the services of the subcharts below. Set these (and turn the subcharts off with
 # rqlite.enabled / logs.enabled) to use a database and VictoriaLogs nodes that you run yourself.
@@ -175,22 +199,20 @@ status:
   apiUrls: ""
   proxy: ""
 
-# The step secrets (6.7): sealed in the database with XChaCha20-Poly1305, a data key per organisation, wrapped by a master key that is NOT in the database.
-# `keySecret` names a Secret whose key `key` holds 64 hexadecimal digits (32 bytes; `openssl rand -hex 32`): keep it apart from the database backup. A database
-# restored without it holds nothing readable. Without `keySecret` the master key is derived from the core's CURVE key (curve.secretName), which you keep
-# anyway; changing that key then loses the secrets. The core refuses to serve secrets when its key is not the one that sealed what the database holds.
+# The step secrets (6.7): sealed in the database with XChaCha20-Poly1305, a data key per organisation, wrapped by a master key that is NOT in the database but in a key service (D-106: there is no mode without one).
+# The key service is the hsmgate of this release (`hsmgate.enabled`, below, the default) or one of yours (`secrets.keyService`). The core refuses to serve secrets when its key is not the one that sealed what the database holds.
 secrets:
-  keySecret: ""
   # The master key on a token that another machine holds (docs/hardware-key.md): the address of a key service with the Transit API (hsmgate, github.com/zystem/hsmgate;
   # a Vault or an OpenBao Transit engine would do), the name of the key in it, and a Secret with ca.crt, tls.crt and tls.key for mutual TLS (https). When `keyService.url`
-  # is set it is used instead of `keySecret`. The key has to be there when the core starts: a core that cannot open it exits and Kubernetes shows CrashLoopBackOff (it starts it again with a growing pause); a running core waits for a service that goes away (`secrets_unavailable`).
+  # is set, `hsmgate.enabled` has to be false. The key has to be there when the core starts: a core that cannot open it exits and Kubernetes shows CrashLoopBackOff (it starts it again with a growing pause); a running core waits for a service that goes away (`secrets_unavailable`).
   # The service must let the core use the key with the contexts `cinim/dek/v1|<tenant>` and `cinim/kek-check/v1` (hsmgate: `aad: {mode: context, allow: [...]}`).
   keyService:
     url: ""
     keyName: cinim-shard
     mount: ""                          # the Transit mount; empty: transit
     proxy: ""                          # an HTTP proxy that takes CONNECT, http://host:port, when the cluster has no road to the service of its own; the mutual TLS still runs from the core to the service
-    tlsSecret: ""
+    tlsSecret: ""                     # a Secret with ca.crt (the CA the service's certificate is checked against) and, for mutual TLS (hsmgate), tls.crt and tls.key
+    tokenSecret: ""                   # a Vault or OpenBao: a Secret with the key `token` (the core sends it as X-Vault-Token; it does not renew it, so make it with a TTL that lasts: deploy/examples/openbao)
   # D-80: the key service that the master key MOVES TO (another service, or the same with another key), set only while it moves: the core does not use it, `/core rekey` in the Pod does
   # (docs/hardware-key.md "Moving to another key service"). The same keys as `keyService`; when the move is done, put these values into `keyService` and empty these.
   newKeyService:
@@ -251,6 +273,14 @@ core:
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {memory: 512Mi}
+
+# hsmgate with a software token, bundled (deploy/charts/hsmgate): the key of the step secrets is a file on a volume that it keeps (made once at the first start; BACK THE VOLUME UP apart from the
+# database, a shard that loses it cannot read its secrets). The core speaks to it over mutual TLS with a certificate of cert-manager. `enabled: false` for a card behind a service of its own,
+# a Vault or an OpenBao: then `secrets.keyService` (docs/hardware-key.md). Its other values are in the chart (persistence, resources, the issuer of its certificates).
+hsmgate:
+  enabled: true
+  tls:
+    issuerRef: {name: cinim-ca, kind: Issuer, group: cert-manager.io}      # the same as tls.certManager.issuerRef when that names an issuer
 
 # The subcharts (official charts). The names are fixed so that the core finds them.
 rqlite:

@@ -2,7 +2,7 @@
 ## (github.com/zystem/caddy-webdav, `atomic_put`), spoken to with PUT, GET with Range, PROPFIND, MOVE and DELETE. A node keeps nothing but files; who may ask is decided by the core
 ## (core/storeauth.nim: every request carries a token made for it, and the node's `forward_auth` asks the core to check it).
 ##
-## How an object lies on a node. WebDAV cannot join files, so an object is a **directory of chunks**: the key is escaped into a path as on the ZeroMQ node (store/layout.nim) and the
+## How an object lies on a node. WebDAV cannot join files, so an object is a **directory of chunks**: the key is escaped into a path as on the node that is gone (D-57; store/layout.nim) and the
 ## last segment gets `~obj`, which no escaped segment can have, so no object is ever inside another and a delete of an object cannot take a neighbour with it:
 ##     data/acme/s1_x/dist/app.txt~obj/.c0000000   .c0000001 ...    (every chunk is a part of the multipart upload, `partSize` bytes but the last)
 ## A chunk is written atomically (the module's `atomic_put`: temp file, flush, rename, the SHA-256 of the body checked against `X-Content-SHA256`). A whole object appears at once:

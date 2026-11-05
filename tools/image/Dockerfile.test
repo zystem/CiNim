@@ -1,5 +1,5 @@
 # The image the tests run in (the pipeline of the repository, .ci/pipeline.lua): Nim on glibc like the workstation (the tests that use threads end in a crash on musl, so the Alpine image of the
-# libraries is not used), the system libraries the tests link (libzmq, libsodium, libpcre, sqlite, OpenSSL), the nimble packages, git, curl and the openssl command (the certificates of the TLS test of the key service), and
+# libraries is not used), the system libraries the tests link (libsodium, nghttp2, libpcre, sqlite, OpenSSL), the nimble packages, git, curl and the openssl command (the certificates of the TLS test of the key service), and
 # `rqlited`, so that the integration tests start their own scratch databases without Docker (tools/test/run.sh with CINIM_RQLITE_BIN). Built with the repository as the context; the hash of the
 # image is that of this file and cinim.nimble. It holds the real key service, hsmgate (github.com/zystem/hsmgate), built from the tag HSMGATE_REF with the Go of the project (the base is pinned
 # as the project pins it): the tests thsmgate.nim, thsmgate_tls.nim and tkeyservice.nim run against it when HSMGATE_BIN is set, which the image does (they are skipped on a machine without it).
@@ -11,7 +11,12 @@ RUN git clone -q --depth 1 --branch "${HSMGATE_REF}" https://github.com/zystem/h
 
 FROM nimlang/nim:2.2.12
 RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git procps openssl \
-      libzmq3-dev libsodium-dev libpcre3-dev libsqlite3-dev libssl-dev && rm -rf /var/lib/apt/lists/*
+      cmake xz-utils zlib1g-dev libsodium-dev libpcre3-dev libsqlite3-dev libssl-dev && rm -rf /var/lib/apt/lists/*
+# nghttp2 as a static archive where nimgrpc looks for it (1.57 or later is required; the distribution's is older)
+RUN set -eu; W=$(mktemp -d); cd "$W"; \
+    curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ; \
+    cmake -S nghttp2-1.68.0 -B b -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
+    cmake --build b -j"$(nproc)" --target install >/dev/null; rm -rf "$W"; test -f /opt/nghttp2/lib/libnghttp2.a
 # rqlited for glibc: the release of the project (the one in its image is built for musl)
 RUN curl -fsSL https://github.com/rqlite/rqlite/releases/download/v10.5.1/rqlite-v10.5.1-linux-amd64.tar.gz | tar xz -C /tmp \
  && install -m 0755 /tmp/rqlite-v10.5.1-linux-amd64/rqlited /usr/local/bin/rqlited && rm -rf /tmp/rqlite-v10.5.1-linux-amd64

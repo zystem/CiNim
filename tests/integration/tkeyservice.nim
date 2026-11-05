@@ -71,7 +71,7 @@ clients:
   test "the store starts: the check text is sealed through the service, and a secret is put and read back for a tenant":
     if not ready: skip()
     else:
-      let r = tryActivate(url, "unused-certs")
+      let r = tryActivate(url)
       check r.ready
       let k = vaultKek()
       check k.ready and k.kek.id.startsWith("transit:cinim-shard@")
@@ -86,7 +86,7 @@ clients:
     else:
       stopService()
       check startService("33".repeat(32))
-      check tryActivate(url, "unused-certs").ready
+      check tryActivate(url).ready
       var c = newRq(url)
       check getSecrets(c, vaultKek().kek, "acme-ks", @["TOKEN"]).values == @[("TOKEN", "hunter2-from-the-card")]
 
@@ -95,14 +95,14 @@ clients:
     else:
       stopService()
       check startService("44".repeat(32))
-      let r = tryActivate(url, "unused-certs")
+      let r = tryActivate(url)
       check not r.ready and not r.retry and "is not the one that sealed" in r.error
 
   test "no service at all: the store waits (may pass), it does not give up":
     if not ready: skip()
     else:
       stopService()
-      let r = tryActivate(url, "unused-certs")
+      let r = tryActivate(url)
       check not r.ready and r.retry
 
   test "D-80 the master key moves from this service to another service with another key: the database opens with the new one only, and the secret reads as before":

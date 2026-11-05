@@ -1,6 +1,6 @@
 ## The real Backend: the official Kubernetes C client (A.6, D-26). The only module of the controller that knows
 ## Kubernetes; it turns the platform's PodRequest into a Pod spec and answers the questions logic.nim asks of the cluster.
-## SEC-010 per-job projected tokens are deferred: the shim gets the shared CURVE "client" identity through a Secret.
+## SEC-010 per-job projected tokens are deferred: the shim gets the shared TLS "client" identity through a Secret.
 import std/[os, json, strutils, times, base64, atomics, sequtils, options]
 import ../common/[k8sbind, envname, quantity]
 import backend, podsec, runvolume, shardsettings
@@ -13,7 +13,7 @@ type K8s* = object
 
 const
   shimConfigMap = "cicd-shim"
-  curveSecret = "cicd-curve-certs"
+  tlsSecret = "cicd-tls-certs"
 
 proc cFree(p: pointer) {.importc: "free", header: "<stdlib.h>".}
 
@@ -82,16 +82,17 @@ proc createOrReplace(k: K8s; client: ptr genericClient_t; kind, name, body: stri
 
 proc ensureShimAssets*(k: K8s; shimBinPath, certs: string; withCerts: bool) =
   ## Safe at every startup. The ConfigMap is unconditional: every step Pod runs through the shim, and it is replaced when it exists, so that
-  ## the shim is that of the controller's own image. The Secret (the shim's CURVE identity) only when logs are streamed; an existing one is left.
+  ## the shim is that of the controller's own image. The Secret (the shim's TLS identity) only when logs are streamed; an existing one is replaced, so that a renewed pair
+  ## reaches the step Pods that start after it.
   createOrReplace(k, k.configmaps, "configmap", shimConfigMap, $(%*{
     "apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": shimConfigMap},
     "binaryData": {"cicd-shim": encode(readFile(shimBinPath))}}))
   if withCerts:
-    createOrIgnore(k, k.secrets, "secret", curveSecret, $(%*{
-      "apiVersion": "v1", "kind": "Secret", "metadata": {"name": curveSecret},
-      "stringData": {"client.pub": readFile(certs / "curve" / "client.pub"),
-                     "client.key": readFile(certs / "curve" / "client.key"),
-                     "core.pub": readFile(certs / "curve" / "core.pub")}}))
+    createOrReplace(k, k.secrets, "secret", tlsSecret, $(%*{
+      "apiVersion": "v1", "kind": "Secret", "metadata": {"name": tlsSecret},
+      "stringData": {"ca.pem": readFile(certs / "tls" / "ca.pem"),
+                     "client.pem": readFile(certs / "tls" / "client.pem"),
+                     "client.key": readFile(certs / "tls" / "client.key")}}))
 
 var shard {.threadvar.}: ShardSettings
   ## the settings of the shard (the build profile of D-42, what a build Pod is is in podsec.nim; the volume of a run, runvolume.nim): given by the core in every answer to a
@@ -117,9 +118,9 @@ proc podBody(r: PodRequest): JsonNode =
         "securityContext": sec.containerCtx,
         "resources": sec.resources}],
       "volumes": (@[%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}}] & vol.volumes &   # the run's volume (the spool of the log and the manifest of the artifacts are on it), and an emptyDir for the shim's own files
-        (if r.logging: @[%*{"name": "certs", "secret": {"secretName": curveSecret, "items": [   # shim reads <certs-dir>/curve/<name>.{pub,key}
-          {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"},
-          {"key": "core.pub", "path": "curve/core.pub"}]}}] else: @[]))}}
+        (if r.logging: @[%*{"name": "certs", "secret": {"secretName": tlsSecret, "items": [   # shim reads <certs-dir>/tls/{ca.pem,client.pem,client.key}
+          {"key": "ca.pem", "path": "tls/ca.pem"}, {"key": "client.pem", "path": "tls/client.pem"},
+          {"key": "client.key", "path": "tls/client.key"}]}}] else: @[]))}}
   if vol.initContainers.len > 0: result["spec"]["initContainers"] = %vol.initContainers
   if vol.affinity != nil: result["spec"]["affinity"] = vol.affinity
   if vol.spread != nil: result["spec"]["topologySpreadConstraints"] = vol.spread
@@ -150,8 +151,8 @@ proc drainBody(name, runId, volume, image: string; cmd: seq[string]): JsonNode =
           {"name": "data", "mountPath": "/cicd/state", "subPath": runvolume.stateDir}],
         "securityContext": sec.containerCtx, "resources": sec.resources}],
       "volumes": [%*{"name": "shim", "configMap": {"name": shimConfigMap, "defaultMode": 493}},
-                  %*{"name": "certs", "secret": {"secretName": curveSecret, "items": [
-                    {"key": "client.pub", "path": "curve/client.pub"}, {"key": "client.key", "path": "curve/client.key"}, {"key": "core.pub", "path": "curve/core.pub"}]}},
+                  %*{"name": "certs", "secret": {"secretName": tlsSecret, "items": [
+                    {"key": "ca.pem", "path": "tls/ca.pem"}, {"key": "client.pem", "path": "tls/client.pem"}, {"key": "client.key", "path": "tls/client.key"}]}},
                   %*{"name": "data", "persistentVolumeClaim": {"claimName": runvolume.claimName(runId, volume)}}],
       "affinity": {"podAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [
         {"weight": 100, "podAffinityTerm": {"labelSelector": {"matchLabels": {runvolume.volumeLabel: runvolume.volumeId(runId, volume)}}, "topologyKey": "kubernetes.io/hostname"}}]}}}}

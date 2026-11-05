@@ -1,3 +1,4 @@
+{{- $ks := include "cinim-shard.keyService" . | fromJson }}
 # One replica: the core holds the queue, the leases and the log circuit of the shard in one process (D-23).
 apiVersion: apps/v1
 kind: Deployment
@@ -46,6 +47,7 @@ spec:
             {{- if .Values.storage.url }}
             # the storage module (D-60, chart cinim-storage): the stores of the shard are its; the core holds its address and the secret its calls are signed with
             - {name: CINIM_STORAGE_URL, value: {{ .Values.storage.url | quote }}}
+            - {name: CINIM_CERT_RELOAD_SECONDS, value: {{ .Values.tls.reloadSeconds | quote }}}      # how often the core looks at the files of the keys (tls.reloadSeconds)
             - {name: CINIM_STORAGE_DIRECT_URL, value: {{ required "storage.directUrl is required when storage.url is set: the shims send the bytes of artifacts and caches straight to the module (D-61), http://cinim-storage.<namespace>.svc:18091" .Values.storage.directUrl | quote }}}
             - name: CINIM_STORAGE_TOKEN
               valueFrom:
@@ -100,24 +102,26 @@ spec:
             - {name: CINIM_BUILD_SECCOMP, value: {{ .Values.build.seccompProfile | quote }}}
             - {name: CINIM_BUILD_INGRESS, value: {{ .Values.build.ingress | toJson | quote }}}   # a list of rules, or the string "all"
             {{- end }}
-            {{- if .Values.secrets.keyService.url }}
+            {{- if $ks.url }}
             # the master key of the step secrets lives on a token behind a key service with the Transit API (hsmgate; docs/hardware-key.md, core/transitclient.nim)
-            - {name: CINIM_KEYSERVICE_URL, value: {{ .Values.secrets.keyService.url | quote }}}
-            - {name: CINIM_KEYSERVICE_KEY_NAME, value: {{ .Values.secrets.keyService.keyName | quote }}}
-            {{- if .Values.secrets.keyService.mount }}
-            - {name: CINIM_KEYSERVICE_MOUNT, value: {{ .Values.secrets.keyService.mount | quote }}}
+            - {name: CINIM_KEYSERVICE_URL, value: {{ $ks.url | quote }}}
+            - {name: CINIM_KEYSERVICE_KEY_NAME, value: {{ $ks.keyName | quote }}}
+            {{- if $ks.mount }}
+            - {name: CINIM_KEYSERVICE_MOUNT, value: {{ $ks.mount | quote }}}
             {{- end }}
-            {{- if .Values.secrets.keyService.proxy }}
-            - {name: CINIM_KEYSERVICE_PROXY, value: {{ .Values.secrets.keyService.proxy | quote }}}
+            {{- if $ks.proxy }}
+            - {name: CINIM_KEYSERVICE_PROXY, value: {{ $ks.proxy | quote }}}
             {{- end }}
-            {{- if .Values.secrets.keyService.tlsSecret }}
+            {{- if $ks.tokenSecret }}
+            - {name: CINIM_KEYSERVICE_TOKEN_FILE, value: /etc/cinim-keyservice-token/token}      # a Vault or OpenBao token, sent as X-Vault-Token
+            {{- end }}
+            {{- if $ks.tlsSecret }}
             - {name: CINIM_KEYSERVICE_CA, value: /etc/cinim-keyservice/ca.crt}
+            {{- if not $ks.tokenSecret }}
             - {name: CINIM_KEYSERVICE_CERT, value: /etc/cinim-keyservice/tls.crt}
             - {name: CINIM_KEYSERVICE_KEY, value: /etc/cinim-keyservice/tls.key}
+            {{- end }}      {{- /* mutual TLS (hsmgate); with a token (Vault, OpenBao) the Secret holds the CA alone */ -}}
             {{- end }}
-            {{- else if .Values.secrets.keySecret }}
-            # the master key of the step secrets (core/secretvault.nim); without one it is derived from the CURVE key
-            - {name: CINIM_SECRETS_KEY_FILE, value: /etc/cinim-secrets/key}
             {{- end }}
             {{- if .Values.secrets.newKeyService.url }}
             # D-80: the key service that the master key moves to, only while it moves (`/core rekey`, docs/hardware-key.md); the core itself does not use it
@@ -193,11 +197,11 @@ spec:
                   key: CINIM_ROUTER_KEY
             {{- end }}
           volumeMounts:
-            - {name: curve, mountPath: /etc/cinim/curve, readOnly: true}
-            {{- if .Values.secrets.keySecret }}
-            - {name: secrets-key, mountPath: /etc/cinim-secrets, readOnly: true}
+            - {name: tls, mountPath: /etc/cinim/tls, readOnly: true}
+            {{- if and $ks.url $ks.tokenSecret }}
+            - {name: keyservice-token, mountPath: /etc/cinim-keyservice-token, readOnly: true}
             {{- end }}
-            {{- if and .Values.secrets.keyService.url .Values.secrets.keyService.tlsSecret }}
+            {{- if and $ks.url $ks.tlsSecret }}
             - {name: keyservice-tls, mountPath: /etc/cinim-keyservice, readOnly: true}
             {{- end }}
             {{- if and .Values.secrets.newKeyService.url .Values.secrets.newKeyService.tlsSecret }}
@@ -231,21 +235,47 @@ spec:
           resources:
             {{- toYaml .Values.core.resources | nindent 12 }}
       volumes:
-        - name: curve
-          secret:
-            secretName: {{ required "curve.secretName is required" .Values.curve.secretName }}
+        - name: tls
+          {{- if .Values.tls.certManager.enabled }}
+          projected:
             defaultMode: 0440
-            # the core's own key pair, and the client pair that it hands to the controller of each organisation (D-24; until the
+            # the files the core expects in /etc/cinim/tls, from what cert-manager made (templates/certificates.yaml); ca.crt is the CA that signed the pair
+            sources:
+              - secret:
+                  name: cinim-core-tls
+                  items:
+                    - {key: tls.crt, path: core.pem}
+                    - {key: tls.key, path: core.key}
+                    - {key: ca.crt, path: ca.pem}
+              - secret:
+                  name: cinim-client-tls
+                  items:
+                    - {key: tls.crt, path: client.pem}
+                    - {key: tls.key, path: client.key}
+          {{- else }}
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+            defaultMode: 0440
+            # the core's own certificate and key, the CA, the client pair that it hands to the controller of each organisation (until the
             # bootstrap token exchange of IAM-003 exists the controllers use the shared client key)
             items:
-              - {key: core.pub, path: core.pub}
+              - {key: ca.pem, path: ca.pem}
+              - {key: core.pem, path: core.pem}
               - {key: core.key, path: core.key}
-              - {key: client.pub, path: client.pub}
+              - {key: client.pem, path: client.pem}
               - {key: client.key, path: client.key}
-        {{- if and .Values.secrets.keyService.url .Values.secrets.keyService.tlsSecret }}
+          {{- end }}
+        {{- if and $ks.url $ks.tokenSecret }}
+        - name: keyservice-token
+          secret:
+            secretName: {{ $ks.tokenSecret }}
+            defaultMode: 0440
+            items: [{key: token, path: token}]
+        {{- end }}
+        {{- if and $ks.url $ks.tlsSecret }}
         - name: keyservice-tls
           secret:
-            secretName: {{ .Values.secrets.keyService.tlsSecret }}
+            secretName: {{ $ks.tlsSecret }}
             defaultMode: 0440
         {{- end }}
         {{- if and .Values.secrets.newKeyService.url .Values.secrets.newKeyService.tlsSecret }}
@@ -253,14 +283,6 @@ spec:
           secret:
             secretName: {{ .Values.secrets.newKeyService.tlsSecret }}
             defaultMode: 0440
-        {{- end }}
-        {{- if .Values.secrets.keySecret }}
-        - name: secrets-key
-          secret:
-            secretName: {{ .Values.secrets.keySecret }}
-            defaultMode: 0440
-            items:
-              - {key: key, path: key}
         {{- end }}
         - name: tmp
           emptyDir: {}

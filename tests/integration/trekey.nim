@@ -3,6 +3,7 @@
 import std/[unittest, json, os, strutils, times, sequtils]
 import common/rqlite
 import core/[schema, secretvault, kekprovider]
+import ../support/testkek
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -23,7 +24,7 @@ suite "D-80 the master key moves to another":
     var checkBefore = ""
     let cb = c.query(%*[["SELECT value FROM vault_meta WHERE key = 'kek_check'"]])["results"][0]{"values"}
     if cb != nil and cb.len > 0: checkBefore = cb[0][0].getStr
-    discard c.execute(%*[["DELETE FROM vault_meta WHERE key = 'kek_check'"], ["DELETE FROM org_keys"]])         # the vault of this test is its own: the rows of other tests are of other keys
+    discard c.execute(%*[["DELETE FROM vault_meta WHERE key = 'kek_check'"], ["DELETE FROM vault_meta WHERE key = 'master_secret'"], ["DELETE FROM org_keys"]])         # the vault of this test is its own: the rows of other tests are of other keys
     for i in 1 .. 3:
       let t = "rk" & $i & sfx
       tenants.add t

@@ -3,6 +3,7 @@
 ## a real process against a core nobody listens on (what is checked is what it does before and when the core does not answer; the bytes through a real core are checked live).
 import std/[unittest, os, osproc, json, strutils, tables, sequtils]
 import checksums/sha2
+import ../support/testcerts
 import jobcontroller/[backend, drain, logic]
 
 func sha(data: string): string =
@@ -116,11 +117,11 @@ suite "DAT-003 the Pod of a drain":
 
 suite "DAT-003 the shim's drain mode":
   let exe = getTempDir() / "cinim-shim-drain-pod-test"
-  let certs = getCurrentDir() / "tests" / "certs"
+  let certs = testCerts()
   var available = false
 
   test "setup: compile the logging shim":
-    available = execCmd("nim c --hints:off --warnings:off -d:shimLogging --nimcache:" & exe & ".nc -o:" & exe & " src/shim/shim.nim") == 0 and dirExists(certs / "curve")
+    available = execCmd("nim c --hints:off --warnings:off -d:shimLogging --nimcache:" & exe & ".nc -o:" & exe & " src/shim/shim.nim") == 0 and certs.len > 0
     if not available: skip()
 
   proc drainShim(dir: string; extra: seq[string]): tuple[code: int, term: JsonNode] =

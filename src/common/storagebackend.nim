@@ -4,7 +4,7 @@
 ## and the core does what is written here with them, in blocks. So the store can change without touching a step or a shim, and the module that talks to it can
 ## move out of the core: `ObjectBackend` is the whole of that module's contract, in these eight operations, none of which holds state between calls (a multipart
 ## upload is named by the store's own upload id and the parts' ETags, which the caller keeps). Built: `S3Backend` (core/s3backend.nim), in the core's process.
-## To run the storage module as a separate service, implement the same eight operations as requests and answers over ZeroMQ with CURVE and write a backend that
+## To run the storage module as a separate service, implement the same eight operations as requests and answers over gRPC with mutual TLS and write a backend that
 ## sends them (`RemoteBackend`): the core still decides everything (the settings and the key are the core's, sealed in its database, and are sent to the service
 ## with each request or when it connects; the service keeps nothing), and `ArtifactIngest` may then be served by that service as well, with the shims pointed to
 ## it by `--artifact-addr`. docs/artifacts.md, "Moving the storage module out of the core".

@@ -1132,7 +1132,7 @@ proc onRequest() {.raises: [], gcsafe.} =
             # the namespace and what the controller needs; the controller itself is a Pod that the core makes in its next pass, with the one-time token of the identity
             # (IAM-003, orgreconcile.nim), which is asked for right after the organisation is recorded
             let pc = provisionConfig(cfg, netEgress, netIngress)
-            let r = provision(kube, pc, slug, loadCurve(coreRef.certs))
+            let r = provision(kube, pc, slug, loadTls(coreRef.certs))
             if not r.ok:
               # what was made stays; asking again makes the rest (every create is idempotent)
               reply(Http502, $(%*{"type": "about:blank", "status": 502, "code": "provision_failed", "step": r.failedStep,
@@ -2550,7 +2550,7 @@ proc onRequest() {.raises: [], gcsafe.} =
       problem(Http500, "internal", e.msg)
 
 
-var vaultThread: Thread[tuple[rqliteUrl, certs: string, stop: ptr Atomic[bool]]]
+var vaultThread: Thread[tuple[rqliteUrl: string, stop: ptr Atomic[bool]]]
 var vaultThreadRunning = false
 
 proc joinVault*() =
@@ -2558,7 +2558,7 @@ proc joinVault*() =
 
 proc serveApi*(co: Core; port: int) =
   coreRef = co
-  createThread(vaultThread, runVaultSetup, (co.rqliteUrl, co.certs, addr stopServers))
+  createThread(vaultThread, runVaultSetup, (co.rqliteUrl, addr stopServers))
   vaultThreadRunning = true
   if authOn:
     # IAM-001: the user `admin` at the first start; the password and the token are written once, in a line that a test can parse. The password has to be changed first.

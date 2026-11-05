@@ -1,0 +1,41 @@
+# Vault for the key of the shard, unsealed by itself with Azure Key Vault (deploy/examples/openbao/autounseal/README.md). The official chart, `hashicorp/vault`. Vault carries the cloud seals itself (no plugin).
+# Replace what is in <angle brackets>. The Service is `vault` in the namespace of the shard, the certificate is vault-tls.yaml.
+global:
+  tlsDisable: false
+injector:
+  enabled: false
+server:
+  standalone:
+    enabled: true
+    config: |
+      ui = false
+      listener "tcp" {
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_cert_file   = "/vault/userconfig/vault-tls/tls.crt"
+        tls_key_file    = "/vault/userconfig/vault-tls/tls.key"
+      }
+      storage "file" {
+        path = "/vault/data"
+      }
+      seal "azurekeyvault" {
+        tenant_id  = "<tenant id>"
+        vault_name = "<name of the Key Vault>"
+        key_name   = "<key>"          # an RSA key with the operations get, wrapKey, unwrapKey for the identity (the role "Key Vault Crypto Service Encryption User")
+        # client_id and client_secret are not here: Vault takes AZURE_CLIENT_ID and AZURE_CLIENT_SECRET (below), or the managed identity of the node when it finds neither
+      }
+  volumes:
+    - name: vault-tls
+      secret: {secretName: vault-tls}
+  volumeMounts:
+    - {name: vault-tls, mountPath: /vault/userconfig/vault-tls, readOnly: true}
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/userconfig/vault-tls/ca.crt        # for `vault` inside the Pod (the chart sets VAULT_ADDR)
+  # Who the Pod is, one of the two.
+  # (a) a service principal that may use the key, in a Secret (`kubectl create secret generic azure-kms --from-literal=client_id=... --from-literal=client_secret=...`)
+  extraSecretEnvironmentVars:
+    - {envName: AZURE_CLIENT_ID, secretName: azure-kms, secretKey: client_id}
+    - {envName: AZURE_CLIENT_SECRET, secretName: azure-kms, secretKey: client_secret}
+  # (b) on AKS, the managed identity of the node pool (or a pod identity) that has the role above: delete (a); Vault uses the managed identity when no client id is given.
+  dataStorage:
+    size: 1Gi

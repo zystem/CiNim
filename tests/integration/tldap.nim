@@ -4,6 +4,7 @@
 import std/[unittest, json, os, osproc, strutils, times, streams, sequtils]
 import common/[rqlite, ldapclient]
 import core/[schema, apiauth, ldapauth, secretvault, kekprovider, teams]
+import ../support/testkek
 
 let url = getEnv("CINIM_RQLITE_URL")
 

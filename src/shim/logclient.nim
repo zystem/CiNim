@@ -1,12 +1,12 @@
 ## LogIngest/StepReport client of the shim (RUN-007, RUN-010, D-27). The step's output is cut into compressed
 ## jsonline blocks (logspool.nim) queued as files on the Pod's ephemeral storage; a sender thread drains them to core
-## over ZeroMQ+CURVE, oldest first, and deletes a block only after core acknowledged it (core acknowledges after vlagent
+## over gRPC with mutual TLS, oldest first, and deletes a block only after core acknowledged it (core acknowledges after vlagent
 ## accepted it, DAT-001). The step's process is never blocked by delivery, only by a *full* spool (then the shim stops
 ## reading its pipe - the backpressure of RUN-007 - and nothing is lost).
 ##
-## SEC-010 (job token) is deferred: the shared CURVE "client" identity is used, as for job-controller/executor-service.
+## SEC-010 (job token) is deferred: the shared TLS "client" identity is used, as for the job controller and the conductors.
 import std/[os, times, atomics, strutils, json]
-import ../common/zmqcurve
+import ../common/corechannel
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import crunchy
@@ -58,13 +58,13 @@ const heartbeatSeconds = 5.0
 
 proc currentStatus(): ShimStatus =
   ## The shim's state exactly as it is written to the Pod log (same JSON, same event number): the reader reconciles the
-  ## ZeroMQ picture with the Pod-log one by `n` (D-29).
+  ## picture of the channel with the Pod-log one by `n` (D-29).
   result = ShimStatus(state_json: $toJson(currentState(), int64(epochTime() * 1000)), spool_bytes: uint64(max(0'i64, spoolBytes.load)))
   for (name, value) in currentMetrics(): result.metrics.add ShimMetric(name: name, value: value)
 
 proc sendLoop(a: SenderArgs) {.thread.} =
   {.cast(gcsafe).}:
-    var conn: ZConnection
+    var conn: CoreChannel
     var connected = false
     var backoff = 300
     var lastWarn = 0.0
@@ -88,8 +88,7 @@ proc sendLoop(a: SenderArgs) {.thread.} =
       if queued.len == 0 and finished.load: break
       try:
         if not connected:
-          conn = connectReq(a.collectorAddr, loadPublicKey(a.certs, "core"), loadKeypair(a.certs, "client"),
-                            recvTimeoutMs = 6000, sendTimeoutMs = 5000)    # a resend after a timeout is harmless (core takes each block once)
+          conn = dialCore(a.collectorAddr, a.certs)    # a resend after a timeout is harmless (core takes each block once)
           connected = true
         let sentN = currentState().n
         var batch = LogBatch(step: step)
@@ -98,8 +97,7 @@ proc sendLoop(a: SenderArgs) {.thread.} =
         let bytes = Protobuf.encode(batch)
         var msg = newString(bytes.len)
         if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-        conn.send(msg)
-        let (avail, _, body) = waitForReceive(conn.socket)     # REQ_RELAXED+CORRELATE: a resend after a timeout is fine
+        let (avail, body) = conn.exchange(logIngestMethod, msg, 6000)
         if not avail:
           warn "no answer from core within the timeout, retrying"
           failing = true
@@ -143,7 +141,7 @@ proc statusLoop(a: StatusArgs) {.thread.} =
   ## D-75: the shim's state, heartbeat and metrics, to the core's status port, from a thread of their own: a core that is slow to record them delays these and never the log. Sent when the state
   ## changed and at least every few seconds; a failure is said once in half a minute and tried again, the step never waits for it.
   {.cast(gcsafe).}:
-    var conn: ZConnection
+    var conn: CoreChannel
     var connected = false
     var backoff = 300
     var lastWarn = 0.0
@@ -161,14 +159,13 @@ proc statusLoop(a: StatusArgs) {.thread.} =
         continue
       try:
         if not connected:
-          conn = connectReq(a.statusAddr, loadPublicKey(a.certs, "core"), loadKeypair(a.certs, "client"), recvTimeoutMs = 6000, sendTimeoutMs = 5000)
+          conn = dialCore(a.statusAddr, a.certs)
           connected = true
         let sentN = currentState().n
         let bytes = Protobuf.encode(StatusReport(step: step, status: currentStatus()))
         var msg = newString(bytes.len)
         if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-        conn.send(msg)
-        let (avail, _, body) = waitForReceive(conn.socket)
+        let (avail, body) = conn.exchange(statusMethod, msg, 6000)
         if not avail:
           warn "no answer from core within the timeout, retrying"
           failing = true
@@ -290,16 +287,14 @@ proc sendStepReport*(coreAddr, certs: string; step: StepRef; exitCode: int; reas
   ## True = core has the result (or the attempt is superseded and nobody wants it): exit. False = no answer / "retry later":
   ## the caller asks again until its patience runs out, then falls back on the termination message and the Pod's status.
   try:
-    let conn = connectReq(coreAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"),
-                          recvTimeoutMs = 5000, sendTimeoutMs = 5000)
+    let conn = dialCore(coreAddr, certs)
     defer: (try: conn.close() except CatchableError: discard)
     let req = StepReport(step: step, exit_code: int32(exitCode), reason: reason,
                          state_json: $toJson(currentState(), int64(epochTime() * 1000)))
     let bytes = Protobuf.encode(req)
     var msg = newString(bytes.len)
     if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-    conn.send(msg)
-    let (avail, _, body) = waitForReceive(conn.socket)
+    let (avail, body) = conn.exchange(stepReportMethod, msg, 5000)
     if not avail: return false
     let ack = Protobuf.decode(cast[seq[byte]](body), StepReportAck)
     ack.may_exit
@@ -317,15 +312,13 @@ proc fetchStepSecrets*(coreAddr, certs: string; step: StepRef; token: string): F
   ## One try at asking core for the values of this step's secrets (6.7), over the same authenticated channel as the report. The credential is
   ## the step's own (bound to the run, step and attempt); core answers with what the step's options asked for.
   try:
-    let conn = connectReq(coreAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"),
-                          recvTimeoutMs = 5000, sendTimeoutMs = 5000)
+    let conn = dialCore(coreAddr, certs)
     defer: (try: conn.close() except CatchableError: discard)
     let req = StepReport(step: step, request: "secrets", job_token: token)
     let bytes = Protobuf.encode(req)
     var msg = newString(bytes.len)
     if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-    conn.send(msg)
-    let (avail, _, body) = waitForReceive(conn.socket)
+    let (avail, body) = conn.exchange(stepReportMethod, msg, 5000)
     if not avail: return FetchedSecrets(retry: true, code: "no_answer", detail: "core did not answer")
     let ack = Protobuf.decode(cast[seq[byte]](body), StepReportAck)
     if ack.accepted:
@@ -343,7 +336,7 @@ proc fetchStepSecrets*(coreAddr, certs: string; step: StepRef; token: string): F
 type
   ArtifactClient* = ref object
     target, certs: string
-    conn: ZConnection
+    conn: CoreChannel
     open: bool
     direct: DirectClient
     directBase: string
@@ -376,15 +369,14 @@ proc call*(c: ArtifactClient; req: ArtifactRequest; timeoutMs = 60000): Artifact
   ## between requests and made again after an error. The credential in `req.job_token` is the step's own.
   try:
     if not c.open:
-      c.conn = connectReq(c.target, loadPublicKey(c.certs, "core"), loadKeypair(c.certs, "client"), recvTimeoutMs = timeoutMs, sendTimeoutMs = 10000)
+      c.conn = dialCore(c.target, c.certs)
       c.open = true
     let bytes = Protobuf.encode(req)
     var msg = newString(bytes.len)
     if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-    c.conn.send(msg)
-    let (avail, _, body) = waitForReceive(c.conn.socket)
+    let (avail, body) = c.conn.exchange(artifactMethod, msg, timeoutMs)
     if not avail:
-      c.close()                    # a REQ socket that did not get its answer cannot send again: a new one
+      c.close()                    # a channel that got no answer is made again
       return ArtifactReply(retry: true, code: "no_answer", detail: "core did not answer")
     result.ack = Protobuf.decode(cast[seq[byte]](body), ArtifactAck)
     result.ok = result.ack.accepted
@@ -481,7 +473,7 @@ proc drainLogSpool*(collectorAddr, certs, spoolDir: string; step: StepRef; patie
   ## The drain (docs/artifacts.md): what the log spool still holds is sent to LogIngest, exactly as the sender thread of a step would have, and the blocks the core
   ## acknowledges are removed. No heartbeat and no state of a shim: the step is over. `ok` false: the core did not take it all within `patience` seconds.
   let until = epochTime() + patience.float
-  var conn: ZConnection
+  var conn: CoreChannel
   var connected = false
   var backoff = 300
   var lastFailure = "the core did not answer"
@@ -494,15 +486,14 @@ proc drainLogSpool*(collectorAddr, certs, spoolDir: string; step: StepRef; patie
     if epochTime() >= until: return (false, lastFailure)
     try:
       if not connected:
-        conn = connectReq(collectorAddr, loadPublicKey(certs, "core"), loadKeypair(certs, "client"), recvTimeoutMs = 6000, sendTimeoutMs = 5000)
+        conn = dialCore(collectorAddr, certs)
         connected = true
       var batch = LogBatch(step: step)
       for q in queued: batch.chunks.add chunkOf(q)
       let bytes = Protobuf.encode(batch)
       var msg = newString(bytes.len)
       if bytes.len > 0: copyMem(addr msg[0], unsafeAddr bytes[0], bytes.len)
-      conn.send(msg)
-      let (avail, _, body) = waitForReceive(conn.socket)
+      let (avail, body) = conn.exchange(logIngestMethod, msg, 6000)
       if not avail:
         lastFailure = "no answer from the core within the timeout"
       else:

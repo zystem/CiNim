@@ -122,7 +122,7 @@ proc pollRound*(be: Backend; st: CtrlState; cfg: Config; now: float): tuple[tran
       started = true
       st.markStarted(p.name)
     let reading = classifyPod(pod, seenStarted = started)
-    # the Pod's log is the second route by which core learns what the shim is doing (the first is ZeroMQ): read every few
+    # the Pod's log is the second route by which core learns what the shim is doing (the first is the channel to the core): read every few
     # seconds while the step runs, and once more when the Pod's story is over; core reconciles both by event number
     var shimJson = ""
     if started and (reading.verdict != vRunning or now - p.lastLog >= cfg.logEvery.float):

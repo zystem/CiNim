@@ -1,4 +1,4 @@
-## The job-controller's decisions against a fake cluster (D-29): no Kubernetes, no ZeroMQ.
+## The job-controller's decisions against a fake cluster (D-29): no Kubernetes, no channel to the core.
 import std/[unittest, json, tables, options, strutils, os, sequtils]
 import common/shimstate
 import common/ids

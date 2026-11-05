@@ -7,7 +7,7 @@
 ## alert (`GET /api/v1/organizations:reconcile`), and objects go only with the explicit deletion of an organisation, or with the end of the
 ## retention of a switched-off one, which is the same deletion. What it can compare is limited by what the core may read: namespaces (their
 ## labels carry the policy, Pod Security and the build-pod policy) and the state volume of a controller; it may not read Secrets, so a
-## Secret that was changed by hand is not noticed.
+## Secret that was changed by hand is not noticed (the Secret of the transport keys is made again when the pair changes or the core has just started: `keysapplied`).
 ##
 ## The controller of an organisation is a Pod that the core itself makes, with the one-time token of the current generation of its identity in the environment (IAM-003, D-62);
 ## Kubernetes neither restarts it nor probes it. Every pass the core looks at the controller Pods of the namespace (`superviseController`): one that it does not know (another
@@ -18,7 +18,7 @@
 ## `tests/unit/torgreconcile.nim` runs them against a fake cluster. `runPass` and `runReconciler` are the glue.
 import std/[json, locks, atomics, os, strutils, times, algorithm]
 import health
-import kubeapi, orgprovision, schema, keptpods, ctrlpresence
+import kubeapi, orgprovision, schema, keptpods, ctrlpresence, keysapplied
 import ../common/[rqlite, ctrlauth]
 
 type
@@ -31,6 +31,8 @@ type
     lastPoll*: proc (namespace: string): int64 {.gcsafe.}                       ## when the core last took in a report of that controller (0: not since the core started)
     startRetention*: proc (slug: string; at: int64) {.gcsafe.}
     forget*: proc (slug, namespace: string) {.gcsafe.}                          ## the rows of a deleted organisation
+    keysSeen*: proc (namespace: string): int64 {.gcsafe.}                       ## the digest (`keysDigest`) of the transport keys the core last put in the Secret of that namespace; 0: it has not since it started
+    noteKeys*: proc (namespace: string; digest: int64) {.gcsafe.}
 
   OrgReport* = object
     slug*, state*: string
@@ -39,6 +41,7 @@ type
     identityRenewed*: bool         ## a new generation of the controller's identity was made in this pass (the controller was not enrolled, was silent, or ended)
     controllerRemoved*: seq[string] ## "<Pod>: <why>" for every controller Pod the core deleted
     policiesReplaced*: seq[string]  ## the NetworkPolicies that differed from what the core makes now and were deleted and made again
+    keysReplaced*: bool             ## the Secret of the transport keys was made again: the pair the core has now is not the one it put in (a certificate was renewed), or it has put none in since it started
     error*: string
 
   Alert* = object
@@ -136,7 +139,7 @@ proc superviseController(k: KubeApi; cfg: ProvisionConfig; slug: string; active:
   of oFailed: report.error = "making the controller: " & made.detail
   else: discard
 
-proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: CurveKeys; hooks: Hooks; now, coreStarted: int64): OrgReport =
+proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; keys: TlsKeys; hooks: Hooks; now, coreStarted: int64): OrgReport =
   result = OrgReport(slug: o.slug, state: o.state)
   let ns = orgNamespace(cfg, o.slug)
   let active = o.state == "active"
@@ -144,7 +147,7 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: 
   if nsGot.error.len > 0:
     result.error = "reading the namespace: " & nsGot.error
     return
-  let r = provision(k, cfg, o.slug, curve, active)
+  let r = provision(k, cfg, o.slug, keys, active)
   for s in r.steps:
     if s.outcome == oCreated: result.created.add s.name
   if not r.ok:
@@ -152,7 +155,7 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: 
     return
   # A policy that differs from what the core makes now (a new port in the rules of the shard, a changed network mode) is deleted and made again: it carries the fingerprint of the
   # object the core made (`hashAnnotation`), and one that carries another, or none (made before the fingerprint), is not the policy the core means. Nothing else is replaced.
-  let (steps, _) = organizationSteps(cfg, o.slug, curve, active)
+  let (steps, _) = organizationSteps(cfg, o.slug, keys, active)
   for st in steps:
     if st.kind notin policyKinds: continue
     let have = k.getObject(st.kind, st.namespace, st.objectName)
@@ -166,6 +169,26 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; curve: 
       result.error = "replacing " & st.name & ": " & made.detail
       return
     result.policiesReplaced.add st.objectName
+  # The Secret of the keys is made only when it is missing (`provision`); a client pair that was renewed (core/certwatch.nim) has to reach the controller, whose files the kubelet then
+  # updates in place, and which connects with them the next time it does. The core may not read a Secret (T-45), so it does not compare: it remembers the pair it put in
+  # (`keysapplied`) and, when the pair it has now is another one, or it has put none since it started (the Secret may hold what an earlier core had), deletes the Secret and makes it again.
+  let want = keysDigest(keys)
+  for st in steps:
+    if st.kind != "Secret" or st.objectName != tlsSecretName: continue
+    var madeNow = false
+    for s in r.steps:
+      if s.name == st.name and s.outcome == oCreated: madeNow = true
+    if madeNow:
+      hooks.noteKeys(ns, want)             # made in this pass, from the pair the core has
+      continue
+    if hooks.keysSeen(ns) == want: continue
+    let gone = k.remove(st.kind, st.namespace, st.objectName)
+    let made = if gone.outcome == oFailed: gone else: k.create(st.kind, st.namespace, st.obj)
+    if made.outcome == oFailed:
+      result.error = "replacing " & st.name & ": " & made.detail
+      return
+    hooks.noteKeys(ns, want)
+    result.keysReplaced = true
   if cfg.controllerImage.len > 0: superviseController(k, cfg, o.slug, active, hooks, now, coreStarted, result)
 
 proc namespaceAlerts(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; shard: string): tuple[alerts: seq[Alert], error: string] =
@@ -193,7 +216,7 @@ proc namespaceAlerts(k: KubeApi; mk: ConfigMaker; orgs: seq[OrganizationFull]; s
       result.alerts.add Alert(code: "orphan_namespace", namespace: name, organization: slug,
                               detail: "no organisation " & slug & " in this shard's database")
 
-proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[OrganizationFull]; hooks: Hooks; now, retention: int64;
+proc reconcilePass*(k: KubeApi; mk: ConfigMaker; keys: TlsKeys; orgs: seq[OrganizationFull]; hooks: Hooks; now, retention: int64;
                     coreStarted = 0'i64; purgeGrace = 0'i64): PassResult =
   ## One pass: first the retention (a switched-off organisation whose time is up is deleted for good; `retention` 0 is at once, below 0
   ## never), then the objects of every organisation that is left, then the alerts. A core that has just started deletes nothing for good: the retention of an organisation
@@ -222,7 +245,7 @@ proc reconcilePass*(k: KubeApi; mk: ConfigMaker; curve: CurveKeys; orgs: seq[Org
         result.orgs.add OrgReport(slug: o.slug, state: o.state, error: "deleting at the end of the retention, " & p.failedStep & ": " & p.error)
     left.add o
   for o in left:
-    result.orgs.add reconcileOne(k, mk(o.egress, o.ingress), o, curve, hooks, now, coreStarted)
+    result.orgs.add reconcileOne(k, mk(o.egress, o.ingress), o, keys, hooks, now, coreStarted)
   let a = namespaceAlerts(k, mk, left, mk("", "").shard)
   result.alerts = a.alerts
   if a.error.len > 0: result.error = a.error
@@ -244,7 +267,7 @@ func toJson*(p: PassResult): JsonNode =
   var orgs = newJArray()
   for o in p.orgs:
     orgs.add %*{"slug": o.slug, "state": o.state, "created": o.created, "controller_replaced": o.controllerReplaced,
-                "identity_renewed": o.identityRenewed, "controller_removed": o.controllerRemoved, "policies_replaced": o.policiesReplaced, "error": o.error}
+                "identity_renewed": o.identityRenewed, "controller_removed": o.controllerRemoved, "policies_replaced": o.policiesReplaced, "keys_replaced": o.keysReplaced, "error": o.error}
   var alerts = newJArray()
   for a in p.alerts:
     alerts.add %*{"code": a.code, "namespace": a.namespace, "organization": a.organization, "detail": a.detail}
@@ -290,10 +313,13 @@ proc makeHooks(e: PassEnv; master: string): Hooks =
         startRetention: proc (slug: string; at: int64) =
           var db = newRq(e.rqliteUrl)
           db.startRetention(slug, at),
+        keysSeen: proc (namespace: string): int64 = keysapplied.keysSeen(namespace),
+        noteKeys: proc (namespace: string; digest: int64) = keysapplied.noteKeys(namespace, digest),
         forget: proc (slug, namespace: string) =
           var db = newRq(e.rqliteUrl)
           db.deleteCredentialRow(namespace)
           forgetPolls(namespace)
+          forgetKeys(namespace)
           forgetKept(namespace)
           db.deleteOrganization(slug))
 
@@ -303,7 +329,7 @@ proc runPass*(e: PassEnv; kube: KubeApi): PassResult =
     withLock passLock:
       var c = newRq(e.rqliteUrl)
       let hooks = makeHooks(e, coreSecret(e.certs))
-      result = reconcilePass(kube, e.mk, loadCurve(e.certs), c.listOrganizationsFull(), hooks, getTime().toUnix(), e.retention, e.coreStarted, e.purgeGrace)
+      result = reconcilePass(kube, e.mk, loadTls(e.certs), c.listOrganizationsFull(), hooks, getTime().toUnix(), e.retention, e.coreStarted, e.purgeGrace)
       withLock lock: lastJson = $result.toJson
 
 proc runSupervision*(e: PassEnv; kube: KubeApi): seq[OrgReport] =
@@ -328,6 +354,7 @@ proc runReconciler*(args: tuple[env: PassEnv, stop: ptr Atomic[bool]]) {.thread.
           for o in r.orgs:
             if o.created.len > 0: echo "core: reconciliation made again for ", o.slug, ": ", o.created.join(", ")
             for g in o.controllerRemoved: echo "core: the controller of ", o.slug, ": deleted ", g
+            if o.keysReplaced: echo "core: the keys of the transport in ", o.slug, " were not the ones the core has now (renewed?) and were made again"
             if o.policiesReplaced.len > 0: echo "core: the network policies of ", o.slug, " differed from what the core makes and were made again: ", o.policiesReplaced.join(", ")
             if o.error.len > 0: stderr.writeLine "core: reconciliation of " & o.slug & ": " & o.error
           for s in r.purged: echo "core: the retention of the organisation ", s, " is over, deleted"

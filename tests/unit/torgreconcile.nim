@@ -1,6 +1,6 @@
 ## SHD-008: the reconciliation of the organisations with their Kubernetes objects, and the retention of a switched-off organisation,
 ## against a fake cluster that keeps objects in memory (no cluster, no database).
-import std/[unittest, json, strutils, tables, sequtils, uri, times]
+import std/[unittest, json, strutils, tables, sequtils, uri, times, base64]
 import ../../src/core/[kubeapi, orgprovision, orgreconcile, schema]
 import ../../src/common/ctrlauth
 
@@ -24,7 +24,12 @@ proc api(f: Cluster): KubeApi =
     case meth
     of "POST":
       if path == f.failPath: return (403, $(%*{"kind": "Status", "message": "forbidden: nope"}))
-      let obj = parseJson(body)
+      var obj = parseJson(body)
+      if obj{"kind"}.getStr == "Secret" and obj.hasKey("stringData"):      # as the API keeps it: `data`, in base64
+        var d = newJObject()
+        for k, v in obj["stringData"]: d[k] = %encode(v.getStr)
+        obj["data"] = d
+        obj.delete("stringData")
       let p = path & "/" & obj["metadata"]["name"].getStr
       if p in f.objects: return (409, "{}")
       f.objects[p] = obj
@@ -51,8 +56,11 @@ proc api(f: Cluster): KubeApi =
         for p, o in f.objects:
           if p.startsWith(prefix & "/") and o["metadata"]["labels"]{sel[0]}.getStr == sel[1]: items.add o
         return (200, $(%*{"items": items}))
+      if "/secrets/" in path: return (403, $(%*{"kind": "Status", "message": "secrets is forbidden: the core may create and delete Secrets, not read them"}))      # T-45
       if path in f.objects: (200, $f.objects[path]) else: (404, "{}")
     else: (500, "{}"))
+
+let tlskeys = TlsKeys(ca: "CA", clientPem: "CP", clientKey: "LK")
 
 type Rec = ref object
   started, forgotten: seq[string]
@@ -61,8 +69,10 @@ type Rec = ref object
   expires: int64
   poll: int64                      ## when the controller was last heard
   rotations: int
+  keys: Table[string, int64]       ## the digest of the transport keys the core put in the Secret of a namespace (the core's memory)
+  knows: bool                      ## a core that has been running: it put `tlskeys` in every Secret it has not heard of otherwise; false: a core that has just started
 
-proc newRec(): Rec = Rec(generation: 1, expires: t0 + 86400)
+proc newRec(knows = true): Rec = Rec(generation: 1, expires: t0 + 86400, knows: knows)
 
 proc hooksFor(r: Rec): Hooks =
   result.identity = proc (namespace: string): CredentialRow =
@@ -76,8 +86,10 @@ proc hooksFor(r: Rec): Hooks =
   result.lastPoll = proc (namespace: string): int64 = r.poll
   result.startRetention = proc (slug: string; at: int64) = r.started.add slug
   result.forget = proc (slug, namespace: string) = r.forgotten.add slug & "@" & namespace
+  let known = if r.knows: keysDigest(tlskeys) else: 0'i64
+  result.keysSeen = proc (namespace: string): int64 = r.keys.getOrDefault(namespace, known)
+  result.noteKeys = proc (namespace: string; digest: int64) = r.keys[namespace] = digest
 
-let curve = CurveKeys(corePub: "CP", clientPub: "LP", clientKey: "LK")
 
 proc maker(build = false; multi = false; image = "reg/ctl:1"): ConfigMaker =
   result = proc (egress, ingress: string): ProvisionConfig =
@@ -104,7 +116,7 @@ proc controllerPod(f: Cluster; mk: ConfigMaker; slug: string; generation = 1; bo
 
 proc made(f: Cluster; mk: ConfigMaker; slug: string; active = true; controller = true) =
   ## the objects of an organisation, as SHD-007 makes them, in the fake cluster, and a controller that has just been started (generation 1, not yet enrolled)
-  discard provision(api(f), mk("", ""), slug, curve, active)
+  discard provision(api(f), mk("", ""), slug, tlskeys, active)
   if active and controller and mk("", "").controllerImage.len > 0: discard f.controllerPod(mk, slug)
   f.calls.setLen 0
 
@@ -121,7 +133,7 @@ suite "IAM-003, D-62 the core supervises the controller: a Pod of its own, with 
     for e in f.objects[path]["spec"]["containers"][0]["env"]:
       if e["name"].getStr == "CINIM_BOOTSTRAP_TOKEN": return e["value"].getStr
   proc pass(f: Cluster; mk: ConfigMaker; rec: Rec; state = "active"; coreStarted = 0'i64; slug = "acme"): PassResult =
-    reconcilePass(api(f), mk, curve, @[org(slug, state, (if state == "disabled": 900 else: 0))], hooksFor(rec), t0, -1, coreStarted)
+    reconcilePass(api(f), mk, tlskeys, @[org(slug, state, (if state == "disabled": 900 else: 0))], hooksFor(rec), t0, -1, coreStarted)
 
   test "an organisation with no controller gets a Pod named by the generation, with the token of that generation; the identity is not rotated for a token that has not been used":
     let f = Cluster()
@@ -275,7 +287,7 @@ suite "IAM-003, D-62 the core supervises the controller: a Pod of its own, with 
     let blind = KubeApi(transport: proc (meth, path, body: string): tuple[code: int, body: string] =
       if meth == "GET" and "/pods?" in path: return (403, $(%*{"message": "pods is forbidden"}))
       api(f).transport(meth, path, body))
-    let r = reconcilePass(blind, mk, curve, @[org("acme")], hooksFor(newRec()), t0, 100)
+    let r = reconcilePass(blind, mk, tlskeys, @[org("acme")], hooksFor(newRec()), t0, 100)
     check "listing the controller" in r.orgs[0].error and f.pods.len == 0
   test "the supervision alone (between the full passes) replaces a silent controller, touches nothing else, and skips an organisation that has no namespace yet":
     let f = Cluster()
@@ -297,13 +309,69 @@ suite "IAM-003, D-62 the core supervises the controller: a Pod of its own, with 
     let r = f.pass(mk, newRec())
     check r.orgs[0].error == "" and f.pods.len == 0 and f.calls.filterIt("/pods" in it).len == 0
 
+suite "D-105 the Secret of the transport keys follows the pair the core has (a renewed certificate reaches the controller), without reading it (T-45)":
+  let secretPath = "/api/v1/namespaces/cinim-001-acme/secrets/" & tlsSecretName
+  let secretsPath = "/api/v1/namespaces/cinim-001-acme/secrets"
+  let renewed = TlsKeys(ca: "CA2", clientPem: "CP2", clientKey: "LK2")
+  proc pass(f: Cluster; mk: ConfigMaker; rec: Rec; keys = tlskeys): OrgReport =
+    reconcilePass(api(f), mk, keys, @[org("acme")], hooksFor(rec), 1000, 100).orgs[0]
+  proc secretReads(f: Cluster): seq[string] = f.calls.filterIt(it.startsWith("GET") and "/secrets" in it)
+  proc held(f: Cluster; key: string): string = decode(f.objects[secretPath]["data"][key].getStr)
+
+  test "the Secret is made in this pass: it holds the pair, nothing is replaced, and the core never asks the cluster for a Secret":
+    let f = Cluster()
+    let mk = maker()
+    let rec = newRec(knows = false)
+    let r = f.pass(mk, rec)
+    check r.error == "" and not r.keysReplaced and f.deletes.len == 0
+    check f.held("client.key") == tlskeys.clientKey
+    check f.pass(mk, rec).error == "" and f.secretReads.len == 0 and f.deletes.len == 0
+  test "a core that has just started does not know what the Secret holds: it makes it again, once, and the next pass leaves it":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")                                 # the Secret of an earlier core process
+    let rec = newRec(knows = false)                     # this core has no memory of it
+    let r = f.pass(mk, rec)
+    check r.error == "" and r.keysReplaced and f.deletes.len >= 1 and (f.deletes.filterIt(secretPath in it).len == 1)
+    check f.held("client.pem") == "CP"
+    check not f.pass(mk, rec).keysReplaced and f.secretReads.len == 0
+  test "a renewed pair (and a CA) is put in the Secret: deleted and made again, once, and the next pass leaves it":
+    let f = Cluster()
+    let mk = maker()
+    let rec = newRec(knows = false)
+    discard f.pass(mk, rec)
+    let r = f.pass(mk, rec, renewed)
+    check r.error == "" and r.keysReplaced
+    check f.held("client.pem") == "CP2" and f.held("ca.pem") == "CA2" and f.held("client.key") == "LK2"
+    check not f.pass(mk, rec, renewed).keysReplaced
+    check f.secretReads.len == 0
+  test "a pair that could not be put in is tried again in the next pass, and the core does not take it for done":
+    let f = Cluster()
+    let mk = maker()
+    let rec = newRec(knows = false)
+    discard f.pass(mk, rec)
+    f.failPath = secretsPath
+    let bad = f.pass(mk, rec, renewed)
+    check not bad.keysReplaced and bad.error.len > 0
+    f.failPath = ""
+    let good = f.pass(mk, rec, renewed)
+    check good.error == "" and good.keysReplaced and f.held("client.pem") == "CP2"
+  test "an organisation of its own: the pair of one namespace is not the memory of another":
+    let f = Cluster()
+    let mk = maker()
+    let rec = newRec(knows = false)
+    discard f.pass(mk, rec)
+    let other = reconcilePass(api(f), mk, renewed, @[org("beta")], hooksFor(rec), 1000, 100).orgs[0]
+    check other.error == "" and not other.keysReplaced          # beta's Secret is made new, with the new pair
+    check rec.keys.len == 2
+
 suite "SHD-008 a NetworkPolicy that differs from what the core makes now is replaced":
   let dns = "/apis/networking.k8s.io/v1/namespaces/cinim-001-acme/networkpolicies/allow-dns-and-collector"
   test "policies the core made are left alone: the fingerprint they carry is the one it would make":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "acme")
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(newRec()), 1000, 100)
     check r.orgs[0].policiesReplaced.len == 0 and f.deletes.len == 0
     check f.objects[dns]["metadata"]["annotations"]["cinim.io/spec-hash"].getStr.len == 24
   test "a policy that carries another fingerprint (the rules of the core changed: a port, the network mode) is deleted and made again with the new content":
@@ -313,7 +381,7 @@ suite "SHD-008 a NetworkPolicy that differs from what the core makes now is repl
     let fresh: ConfigMaker = proc (egress, ingress: string): ProvisionConfig {.gcsafe.} =
       {.cast(gcsafe).}: result = old(egress, ingress)
       result.storageDirectPort = 18091                      # a rule the policy did not have when it was made
-    let r = reconcilePass(api(f), fresh, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    let r = reconcilePass(api(f), fresh, tlskeys, @[org("acme")], hooksFor(newRec()), 1000, 100)
     check r.orgs[0].policiesReplaced == @["allow-dns-and-collector"] and r.orgs[0].error == ""
     let at = f.calls.find("DELETE " & dns)
     check at >= 0 and "POST /apis/networking.k8s.io/v1/namespaces/cinim-001-acme/networkpolicies" in f.calls[at + 1 .. ^1]       # deleted, then made again
@@ -321,19 +389,19 @@ suite "SHD-008 a NetworkPolicy that differs from what the core makes now is repl
     for rule in f.objects[dns]["spec"]["egress"]:
       for p in rule{"ports"}.getElems: ports.add p["port"].getInt
     check 18091 in ports
-    check reconcilePass(api(f), fresh, curve, @[org("acme")], hooksFor(newRec()), 1000, 100).orgs[0].policiesReplaced.len == 0       # and then it is the one wanted
+    check reconcilePass(api(f), fresh, tlskeys, @[org("acme")], hooksFor(newRec()), 1000, 100).orgs[0].policiesReplaced.len == 0       # and then it is the one wanted
   test "a policy made before the fingerprint existed has none: it is replaced once":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "acme")
     f.objects[dns]["metadata"].delete "annotations"
-    check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100).orgs[0].policiesReplaced == @["allow-dns-and-collector"]
+    check reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(newRec()), 1000, 100).orgs[0].policiesReplaced == @["allow-dns-and-collector"]
   test "a policy that is missing is made, not counted as replaced":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "acme")
     f.objects.del dns
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(newRec()), 1000, 100)
     check r.orgs[0].policiesReplaced.len == 0 and "network policy allow-dns-and-collector" in r.orgs[0].created
   test "a refusal to delete or to read a policy is told for that organisation":
     let f = Cluster()
@@ -343,7 +411,7 @@ suite "SHD-008 a NetworkPolicy that differs from what the core makes now is repl
     let denying = KubeApi(transport: proc (meth, path, body: string): tuple[code: int, body: string] =
       if meth == "DELETE" and path == dns: return (403, $(%*{"message": "forbidden: delete"}))
       api(f).transport(meth, path, body))
-    let r = reconcilePass(denying, mk, curve, @[org("acme")], hooksFor(newRec()), 1000, 100)
+    let r = reconcilePass(denying, mk, tlskeys, @[org("acme")], hooksFor(newRec()), 1000, 100)
     check "replacing network policy allow-dns-and-collector" in r.orgs[0].error and r.orgs[0].policiesReplaced.len == 0
 
 suite "SHD-008 reconciliation":
@@ -352,7 +420,7 @@ suite "SHD-008 reconciliation":
     let mk = maker()
     f.made(mk, "acme")
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.error == "" and r.orgs.len == 1 and r.orgs[0].created.len == 0 and r.orgs[0].error == ""
     check not r.orgs[0].identityRenewed and r.orgs[0].controllerRemoved.len == 0
     check f.deletes.len == 0
@@ -365,7 +433,7 @@ suite "SHD-008 reconciliation":
     f.objects.del ns("acme") & "/resourcequotas/cinim-default"
     f.objects.del "/apis/networking.k8s.io/v1/namespaces/cinim-001-acme/networkpolicies/default-deny"
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.orgs[0].created.len == 2 and "resource quota" in r.orgs[0].created
     check "network policy default-deny" in r.orgs[0].created
     check f.objects[ns("acme") & "/resourcequotas/cinim-default"] == before
@@ -377,7 +445,7 @@ suite "SHD-008 reconciliation":
     check "/apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-old" notin f.objects
     f.objects.del ns("old") & "/limitranges/cinim-default"
     let rec = newRec()
-    let r = reconcilePass(api(f), mkMulti, curve, @[org("old", "disabled", 900)], hooksFor(rec), 1000, 100000)
+    let r = reconcilePass(api(f), mkMulti, tlskeys, @[org("old", "disabled", 900)], hooksFor(rec), 1000, 100000)
     check r.orgs[0].created == @["limit range"]
     check toSeq(f.objects.keys).filterIt("/pods/" in it).len == 0
     check "/apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-old" notin f.objects
@@ -388,13 +456,13 @@ suite "SHD-008 reconciliation":
     f.made(mkMulti, "acme")
     f.objects.del "/apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-acme"
     let rec = newRec()
-    let r = reconcilePass(api(f), mkMulti, curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), mkMulti, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.orgs[0].created == @["ingress"]
 
   test "a new cluster (the database was restored): every object is made, and a controller is started with a token of the generation the database has":
     let f = Cluster()
     let rec = newRec()
-    let r = reconcilePass(api(f), maker(), curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), maker(), tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.orgs[0].error == "" and "namespace" in r.orgs[0].created and "controller" in r.orgs[0].created
     check ns("acme") in f.objects and ns("acme") & "/pods/cinim-job-controller-1" in f.objects
     check f.deletes.len == 0
@@ -404,17 +472,17 @@ suite "SHD-008 reconciliation":
     f.made(mk, "acme")
     f.objects.del ns("acme") & "/persistentvolumeclaims/cinim-job-controller-state"
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.orgs[0].created == @["controller state volume"] and rec.rotations == 0
 
   test "the network mode asked for at creation is kept: an organisation with open egress gets its policy back":
     let f = Cluster()
     let mk = maker()
-    discard provision(api(f), mk("open", "open"), "easy", curve)
+    discard provision(api(f), mk("open", "open"), "easy", tlskeys)
     discard f.controllerPod(mk, "easy")
     f.objects.del "/apis/networking.k8s.io/v1/namespaces/cinim-001-easy/networkpolicies/allow-all-egress"
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("easy", egress = "open", ingress = "open")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("easy", egress = "open", ingress = "open")], hooksFor(rec), 1000, 100)
     check r.orgs[0].created == @["network policy allow-all-egress"]
 
   test "a namespace of this shard that no organisation owns is an alert, and is never deleted":
@@ -423,13 +491,13 @@ suite "SHD-008 reconciliation":
     f.made(mk, "acme")
     f.made(mk, "ghost")
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.alerts.len == 1 and r.alerts[0].code == "orphan_namespace" and r.alerts[0].organization == "ghost" and r.alerts[0].namespace == "cinim-001-ghost"
     check ns("ghost") in f.objects
     check f.deletes.len == 0
     # the namespace of another shard is not this shard's business
     f.objects["/api/v1/namespaces/cinim-002-x"] = %*{"metadata": {"name": "cinim-002-x", "labels": {"cinim.io/shard": "002", "cinim.io/organization": "x"}}}
-    check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 1
+    check reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 1
 
   test "a namespace that is being deleted is neither an orphan nor drift":
     let f = Cluster()
@@ -440,7 +508,7 @@ suite "SHD-008 reconciliation":
     f.objects[ns("acme")]["metadata"]["deletionTimestamp"] = %"2026-10-06T17:12:00Z"
     f.objects[ns("acme")]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = %"privileged"
     let rec = newRec()
-    check reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 0
+    check reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100).alerts.len == 0
 
   test "a namespace whose policy labels differ from the expected ones is an alert, and is left as it is":
     let f = Cluster()
@@ -449,7 +517,7 @@ suite "SHD-008 reconciliation":
     f.objects[ns("acme")]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = %"privileged"
     f.objects[ns("acme")]["metadata"]["labels"].delete "cinim.io/build-pod-policy"
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.alerts.len == 2
     for a in r.alerts: check a.code == "namespace_drift" and a.organization == "acme"
     check "`privileged`, expected `baseline`" in r.alerts[0].detail or "`privileged`, expected `baseline`" in r.alerts[1].detail
@@ -458,13 +526,13 @@ suite "SHD-008 reconciliation":
   test "an object the cluster refuses is reported for that organisation, the others are still reconciled":
     let f = Cluster(failPath: "/api/v1/namespaces/cinim-001-bad/secrets")
     let rec = newRec()
-    let r = reconcilePass(api(f), maker(), curve, @[org("bad"), org("good")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(api(f), maker(), tlskeys, @[org("bad"), org("good")], hooksFor(rec), 1000, 100)
     check "forbidden: nope" in r.orgs[0].error and "controller keys" in r.orgs[0].error
     check r.orgs[1].error == "" and ns("good") in f.objects
 
   test "outside a cluster the pass says so and does nothing":
     let rec = newRec()
-    let r = reconcilePass(KubeApi(), maker(), curve, @[org("acme")], hooksFor(rec), 1000, 100)
+    let r = reconcilePass(KubeApi(), maker(), tlskeys, @[org("acme")], hooksFor(rec), 1000, 100)
     check r.error.len > 0 and r.orgs.len == 0
 
 suite "SHD-007, SHD-008 retention of a switched-off organisation":
@@ -474,7 +542,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     f.made(mk, "gone", active = false)
     f.made(mk, "kept", active = false)
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("gone", "disabled", 100), org("kept", "disabled", 900)],
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("gone", "disabled", 100), org("kept", "disabled", 900)],
                           hooksFor(rec), 1000, 500)
     check r.purged == @["gone"] and rec.forgotten == @["gone@cinim-001-gone"]
     check ns("gone") notin f.objects and ns("kept") in f.objects
@@ -489,20 +557,20 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let rec = newRec()
     var heldOrg = org("held", "disabled", 100)
     heldOrg.held = 2
-    let r = reconcilePass(api(f), mk, curve, @[heldOrg, org("free", "disabled", 100)], hooksFor(rec), 1000, 500)
+    let r = reconcilePass(api(f), mk, tlskeys, @[heldOrg, org("free", "disabled", 100)], hooksFor(rec), 1000, 500)
     check r.purged == @["free"] and ns("held") in f.objects and ns("free") notin f.objects
     check r.orgs.anyIt(it.slug == "held" and "legal hold" in it.error and "2 run" in it.error)
     heldOrg.held = 0
-    check reconcilePass(api(f), mk, curve, @[heldOrg], hooksFor(rec), 1000, 500).purged == @["held"]       # released: the next pass deletes it
+    check reconcilePass(api(f), mk, tlskeys, @[heldOrg], hooksFor(rec), 1000, 500).purged == @["held"]       # released: the next pass deletes it
 
   test "retention 0 deletes a switched-off organisation at once, a negative one never does":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "now", active = false)
     let rec = newRec()
-    check reconcilePass(api(f), mk, curve, @[org("now", "disabled", 999)], hooksFor(rec), 1000, -1).purged.len == 0
+    check reconcilePass(api(f), mk, tlskeys, @[org("now", "disabled", 999)], hooksFor(rec), 1000, -1).purged.len == 0
     check ns("now") in f.objects
-    check reconcilePass(api(f), mk, curve, @[org("now", "disabled", 999)], hooksFor(rec), 1000, 0).purged == @["now"]
+    check reconcilePass(api(f), mk, tlskeys, @[org("now", "disabled", 999)], hooksFor(rec), 1000, 0).purged == @["now"]
     check ns("now") notin f.objects
 
   test "an organisation switched off before the time was recorded: the retention starts now, it is not deleted":
@@ -510,7 +578,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let mk = maker()
     f.made(mk, "old", active = false)
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("old", "disabled", 0)], hooksFor(rec), 1000, 500)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("old", "disabled", 0)], hooksFor(rec), 1000, 500)
     check rec.started == @["old"] and r.purged.len == 0 and ns("old") in f.objects
 
   test "an active organisation is never deleted by the retention":
@@ -518,7 +586,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
     let mk = maker()
     f.made(mk, "acme")
     let rec = newRec()
-    check reconcilePass(api(f), mk, curve, @[org("acme", "active", 1)], hooksFor(rec), 10_000_000, 0).purged.len == 0
+    check reconcilePass(api(f), mk, tlskeys, @[org("acme", "active", 1)], hooksFor(rec), 10_000_000, 0).purged.len == 0
     check ns("acme") in f.objects
 
   test "a failed deletion keeps the organisation and says why":
@@ -530,7 +598,7 @@ suite "SHD-007, SHD-008 retention of a switched-off organisation":
       if meth == "DELETE" and path == ns("gone"): return (403, $(%*{"message": "namespaces is forbidden"}))
       api(f).transport(meth, path, body))
     let rec = newRec()
-    let r = reconcilePass(broken, mk, curve, @[org("gone", "disabled", 1)], hooksFor(rec), 1000, 10)
+    let r = reconcilePass(broken, mk, tlskeys, @[org("gone", "disabled", 1)], hooksFor(rec), 1000, 10)
     check r.purged.len == 0 and rec.forgotten.len == 0
     check r.orgs.len >= 1 and "forbidden" in r.orgs[0].error
 
@@ -541,14 +609,14 @@ suite "SHD-008 a core that has just started deletes no organisation for good":
     f.made(mk, "late", active = false)
     let rec = newRec()
     # the retention ended long ago (500 s from 100), the core started at 990 and the grace is 3600 s
-    let early = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
+    let early = reconcilePass(api(f), mk, tlskeys, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
     check early.purged.len == 0 and ns("late") in f.objects
-    let later = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 4600, 500, coreStarted = 990, purgeGrace = 3600)
+    let later = reconcilePass(api(f), mk, tlskeys, @[org("late", "disabled", 100)], hooksFor(rec), 4600, 500, coreStarted = 990, purgeGrace = 3600)
     check later.purged == @["late"] and ns("late") notin f.objects
   test "an organisation that is kept for the grace is still reconciled like any other":
     let f = Cluster()
     let mk = maker()
     f.made(mk, "late", active = false)
     let rec = newRec()
-    let r = reconcilePass(api(f), mk, curve, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
+    let r = reconcilePass(api(f), mk, tlskeys, @[org("late", "disabled", 100)], hooksFor(rec), 1000, 500, coreStarted = 990, purgeGrace = 3600)
     check r.orgs.len == 1 and r.orgs[0].slug == "late"

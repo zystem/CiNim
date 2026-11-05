@@ -2,7 +2,7 @@
 -- organisation reads this file at that commit (`run.source`), so a change of the pipeline is a commit like any other.
 --   1. `prep`: fetch the repository into a bare mirror kept as a cache of the organisation (`git-<commit>`, docs/cache.md; the next run fetches only what is new), find the commit,
 --      the tag of the images and the hash of what the libraries image is made of,
---   2. `deps`: the image of the libraries (libsodium, libzmq, the Kubernetes C client, the nimble packages; tools/image/Dockerfile.deps) as `cinim-deps:<hash>`, and the image of the tests
+--   2. `deps`: the image of the libraries (libsodium, nghttp2, the Kubernetes C client, the nimble packages; tools/image/Dockerfile.deps) as `cinim-deps:<hash>`, and the image of the tests
 --      (tools/image/Dockerfile.test: Nim on glibc as on a workstation, the system libraries, the nimble packages and `rqlited`) as `cinim-test:<hash>`, each made once and found in the registry afterwards,
 --   3. side by side, and the first failure stops the other: the images of the components (`ci.matrix`: each build restores the mirror of its commit, clones from it into its own volume and runs
 --      Kaniko on the Dockerfile of its component with DEPS_IMAGE) and the tests (`tools/test/run.sh` in a Pod of the test image: the integration tests start their own `rqlited` processes,
@@ -117,7 +117,6 @@ cd src
 # temporary files are on the volume of the job.
 export XDG_CACHE_HOME=/cicd/workspace/nimcache TMPDIR=/cicd/workspace/tmp; mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
 tools/proto/nim_flatten.sh build/nimproto
-tools/zmq/gen_curve_keys.sh                 # the secret halves of the test keys are not in the repository
 for v in $(env | grep -o '^CICD_[A-Z_]*'); do unset "$v"; done         # this is a step of a run, and the tests are about shims that make their own
 rc=0
 # D-82: when the script decided on some of the tests (COMPONENTS: what changed and what imports it), those that import one of them and the test files that changed; else all of them
@@ -191,7 +190,7 @@ local IMAGE_PARTS = { core = {"core"}, controller = {"jobcontroller", "shim"}, c
 local SPEAK_PROTO = { core = true, controller = true, conductor = true }     -- the images that have the types of the messages
 local RUN_LUA = { core = true, conductor = true }                            -- the images that run Lua and have its stubs
 local BUILD_ALL = { ["cinim.nimble"] = true, ["config.nims"] = true, ["nim.cfg"] = true, ["tools/image/build-static.sh"] = true, ["tools/image/Dockerfile.deps"] = true,
-                    ["tools/k8s"] = true, ["tools/proto"] = true, ["tools/shim"] = true, ["tools/zmq"] = true }        -- the build of everything
+                    ["tools/k8s"] = true, ["tools/proto"] = true, ["tools/shim"] = true, ["tools/grpc"] = true }        -- the build of everything
 local TESTS_ALL = { ["tests/support"] = true, ["tests/certs"] = true, ["tests/vectors"] = true, ["tests/contract"] = true, ["tools/test"] = true, [".ci"] = true, ["deploy"] = true,
                     ["tools/image/Dockerfile.test"] = true }                     -- what every test may depend on, and not an image
 local NOTHING = { docs = true, ["docs-tr"] = true, [".claude"] = true, [".gitignore"] = true, LICENSE = true }       -- changes that no image and no test depends on

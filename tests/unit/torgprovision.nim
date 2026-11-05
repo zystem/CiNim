@@ -25,20 +25,20 @@ proc api(f: Fake): KubeApi =
       return (200, $(%*{"items": items}))
     (200, "{}"))
 
-let curve = CurveKeys(corePub: "CP", clientPub: "LP", clientKey: "LK")
+let tlskeys = TlsKeys(ca: "CA", clientPem: "CP", clientKey: "LK")
 proc cfg(multi = false, image = "reg/ctl:1"): ProvisionConfig =
   ProvisionConfig(prefix: "cinim", shard: "001", shardNamespace: "cinim-001", controllerImage: image, multi: multi,
                   host: "ci.example.com", basePath: "/", ingressClass: "nginx", annotations: %*{"a/b": "c"})
 
 suite "SHD-007 the objects of an organisation":
   test "the namespace is <prefix>-<shard>-<slug> with Pod Security restricted and the labels of the shard":
-    let ns = organizationSteps(cfg(), "acme", curve).steps[0].obj
+    let ns = organizationSteps(cfg(), "acme", tlskeys).steps[0].obj
     check ns["metadata"]["name"].getStr == "cinim-001-acme"
     for m in ["enforce", "audit", "warn"]: check ns["metadata"]["labels"]["pod-security.kubernetes.io/" & m].getStr == "restricted"
     check ns["metadata"]["labels"]["cinim.io/shard"].getStr == "001" and ns["metadata"]["labels"]["cinim.io/organization"].getStr == "acme"
   test "the controller's role binding gives the step role of the shard in that namespace only":
     var rb: JsonNode
-    for s in organizationSteps(cfg(), "acme", curve).steps:
+    for s in organizationSteps(cfg(), "acme", tlskeys).steps:
       if s.kind == "RoleBinding": rb = s.obj
     check rb["kind"].getStr == "RoleBinding" and rb["roleRef"]["kind"].getStr == "ClusterRole"
     check rb["roleRef"]["name"].getStr == "cinim-001-step-runner"
@@ -51,14 +51,14 @@ suite "SHD-007 the objects of an organisation":
     check pod["metadata"]["labels"]["app.kubernetes.io/name"].getStr == "cinim-job-controller"
     let c = pod["spec"]["containers"][0]
     check not c.hasKey("livenessProbe") and not c.hasKey("readinessProbe")
-    for s in organizationSteps(cfg(), "acme", curve).steps: check s.kind notin ["Deployment", "Pod"]      # the supervision makes it (orgreconcile.nim)
+    for s in organizationSteps(cfg(), "acme", tlskeys).steps: check s.kind notin ["Deployment", "Pod"]      # the supervision makes it (orgreconcile.nim)
   test "the one-time token is in the environment of the Pod: no Secret, no volume for it, and it is not part of the fingerprint of the Pod":
     let pod = newControllerPod(cfg(), "acme", 3, "TOK")
     var env = initTable[string, string]()
     for e in pod["spec"]["containers"][0]["env"]: env[e["name"].getStr] = e["value"].getStr
     check env["CINIM_BOOTSTRAP_TOKEN"] == "TOK" and "CINIM_BOOTSTRAP_FILE" notin env
     for v in pod["spec"]["volumes"]: check v["name"].getStr != "bootstrap"
-    for st in organizationSteps(cfg(), "acme", curve).steps: check st.objectName != "cinim-controller-bootstrap"
+    for st in organizationSteps(cfg(), "acme", tlskeys).steps: check st.objectName != "cinim-controller-bootstrap"
     check pod["metadata"]["annotations"]["cinim.io/controller-spec"].getStr == controllerSpecHash(cfg(), "acme")
     check newControllerPod(cfg(), "acme", 4, "OTHER")["metadata"]["annotations"]["cinim.io/controller-spec"].getStr == controllerSpecHash(cfg(), "acme")
     check controllerSpecHash(cfg(image = "reg/ctl:2"), "acme") != controllerSpecHash(cfg(), "acme")
@@ -82,23 +82,23 @@ suite "SHD-007 the objects of an organisation":
     check c["securityContext"]["readOnlyRootFilesystem"].getBool and d["spec"]["securityContext"]["runAsNonRoot"].getBool
   test "the keys of the transport go into a Secret of the namespace, the core's secret key stays out":
     var s: JsonNode
-    for st in organizationSteps(cfg(), "acme", curve).steps:
-      if st.objectName == "cinim-controller-curve": s = st.obj
-    check s["stringData"]["core.pub"].getStr == "CP" and s["stringData"]["client.key"].getStr == "LK"
-    check not s["stringData"].hasKey("core.key")
+    for st in organizationSteps(cfg(), "acme", tlskeys).steps:
+      if st.objectName == "cinim-controller-tls": s = st.obj
+    check s["stringData"]["ca.pem"].getStr == "CA" and s["stringData"]["client.pem"].getStr == "CP" and s["stringData"]["client.key"].getStr == "LK"
+    check not s["stringData"].hasKey("core.key") and not s["stringData"].hasKey("master.key")
   test "SHD-008 every network policy carries the fingerprint of the object the core made, which changes with its content (the reconciliation replaces a policy by it)":
     var hashes: seq[string]
-    for st in organizationSteps(cfg(), "acme", curve).steps:
+    for st in organizationSteps(cfg(), "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy": hashes.add st.obj["metadata"]["annotations"]["cinim.io/spec-hash"].getStr
     check hashes.len >= 3 and hashes.deduplicate.len == hashes.len
     var c = cfg()
     c.storageDirectPort = 18091
     var changed = 0
-    for st in organizationSteps(c, "acme", curve).steps:
+    for st in organizationSteps(c, "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy" and st.obj["metadata"]["annotations"]["cinim.io/spec-hash"].getStr notin hashes: inc changed
     check changed == 1                                   # the policy of the steps got a rule; the others are the same
   test "a quota, a limit range and three network policies, default-deny first":
-    let steps = organizationSteps(cfg(), "acme", curve).steps
+    let steps = organizationSteps(cfg(), "acme", tlskeys).steps
     var kinds: seq[string]
     for s in steps: kinds.add s.kind
     check "ResourceQuota" in kinds and "LimitRange" in kinds and kinds.count("NetworkPolicy") == 3
@@ -114,8 +114,8 @@ suite "SHD-007 the objects of an organisation":
       if s.objectName == "controller-no-ingress":
         check s.obj["spec"]["policyTypes"].len == 1 and "Egress" notin $s.obj["spec"]["policyTypes"] and not s.obj["spec"].hasKey("ingress")
   test "the Ingress exists only in the multi mode, lives in the namespace of the shard and points at the core":
-    check organizationSteps(cfg(false), "acme", curve).steps[^1].kind != "Ingress"
-    let last = organizationSteps(cfg(true), "acme", curve).steps[^1]
+    check organizationSteps(cfg(false), "acme", tlskeys).steps[^1].kind != "Ingress"
+    let last = organizationSteps(cfg(true), "acme", tlskeys).steps[^1]
     check last.kind == "Ingress" and last.namespace == "cinim-001" and last.objectName == "org-acme"
     let i = last.obj
     check i["spec"]["rules"][0]["host"].getStr == "ci.example.com" and i["spec"]["rules"][0]["http"]["paths"][0]["path"].getStr == "/acme"
@@ -124,9 +124,9 @@ suite "SHD-007 the objects of an organisation":
   test "with a base path the Ingress path carries it":
     var c = cfg(true)
     c.basePath = "/ci/"
-    check organizationSteps(c, "acme", curve).steps[^1].obj["spec"]["rules"][0]["http"]["paths"][0]["path"].getStr == "/ci/acme"
+    check organizationSteps(c, "acme", tlskeys).steps[^1].obj["spec"]["rules"][0]["http"]["paths"][0]["path"].getStr == "/ci/acme"
   test "without a controller image the controller and what it needs are left out and the reason is given":
-    let r = organizationSteps(cfg(image = ""), "acme", curve)
+    let r = organizationSteps(cfg(image = ""), "acme", tlskeys)
     for s in r.steps: check s.kind notin ["Deployment", "RoleBinding", "ServiceAccount", "PersistentVolumeClaim"]
     check r.skipped.len == 1 and "CINIM_CONTROLLER_IMAGE" in r.skipped[0]
 
@@ -139,10 +139,10 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
   let registry = %*[{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "registry"}}}],
                      "ports": [{"protocol": "TCP", "port": 5000}]}]
   proc namespaceOf(cfg: ProvisionConfig): JsonNode =
-    for st in organizationSteps(cfg, "acme", curve).steps:
+    for st in organizationSteps(cfg, "acme", tlskeys).steps:
       if st.kind == "Namespace": return st.obj
   test "without a build profile there is one namespace, restricted, and no build setting anywhere":
-    let steps = organizationSteps(cfg(true), "acme", curve).steps
+    let steps = organizationSteps(cfg(true), "acme", tlskeys).steps
     for st in steps:
       check "-build" notin st.objectName and "-build" notin st.namespace and st.objectName notin ["allow-build-internet", "allow-build-egress"]
     for e in newControllerPod(cfg(true), "acme", 1, "T")["spec"]["containers"][0]["env"]: check not e["name"].getStr.startsWith("CINIM_BUILD")
@@ -153,7 +153,7 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     for m in ["audit", "warn"]: check l["pod-security.kubernetes.io/" & m].getStr == "restricted"
     check l["cinim.io/build-pod-policy"].getStr == "on"
   test "there is no second namespace and no second controller, and no object of the organisation is labelled as a build Pod":
-    let steps = organizationSteps(buildCfg(registry), "acme", curve).steps
+    let steps = organizationSteps(buildCfg(registry), "acme", tlskeys).steps
     var namespaces = 0
     for st in steps:
       if st.kind == "Namespace": inc namespaces
@@ -170,7 +170,7 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
   test "DAT-003 a step Pod reaches the core's artifact port and not the object store":
     var ports: seq[int]
     var toStore = false
-    for st in organizationSteps(buildCfg(), "acme", curve).steps:
+    for st in organizationSteps(buildCfg(), "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy" and st.objectName == "allow-dns-and-collector":
         for r in st.obj["spec"]["egress"]:
           if r["to"][0]{"podSelector"}{"matchLabels"}{"app"}.getStr == "garage": toStore = true
@@ -183,13 +183,13 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     var cfgDirect = buildCfg()
     check cfgDirect.storageDirectPort == 0
     var without: seq[string]
-    for st in organizationSteps(cfgDirect, "acme", curve).steps:
+    for st in organizationSteps(cfgDirect, "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy" and st.objectName == "allow-dns-and-collector":
         for r in st.obj["spec"]["egress"]: without.add r["to"][0]{"podSelector"}{"matchLabels"}{"app.kubernetes.io/name"}.getStr
     check "cinim-storage" notin without
     cfgDirect.storageDirectPort = 18091
     var found = false
-    for st in organizationSteps(cfgDirect, "acme", curve).steps:
+    for st in organizationSteps(cfgDirect, "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy" and st.objectName == "allow-dns-and-collector":
         for r in st.obj["spec"]["egress"]:
           if r["to"][0]{"podSelector"}{"matchLabels"}{"app.kubernetes.io/name"}.getStr == "cinim-storage":
@@ -199,11 +199,11 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     check found
   test "without an internet setting a build Pod may reach DNS, the collector and what the operator opened, nothing else":
     var closed, opened: seq[string]
-    for st in organizationSteps(buildCfg(), "acme", curve).steps:
+    for st in organizationSteps(buildCfg(), "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy": closed.add st.objectName
     check "default-deny" in closed and "allow-dns-and-collector" in closed and "allow-build-egress" notin closed
     var egress: JsonNode
-    for st in organizationSteps(buildCfg(registry), "acme", curve).steps:
+    for st in organizationSteps(buildCfg(registry), "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy": opened.add st.objectName
       if st.objectName == "allow-build-egress": egress = st.obj
     check "allow-build-egress" in opened
@@ -213,7 +213,7 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     let sinks = %*[{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "registry"}}}], "ports": [{"protocol": "TCP", "port": 5000}]},
                    {"to": [{"ipBlock": {"cidr": "192.168.10.20/32"}}], "ports": [{"protocol": "TCP", "port": 8081}, {"protocol": "TCP", "port": 8443}]}]
     var egress: JsonNode
-    for st in organizationSteps(buildCfg(sinks), "acme", curve).steps:
+    for st in organizationSteps(buildCfg(sinks), "acme", tlskeys).steps:
       if st.objectName == "allow-build-egress": egress = st.obj
     check egress["spec"]["egress"].len == 2
     check egress["spec"]["egress"][1]["to"][0]["ipBlock"]["cidr"].getStr == "192.168.10.20/32" and egress["spec"]["egress"][1]["ports"].len == 2
@@ -223,7 +223,7 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     c.buildInternet = %*{"ports": [80, 443], "except": ["10.0.0.0/8"]}
     var egress: JsonNode
     var names: seq[string]
-    for st in organizationSteps(c, "acme", curve).steps:
+    for st in organizationSteps(c, "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy": names.add st.objectName
       if st.objectName == "allow-build-egress": egress = st.obj
     check egress["spec"]["egress"] == %*[{}]
@@ -233,29 +233,29 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     var c = buildCfg()
     c.buildIngress = %"all"
     var p: JsonNode
-    for st in organizationSteps(c, "acme", curve).steps:
+    for st in organizationSteps(c, "acme", tlskeys).steps:
       if st.objectName == "allow-build-ingress": p = st.obj
     check p["spec"]["ingress"] == %*[{}] and p["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
-    for st in organizationSteps(buildCfg(), "acme", curve).steps: check st.objectName != "allow-build-ingress"
+    for st in organizationSteps(buildCfg(), "acme", tlskeys).steps: check st.objectName != "allow-build-ingress"
     c.ingressOpen = true
-    for st in organizationSteps(c, "acme", curve).steps: check st.objectName != "allow-build-ingress"      # the all-steps policy says it
+    for st in organizationSteps(c, "acme", tlskeys).steps: check st.objectName != "allow-build-ingress"      # the all-steps policy says it
   test "build.ingress as a list: several peers and ports in one policy":
     var c = buildCfg()
     c.buildIngress = %*[{"from": [{"ipBlock": {"cidr": "192.168.10.0/24"}}], "ports": [{"protocol": "TCP", "port": 8080}]},
                         {"from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "registry"}}}]}]
     var p: JsonNode
-    for st in organizationSteps(c, "acme", curve).steps:
+    for st in organizationSteps(c, "acme", tlskeys).steps:
       if st.objectName == "allow-build-ingress": p = st.obj
     check p["spec"]["ingress"].len == 2 and p["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
     c.buildIngress = %*[]
-    for st in organizationSteps(c, "acme", curve).steps: check st.objectName != "allow-build-ingress"      # an empty list is closed
+    for st in organizationSteps(c, "acme", tlskeys).steps: check st.objectName != "allow-build-ingress"      # an empty list is closed
   test "the simple mode: egress open and ingress open are one policy each for every step Pod, the controller stays closed":
     var c = cfg(true)
     c.egressOpen = true
     c.ingressOpen = true
     var all: seq[JsonNode]
     var names: seq[string]
-    for st in organizationSteps(c, "acme", curve).steps:
+    for st in organizationSteps(c, "acme", tlskeys).steps:
       if st.kind == "NetworkPolicy": names.add st.objectName
       if st.objectName in ["allow-all-egress", "allow-all-ingress"]: all.add st.obj
     check all.len == 2 and "default-deny" in names and "controller-no-ingress" in names
@@ -263,17 +263,17 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     check all[1]["spec"]["ingress"] == %*[{}] and all[1]["spec"]["policyTypes"] == %*["Ingress"]
     for p in all: check p["spec"]["podSelector"]["matchExpressions"][0]["operator"].getStr == "NotIn"      # not the controller
     # asked for separately; a closed organisation has neither
-    for st in organizationSteps(cfg(true), "acme", curve).steps: check st.objectName notin ["allow-all-egress", "allow-all-ingress"]
+    for st in organizationSteps(cfg(true), "acme", tlskeys).steps: check st.objectName notin ["allow-all-egress", "allow-all-ingress"]
   test "with egress open the rules of the build profile are left out, as they would say nothing more":
     var c = buildCfg(%*[{"to": [{"ipBlock": {"cidr": "192.168.10.20/32"}}]}])
     c.buildInternet = %*{"ports": [80], "except": []}
     c.egressOpen = true
-    for st in organizationSteps(c, "acme", curve).steps: check st.objectName notin ["allow-build-egress", "allow-build-internet"]
+    for st in organizationSteps(c, "acme", tlskeys).steps: check st.objectName notin ["allow-build-egress", "allow-build-internet"]
   test "a build Pod may download packages from the public internet and reach no private range (npm, deb, maven, git)":
     var cfgI = buildCfg(registry)
     cfgI.buildInternet = %*{"ports": [80, 443, 22], "except": ["10.0.0.0/8", "192.168.0.0/16", "169.254.0.0/16"]}
     var policy: JsonNode
-    for st in organizationSteps(cfgI, "acme", curve).steps:
+    for st in organizationSteps(cfgI, "acme", tlskeys).steps:
       if st.objectName == "allow-build-internet": policy = st.obj
     check policy != nil
     let rule = policy["spec"]["egress"][0]
@@ -283,26 +283,26 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
     for p in rule["ports"]: ports.add p["port"].getInt
     check ports == @[80, 443, 22]
     check policy["spec"]["podSelector"]["matchLabels"]["cinim.io/profile"].getStr == "build"
-    for st in organizationSteps(buildCfg(registry), "acme", curve).steps: check st.objectName != "allow-build-internet"
+    for st in organizationSteps(buildCfg(registry), "acme", tlskeys).steps: check st.objectName != "allow-build-internet"
   test "the limit range gives a step Pod an ephemeral-storage request of 64Mi and a limit of 1Gi, or the operator's":
     for cfgLimit in ["", "3Gi"]:
       var c = buildCfg()
       c.stepEphemeralLimit = cfgLimit
-      for st in organizationSteps(c, "acme", curve).steps:
+      for st in organizationSteps(c, "acme", tlskeys).steps:
         if st.kind == "LimitRange":
           let l = st.obj["spec"]["limits"][0]
           check l["defaultRequest"]["ephemeral-storage"].getStr == "64Mi"
           check l["default"]["ephemeral-storage"].getStr == (if cfgLimit.len > 0: cfgLimit else: "1Gi")
   test "the limit range stays that of an ordinary step: a build Pod sets its own memory":
-    for st in organizationSteps(buildCfg(), "acme", curve).steps:
+    for st in organizationSteps(buildCfg(), "acme", tlskeys).steps:
       if st.kind == "LimitRange": check st.obj["spec"]["limits"][0]["default"]["memory"].getStr == "1Gi"
   test "everything is created once, and a repeat is harmless":
     let f = Fake()
-    let r = provision(api(f), buildCfg(registry), "acme", curve)
+    let r = provision(api(f), buildCfg(registry), "acme", tlskeys)
     check r.ok
     check f.calls.count("POST /api/v1/namespaces") == 1
     let again = Fake(exists: @["/api/v1/namespaces"])
-    check provision(api(again), buildCfg(registry), "acme", curve).ok
+    check provision(api(again), buildCfg(registry), "acme", tlskeys).ok
   test "switching off and deleting for good touch the one namespace":
     let f = Fake()
     check disable(api(f), buildCfg(), "acme").ok
@@ -314,17 +314,17 @@ suite "build profile (D-42): build Pods in the namespace of the organisation":
 suite "SHD-007 creating, switching off, deleting":
   test "everything is created in order, the namespace first":
     let f = Fake()
-    let r = provision(api(f), cfg(true), "acme", curve)
+    let r = provision(api(f), cfg(true), "acme", tlskeys)
     check r.ok and r.steps[0].name == "namespace" and r.steps[^1].name == "ingress"
     check f.calls[0] == "POST /api/v1/namespaces"
     check "POST /apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses" in f.calls
   test "an object that exists is as good as a created one, so a repeat succeeds":
     let f = Fake(exists: @["/api/v1/namespaces"])
-    let r = provision(api(f), cfg(), "acme", curve)
+    let r = provision(api(f), cfg(), "acme", tlskeys)
     check r.ok and r.steps[0].outcome == oExists
   test "a refusal stops there and names the step and the reason":
     let f = Fake(fail: "/api/v1/namespaces/cinim-001-acme/secrets")
-    let r = provision(api(f), cfg(), "acme", curve)
+    let r = provision(api(f), cfg(), "acme", tlskeys)
     check not r.ok and r.failedStep == "controller keys" and r.error == "namespaces is forbidden: nope"
     check "POST /api/v1/namespaces/cinim-001-acme/persistentvolumeclaims" notin f.calls
   test "switching off removes the Ingress and the controller (a Deployment of the time before, and every Pod of it) and leaves the namespace":
@@ -352,11 +352,11 @@ suite "SHD-007 creating, switching off, deleting":
 suite "RUN-009 the namespace of an organisation with conductors (docs/conductors.md section 7)":
   test "without conductors nothing changes: no policy for them":
     var names: seq[string]
-    for st in organizationSteps(cfg(), "acme", curve).steps: names.add st.objectName
+    for st in organizationSteps(cfg(), "acme", tlskeys).steps: names.add st.objectName
     check "allow-conductor" notin names
   test "D-63 a conductor reaches a git server only where the operator says: the public internet on some ports with the private ranges closed, and rules of its own, or everything":
     proc egressOf(c: ProvisionConfig): JsonNode =
-      for st in organizationSteps(c, "acme", curve).steps:
+      for st in organizationSteps(c, "acme", tlskeys).steps:
         if st.objectName == "allow-conductor": return st.obj["spec"]["egress"]
     var c = cfg()
     c.conductors = true
@@ -376,7 +376,7 @@ suite "RUN-009 the namespace of an organisation with conductors (docs/conductors
     c.conductors = true
     var conductorPolicy: JsonNode
     var deny: JsonNode
-    for st in organizationSteps(c, "acme", curve).steps:
+    for st in organizationSteps(c, "acme", tlskeys).steps:
       if st.objectName == "allow-conductor": conductorPolicy = st.obj
       if st.objectName == "default-deny": deny = st.obj
       if st.objectName == "allow-dns-and-collector":

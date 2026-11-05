@@ -2,14 +2,15 @@
 ## exists is as good as a created one), so that a retry after a failure and the reconciliation (SHD-008) do the same thing. Nothing is
 ## ever deleted except by `disable` (the Ingress and the controller) and `purge` (the namespace and, with it, everything in it), both
 ## on the explicit request of an administrator. The objects are plain JSON: the tests compare them, the API server validates them.
-import std/[json, os, strutils]
+import std/[json, os, strutils, base64]
 import crunchy
 import kubeapi, orgrules
+import ../common/ctrlauth
 
 const
   conductorName* = "cinim-conductor"            ## the label of the organisation's conductor Pods (the controller makes them, jobcontroller/conductors.nim)
   controllerName* = "cinim-job-controller"      ## the ServiceAccount and the label of the organisation's controller; its Pod is `<name>-<generation>`
-  curveSecretName* = "cinim-controller-curve"
+  tlsSecretName* = "cinim-controller-tls"
   generationAnnotation* = "cinim.io/generation" ## on the controller's Pod: the generation of the identity whose one-time token it was started with (IAM-003, common/ctrlauth.nim)
   hashAnnotation* = "cinim.io/spec-hash"        ## on a NetworkPolicy: the fingerprint of the object the core made; the reconciliation replaces a policy that carries another one (SHD-008)
   policyKinds* = ["NetworkPolicy", "CiliumNetworkPolicy"]
@@ -44,8 +45,8 @@ type
     storageDirectPort*: int                     ## D-61: the shard's storage module takes the bytes of the shims on this port (0: it does not); a step Pod may reach it, and nothing else of the module
     deployKubeApiServer*: bool                  ## also a CiliumNetworkPolicy that lets the deploy Pods reach the Kubernetes API server (the entity `kube-apiserver`): a NetworkPolicy cannot name it under Cilium
 
-  CurveKeys* = object                           ## what the controller of an organisation needs to reach the core (D-24)
-    corePub*, clientPub*, clientKey*: string
+  TlsKeys* = object                             ## what the controller of an organisation needs to reach the core: the CA of the core's certificate and the shared client identity (docs/shim-grpc.md)
+    ca*, clientPem*, clientKey*: string
 
   Step* = object
     name*, kind*, namespace*, objectName*: string
@@ -134,13 +135,13 @@ func controllerPodBase(cfg: ProvisionConfig; slug: string; generation: int; toke
          "image": cfg.controllerImage,
          "env": env,
          "volumeMounts": [
-           {"name": "curve", "mountPath": "/etc/cinim/curve", "readOnly": true},
+           {"name": "tls", "mountPath": "/etc/cinim/tls", "readOnly": true},
            {"name": "state", "mountPath": "/state"},
            {"name": "tmp", "mountPath": "/tmp"}],
          "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
          "resources": {"requests": {"cpu": "20m", "memory": "64Mi"}, "limits": {"memory": "256Mi"}}}],
        "volumes": [
-         {"name": "curve", "secret": {"secretName": curveSecretName, "defaultMode": 288}},   # 0440
+         {"name": "tls", "secret": {"secretName": tlsSecretName, "defaultMode": 288}},   # 0440
          {"name": "state", "persistentVolumeClaim": {"claimName": stateClaimName}},
          {"name": "tmp", "emptyDir": {}}]}}
 
@@ -151,6 +152,10 @@ proc fingerprint(text: string): string =
     result.add digits[int(b shr 4)]
     result.add digits[int(b and 15)]
   result.setLen 24
+
+proc keysDigest*(k: TlsKeys): int64 =
+  ## a number that stands for the transport keys: 60 bits of their fingerprint, never 0 (0 means "not known" to `keysapplied`). The core remembers it for the Secret it made, because it may not read the Secret back (T-45).
+  max(1'i64, parseHexInt(fingerprint(k.ca & "\0" & k.clientPem & "\0" & k.clientKey)[0 ..< 15]).int64)
 
 proc controllerSpecHash*(cfg: ProvisionConfig; slug: string): string =
   ## What the controller's Pod should be, as a short fingerprint (the SHA-256 of the object made with no generation and no token): its image, its settings (the core's settings that
@@ -275,7 +280,7 @@ func ingressObject(cfg: ProvisionConfig; slug: string): JsonNode =
   if cfg.tlsSecret.len > 0 and cfg.host.len > 0:
     result["spec"]["tls"] = %*[{"hosts": [cfg.host], "secretName": cfg.tlsSecret}]
 
-proc organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; active = true): tuple[steps: seq[Step], skipped: seq[string]] =
+proc organizationSteps*(cfg: ProvisionConfig; slug: string; keys: TlsKeys; active = true): tuple[steps: seq[Step], skipped: seq[string]] =
   ## SHD-007 (2)..(5): the objects of the namespace of the organisation, in the order of the specification, and its Ingress in the `multi` mode.
   ## Builds (D-42) need none of their own: a build Pod is made by the same controller, in the same namespace. A switched-off organisation
   ## (`active` false) is expected without its Ingress (SHD-008); everything else of it stays. The controller's Pod is not here: the core starts it with a token of its own
@@ -291,9 +296,9 @@ proc organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; ac
       %*{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta(cfg, slug, controllerName, ns),
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": stepRunnerRole(cfg)},
          "subjects": [{"kind": "ServiceAccount", "name": controllerName, "namespace": ns}]})
-    result.steps.add step("controller keys", "Secret", ns, curveSecretName,
-      %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, curveSecretName, ns), "type": "Opaque",
-         "stringData": {"core.pub": curve.corePub, "client.pub": curve.clientPub, "client.key": curve.clientKey}})
+    result.steps.add step("controller keys", "Secret", ns, tlsSecretName,
+      %*{"apiVersion": "v1", "kind": "Secret", "metadata": meta(cfg, slug, tlsSecretName, ns), "type": "Opaque",
+         "stringData": {"ca.pem": keys.ca, "client.pem": keys.clientPem, "client.key": keys.clientKey}})
     result.steps.add step("controller state volume", "PersistentVolumeClaim", ns, stateClaimName, stateClaim(cfg, slug))
   else:
     result.skipped.add "job controller: CINIM_CONTROLLER_IMAGE is not set"
@@ -314,9 +319,9 @@ proc organizationSteps*(cfg: ProvisionConfig; slug: string; curve: CurveKeys; ac
   if cfg.multi and active:
     result.steps.add Step(name: "ingress", kind: "Ingress", namespace: cfg.shardNamespace, objectName: ingressName(slug), obj: ingressObject(cfg, slug))
 
-proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; curve: CurveKeys; active = true): ProvisionResult =
+proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; keys: TlsKeys; active = true): ProvisionResult =
   ## stops at the first failure and says which step it was; what was created stays (a retry creates the rest)
-  let (steps, skipped) = organizationSteps(cfg, slug, curve, active)
+  let (steps, skipped) = organizationSteps(cfg, slug, keys, active)
   result.skipped = skipped
   for s in steps:
     let r = k.create(s.kind, s.namespace, s.obj)
@@ -363,12 +368,19 @@ proc purge*(k: KubeApi; cfg: ProvisionConfig; slug: string): ProvisionResult =
     return
   result.steps.add StepResult(name: "namespace", outcome: r.outcome)
 
-proc coreSecret*(certs: string): string =
-  ## the core's own secret key: the master of the controller identities (common/ctrlauth.nim); it leaves the core nowhere
-  readFile(certs / "curve" / "core.key").strip
+proc secretHolds*(have, want: JsonNode): bool =
+  ## does the Secret read from the cluster (`data`, base64) hold what `want` (`stringData`) says
+  let data = have{"data"}
+  if data == nil or data.kind != JObject: return false
+  for k, v in want{"stringData"}.pairs:
+    if not data.hasKey(k) or decode(data[k].getStr) != v.getStr: return false
+  true
 
-proc loadCurve*(certs: string): CurveKeys =
-  ## the keys the core itself holds for the transport (D-24), to hand to the controller of an organisation
-  let d = certs / "curve"
-  CurveKeys(corePub: readFile(d / "core.pub").strip, clientPub: readFile(d / "client.pub").strip,
-            clientKey: readFile(d / "client.key").strip)
+proc coreSecret*(certs: string): string =
+  ## the core's own secret: the master of the controller identities (common/ctrlauth.nim); it leaves the core nowhere
+  coreSecretKey(certs)
+
+proc loadTls*(certs: string): TlsKeys =
+  ## the keys the core itself holds for the transport, to hand to the controller of an organisation (never the core's key)
+  let d = certs / "tls"
+  TlsKeys(ca: readFile(d / "ca.pem"), clientPem: readFile(d / "client.pem"), clientKey: readFile(d / "client.key"))

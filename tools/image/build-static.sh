@@ -5,4 +5,4 @@ set -eu
 out=$1; src=$2; shift 2
 cd /src
 tools/proto/nim_flatten.sh build/nimproto >/dev/null
-exec nim c -d:release ${CINIM_NIM_FLAGS:-} --opt:size --hints:off --warnings:off --dynlibOverride:zmq --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static "$@" -o:"$out" "$src"
+exec nim c -d:release ${CINIM_NIM_FLAGS:-} --opt:size --hints:off --warnings:off --passC:-ffunction-sections --passC:-fdata-sections --passL:-Wl,--gc-sections --passL:-static "$@" -o:"$out" "$src"
