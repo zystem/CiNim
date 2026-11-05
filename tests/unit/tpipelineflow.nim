@@ -8,20 +8,37 @@ let script = readFile(if fileExists(".ci/pipeline.lua"): ".ci/pipeline.lua" else
 type Flow = object
   builds, retags: seq[string]      ## the components whose image was built (Kaniko) and tagged from BASE's
   tests, deploy, depsImage, testImage: bool
+  registrySteps, withLogin, strayLogin: int   ## the steps that talk to the registry (Kaniko, crane), how many of them were given the Docker config, and how many steps that do not talk to it were
+  checks: seq[string]              ## the images whose presence in the registry was asked (the libraries, the tests)
+  copies: seq[string]              ## the copies of the images to the other registries (`crane copy`): the names of the images the job was given
   testEnv: string                  ## COMPONENTS and CHANGED_TESTS of the job of the tests
   status: string
 
-proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; deploy = false): Flow =
+proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; deploy = false; login = false; present: seq[string] = @[]; pushAlso = ""; build = true): Flow =
   ## `prepOutputs`: the lines the first step answers (name=value). `base`: what the platform tells (run.source.base). `retagged`: for which component the retag finds an image (a component not named
   ## is found, when none is named all are)
   var answer = initHashSet[string]()
   for (c, found) in retagged: (if found: answer.incl c)
+  let inRegistry = present.toHashSet
   var res = Flow()
   proc host(seq: int; kind, payload: string): Option[string] =
     if kind != "job_sh": return some("")
     let parts = payload.split('\t')
     let cmd = parts[^1]
+    let meta = payload[0 ..< payload.len - cmd.len]            # the job and the step with what they were given (the secrets among it)
+    let talks = "/kaniko/executor" in cmd or "crane " in cmd
+    if talks: inc res.registrySteps
+    if "REGISTRY_DOCKER_CONFIG" in meta: (if talks: inc res.withLogin else: inc res.strayLogin)
     if "git init -q --bare mirror.git" in cmd: return some("0\n" & prepOutputs)
+    if "crane copy" in cmd:
+      let at = meta.find("\"IMAGES\":\"")
+      res.copies.add (if at >= 0: meta[at + 10 ..< meta.find('"', at + 10)] else: "?")
+    if "crane manifest" in cmd:                                  # is the image of the libraries or of the tests there already?
+      for name in ["cinim-deps", "cinim-test"]:
+        if "NAME=" & name in cmd:
+          res.checks.add name
+          return some("0\nPRESENT=" & (if name in inRegistry: "yes" else: "no") & "\n")
+      return some("0\nPRESENT=no\n")
     if "RETAGGED" in cmd and "base7" in cmd:
       let opts = parts[3]
       for c in ["cinim-controller", "cinim-conductor", "cinim-storage", "cinim-ui", "cinim"]:
@@ -49,6 +66,9 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
   var j: Journal
   var params = @[("REGISTRY", "r:5000")]
   if deploy: params.add ("DEPLOY", "true")
+  if login: params.add ("REGISTRY_LOGIN", "true")
+  if pushAlso.len > 0: params.add ("PUSH_ALSO", pushAlso)
+  if not build: params.add ("BUILD", "false")
   if base.len > 0: params.add [("@source.repository", "https://x/r.git"), ("@source.commit", "c"), ("@source.path", ".ci/pipeline.lua"), ("@source.base", base)]
   let r = execute(sb, j, script, host, runId = "flow", params = params)
   res.status = $r.status & (if r.message.len > 0: ": " & r.message else: "")
@@ -129,3 +149,37 @@ suite "D-82 what the pipeline builds, tags and runs":
   test "the deploy follows whatever was built or tagged":
     let f = flow(common & "BASE=" & goodBase & "\nAREAS=docs\nCHANGED_TESTS=none\n", base = goodBase, deploy = true)
     check f.status.startsWith("esDone") and f.deploy
+
+suite "the registry: any one, with a login or without (Docker config, crane and Kaniko)":
+  test "no login (the plain registry of the cluster): no step is given the credential, and Kaniko and crane are the steps that talk to the registry":
+    let f = flow(common)
+    check f.registrySteps > 0 and f.withLogin == 0 and f.strayLogin == 0
+  test "with REGISTRY_LOGIN every step that talks to the registry gets the Docker config, and no other step does":
+    let f = flow(common, login = true)
+    check f.registrySteps > 0 and f.withLogin == f.registrySteps and f.strayLogin == 0
+    let g = changed("src/ui")                                    # the retags talk to it too
+    check g.retags.len > 0
+    let h = flow(common & "BASE=" & goodBase & "\nAREAS=src/ui\nCHANGED_TESTS=none\n", base = goodBase, login = true)
+    check h.withLogin == h.registrySteps and h.strayLogin == 0
+  test "the image of the libraries and the image of the tests are looked for in the registry first, and built when they are not there":
+    let f = flow(common)
+    check f.checks.sorted == @["cinim-deps", "cinim-test"] and f.depsImage and f.testImage
+  test "images that the registry has already are not built again (the libraries and the tests are made once)":
+    let f = flow(common, present = @["cinim-deps", "cinim-test"])
+    check f.checks.len == 2 and not f.depsImage and not f.testImage and f.builds.sorted == allFive
+  test "only one of them is there: the other is built":
+    let f = flow(common, present = @["cinim-deps"])
+    check not f.depsImage and f.testImage
+
+suite "several registries for one project: the images are copied to the others":
+  test "no other registry: nothing is copied":
+    check flow(common).copies.len == 0
+  test "other registries: one step copies the five images to each of them, and it is given the login (the Docker config holds them all)":
+    let f = flow(common, login = true, pushAlso = "ghcr.io/acme, quay.io/acme")
+    check f.copies.len == 1 and f.copies[0] == "cinim cinim-controller cinim-conductor cinim-storage cinim-ui"
+    check f.withLogin == f.registrySteps and f.strayLogin == 0
+  test "when nothing is built (BUILD is off) there is nothing new to copy":
+    check flow(common, pushAlso = "ghcr.io/acme", build = false).copies.len == 0
+  test "an image tagged from the base is copied as well: the other registries get the five tags of every run":
+    let f = flow(common & "BASE=" & goodBase & "\nAREAS=src/ui\nCHANGED_TESTS=none\n", base = goodBase, pushAlso = "ghcr.io/acme")
+    check f.retags.len == 4 and f.copies.len == 1

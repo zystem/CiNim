@@ -280,6 +280,32 @@ too, because only build Pods reach the internet. Checked on the TESTING cluster 
 with a non-zero code fails the job and the run (`ignore_failure = true` returns the code to the script instead, PIP-018). The registry here is the plain
 in-cluster one of `deploy/registry`: its address is the one the Pods reach it at, which is not always the name the nodes pull from.
 
+### Where the images go: any registry, with a login, and several of them
+
+The pipeline pushes the images of the platform to `$REGISTRY/<image>`. Kaniko builds and pushes, and `crane` (the image `gcr.io/go-containerregistry/crane`, pinned by its digest in `.ci/pipeline.lua`) asks whether an image is
+there and tags it; both read the **Docker config** (`config.json`) of the registry, and both answer the registry's own challenge, so a registry that hands out a token against the login (Docker Hub, GitHub, GitLab, Quay,
+Harbor and Gitea do) works as well as one that takes a password, which a password put in a header by hand could not do. The images are `$REGISTRY/<image>`, so a registry that wants an owner or a project in the path has it in `REGISTRY`.
+
+| the registry | `REGISTRY` | `REGISTRY_INSECURE` | `REGISTRY_LOGIN` |
+|:--|:--|:--|:--|
+| the one of the cluster (`deploy/registry`), the default | `registry-docker-registry.registry.svc:5000` | `true` (plain HTTP) | `false` |
+| Gitea | `gitea.example.org/<owner>` | `true` if it speaks plain HTTP, else `false` | `true` |
+| GitHub | `ghcr.io/<owner>` | `false` | `true` |
+| GitLab, Docker Hub, Quay, Harbor, ... | `registry.example.org/<project>`, `docker.io/<user>`, ... | `false` | `true` |
+
+The login is the organisation's secret **`REGISTRY_DOCKER_CONFIG`**: the text of a Docker config that holds the login of every registry the project pushes to (`docker login <registry>` writes one, or make it by hand: `{"auths":{"ghcr.io":{"auth":"<base64 of user:token>"}}}`):
+
+```bash
+curl -X PUT .../api/v1/organizations/<slug>/secrets/REGISTRY_DOCKER_CONFIG -H "Authorization: Bearer $ADMIN" -d "$(jq -n --rawfile v config.json '{value: $v}')"
+```
+
+Only the steps that talk to the registry are given it. **Different projects, different registries:** the secret can be set on a group or a project (`PUT .../projects/<path>/secrets/REGISTRY_DOCKER_CONFIG`, the nearest one wins, D-86), and the
+trigger of each project holds its own `REGISTRY`. **Several registries for one project:** `PUSH_ALSO` is a list of other registries (`ghcr.io/acme,quay.io/acme`, separated by commas); after the images are built (or tagged from the images of the base) one step
+copies each of the five to each of them under the same tag with `crane copy`, and the one Docker config holds all the logins. The libraries image and the cache stay in `REGISTRY`. The build Pods reach only what `build.egress` of the chart lists (the
+network policy of the organisation): every registry here has to be there, with its port, or the step is cut off. **The nodes** pull the images (the test image, and the rollout) with their own logins, which the pipeline does not set
+(`machine.registries` of Talos, the `config.json` of containerd, an `imagePullSecret` by hand): `PULL_REGISTRY` is the name they pull from. Not built: registries as objects of the organisation, a project or a group that the platform keeps (an address, a login,
+what is allowed to reach it) and shows in the UI, with the egress rule and the pull login made from them (D-107).
+
 ### By the clock, every night
 
 The same script as a **schedule trigger** of the organisation (docs/triggers.md): the platform then builds its own images every night without anyone starting it. The trigger names the

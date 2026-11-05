@@ -16,7 +16,11 @@
 -- with no base (a first run, a run whose script came in the request) or with no image of the base, everything is built and tested.
 -- Start it with the commit to run, from a webhook (the trigger of the organisation names the repository; a git server calls it with {"commit": "<sha>"}), by the clock, or by hand:
 --   POST /api/v1/runs  {"organization": "<slug>", "repository": "https://github.com/zystem/CiNim.git", "commit": "main",
---                       "params": {"REGISTRY": "<host:port the build Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}
+--                       "params": {"REGISTRY": "<host[:port][/path] the build Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}
+-- Any registry that speaks the Docker registry API: the plain one of the cluster (the default: HTTP, no login), or one with TLS and a login (REGISTRY_INSECURE=false, REGISTRY_LOGIN=true): Gitea, GitHub
+-- (ghcr.io/<owner>), GitLab, Docker Hub, Quay, Harbor, ... The images are `$REGISTRY/<image>`, so a registry that wants an owner or a project in the path has it in REGISTRY. The login is the Docker `config.json` of
+-- the registry, kept as the organisation's secret REGISTRY_DOCKER_CONFIG (docs/deployment.md "Where the images go"); Kaniko and crane (which does the rest: is an image there, tag an image) read it, and they
+-- answer the registry's own challenge (a token, as Docker Hub, GitHub and GitLab ask for, or a password), which a plain password in a header could not. The nodes pull with their own login (PULL_REGISTRY).
 -- Leave TAG out and every run tags its images <date>-<commit>. A run that came with the script in the request (no repository) takes REPO and REF from its parameters.
 -- The organisation needs the build profile (build.enabled) with a build.egress rule for the registry, and a store for caches (the storage module); for the deploy step the deploy
 -- profile (deploy.enabled, deploy.kubeApiServer) and the secrets DEPLOY_TOKEN and DEPLOY_CA (deployer.yaml). A step that exits non-zero fails the job and so the run (6.7).
@@ -68,10 +72,21 @@ git clone -q -n --shared mirror.git src
 git -C src -c advice.detachedHead=false -c checkout.workers=0 checkout -q "$SHA"
 ]]
 
+local CRANE = "gcr.io/go-containerregistry/crane:debug@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b"   -- crane: is an image there, tag an image; no daemon
+
+-- The login and the transport of the registry for the shell of a step that talks to it. The Docker config (the secret REGISTRY_DOCKER_CONFIG, only with REGISTRY_LOGIN) is put where Kaniko and crane look for it;
+-- REGISTRY_INSECURE (the registry of the cluster speaks plain HTTP) gives the flags that allow it.
 local REGISTRY_FLAGS = "--insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull"
+local function registry_sh(config_dir)
+  return 'CRANE_FLAGS=""; KANIKO_FLAGS=""\n' ..
+         'if [ "${REGISTRY_INSECURE:-true}" = true ]; then CRANE_FLAGS=--insecure; KANIKO_FLAGS="' .. REGISTRY_FLAGS .. '"; fi\n' ..
+         'export DOCKER_CONFIG=' .. config_dir .. '\n' ..
+         'if [ -n "${REGISTRY_DOCKER_CONFIG:-}" ]; then mkdir -p "$DOCKER_CONFIG" && printf \'%s\' "$REGISTRY_DOCKER_CONFIG" > "$DOCKER_CONFIG/config.json"; fi\n'
+end
 local function kaniko(component, image, tag, extra)
-  return "/kaniko/executor --dockerfile=/cicd/workspace/src/tools/image/Dockerfile." .. component .. " --context=dir:///cicd/workspace/src " .. (extra or "") ..
-         " --destination=$REGISTRY/" .. image .. ":" .. tag .. " --cache=true --cache-repo=$REGISTRY/cinim-cache --log-format=text " .. REGISTRY_FLAGS
+  return registry_sh("/kaniko/.docker") ..
+         "/kaniko/executor --dockerfile=/cicd/workspace/src/tools/image/Dockerfile." .. component .. " --context=dir:///cicd/workspace/src " .. (extra or "") ..
+         " --destination=$REGISTRY/" .. image .. ":" .. tag .. " --cache=true --cache-repo=$REGISTRY/cinim-cache --log-format=text $KANIKO_FLAGS"
 end
 
 -- a job (its id is the first argument, 2 characters, D-67) in a volume of its own with the source of the commit in it; its steps 1 and 2 are the mirror and the clone, the steps of `fn` are 3 on
@@ -84,27 +99,36 @@ local function checked_out(id, env, fn, opts)
   end }
 end
 
--- Is the image in the registry? (the images of the libraries and of the tests are made once)
+-- Is the image in the registry? (the images of the libraries and of the tests are made once.) A step of crane; its output PRESENT is yes or no, and the build step follows only on no.
 local function in_registry(name, hash)
-  return 'wget -q -O /dev/null --header "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" ' ..
-         'http://$REGISTRY/v2/' .. name .. '/manifests/$' .. hash .. ' && echo "' .. name .. ':$' .. hash .. ' is in the registry" || '
+  return "set -eu\nNAME=" .. name .. "\nHASH=$" .. hash .. "\n" .. registry_sh("$CICD_RUN_DIR/docker") ..
+         'if crane manifest $CRANE_FLAGS "$REGISTRY/$NAME:$HASH" >/dev/null 2>&1; then echo "$NAME:$HASH is in the registry"; echo PRESENT=yes >> "$CICD_OUTPUT"; ' ..
+         'else echo PRESENT=no >> "$CICD_OUTPUT"; fi\n'
 end
 
 -- D-82: an image that nothing changed for is not built again: the manifest of the image of BASE (the commit that was last good) is put under the new tag, in the registry that the Pods reach (a PUT of the
 -- same manifest: the layers are there already). RETAGGED=no when there is no such image: the caller builds it.
-local RETAG = [[
+local RETAG = registry_sh("$CICD_RUN_DIR/docker") .. [[
 set -eu
 base7=$(printf '%s' "$BASE" | cut -c1-7)
 no() { echo "RETAGGED=no" >> "$CICD_OUTPUT"; exit 0; }
 [ -n "$base7" ] && [ "$base7" != none ] || no
-old=$(curl -sf "http://$REGISTRY/v2/$NAME/tags/list" | jq -r '.tags[]?' | grep -- "-$base7\$" | tail -n 1) || old=""
+old=$(crane ls $CRANE_FLAGS "$REGISTRY/$NAME" 2>/dev/null | grep -- "-$base7\$" | tail -n 1) || old=""
 [ -n "$old" ] || { echo "no $NAME image of $base7: it is built"; no; }
-hdr=$(mktemp); body=$(mktemp)
-curl -sf -D "$hdr" -o "$body" -H "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json" "http://$REGISTRY/v2/$NAME/manifests/$old" || { echo "cannot read $NAME:$old"; no; }
-type=$(grep -i '^content-type:' "$hdr" | tr -d '\r' | cut -d' ' -f2-)
-curl -sf -X PUT -H "Content-Type: $type" --data-binary @"$body" "http://$REGISTRY/v2/$NAME/manifests/$IMAGE_TAG" || { echo "cannot put $NAME:$IMAGE_TAG"; no; }
+crane tag $CRANE_FLAGS "$REGISTRY/$NAME:$old" "$IMAGE_TAG" || { echo "cannot tag $NAME:$IMAGE_TAG"; no; }
 echo "$NAME:$IMAGE_TAG is $NAME:$old: nothing of it changed since $base7"
 echo "RETAGGED=yes" >> "$CICD_OUTPUT"
+]]
+
+-- Several registries for one project (PUSH_ALSO): the images are in $REGISTRY, built or tagged, and are copied from there, blob by blob only what the other registry lacks. One Docker config holds the
+-- logins of all of them.
+local REPLICATE = registry_sh("$CICD_RUN_DIR/docker") .. [[
+set -eu
+for r in $(printf '%s' "$PUSH_ALSO" | tr ',' ' '); do
+  for name in $IMAGES; do
+    crane copy $CRANE_FLAGS "$REGISTRY/$name:$IMAGE_TAG" "$r/$name:$IMAGE_TAG"
+  done
+done
 ]]
 
 -- The tests, in a Pod: the integration tests start `rqlited` themselves (tools/test/run.sh), the unit tests need nothing. The nimble packages of the image are in the home of root, which is what
@@ -253,7 +277,10 @@ end
 return ci.pipeline({
   name = "cinim-self-build",
   params = {
-    REGISTRY = ci.string{required = true, max_length = 200},                          -- host:port, as the build Pods reach the registry (plain HTTP)
+    REGISTRY = ci.string{required = true, max_length = 200},                          -- host[:port][/path], as the build Pods reach the registry; the images are $REGISTRY/<image>
+    REGISTRY_INSECURE = ci.bool{default = true},                                      -- the registry speaks plain HTTP or has no certificate to check (the registry of the cluster); false for TLS
+    PUSH_ALSO = ci.string{default = "", max_length = 500},                            -- other registries the images are copied to, host[:port][/path], separated by commas (the same names and tags)
+    REGISTRY_LOGIN = ci.bool{default = false},                                        -- the steps that talk to the registry log in with the secret REGISTRY_DOCKER_CONFIG (the text of a Docker config.json)
     PULL_REGISTRY = ci.string{default = "", max_length = 200},                        -- the name the nodes pull the images from; empty: the same as REGISTRY
     TAG = ci.string{default = "", max_length = 100, pattern = "[%w%._%-]*"},          -- the tag of the images; empty: <date>-<commit>
     REPO = ci.string{default = "https://github.com/zystem/CiNim.git", max_length = 300},   -- when the run did not come from a repository (run.source)
@@ -270,6 +297,7 @@ return ci.pipeline({
   main = function(run)
     local p = run.params
     local pull = (p.PULL_REGISTRY ~= "") and p.PULL_REGISTRY or p.REGISTRY
+    local login = p.REGISTRY_LOGIN and {"REGISTRY_DOCKER_CONFIG"} or nil      -- given to the steps that talk to the registry and to no other
     -- where the commit is: the repository and the commit that the conductor read this script from, or the parameters
     local repo = (run.source.repository ~= "") and run.source.repository or p.REPO
     local ref = (run.source.commit ~= "") and run.source.commit or p.REF
@@ -299,12 +327,14 @@ return ci.pipeline({
       -- 2. the libraries, and the tests' image, once for as long as what they are made of stays the same
       if p.BUILD then
         checked_out('d', env, function(j)
-          j:run(step.sh['3']{ cmd = in_registry("cinim-deps", "DEPS") .. kaniko("deps", "cinim-deps", "$DEPS"), image = KANIKO })
+          local have = j:run(step.sh['3']{ cmd = in_registry("cinim-deps", "DEPS"), image = CRANE, secrets = login }).outputs.PRESENT == "yes"
+          if not have then j:run(step.sh['4']{ cmd = kaniko("deps", "cinim-deps", "$DEPS"), image = KANIKO, secrets = login }) end
         end)
       end
       if run_tests then
         checked_out('t', env, function(j)
-          j:run(step.sh['3']{ cmd = in_registry("cinim-test", "TESTDEPS") .. kaniko("test", "cinim-test", "$TESTDEPS"), image = KANIKO })
+          local have = j:run(step.sh['3']{ cmd = in_registry("cinim-test", "TESTDEPS"), image = CRANE, secrets = login }).outputs.PRESENT == "yes"
+          if not have then j:run(step.sh['4']{ cmd = kaniko("test", "cinim-test", "$TESTDEPS"), image = KANIKO, secrets = login }) end
         end)
       end
       -- 3. the images of the components, and the tests, side by side: the first that fails stops the others
@@ -317,7 +347,7 @@ return ci.pipeline({
             local comp = by[c.component]
             local function build()
               checked_out(b32f("{xx}", 32 + number[comp.target]), env, function(j)         -- the jobs 11, 12, ... one for each component
-                j:run(step.sh['3']{ cmd = kaniko(comp.target, comp.image, "$IMAGE_TAG", "--build-arg DEPS_IMAGE=$REGISTRY/cinim-deps:$DEPS"), image = KANIKO })
+                j:run(step.sh['3']{ cmd = kaniko(comp.target, comp.image, "$IMAGE_TAG", "--build-arg DEPS_IMAGE=$REGISTRY/cinim-deps:$DEPS"), image = KANIKO, secrets = login })
               end)
             end
             if affected[comp.target] then
@@ -325,9 +355,9 @@ return ci.pipeline({
             else
               -- nothing of it changed since BASE: the image of BASE under the new tag (the jobs 49, 50, ...); if there is none, it is built
               local retagged = false
-              ci.single[b32f("{xx}", 48 + number[comp.target])]{ image = KUBECTL, profile = "build", workspace = "isolated",
+              ci.single[b32f("{xx}", 48 + number[comp.target])]{ image = CRANE, profile = "build", workspace = "isolated",
                 env = { BASE = base, NAME = comp.image, IMAGE_TAG = info.TAG }, body = function(j)
-                  retagged = j:run(step.sh['1']{ cmd = RETAG }).outputs.RETAGGED == "yes"
+                  retagged = j:run(step.sh['1']{ cmd = RETAG, secrets = login }).outputs.RETAGGED == "yes"
                 end }
               if not retagged then build() end
             end
@@ -346,6 +376,14 @@ return ci.pipeline({
         end
       end
       ci.parallel(branches, {fail_fast = true})
+      -- the other registries of the project (the images are in $REGISTRY by now, built or tagged): one copy of each image to each of them
+      if p.BUILD and p.PUSH_ALSO ~= "" then
+        local images = {}
+        for _, c in ipairs(COMPONENTS) do images[#images + 1] = c.image end
+        ci.single['y']{ image = CRANE, profile = "build", workspace = "isolated", env = { IMAGE_TAG = info.TAG, IMAGES = table.concat(images, " ") }, body = function(j)
+          j:run(step.sh['1']{ cmd = REPLICATE, secrets = login })
+        end }
+      end
     end
     -- 4. the new tag in the cluster
     if p.DEPLOY then
