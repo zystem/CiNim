@@ -21,30 +21,22 @@ if paramCount() >= 1 and paramStr(1) == "admin-password-reset":
   quit 0
 
 if paramCount() >= 1 and paramStr(1) == "rekey":
-  # `kubectl -n <ns> exec deploy/cinim-core -- /core rekey [--dry-run]` (D-80, docs/hardware-key.md): the master key moves to another, the new one given by CINIM_NEW_KEYSERVICE_* or
-  # CINIM_NEW_SECRETS_KEY_FILE next to the old one that the core runs with. Every data key of an organisation and the check text of the vault are opened with the old key and sealed with the new
+  # `kubectl -n <ns> exec deploy/cinim-core -- /core rekey [--dry-run]` (D-80, docs/hardware-key.md): the master key moves to another key service, the new one given by CINIM_NEW_KEYSERVICE_*
+  # next to the old one that the core runs with. Every data key of an organisation and the check text of the vault are opened with the old key and sealed with the new
   # one (the secrets themselves are not touched); with --dry-run nothing changes. Then the core is started with the new key. Safe to run again.
   let dry = paramCount() >= 2 and paramStr(2) == "--dry-run"
-  let certsDir = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
-  var oldK: tuple[ok, retry: bool, kek: KekProvider, error: string]
-  if keyGiven():
-    let mo = resolveMasterSecret(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"), certsDir)
-    if not mo.ok:
-      stderr.writeLine "core: the master secret: " & mo.error
-      quit 1
-    oldK = buildKek(certsDir)
-  else:
-    # leaving the mode of the earlier versions (there is none now): the secrets are sealed by a key derived from the file tls/master.key, which is read for this once
-    let f = certsDir / "tls" / "master.key"
-    if not fileExists(f):
-      stderr.writeLine "core: no key is given for the secrets and " & f & " is missing: nothing to move from"
-      quit 1
-    stderr.writeLine "core: the old key is the one derived from " & f & " (the mode of the earlier versions)"
-    oldK = (true, false, derivedKek(readFile(f).strip), "")
+  if not keyGiven():
+    stderr.writeLine "core: " & noKeyText & ": nothing to move from"
+    quit 1
+  let mo = resolveMasterSecret(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
+  if not mo.ok:
+    stderr.writeLine "core: the master secret: " & mo.error
+    quit 1
+  let oldK = buildKek()
   if not oldK.ok:
     stderr.writeLine "core: the old key: " & oldK.error
     quit 1
-  let newK = buildNewKek(certsDir)
+  let newK = buildNewKek()
   if not newK.ok:
     stderr.writeLine "core: the new key: " & newK.error
     quit 1
@@ -63,7 +55,7 @@ if paramCount() >= 3 and paramStr(1) == "conductor-credential":
   # `/core conductor-credential <namespace> <conductor id>`: what a conductor of that organisation proves itself with (IAM-003). The controller will
   # hand it to the conductors it makes (docs/conductors.md phase 3); a conductor started by hand is given it this way.
   let certsDir = getEnv("CINIM_CERTS", getCurrentDir() / "tests" / "certs")
-  let m = resolveMasterSecret(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"), certsDir)
+  let m = resolveMasterSecret(getEnv("CINIM_RQLITE_URL", "http://127.0.0.1:4001"))
   if not m.ok:
     stderr.writeLine "core: the master secret: " & m.error
     quit 1
@@ -169,9 +161,9 @@ proc main() =
     if not fileExists(certs / "tls" / f):
       stderr.writeLine "core: the transport key " & (certs / "tls" / f) & " is missing (CINIM_CERTS; in a cluster the chart's tls values: cert-manager, or tls.secretName; tools/grpc/gen_tls.sh makes the set)"
       quit 2
-  # the master secret: in the database, sealed by the key of the secrets (a key service or a key file), or in the file tls/master.key that their key is derived from. Before any thread that uses it.
+  # the master secret: in the database, sealed by the key of the secrets (a key service). Before any thread that uses it.
   block:
-    let m = resolveMasterSecret(rqliteUrl, certs)
+    let m = resolveMasterSecret(rqliteUrl)
     if not m.ok:
       stderr.writeLine "core: FATAL: the master secret: " & m.error
       stderr.writeLine (if m.retry: "core: exiting; the key service may be back in a moment: Kubernetes starts the core again" else: "core: exiting; waiting will not help, a person must look")

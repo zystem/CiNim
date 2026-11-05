@@ -79,7 +79,7 @@ a run of an organisation; a run of the shard's default tenant has none.
 
 The master key can also be kept on a hardware token (a SmartCard-HSM); how to prepare the card and the key is in docs/hardware-key.md; the core already speaks to a key service (an emulator exists), the service for the card is not built yet.
 
-The master key is a file of 64 hexadecimal digits (`CINIM_SECRETS_KEY_FILE`; the chart gives none), or, in a key service (the software hsmgate of the chart by default, a card behind hsmgate, a Vault or an OpenBao); there is no mode without a key (D-106). **Keep it apart from the database backup** and back it up too: a database restored without it holds nothing readable (GitLab and Drone say the same of their
+The master key is in a key service (the software hsmgate of the chart by default, a card behind hsmgate, a Vault or an OpenBao); there is no mode without a key (D-106). **Keep it apart from the database backup** and back it up too: a database restored without it holds nothing readable (GitLab and Drone say the same of their
 keys). The core stores a check value and refuses to serve secrets when started with another key, instead of writing new secrets next to ones it cannot read.
 
 ## What is not covered

@@ -153,6 +153,10 @@ proc fingerprint(text: string): string =
     result.add digits[int(b and 15)]
   result.setLen 24
 
+proc keysDigest*(k: TlsKeys): int64 =
+  ## a number that stands for the transport keys: 60 bits of their fingerprint, never 0 (0 means "not known" to `keysapplied`). The core remembers it for the Secret it made, because it may not read the Secret back (T-45).
+  max(1'i64, parseHexInt(fingerprint(k.ca & "\0" & k.clientPem & "\0" & k.clientKey)[0 ..< 15]).int64)
+
 proc controllerSpecHash*(cfg: ProvisionConfig; slug: string): string =
   ## What the controller's Pod should be, as a short fingerprint (the SHA-256 of the object made with no generation and no token): its image, its settings (the core's settings that
   ## reach it as environment), its resources. The Pod carries it (`specAnnotation`), and the supervision of the controller (SHD-008) replaces a Pod that carries another one, e.g. after

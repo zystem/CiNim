@@ -23,6 +23,3 @@ Two releases of one shard collide on the cluster-scoped objects (the ClusterRole
 {{- if and .Values.hsmgate.enabled .Values.tls.certManager.issuerRef.name (ne .Values.tls.certManager.issuerRef.name .Values.hsmgate.tls.issuerRef.name) }}
 {{- fail "the certificates of hsmgate follow the issuer of the others: set hsmgate.tls.issuerRef to the same as tls.certManager.issuerRef" }}
 {{- end }}
-{{- if .Values.secrets.keySecret }}
-{{- fail "secrets.keySecret is gone (D-106): a key in a Secret that the core itself mounts is no key service. Use the hsmgate of the release (hsmgate.enabled, the default) or secrets.keyService" }}
-{{- end }}

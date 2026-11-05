@@ -31,22 +31,23 @@ cert-manager has to be in the cluster (its CRDs): install it once per cluster, a
 moved with the rest by `/core rekey`), so a backup of the database is the only backup of it and a restore needs nothing else (the key of the secrets, as for the secrets themselves). It is not a TLS key, so renewing a certificate changes nothing in it. The key's policy has to
 allow the context `cinim/master-secret/v1` (the bundled hsmgate does; docs/hardware-key.md for a service of yours).
 
-**A shard of the earlier versions** (CURVE, D-24, or a master secret in a file with the key of the secrets derived from it: that mode is gone) leaves it first: give the new key (one of the two places above) and run `/core rekey` with the old files still
-mounted (docs/hardware-key.md "Moving to another key service"), then start the new version with `master.key` mounted once, as the file of a Secret named by `tls.masterKeySecret` (or `tls.masterKeyInSecret=true` with the Secret of `tls.secretName`) so that its
-identities stay valid. The core stores it sealed and does not read the file again; a database that holds identities and no master secret refuses to start without it (a new random one would void every credential). The controllers, the conductors and the shims
+**A shard of the earlier versions** (CURVE, D-24, or a master secret in a file with the key of the secrets derived from it) is not brought over: both modes are gone, and the core reads no key file and brings no master secret in
+from a file (`CINIM_SECRETS_KEY_FILE`, `master.key` and `tls.masterKeySecret` were removed). The secrets of a database that a derived key sealed cannot be opened by this version: move them to a key service with the version that
+still has the way (`/core rekey` with no key given) before you take this one. A database that holds identities of controllers and no master secret gets a new one: the old credentials stop working, the core replaces each controller
+it no longer hears from (about two minutes) and the new one enrols. The controllers, the conductors and the shims
 are given the new keys by the core when it provisions the organisations again (the Secret `cinim-controller-tls`; the old `cinim-controller-curve` can be deleted). A release has to be taken up by the core, the controllers, the conductors and the shims together:
 a step that runs while the core is replaced loses its channel until it ends.
 
 **A renewed certificate is taken up without a restart.** The core looks at the files of its keys every `tls.reloadSeconds` (60; `CINIM_CERT_RELOAD_SECONDS`, 0: never; the Secret volumes are updated by the kubelet in a minute or two).
 When they have changed and can be used (a half-written or a wrong set is told and the old one stays), the five channels of the core start again with the new ones; the clients connect again and, reading their files at every connection,
-have the new pair. The core also puts the new client pair and CA in the Secret `cinim-controller-tls` of each organisation (the next provisioning pass), the kubelet updates the files of the controller and the conductors, the controller makes
+have the new pair. The core also puts the new client pair and CA in the Secret `cinim-controller-tls` of each organisation (the next provisioning pass; the core may not read a Secret, T-45, so it remembers the pair it put there, in memory, and makes the Secret again when the pair it has differs from it, and once after each start of the core), the kubelet updates the files of the controller and the conductors, the controller makes
 the Secret of the shims again for the steps that start from then on, and every one of them connects with the new pair at its next connection. A CA that is renewed must be trusted in both the old and the new form for a while; that is by hand.
 
 ```bash
 kubectl create namespace cinim-001
 ```
 
-Without cert-manager (`--set tls.certManager.enabled=false`) the keys are a Secret of yours, named by `tls.secretName`, with five files: `ca.pem`, `core.pem`, `core.key`, `client.pem` and `client.key` (and `master.key` only to bring in an old secret).
+Without cert-manager (`--set tls.certManager.enabled=false`) the keys are a Secret of yours, named by `tls.secretName`, with five files: `ca.pem`, `core.pem`, `core.key`, `client.pem` and `client.key`.
 `tools/grpc/gen_tls.sh DIR [DAYS]` makes a set in `DIR/tls` (EC P-256, two years by default; the certificate of the core must carry the name `cinim-core`):
 
 ```bash
@@ -164,6 +165,15 @@ helm install registry twuni/docker-registry -n registry --create-namespace -f de
   --set 'ingress.hosts[0]=registry.example.com'
 tools/image/build_core.sh registry.example.com/cinim:dev && docker push registry.example.com/cinim:dev
 ```
+
+**A registry that is already there: Gitea's own.** A Gitea (1.25 was tried) serves container images itself, at `<host>/<owner>/<image>:<tag>`, so a
+separate registry is not needed. Make an owner for the images (a user or an organisation) and tokens: `write:package` for the builds, and a separate
+`read:package` one for the nodes. Then `skopeo login --tls-verify=false <host>` on the workstation and `REGISTRY=<host>/<owner> tools/image/build-local.sh <tag> core ...`
+(the scripts push `<REGISTRY>/<image>:<tag>`). The name of the host must be the one in Gitea's `ROOT_URL`: the token endpoint that the client is sent to is built from it.
+With `REQUIRE_SIGNIN_VIEW` on, nothing is pulled without a login, so the nodes need the credentials. In Talos, one place for every Pod, those of the
+organisations' namespaces too (no `imagePullSecrets`): in `machine.registries`, a mirror `<host>: {endpoints: [http://<host>]}` and `config.<host>.auth` with the user and the
+`read:package` token; applied with `talosctl patch machineconfig --mode=no-reboot`, it took effect at once on all the nodes. It is plain HTTP like the registry above, so the token goes over
+the LAN in the clear.
 
 The image is built by `tools/image/build_core.sh`: the core (with TLS) is a static binary in a `scratch` image of about 8 MB
 with the CA certificates, so the image needs no libraries (`deploy/core/Dockerfile`). The image of the job controller is built by
@@ -330,7 +340,7 @@ A Pod uses it with `securityContext: {seccompProfile: {type: Localhost, localhos
 ## The master key of the step secrets
 
 The step secrets (docs/secrets-masking.md) are sealed in the database with data keys that a master key wraps; there is no mode without that key (D-106). It is in a key service (the hsmgate of the release, a card behind hsmgate, a Vault or an OpenBao: "The key of the step
-secrets" above) (the core itself still reads a key file, `CINIM_SECRETS_KEY_FILE`, for `/core rekey` and the tests; the chart does not give one: a key in a Secret that the core mounts is no key service). **Back the master key up apart from the database**: a database restored without it holds nothing readable. For the bundled hsmgate that means a snapshot of its volume; for
+secrets" above). **Back the master key up apart from the database**: a database restored without it holds nothing readable. For the bundled hsmgate that means a snapshot of its volume; for
 a service of yours, its own backup (a card: docs/hardware-key.md). To keep the master key on a SmartCard-HSM instead of the software token, see docs/hardware-key.md.
 
 ## API tokens

@@ -1,6 +1,6 @@
 {{- if and .Values.auth.enabled .Values.auth.adminToken }}
 {{- /* IAM-003: the administrator's token as the operator gave it (auth.adminToken, from a secret store of yours): the same at every render, so it
-works with helmfile and `helm template`. Without it the core derives the token from its master.key, `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token`. */ -}}
+works with helmfile and `helm template`. Without it the core derives the token from its master secret, `kubectl -n <ns> exec deploy/cinim-core -- /core admin-token`. */ -}}
 apiVersion: v1
 kind: Secret
 metadata:

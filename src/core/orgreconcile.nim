@@ -7,7 +7,7 @@
 ## alert (`GET /api/v1/organizations:reconcile`), and objects go only with the explicit deletion of an organisation, or with the end of the
 ## retention of a switched-off one, which is the same deletion. What it can compare is limited by what the core may read: namespaces (their
 ## labels carry the policy, Pod Security and the build-pod policy) and the state volume of a controller; it may not read Secrets, so a
-## Secret that was changed by hand is not noticed.
+## Secret that was changed by hand is not noticed (the Secret of the transport keys is made again when the pair changes or the core has just started: `keysapplied`).
 ##
 ## The controller of an organisation is a Pod that the core itself makes, with the one-time token of the current generation of its identity in the environment (IAM-003, D-62);
 ## Kubernetes neither restarts it nor probes it. Every pass the core looks at the controller Pods of the namespace (`superviseController`): one that it does not know (another
@@ -18,7 +18,7 @@
 ## `tests/unit/torgreconcile.nim` runs them against a fake cluster. `runPass` and `runReconciler` are the glue.
 import std/[json, locks, atomics, os, strutils, times, algorithm]
 import health
-import kubeapi, orgprovision, schema, keptpods, ctrlpresence
+import kubeapi, orgprovision, schema, keptpods, ctrlpresence, keysapplied
 import ../common/[rqlite, ctrlauth]
 
 type
@@ -31,6 +31,8 @@ type
     lastPoll*: proc (namespace: string): int64 {.gcsafe.}                       ## when the core last took in a report of that controller (0: not since the core started)
     startRetention*: proc (slug: string; at: int64) {.gcsafe.}
     forget*: proc (slug, namespace: string) {.gcsafe.}                          ## the rows of a deleted organisation
+    keysSeen*: proc (namespace: string): int64 {.gcsafe.}                       ## the digest (`keysDigest`) of the transport keys the core last put in the Secret of that namespace; 0: it has not since it started
+    noteKeys*: proc (namespace: string; digest: int64) {.gcsafe.}
 
   OrgReport* = object
     slug*, state*: string
@@ -39,7 +41,7 @@ type
     identityRenewed*: bool         ## a new generation of the controller's identity was made in this pass (the controller was not enrolled, was silent, or ended)
     controllerRemoved*: seq[string] ## "<Pod>: <why>" for every controller Pod the core deleted
     policiesReplaced*: seq[string]  ## the NetworkPolicies that differed from what the core makes now and were deleted and made again
-    keysReplaced*: bool             ## the Secret of the transport keys held another pair than the core has now (a certificate was renewed) and was made again
+    keysReplaced*: bool             ## the Secret of the transport keys was made again: the pair the core has now is not the one it put in (a certificate was renewed), or it has put none in since it started
     error*: string
 
   Alert* = object
@@ -167,20 +169,25 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; keys: T
       result.error = "replacing " & st.name & ": " & made.detail
       return
     result.policiesReplaced.add st.objectName
-  # The Secret of the keys is made only when it is missing (`provision`); a client pair that was renewed (core/certwatch.nim) has to reach the controller, whose files the kubelet then updates in place,
-  # and which connects with them the next time it does. Deleted and made again, like a policy; compared by what it holds.
+  # The Secret of the keys is made only when it is missing (`provision`); a client pair that was renewed (core/certwatch.nim) has to reach the controller, whose files the kubelet then
+  # updates in place, and which connects with them the next time it does. The core may not read a Secret (T-45), so it does not compare: it remembers the pair it put in
+  # (`keysapplied`) and, when the pair it has now is another one, or it has put none since it started (the Secret may hold what an earlier core had), deletes the Secret and makes it again.
+  let want = keysDigest(keys)
   for st in steps:
     if st.kind != "Secret" or st.objectName != tlsSecretName: continue
-    let have = k.getObject(st.kind, st.namespace, st.objectName)
-    if have.error.len > 0:
-      result.error = "reading " & st.name & ": " & have.error
-      return
-    if not have.found or secretHolds(have.obj, st.obj): continue
+    var madeNow = false
+    for s in r.steps:
+      if s.name == st.name and s.outcome == oCreated: madeNow = true
+    if madeNow:
+      hooks.noteKeys(ns, want)             # made in this pass, from the pair the core has
+      continue
+    if hooks.keysSeen(ns) == want: continue
     let gone = k.remove(st.kind, st.namespace, st.objectName)
     let made = if gone.outcome == oFailed: gone else: k.create(st.kind, st.namespace, st.obj)
     if made.outcome == oFailed:
       result.error = "replacing " & st.name & ": " & made.detail
       return
+    hooks.noteKeys(ns, want)
     result.keysReplaced = true
   if cfg.controllerImage.len > 0: superviseController(k, cfg, o.slug, active, hooks, now, coreStarted, result)
 
@@ -306,10 +313,13 @@ proc makeHooks(e: PassEnv; master: string): Hooks =
         startRetention: proc (slug: string; at: int64) =
           var db = newRq(e.rqliteUrl)
           db.startRetention(slug, at),
+        keysSeen: proc (namespace: string): int64 = keysapplied.keysSeen(namespace),
+        noteKeys: proc (namespace: string; digest: int64) = keysapplied.noteKeys(namespace, digest),
         forget: proc (slug, namespace: string) =
           var db = newRq(e.rqliteUrl)
           db.deleteCredentialRow(namespace)
           forgetPolls(namespace)
+          forgetKeys(namespace)
           forgetKept(namespace)
           db.deleteOrganization(slug))
 

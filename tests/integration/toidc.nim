@@ -3,6 +3,7 @@
 import std/[unittest, json, os, strutils, times, tables, sequtils, asynchttpserver, asyncdispatch, locks, base64, uri]
 import common/rqlite
 import core/[schema, apiauth, secretvault, kekprovider, oidc]
+import ../support/testkek
 
 let url = getEnv("CINIM_RQLITE_URL")
 const port = 24885

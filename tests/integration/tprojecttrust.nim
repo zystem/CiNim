@@ -3,6 +3,7 @@
 import std/[unittest, json, os, strutils, times, tables]
 import common/[rqlite, scriptsource]
 import core/[schema, scheduler, secretvault, kekprovider, stepsecrets, groups, projectpolicy, loggate, logcircuit, runlease]
+import ../support/testkek
 
 let url = getEnv("CINIM_RQLITE_URL")
 

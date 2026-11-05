@@ -2550,7 +2550,7 @@ proc onRequest() {.raises: [], gcsafe.} =
       problem(Http500, "internal", e.msg)
 
 
-var vaultThread: Thread[tuple[rqliteUrl, certs: string, stop: ptr Atomic[bool]]]
+var vaultThread: Thread[tuple[rqliteUrl: string, stop: ptr Atomic[bool]]]
 var vaultThreadRunning = false
 
 proc joinVault*() =
@@ -2558,7 +2558,7 @@ proc joinVault*() =
 
 proc serveApi*(co: Core; port: int) =
   coreRef = co
-  createThread(vaultThread, runVaultSetup, (co.rqliteUrl, co.certs, addr stopServers))
+  createThread(vaultThread, runVaultSetup, (co.rqliteUrl, addr stopServers))
   vaultThreadRunning = true
   if authOn:
     # IAM-001: the user `admin` at the first start; the password and the token are written once, in a line that a test can parse. The password has to be changed first.

@@ -1,6 +1,6 @@
 ## The identity of a job controller (IAM-003, SHD-007, T-46): which namespace it may serve. Nothing is stored but a generation number:
 ## the bootstrap token and the credential of a namespace are HMAC-SHA256 of the namespace and the generation under the core's own
-## secret (`tls/master.key`, which never leaves the core), so the core can make the token again when a provisioning is
+## secret (the master secret, which never leaves the core), so the core can make the token again when a provisioning is
 ## retried, and a rotation is a new generation. The bootstrap token (in a Secret of the namespace) is good until the controller has
 ## once polled with the credential that it gave in exchange, or until it expires; the credential is what every poll carries.
 ## A namespace that has no row is **not enrolled** and is refused: whoever holds the transport's `client` key could otherwise pose as the controller of a namespace the core has
@@ -54,9 +54,9 @@ proc setMasterSecret*(s: string) =
   masterLen.store(s.len)
 
 proc coreSecretKey*(certs: string): string =
-  ## the core's own secret: the master of the controller identities and the step credentials; it leaves the core nowhere. With a key service or a key file for the secrets it is kept in the database,
-  ## sealed by that key (`vault_meta`, secretvault.nim `ensureMasterSecret`) and set at the start by `setMasterSecret`; otherwise it is the file `<certs>/tls/master.key`
-  ## (tools/grpc/gen_tls.sh), from which the key of the secrets is derived. It is not a TLS key, so a new certificate does not change the identities.
+  ## the core's own secret: the master of the controller identities and the step credentials; it leaves the core nowhere. It is kept in the database, sealed by the key of the secrets (`vault_meta`,
+  ## secretvault.nim `ensureMasterSecret`), and set at the start by `setMasterSecret`. A server that a test or a development run starts without that reads the file `<certs>/tls/master.key` that
+  ## tools/grpc/gen_tls.sh makes; the core never does (vaultsetup.nim), and the chart does not mount one. It is not a TLS key, so a new certificate does not change the identities.
   let n = masterLen.load
   if n > 0:
     result = newString(n)

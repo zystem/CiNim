@@ -56,8 +56,11 @@ proc api(f: Cluster): KubeApi =
         for p, o in f.objects:
           if p.startsWith(prefix & "/") and o["metadata"]["labels"]{sel[0]}.getStr == sel[1]: items.add o
         return (200, $(%*{"items": items}))
+      if "/secrets/" in path: return (403, $(%*{"kind": "Status", "message": "secrets is forbidden: the core may create and delete Secrets, not read them"}))      # T-45
       if path in f.objects: (200, $f.objects[path]) else: (404, "{}")
     else: (500, "{}"))
+
+let tlskeys = TlsKeys(ca: "CA", clientPem: "CP", clientKey: "LK")
 
 type Rec = ref object
   started, forgotten: seq[string]
@@ -66,8 +69,10 @@ type Rec = ref object
   expires: int64
   poll: int64                      ## when the controller was last heard
   rotations: int
+  keys: Table[string, int64]       ## the digest of the transport keys the core put in the Secret of a namespace (the core's memory)
+  knows: bool                      ## a core that has been running: it put `tlskeys` in every Secret it has not heard of otherwise; false: a core that has just started
 
-proc newRec(): Rec = Rec(generation: 1, expires: t0 + 86400)
+proc newRec(knows = true): Rec = Rec(generation: 1, expires: t0 + 86400, knows: knows)
 
 proc hooksFor(r: Rec): Hooks =
   result.identity = proc (namespace: string): CredentialRow =
@@ -81,8 +86,10 @@ proc hooksFor(r: Rec): Hooks =
   result.lastPoll = proc (namespace: string): int64 = r.poll
   result.startRetention = proc (slug: string; at: int64) = r.started.add slug
   result.forget = proc (slug, namespace: string) = r.forgotten.add slug & "@" & namespace
+  let known = if r.knows: keysDigest(tlskeys) else: 0'i64
+  result.keysSeen = proc (namespace: string): int64 = r.keys.getOrDefault(namespace, known)
+  result.noteKeys = proc (namespace: string; digest: int64) = r.keys[namespace] = digest
 
-let tlskeys = TlsKeys(ca: "CA", clientPem: "CP", clientKey: "LK")
 
 proc maker(build = false; multi = false; image = "reg/ctl:1"): ConfigMaker =
   result = proc (egress, ingress: string): ProvisionConfig =
@@ -302,25 +309,61 @@ suite "IAM-003, D-62 the core supervises the controller: a Pod of its own, with 
     let r = f.pass(mk, newRec())
     check r.orgs[0].error == "" and f.pods.len == 0 and f.calls.filterIt("/pods" in it).len == 0
 
-suite "D-105 the Secret of the transport keys follows the pair the core has (a renewed certificate reaches the controller)":
+suite "D-105 the Secret of the transport keys follows the pair the core has (a renewed certificate reaches the controller), without reading it (T-45)":
   let secretPath = "/api/v1/namespaces/cinim-001-acme/secrets/" & tlsSecretName
-  test "the keys the core has are the keys in the Secret: nothing is replaced":
+  let secretsPath = "/api/v1/namespaces/cinim-001-acme/secrets"
+  let renewed = TlsKeys(ca: "CA2", clientPem: "CP2", clientKey: "LK2")
+  proc pass(f: Cluster; mk: ConfigMaker; rec: Rec; keys = tlskeys): OrgReport =
+    reconcilePass(api(f), mk, keys, @[org("acme")], hooksFor(rec), 1000, 100).orgs[0]
+  proc secretReads(f: Cluster): seq[string] = f.calls.filterIt(it.startsWith("GET") and "/secrets" in it)
+  proc held(f: Cluster; key: string): string = decode(f.objects[secretPath]["data"][key].getStr)
+
+  test "the Secret is made in this pass: it holds the pair, nothing is replaced, and the core never asks the cluster for a Secret":
     let f = Cluster()
     let mk = maker()
-    f.made(mk, "acme")
-    let r = reconcilePass(api(f), mk, tlskeys, @[org("acme")], hooksFor(newRec()), 1000, 100)
-    check not r.orgs[0].keysReplaced and f.deletes.len == 0
-    check decode(f.objects[secretPath]["data"]["client.key"].getStr) == tlskeys.clientKey
+    let rec = newRec(knows = false)
+    let r = f.pass(mk, rec)
+    check r.error == "" and not r.keysReplaced and f.deletes.len == 0
+    check f.held("client.key") == tlskeys.clientKey
+    check f.pass(mk, rec).error == "" and f.secretReads.len == 0 and f.deletes.len == 0
+  test "a core that has just started does not know what the Secret holds: it makes it again, once, and the next pass leaves it":
+    let f = Cluster()
+    let mk = maker()
+    f.made(mk, "acme")                                 # the Secret of an earlier core process
+    let rec = newRec(knows = false)                     # this core has no memory of it
+    let r = f.pass(mk, rec)
+    check r.error == "" and r.keysReplaced and f.deletes.len >= 1 and (f.deletes.filterIt(secretPath in it).len == 1)
+    check f.held("client.pem") == "CP"
+    check not f.pass(mk, rec).keysReplaced and f.secretReads.len == 0
   test "a renewed pair (and a CA) is put in the Secret: deleted and made again, once, and the next pass leaves it":
     let f = Cluster()
     let mk = maker()
-    f.made(mk, "acme")
-    let renewed = TlsKeys(ca: "CA2", clientPem: "CP2", clientKey: "LK2")
-    let r = reconcilePass(api(f), mk, renewed, @[org("acme")], hooksFor(newRec()), 1000, 100)
-    check r.orgs[0].keysReplaced and r.orgs[0].error.len == 0
-    check decode(f.objects[secretPath]["data"]["client.pem"].getStr) == "CP2" and decode(f.objects[secretPath]["data"]["ca.pem"].getStr) == "CA2"
-    let again = reconcilePass(api(f), mk, renewed, @[org("acme")], hooksFor(newRec()), 1000, 100)
-    check not again.orgs[0].keysReplaced
+    let rec = newRec(knows = false)
+    discard f.pass(mk, rec)
+    let r = f.pass(mk, rec, renewed)
+    check r.error == "" and r.keysReplaced
+    check f.held("client.pem") == "CP2" and f.held("ca.pem") == "CA2" and f.held("client.key") == "LK2"
+    check not f.pass(mk, rec, renewed).keysReplaced
+    check f.secretReads.len == 0
+  test "a pair that could not be put in is tried again in the next pass, and the core does not take it for done":
+    let f = Cluster()
+    let mk = maker()
+    let rec = newRec(knows = false)
+    discard f.pass(mk, rec)
+    f.failPath = secretsPath
+    let bad = f.pass(mk, rec, renewed)
+    check not bad.keysReplaced and bad.error.len > 0
+    f.failPath = ""
+    let good = f.pass(mk, rec, renewed)
+    check good.error == "" and good.keysReplaced and f.held("client.pem") == "CP2"
+  test "an organisation of its own: the pair of one namespace is not the memory of another":
+    let f = Cluster()
+    let mk = maker()
+    let rec = newRec(knows = false)
+    discard f.pass(mk, rec)
+    let other = reconcilePass(api(f), mk, renewed, @[org("beta")], hooksFor(rec), 1000, 100).orgs[0]
+    check other.error == "" and not other.keysReplaced          # beta's Secret is made new, with the new pair
+    check rec.keys.len == 2
 
 suite "SHD-008 a NetworkPolicy that differs from what the core makes now is replaced":
   let dns = "/apis/networking.k8s.io/v1/namespaces/cinim-001-acme/networkpolicies/allow-dns-and-collector"

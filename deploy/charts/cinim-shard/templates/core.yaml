@@ -239,7 +239,7 @@ spec:
           {{- if .Values.tls.certManager.enabled }}
           projected:
             defaultMode: 0440
-            # the files the core expects in /etc/cinim/tls, from what cert-manager made (templates/certificates.yaml) and, if you named one, the master secret file; ca.crt is the CA that signed the pair
+            # the files the core expects in /etc/cinim/tls, from what cert-manager made (templates/certificates.yaml); ca.crt is the CA that signed the pair
             sources:
               - secret:
                   name: cinim-core-tls
@@ -252,27 +252,18 @@ spec:
                   items:
                     - {key: tls.crt, path: client.pem}
                     - {key: tls.key, path: client.key}
-              {{- if .Values.tls.masterKeySecret }}
-              - secret:
-                  name: {{ .Values.tls.masterKeySecret }}
-                  items:
-                    - {key: master.key, path: master.key}
-              {{- end }}
           {{- else }}
           secret:
             secretName: {{ .Values.tls.secretName }}
             defaultMode: 0440
             # the core's own certificate and key, the CA, the client pair that it hands to the controller of each organisation (until the
-            # bootstrap token exchange of IAM-003 exists the controllers use the shared client key) and the core's master secret
+            # bootstrap token exchange of IAM-003 exists the controllers use the shared client key)
             items:
               - {key: ca.pem, path: ca.pem}
               - {key: core.pem, path: core.pem}
               - {key: core.key, path: core.key}
               - {key: client.pem, path: client.pem}
               - {key: client.key, path: client.key}
-              {{- if .Values.tls.masterKeyInSecret }}
-              - {key: master.key, path: master.key}
-              {{- end }}
           {{- end }}
         {{- if and $ks.url $ks.tokenSecret }}
         - name: keyservice-token
