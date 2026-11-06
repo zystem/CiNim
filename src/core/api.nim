@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, webhooks, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -2123,6 +2123,86 @@ proc onRequest() {.raises: [], gcsafe.} =
             problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         else:
           problem(Http405, "method_not_allowed", "GET, PATCH, DELETE, or POST :enable :disable :rotate-secret :fire")
+        return
+      if path.startsWith("/api/v1/organizations/") and "/webhooks" in path:
+        # D-111, core/webhooks.nim: the addresses that are told what happens to the runs of an organisation or of a project
+        let rest = path["/api/v1/organizations/".len .. ^1]
+        let parts = rest.split("/webhooks", maxsplit = 1)
+        let slug = parts[0]
+        let tail = if parts.len > 1: parts[1] else: ""
+        if parts.len != 2 or slug.len == 0 or (tail.len > 0 and not tail.startsWith("/")):
+          problem(Http404, "not_found", "no such route")
+          return
+        var c = newRq(coreRef.rqliteUrl)
+        let org = c.organizationRow(slug)
+        if org.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slug)
+          return
+        let wmeth = getMethod()
+        let target = tail.strip(chars = {'/'})
+        let colon = target.find(':')
+        let wid = if colon >= 0: target[0 ..< colon] else: target
+        let action = if colon >= 0: target[colon + 1 .. ^1] else: ""
+        if wid.len == 0:
+          if wmeth == "GET":
+            var items = newJArray()
+            for w in c.listWebhooks(org.id):
+              if who.mayIn("webhook.read", slug, w.groupPath): items.add w.view
+            jsonOk(Http200, %*{"organization": slug, "webhooks": items, "allowed_hosts": allowedHosts()})
+          elif wmeth == "POST":
+            if org.state != "active":
+              problem(Http409, "organization_disabled", "the organisation " & slug & " is switched off")
+              return
+            let spec = parseWebhookSpec(try: parseJson(getBody()) except JsonParsingError: nil, allowedHosts())
+            if spec.error.len > 0:
+              problem(Http400, "invalid_request", spec.error)
+              return
+            if c.webhookNameTaken(org.id, spec.spec.name):
+              problem(Http409, "name_taken", "the organisation has a webhook " & spec.spec.name)
+              return
+            if c.countWebhooks(org.id) >= maxWebhooksPerOrg:
+              problem(Http409, "too_many_webhooks", "at most " & $maxWebhooksPerOrg & " webhooks per organisation")
+              return
+            if not who.mayIn("webhook.write", slug, spec.spec.groupPath):
+              problem(Http403, "forbidden", "you may not make webhooks for " & (if spec.spec.groupPath.len > 0: "the project " & spec.spec.groupPath else: "the organisation") & ": it needs webhook.write there")
+              return
+            var groupId = ""
+            if spec.spec.groupPath.len > 0:
+              let tg = c.resolveProject(org.id, spec.spec.groupPath)
+              if tg.code.len > 0:
+                problem((if tg.code == "project_not_found": Http404 else: Http409), tg.code, tg.message)
+                return
+              groupId = tg.id
+            let made = c.createWebhook(org.id, spec.spec, groupId, getTime().toUnix())
+            jsonOk(Http201, c.getWebhook(org.id, made).row.view)
+          else:
+            problem(Http405, "method_not_allowed", "GET lists, POST creates")
+          return
+        let found = c.getWebhook(org.id, wid)
+        if not found.found or not who.mayUseIn(slug, found.row.groupPath):
+          problem(Http404, "not_found", "no such webhook")                    # one in a project the caller may not use is not confirmed
+          return
+        if action == "" and wmeth == "GET":
+          jsonOk(Http200, found.row.view)
+        elif (action == "" and wmeth in ["PATCH", "DELETE"]) or (wmeth == "POST" and action == "test"):
+          if not who.mayIn("webhook.write", slug, found.row.groupPath):
+            problem(Http403, "forbidden", "you may not change the webhooks of " & (if found.row.groupPath.len > 0: "the project " & found.row.groupPath else: "the organisation") & ": it needs webhook.write there")
+            return
+          if wmeth == "DELETE":
+            discard c.deleteWebhook(org.id, wid)
+            jsonOk(Http200, %*{"id": wid, "deleted": true})
+          elif wmeth == "POST":
+            let delivery = c.queuePing(found.row, getTime().toUnix())
+            jsonOk(Http202, %*{"id": wid, "delivery": delivery, "note": "a ping is sent at the next beat of the core (within " & $20 & " seconds), if the shard allows the address"})
+          else:
+            let upd = parseWebhookUpdate(try: parseJson(getBody()) except JsonParsingError: nil, found.row, allowedHosts())
+            if upd.error.len > 0:
+              problem(Http400, "invalid_request", upd.error)
+              return
+            discard c.updateWebhook(org.id, wid, upd.spec)
+            jsonOk(Http200, c.getWebhook(org.id, wid).row.view)
+        else:
+          problem(Http405, "method_not_allowed", "GET, PATCH, DELETE, or POST :test")
         return
       if path.startsWith("/api/v1/organizations/"):
         # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)

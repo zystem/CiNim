@@ -194,6 +194,11 @@ auth:
 
 # D-96: the state of a run is told to the host of its repository as a status of the commit (a project says where, with a secret that holds the token). `uiUrl` is the address of the UI that the status
 # links to (empty: no link); `apiUrls` the addresses of hosts' APIs a project may name, because the core sends a token there (empty: api.github.com and gitlab.com); `proxy` an HTTP proxy that takes CONNECT.
+# D-111: webhooks tell an address what happens to the runs of an organisation or of a project (a run started, a step failed, a run finished). The core sends, and only to the hosts listed here
+# (`allowedHosts`: hosts, or host:port, separated by commas); whoever sets a webhook must not be able to make the core call what is inside the cluster. Empty: nothing is sent.
+webhooks:
+  allowedHosts: ""
+
 status:
   uiUrl: ""
   apiUrls: ""

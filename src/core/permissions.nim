@@ -31,6 +31,8 @@ const
     ("trigger.read", lvGroup, "see the triggers of an organisation"),
     ("trigger.write", lvGroup, "make, delete, switch and re-key triggers"),
     ("trigger.fire", lvGroup, "fire a manual trigger"),
+    ("webhook.read", lvGroup, "see the webhooks of an organisation (the addresses that are told what happens to its runs)"),
+    ("webhook.write", lvGroup, "make, change, delete and test webhooks"),
     ("variable.read", lvGroup, "read variables"),
     ("variable.write", lvGroup, "write and delete variables of an organisation or of a group"),
     ("secret.read", lvGroup, "see the names of the secrets of an organisation"),
@@ -73,7 +75,7 @@ const
     ("audit.read", lvShard, "read the audit log"),
     ("audit.export", lvShard, "choose where the audit log is sent (syslog, an HTTP receiver)")]
 
-  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read"]
+  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "webhook.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read"]
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
@@ -163,6 +165,10 @@ func orgNeed(meth, org, rest: string): Need =
       if action in ["enable", "disable", "rotate-secret"]: return need("trigger.write", nsInOrg, org)
       return Need()
     return need(if write: "trigger.write" else: "trigger.read", nsInOrg, org)
+  if rest.startsWith("/webhooks"):
+    let tail = rest["/webhooks".len .. ^1]
+    if tail.rfind(':') >= 0 and not write: return Need()
+    return need(if write: "webhook.write" else: "webhook.read", nsInOrg, org)       # D-111: the webhook knows its project: the handler asks for it
   if has("/locks"): return need(if write: "lock.write" else: "lock.read", nsOrg, org)
   if has("/variables"): return need(if write: "variable.write" else: "variable.read", nsOrg, org)
   if onTree() and "/variables" in rest: return treeNeed(if write: "variable.write" else: "variable.read")

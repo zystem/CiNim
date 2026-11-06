@@ -145,6 +145,9 @@ spec:
             {{- if .Values.status.apiUrls }}
             - {name: CINIM_STATUS_API_URLS, value: {{ .Values.status.apiUrls | quote }}}
             {{- end }}
+            {{- if .Values.webhooks.allowedHosts }}
+            - {name: CINIM_WEBHOOK_HOSTS, value: {{ .Values.webhooks.allowedHosts | quote }}}
+            {{- end }}
             {{- if .Values.status.proxy }}
             - {name: CINIM_STATUS_PROXY, value: {{ .Values.status.proxy | quote }}}
             {{- end }}

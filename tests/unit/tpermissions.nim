@@ -41,6 +41,9 @@ suite "D-84 what a request needs":
     for (m, p, want) in [("GET", "/api/v1/organizations/acme/triggers", "trigger.read"), ("POST", "/api/v1/organizations/acme/triggers", "trigger.write"),
                          ("DELETE", "/api/v1/organizations/acme/triggers/t1", "trigger.write"), ("POST", "/api/v1/organizations/acme/triggers/t1:fire", "trigger.fire"),
                          ("POST", "/api/v1/organizations/acme/triggers/t1:enable", "trigger.write"), ("POST", "/api/v1/organizations/acme/triggers/t1:rotate-secret", "trigger.write"),
+                         ("GET", "/api/v1/organizations/acme/webhooks", "webhook.read"), ("POST", "/api/v1/organizations/acme/webhooks", "webhook.write"),
+                         ("PATCH", "/api/v1/organizations/acme/webhooks/w1", "webhook.write"), ("DELETE", "/api/v1/organizations/acme/webhooks/w1", "webhook.write"),
+                         ("POST", "/api/v1/organizations/acme/webhooks/w1:test", "webhook.write"), ("GET", "/api/v1/organizations/acme/webhooks/w1", "webhook.read"),
                          ("GET", "/api/v1/organizations/acme/variables", "variable.read"), ("PUT", "/api/v1/organizations/acme/variables/URL", "variable.write"),
                          ("PUT", "/api/v1/organizations/acme/groups/team/variables/URL", "variable.write"), ("GET", "/api/v1/organizations/acme/groups/team", "group.read"),
                          ("PUT", "/api/v1/organizations/acme/projects/team/app", "group.write"), ("GET", "/api/v1/organizations/acme/holds", "hold.read"),
@@ -74,7 +77,7 @@ suite "D-84 what a request needs":
     var used = initHashSet[string]()
     for (m, p) in [("GET", "/api/v1/runs"), ("POST", "/api/v1/runs"), ("POST", "/api/v1/pipelines:check"), ("POST", "/api/v1/runs/x:abort"), ("POST", "/api/v1/runs/x:retry"), ("POST", "/api/v1/runs/x:approve"),
                    ("DELETE", "/api/v1/runs/x"), ("GET", "/api/v1/runs/x/log"), ("GET", "/api/v1/runs/x/artifacts"), ("GET", "/api/v1/organizations/o/triggers"),
-                   ("POST", "/api/v1/organizations/o/triggers"), ("POST", "/api/v1/organizations/o/triggers/t:fire"), ("GET", "/api/v1/organizations/o/variables"),
+                   ("POST", "/api/v1/organizations/o/triggers"), ("POST", "/api/v1/organizations/o/triggers/t:fire"), ("GET", "/api/v1/organizations/o/webhooks"), ("POST", "/api/v1/organizations/o/webhooks"), ("GET", "/api/v1/organizations/o/variables"),
                    ("PUT", "/api/v1/organizations/o/variables/V"), ("GET", "/api/v1/organizations/o/secrets"), ("PUT", "/api/v1/organizations/o/secrets/S"),
                    ("GET", "/api/v1/organizations/o/groups"), ("PUT", "/api/v1/organizations/o/groups/g"), ("GET", "/api/v1/organizations/o/holds"), ("PUT", "/api/v1/organizations/o/hold"),
                    ("GET", "/api/v1/organizations/o/caches"), ("DELETE", "/api/v1/organizations/o/caches"), ("GET", "/api/v1/organizations/o/locks"), ("PUT", "/api/v1/organizations/o/locks/l"),

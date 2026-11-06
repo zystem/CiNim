@@ -115,6 +115,7 @@ the organisation drop-down holds the organisations of this shard and the slug is
 | `CINIM_AUDIT_TOKEN_<NAME>` | none | the bearer token of an HTTP sink of the audit log, named in its `token_env` (set from a Secret of Kubernetes; D-97) |
 | `CINIM_UI_URL` | empty | the address of the UI that the statuses told to the host of a repository link to (`<address>/runs/<id>`; the Helm value `status.uiUrl`; D-96) |
 | `CINIM_STATUS_API_URLS` | `https://api.github.com,https://gitlab.com/api/v4` | the addresses of the APIs of hosts that a project may name in its `status` setting, comma separated: the core sends a token to the address, so a project cannot choose one the shard does not allow (`status.apiUrls`; D-96) |
+| `CINIM_WEBHOOK_HOSTS` | empty | D-111: the hosts that the webhooks of the organisations may name (a host, or `host:port` for one port only; comma separated; the chart value `webhooks.allowedHosts`). The core sends the events of the runs only there; empty: nothing is sent and no webhook can be made (docs/webhooks.md) |
 | `CINIM_STATUS_PROXY` | empty | an HTTP proxy (`http://host:port`, CONNECT) for the calls to the host of a repository (`status.proxy`) |
 | `CINIM_CONTROLLER_BOOTSTRAP_TTL` | 86400 | seconds that the bootstrap token of an organisation's controller stays good (IAM-003) |
 | `CINIM_INGRESS_CLASS`, `CINIM_INGRESS_TLS_SECRET`, `CINIM_INGRESS_ANNOTATIONS` | empty | the Ingress of an organisation in the `multi` mode: the class, the TLS Secret (for the host of `CINIM_PUBLIC_URL`) and the annotations as a JSON object |

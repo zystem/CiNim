@@ -155,6 +155,16 @@ const ddl = [
        concurrency TEXT NOT NULL DEFAULT 'parallel', enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
        last_fired_at INTEGER NOT NULL DEFAULT 0, last_run_id TEXT NOT NULL DEFAULT '', last_result TEXT NOT NULL DEFAULT '',
        seen_commit TEXT NOT NULL DEFAULT '', last_checked_at INTEGER NOT NULL DEFAULT 0)""",
+  # D-111, core/webhooks.nim: an address that is told what happens to the runs of an organisation (group_id '') or of a project, and the queue of what is to be told. A delivery is unique by webhook, run,
+  # event and key (a failed step's number), so that looking at the runs again writes nothing twice; `secret` is the NAME of a secret of the organisation that signs the body.
+  """CREATE TABLE IF NOT EXISTS webhooks (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, url TEXT NOT NULL,
+       secret TEXT NOT NULL DEFAULT '', events TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)""",
+  """CREATE TABLE IF NOT EXISTS webhook_deliveries (
+       id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '', event TEXT NOT NULL, ekey TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
+       created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0, sent_at INTEGER NOT NULL DEFAULT 0,
+       last_error TEXT NOT NULL DEFAULT '', UNIQUE (webhook_id, run_id, event, ekey))""",
+  "CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries (sent_at, next_at)",
   # the artifacts of runs (DAT-003, core/objectstore.nim): the object is in the store, this is what the platform knows about it; a path is one artifact of a run
   """CREATE TABLE IF NOT EXISTS artifacts (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL, step_ordinal INTEGER NOT NULL, path TEXT NOT NULL, s3_key TEXT NOT NULL,
