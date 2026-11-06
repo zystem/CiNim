@@ -1,5 +1,5 @@
 ## Triggers (spec 6.3): the body of the creation call and what the API shows. The clock is in tcron.nim, the rows are glue over rqlite.
-import std/[unittest, json, strutils]
+import std/[unittest, json, strutils, algorithm]
 import core/triggers
 
 proc spec(extra: JsonNode = nil): JsonNode =
@@ -118,3 +118,42 @@ suite "D-63 what a webhook may say":
     check hookCommit(%*{"commit": 5}, repoTrigger).error.contains("text")
     check hookCommit(newJArray(), repoTrigger).error.len > 0
     check hookCommit(nil, repoTrigger).error.len > 0
+
+suite "TRG-005 a trigger is changed (PATCH): what may change and what may not":
+  let poll = TriggerRow(id: "s1_p", slug: "acme", name: "main-poll", kind: "poll", groupPath: "ci/cinim", ref0: "main", scriptPath: ".ci/pipeline.lua", concurrency: "abort_previous",
+                        params: @[("REGISTRY", "old:5000"), ("DEPLOY", "true")], enabled: true)
+  let nightly = TriggerRow(id: "s1_n", slug: "acme", name: "nightly", kind: "schedule", schedule: "0 2 * * *", groupPath: "ci/cinim", concurrency: "parallel", enabled: true)
+
+  test "the parameters are replaced as a whole, and everything else stays: the name, the kind, the project, the ref, the path, the concurrency":
+    let u = parseTriggerUpdate(%*{"params": {"REGISTRY": "gitea.example.org/cinim", "DEPLOY": "false"}}, poll)
+    check u.error == ""
+    check u.spec.params.sorted == @[("DEPLOY", "false"), ("REGISTRY", "gitea.example.org/cinim")]      # the old ones are gone, the order is not meaningful
+    check u.spec.name == "main-poll" and u.spec.kind == "poll" and u.spec.groupPath == "ci/cinim" and u.spec.ref0 == "main"
+    check u.spec.scriptPath == ".ci/pipeline.lua" and u.spec.concurrency == "abort_previous"
+  test "an empty params object clears the parameters":
+    check parseTriggerUpdate(%*{"params": {}}, poll).spec.params.len == 0
+  test "the concurrency, the ref and the path change, and are checked as when the trigger is made":
+    let u = parseTriggerUpdate(%*{"concurrency": "abort_newest", "ref": "release", "path": "ci/other.lua"}, poll)
+    check u.error == "" and u.spec.concurrency == "abort_newest" and u.spec.ref0 == "release" and u.spec.scriptPath == "ci/other.lua" and u.spec.params.sorted == poll.params.sorted
+    check parseTriggerUpdate(%*{"concurrency": "sometimes"}, poll).error.startsWith("concurrency is")
+    check parseTriggerUpdate(%*{"ref": "--upload-pack=x"}, poll).error.startsWith("ref is")
+    check parseTriggerUpdate(%*{"path": "../x"}, poll).error.startsWith("path is")
+  test "the parameters follow the rules of launch parameters":
+    check parseTriggerUpdate(%*{"params": {"PATH": "/x"}}, poll).error.startsWith("params: ")
+  test "a schedule changes with a schedule trigger only, and is checked as cron":
+    check parseTriggerUpdate(%*{"schedule": "30 3 * * *"}, nightly).spec.schedule == "30 3 * * *"
+    check parseTriggerUpdate(%*{"schedule": "not cron"}, nightly).error.startsWith("schedule:")
+    check parseTriggerUpdate(%*{"schedule": "0 1 * * *"}, poll).error.startsWith("only a schedule trigger has a schedule")
+    check parseTriggerUpdate(%*{"params": {"A": "1"}}, nightly).spec.schedule == "0 2 * * *"      # the schedule stays when it is not named
+  test "the name, the kind, the project, the repository, the script and enabled are not changed here, and the words say what to do":
+    for k in ["name", "kind", "project", "repository", "script", "group", "enabled"]:
+      let u = parseTriggerUpdate(%*{k: "x"}, poll)
+      check u.error.startsWith(k & " cannot be changed")
+    check "make a new trigger" in parseTriggerUpdate(%*{"name": "x"}, poll).error
+    check ":enable" in parseTriggerUpdate(%*{"enabled": false}, poll).error
+  test "an unknown field, an empty body, and a body that is not an object are refused":
+    check parseTriggerUpdate(%*{"colour": "red"}, poll).error.startsWith("unknown field colour")
+    check parseTriggerUpdate(%*{}, poll).error.startsWith("nothing to change")
+    check parseTriggerUpdate(%*[1], poll).error != ""
+    check parseTriggerUpdate(nil, poll).error != ""
+

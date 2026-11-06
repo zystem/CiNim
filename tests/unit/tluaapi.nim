@@ -6,7 +6,7 @@ import executor/sandbox
 const specNames = ["ci.pipeline", "ci.string", "ci.number", "ci.bool", "ci.choice", "ci.list", "ci.map", "ci.secret", "ci.vault",
   "ci.stage", "ci.single", "ci.parallel", "ci.spawn", "ci.matrix", "ci.input", "ci.deploy", "ci.run", "ci.trigger", "ci.sleep", "ci.now",
   "ci.random", "ci.finally", "ci.log", "ci.fail", "b58x", "b58xx", "b58f", "b32f", "step.sh", "step.cache_restore", "step.cache_save",
-  "Job:checkout", "Job:run", "Job:use", "Job:env", "JobArtifact.upload", "JobArtifact.download",
+  "Job:checkout", "Job:image", "Job:run", "Job:use", "Job:env", "JobArtifact.upload", "JobArtifact.download",
   "Handle:wait", "Handle:abort"]
 
 proc declaredFunctions(): HashSet[string] =

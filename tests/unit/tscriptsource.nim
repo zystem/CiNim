@@ -82,3 +82,58 @@ suite "D-63 a script read from a repository":
     let f = fetchScript(Source(repository: "http://127.0.0.1:" & $port & "/x.git", commit: "main"), timeoutSeconds = 3, transports = "http")
     sock.close()
     check f.code == "fetch_failed" and "did not answer" in f.message and epochTime() - t0 < 12
+
+# PRJ-004, D-82: the paths that differ between the commit of the last good run (the base) and the commit of this run
+let repo2 = root / "repo2"
+createDir repo2
+run repo2, "git init -q -b main"
+run repo2, "git config user.email t@example.test && git config user.name t"
+createDir repo2 / "src" / "core"
+createDir repo2 / "docs"
+createDir repo2 / ".ci"
+writeFile repo2 / "src" / "core" / "a.nim", "a\n"
+writeFile repo2 / "src" / "b.nim", "b\n"
+writeFile repo2 / "docs" / "x.md", "x\n"
+writeFile repo2 / "gone.txt", "g\n"
+writeFile repo2 / ".ci" / "pipeline.lua", "return 1\n"
+run repo2, "git add -A && git commit -q -m c1"
+let c1 = execProcess("git rev-parse HEAD", workingDir = repo2).strip
+writeFile repo2 / "src" / "core" / "a.nim", "a2\n"            # changed
+writeFile repo2 / "docs" / "new file with spaces.md", "n\n"       # added, a name with spaces
+removeFile repo2 / "gone.txt"                                         # deleted
+run repo2, "git add -A && git commit -q -m c2 && git tag base-tag"
+let c2 = execProcess("git rev-parse HEAD", workingDir = repo2).strip
+writeFile repo2 / "src" / "b.nim", "b3\n"
+run repo2, "git commit -q -am c3"
+let c3 = execProcess("git rev-parse HEAD", workingDir = repo2).strip
+let url2 = "file://" & repo2
+
+proc changed(base, commit: string; maxPaths = 5000; repository = url2): Changed =
+  changedPaths(repository, base, commit, timeoutSeconds = 20, transports = "file", schemes = ["file://"], maxPaths = maxPaths)
+
+suite "PRJ-004 the paths that changed between the base and the commit":
+  test "a change, an addition and a deletion are paths, in order, and the two commits are named by their SHAs":
+    let c = changed(c1, c2)
+    check c.ok and not c.truncated
+    check c.paths == @["docs/new file with spaces.md", "gone.txt", "src/core/a.nim"]
+    check c.base == c1 and c.commit == c2
+  test "the base may be a name, and the commits need no history in common with each other or a fetch of the history":
+    let c = changed("base-tag", c3)
+    check c.ok and c.paths == @["src/b.nim"] and c.base == c2
+    check changed(c1, c3).paths == @["docs/new file with spaces.md", "gone.txt", "src/b.nim", "src/core/a.nim"]
+  test "the same commit changes nothing":
+    let c = changed(c2, c2)
+    check c.ok and c.paths.len == 0
+  test "a list longer than the limit is cut, and says so":
+    let c = changed(c1, c3, maxPaths = 2)
+    check c.ok and c.truncated and c.paths == @["docs/new file with spaces.md", "gone.txt"]
+  test "a base that is not in the repository is a failure with a code, and so is a repository that is not one":
+    let c = changed("0000000000000000000000000000000000000001", c2)
+    check not c.ok and c.code == "fetch_failed" and c.message.len > 0
+    check changed(c1, "no-such-branch").code == "fetch_failed"
+    check changed(c1, c2, repository = "https://127.0.0.1:1/none.git").ok == false
+  test "what git would take for an option, and a repository that is not a URL, are refused before git is run":
+    check changed("--upload-pack=x", c2).code == "invalid_source"
+    check changed(c1, "-x").code == "invalid_source"
+    check changed(c1, c2, repository = "/etc/passwd").code == "invalid_source"
+

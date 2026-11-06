@@ -24,11 +24,20 @@
 ---@field run_id string
 ---@field state string                     # terminal run state (states.nim)
 ---@field outputs table<string,string>
+---@class RunSource                        # where the script was read from (D-63); empty strings for a script that came in the request
+---@field repository string                # the repository address
+---@field commit string                    # the commit of the run: a full SHA once the script is read from the repository
+---@field sha string                       # the same as `commit` (D-109)
+---@field short string                     # its first seven characters, "" when there is no commit
+---@field path string                      # the path of the script in the repository
+---@field base string                      # D-82: the commit of the last run of this pipeline that ended OK, "" when there is none
 ---@class Run                              # argument of main
 ---@field params table<string,any>
+---@field source RunSource
+---@field tag string                       # D-109: `<YYYYMMDD of the day it is read, UTC>-<short commit>` (the date alone when the run has no commit); the same every time, journaled
 ---@field ref string
----@field sha string
----@field changed_paths fun(): string[]    # journaled (PRJ-004)
+---@field sha string                       # the same as `source.sha`
+---@field changed_paths fun(): string[]    # journaled (PRJ-004); not built yet
 
 ---@class ConcurrencySpec
 ---@field group string
@@ -255,9 +264,12 @@ function JobArtifact.download(name, opts) end
 ---@class Job                              # argument of the `body` function of a job
 ---@field artifact JobArtifact
 local Job = {}
----@param opts? {url?:string, ref?:string, depth?:integer, submodules?:boolean, lfs?:boolean}
----@return StepResult
+---@param opts? {url?:string, ref?:string, image?:string, submodules?:boolean, depth?:integer, lfs?:boolean}   # `url` and `ref` default to the run's own; `depth` and `lfs` are refused (not built yet)
+---@return StepResult                      # the result of the step that cloned, with `commit` (the full SHA), `dir` ("src") and `url`
 function Job:checkout(opts) end
+---@param opts {name:string, registry:string, dockerfile:string, tag?:string, tags?:string[], context?:string, target?:string, build_args?:table<string,string>, cache?:boolean, cache_repo?:string, insecure?:boolean, login?:boolean|string, skip_if_present?:boolean, reuse?:{suffix:string}, also?:string[], kaniko_image?:string, crane_image?:string}
+---@return {action:"build"|"retagged"|"present", ref:string, tag:string, name:string, registry:string}   # D-110: build and push the image of the source in `src` to `registry/name:tag` (`tag` defaults to `run.tag`); `skip_if_present`, `reuse` and `also` as in docs/deployment.md "Where the images go"
+function Job:image(opts) end
 ---@param step Step                        # a step that `step.sh[id]{...}` (or a cache constructor) described
 ---@return StepResult                      # { status = "ok"|"failed", code, outputs, stdout }; a non-zero code fails the job unless `ignore_failure`
 function Job:run(step) end

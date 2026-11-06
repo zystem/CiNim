@@ -282,7 +282,8 @@ in-cluster one of `deploy/registry`: its address is the one the Pods reach it at
 
 ### Where the images go: any registry, with a login, and several of them
 
-The pipeline pushes the images of the platform to `$REGISTRY/<image>`. Kaniko builds and pushes, and `crane` (the image `gcr.io/go-containerregistry/crane`, pinned by its digest in `.ci/pipeline.lua`) asks whether an image is
+The pipeline pushes the images of the platform to `$REGISTRY/<image>` with **`j:image{...}`**, a helper of the platform (D-110) that a pipeline of yours calls the same way: `j:image{ name = "app", registry = "ghcr.io/acme", dockerfile = "Dockerfile", login = true }` after `j:checkout()`
+(`tag` is `run.tag`, `<date>-<commit>`, unless given; `skip_if_present`, `reuse = { suffix = "-<short commit>" }` for the image of the last good commit, `also = { ... }` for other registries, `insecure` for plain HTTP; the options are in `lua/stdlib/cicd.d.lua`). Kaniko builds and pushes, and `crane` (the image `gcr.io/go-containerregistry/crane`, pinned by its digest in the helper) asks whether an image is
 there and tags it; both read the **Docker config** (`config.json`) of the registry, and both answer the registry's own challenge, so a registry that hands out a token against the login (Docker Hub, GitHub, GitLab, Quay,
 Harbor and Gitea do) works as well as one that takes a password, which a password put in a header by hand could not do. The images are `$REGISTRY/<image>`, so a registry that wants an owner or a project in the path has it in `REGISTRY`.
 

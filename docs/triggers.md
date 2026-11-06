@@ -116,7 +116,13 @@ POST /api/v1/organizations/acme/triggers/{id}:fire      {"params": {…}, "commi
 POST /api/v1/organizations/acme/triggers/{id}:disable   (or :enable)
 GET  /api/v1/organizations/acme/triggers                                   # the list; last_fired_at, last_run_id, last_result
 DELETE /api/v1/organizations/acme/triggers/{id}
+PATCH  /api/v1/organizations/acme/triggers/{id}    {"params": {…}, "concurrency": "abort_previous", "ref": "main", "path": ".ci/pipeline.lua", "schedule": "0 2 * * *"}
 ```
+
+**A trigger is changed with `PATCH`** (TRG-005; it needs `trigger.write` in the trigger's project). The fields named replace the trigger's own, the others stay, and the result is checked as when a trigger is made (the same words for a bad `ref`, `path`, `schedule` or `concurrency`):
+`params` is replaced as a whole (the old ones that are not named go; `{}` clears them), `concurrency`, `ref` and `path`, and `schedule` of a schedule trigger. The **name, the kind and the project** are not changed (`400`, "make a new trigger"): the runs a trigger started and a webhook's
+secret belong to it, and a poll or a webhook that is moved to another project is another trigger; on and off are `:enable` and `:disable`. A **poll trigger whose `ref` changed** has seen nothing on the new one, so it looks again from nothing and runs at once on what the ref is at, as a new trigger does; a change of
+the parameters alone keeps the commit it has seen (no run starts for it: use `:fire` to start one with the new parameters). The answer is the trigger as `GET` shows it.
 
 ### Concurrency
 

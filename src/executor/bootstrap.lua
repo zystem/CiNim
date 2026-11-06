@@ -768,6 +768,209 @@ local function run_cache(job, d)
   return { status = "ok", code = 0, outputs = {}, hit = true, key = out }
 end
 
+-- `j:checkout(opts)` (STO-002, PRJ-004): the source of the run's commit in `src` of the job's workspace. Three steps of the job, made from the ones above, with ids that are its own (`ck01`, `ck02`, `ck03`): the mirror
+-- of the repository from the cache of the organisation (the key of the commit; failing that, the latest mirror of this repository, so that only what is new is fetched), a step of an image with git that fetches
+-- what the mirror lacks and clones out of it (`--shared`: no copy of the objects), and the mirror saved under the key of the commit when it grew. The repository and the commit are the run's own (`run.source`)
+-- unless `opts` names them: `url` (an http(s) address), `ref` (a SHA, a branch or a tag), `submodules` (update them after the checkout), `image` (the image of the step that runs git; the job's image needs a
+-- shell for the two cache steps). `depth` and `lfs` are in the declared signature (lua/stdlib/cicd.d.lua) and not built: they are refused, not ignored. Only a job of the build profile reaches the repository when
+-- the mirror is not in the cache. Returns the result of the step that cloned (`status`, `code`, `outputs`) with `commit` (the full SHA), `dir` ("src") and `url`.
+local CHECKOUT_IMAGE = "alpine/git:v2.47.2"
+local CHECKOUT_FIELDS = { url = true, ref = true, image = true, submodules = true, depth = true, lfs = true }
+local CHECKOUT_SH = [[
+set -eu
+[ -f mirror.git/HEAD ] || git init -q --bare mirror.git
+# the clone below borrows the objects of the mirror (`--shared`): nothing may tidy or repack the mirror under it
+git -C mirror.git config gc.auto 0
+git -C mirror.git config maintenance.auto false
+fetched=no
+if printf '%s' "$REF" | grep -Eq '^[0-9a-f]{40}$'; then
+  sha=$REF
+  if ! git -C mirror.git cat-file -e "$sha^{commit}" 2>/dev/null; then git -C mirror.git fetch -q "$REPO" "$sha"; fetched=yes; fi
+else
+  git -C mirror.git fetch -q "$REPO" "+refs/heads/$REF:refs/heads/$REF" || git -C mirror.git fetch -q "$REPO" "+refs/tags/$REF:refs/tags/$REF"
+  sha=$(git -C mirror.git rev-parse "$REF^{commit}"); fetched=yes
+fi
+rm -rf src
+git clone -q -n --shared mirror.git src
+git -C src -c advice.detachedHead=false -c checkout.workers=0 checkout -q "$sha"
+[ "$SUBMODULES" != yes ] || git -C src submodule update --init --recursive
+{ echo "SHA=$sha"; echo "FETCHED=$fetched"; } >> "$CICD_OUTPUT"
+]]
+
+local function checkout_opts(opts)
+  if opts == nil then opts = {} end
+  if type(opts) ~= "table" then error("Job:checkout: a table of options expected", 3) end
+  for k in rawnext, opts do
+    if not CHECKOUT_FIELDS[k] then error("Job:checkout: unknown field '" .. tostring_(k) .. "' (url, ref, image and submodules are the options)", 3) end
+  end
+  if opts.depth ~= nil then error("Job:checkout: depth is not supported yet (the mirror of the repository keeps its history, which is what makes the next fetch small)", 3) end
+  if opts.lfs ~= nil then error("Job:checkout: lfs is not supported yet", 3) end
+  if opts.submodules ~= nil and type(opts.submodules) ~= "boolean" then error("Job:checkout: submodules is true or false", 3) end
+  local src = state.source or {}
+  local repo = opts.url
+  if repo == nil then repo = src.repository or "" end
+  local ref = opts.ref
+  if ref == nil then ref = src.commit or "" end
+  if repo == "" then error("Job:checkout: no url: the run did not come from a repository (give url = \"https://host/name.git\")", 3) end
+  if type(repo) ~= "string" or #repo > 300 or not repo:match("^https?://[^%s%c\\'\"`]+$") then
+    error("Job:checkout: url is an http(s) address with no spaces or quotes in it", 3)
+  end
+  if type(ref) ~= "string" or ref == "" or #ref > 200 or not ref:match("^[%w%._/@%-]+$") or ref:find("..", 1, true) or ref:sub(1, 1) == "-" or ref:sub(1, 1) == "/" then
+    error("Job:checkout: ref is a SHA, a branch or a tag name" .. (ref == "" and " (the run has no commit: give ref)" or ""), 3)
+  end
+  local image = opts.image
+  if image == nil then image = CHECKOUT_IMAGE end
+  if type(image) ~= "string" or image == "" then error("Job:checkout: image is a non-empty string", 3) end
+  return repo, ref, image, opts.submodules == true
+end
+
+local function checkout_slug(text, limit)
+  local t = text:gsub("^https?://", "")
+  t = t:gsub("%.git$", "")
+  t = t:gsub("[^%w%._%-]", "-")
+  return t:sub(1, limit)
+end
+
+-- `j:image(opts)` (D-110): an image of the source in `src` (`j:checkout()`), built and pushed to a registry. What a pipeline wrote in shell for this is done here once, with the tools pinned by their digests:
+-- `crane` asks whether an image is there, tags an image, copies it to other registries; Kaniko builds and pushes. Both read the Docker config of the registry (`login`: a secret that holds a `config.json`), which is
+-- how Docker Hub, GitHub, GitLab, Quay, Harbor and Gitea are logged in to, token flows included. Steps of the job, with ids of their own (`mg<n>1` the check, `mg<n>2` the build, `mg<n>3` the copies; n is the
+-- number of the image in the job, 1 to 9). `opts`:
+--   name (required, `app`, `team/app`), registry (required, `host[:port][/path]`, no scheme), dockerfile (required, relative to `context`), tag (default `run.tag`), tags (more tags of the same image),
+--   context (default `src`), target, build_args (NAME = "value": the names are checked, the values are quoted), cache (default true; the cache is `<registry>/cinim-cache`, `cache_repo` names another),
+--   insecure (the registry speaks plain HTTP or has no certificate to check; default false), login (true: the secret REGISTRY_DOCKER_CONFIG; a name: that secret),
+--   skip_if_present (an image with this tag in the registry is not built), reuse = { suffix = "-<short commit>" } (when the registry has a tag of this image with that ending, the image of it is tagged with `tag`
+--   and nothing is built: the image of the commit that was last good, D-82), also = { "ghcr.io/acme", ... } (other registries: every tag is copied to each, after the image is there), kaniko_image, crane_image.
+-- Returns `{ action = "build" | "retagged" | "present", ref = "<registry>/<name>:<tag>", tag, name, registry }`.
+local KANIKO_IMAGE = "ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572"
+local CRANE_IMAGE = "gcr.io/go-containerregistry/crane:debug@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b"
+local IMAGE_FIELDS = { name = true, tag = true, tags = true, registry = true, dockerfile = true, context = true, target = true, build_args = true, cache = true, cache_repo = true,
+                       insecure = true, login = true, skip_if_present = true, reuse = true, also = true, kaniko_image = true, crane_image = true }
+local IMAGE_MAX_PER_JOB = 9
+
+local function image_fail(msg) error("Job:image: " .. msg, 4) end
+
+local function image_text(v, what, pattern, max)
+  if type(v) ~= "string" or v == "" or #v > (max or 200) or not v:match(pattern) then image_fail(what .. " is not what it can be (got " .. (type(v) == "string" and ("'" .. v:sub(1, 60) .. "'") or type(v)) .. ")") end
+  return v
+end
+
+local function image_registry(v, what)
+  -- host[:port][/path]: the host is letters, digits, `.` and `-`; the port is digits; the path is parts of letters, digits and `. _ -` between single slashes; no scheme, no spaces, no quotes
+  image_text(v, what, "^[%w%.%-:/_]+$", 200)
+  local hostport, path = v:match("^([^/]+)(.*)$")
+  local ok = hostport ~= nil and (hostport:match("^[%w][%w%.%-]*$") or hostport:match("^[%w][%w%.%-]*:%d+$"))
+  if ok and path ~= "" then ok = path:sub(1, 1) == "/" and path:sub(-1) ~= "/" and not path:find("//", 1, true) and path:sub(2):match("^[%w%._/%-]+$") end
+  if not ok then image_fail(what .. " is host[:port][/path], with no scheme (got '" .. v:sub(1, 60) .. "')") end
+  return v
+end
+
+local function image_path(v, what)
+  image_text(v, what, "^[%w%._/%-]+$", 200)
+  if v:sub(1, 1) == "/" or v:find("..", 1, true) then image_fail(what .. " is a relative path inside the source") end
+  return v
+end
+
+local function image_list(v, what, check)
+  if v == nil then return {} end
+  if type(v) ~= "table" then image_fail(what .. " is a list") end
+  local out = {}
+  for i = 1, rawlen(v) do out[i] = check(v[i], what) end
+  return out
+end
+
+local function shell_quote(text)
+  local q = text:gsub("'", "'\\''")
+  return "'" .. q .. "'"
+end
+
+-- the Docker config of the login is written where the tool looks for it: Kaniko in /kaniko/.docker, crane in a directory of the run
+local function image_login_sh(dir, secret)
+  local sh = "export DOCKER_CONFIG=" .. dir .. "\n"
+  if secret then
+    sh = sh .. 'if [ -n "${' .. secret .. ':-}" ]; then mkdir -p "$DOCKER_CONFIG" && printf \'%s\' "$' .. secret .. '" > "$DOCKER_CONFIG/config.json"; fi\n'
+  end
+  return sh
+end
+
+local function image_opts(opts)
+  if type(opts) ~= "table" then image_fail("a table of options expected") end
+  for k in rawnext, opts do
+    if not IMAGE_FIELDS[k] then image_fail("unknown field '" .. tostring_(k) .. "'") end
+  end
+  local o = {}
+  for _, k in ipairs({ "name", "registry", "dockerfile" }) do
+    if opts[k] == nil then image_fail(k .. " is required") end
+  end
+  o.name = image_text(opts.name, "name", "^[a-z0-9][a-z0-9%._/%-]*$", 128)
+  o.registry = image_registry(opts.registry, "registry")
+  o.context = image_path(opts.context == nil and "src" or opts.context, "context")
+  o.dockerfile = image_path(opts.dockerfile, "dockerfile")
+  local tag = opts.tag
+  if tag == nil then tag = state.run.tag end
+  local tagpat = "^[%w_][%w_%.%-]*$"
+  o.tag = image_text(tag, "tag", tagpat, 128)
+  o.tags = image_list(opts.tags, "tags", function(t, w) return image_text(t, w, tagpat, 128) end)
+  o.also = image_list(opts.also, "also", image_registry)
+  for _, b in ipairs({ "cache", "insecure", "skip_if_present" }) do
+    if opts[b] ~= nil and type(opts[b]) ~= "boolean" then image_fail(b .. " is true or false") end
+  end
+  o.cache = opts.cache ~= false
+  o.insecure = opts.insecure == true
+  o.skip = opts.skip_if_present == true
+  if opts.cache_repo ~= nil then o.cache_repo = image_registry(opts.cache_repo, "cache_repo") end
+  if opts.target ~= nil then o.target = image_text(opts.target, "target", "^[%w][%w%._%-]*$", 100) end
+  local login = opts.login
+  if login == true then o.secret = "REGISTRY_DOCKER_CONFIG"
+  elseif login ~= nil and login ~= false then
+    if type(login) ~= "string" or not login:match("^[A-Z_][A-Z0-9_]*$") then image_fail("login is true, or the name of a secret (capital letters, digits and _)") end
+    o.secret = login
+  end
+  if opts.reuse ~= nil then
+    if type(opts.reuse) ~= "table" or type(opts.reuse.suffix) ~= "string" or not opts.reuse.suffix:match("^[%w_%-]+$") then
+      image_fail("reuse is { suffix = \"-<text>\" }: the ending of a tag, letters, digits, - and _ (not a pattern)")
+    end
+    o.suffix = opts.reuse.suffix
+  end
+  o.args = {}
+  if opts.build_args ~= nil then
+    if type(opts.build_args) ~= "table" then image_fail("build_args is a table NAME = \"value\"") end
+    for k, v in stable_pairs(opts.build_args) do
+      if type(k) ~= "string" or not k:match("^[A-Z_][A-Z0-9_]*$") then image_fail("a build argument is named with capital letters, digits and _ (got '" .. tostring_(k) .. "')") end
+      if type(v) ~= "string" or v:find("[%z\n]") then image_fail("the value of the build argument " .. k .. " is a text on one line") end
+      o.args[#o.args + 1] = k .. "=" .. v
+    end
+  end
+  o.kaniko = opts.kaniko_image == nil and KANIKO_IMAGE or image_text(opts.kaniko_image, "kaniko_image", "^[%w][%w%._/:@%-]*$", 300)
+  o.crane = opts.crane_image == nil and CRANE_IMAGE or image_text(opts.crane_image, "crane_image", "^[%w][%w%._/:@%-]*$", 300)
+  return o
+end
+
+local IMAGE_CHECK_SH = [[
+set -eu
+ref="$REG/$NAME"
+action=build
+if [ "${SKIP_IF_PRESENT:-no}" = yes ] && crane manifest @FLAGS "$ref:$TAG" >/dev/null 2>&1; then
+  action=present
+elif [ -n "${REUSE_SUFFIX:-}" ]; then
+  old=$(crane ls @FLAGS "$ref" 2>/dev/null | grep -- "$REUSE_SUFFIX\$" | tail -n 1) || old=""
+  if [ -n "$old" ] && crane tag @FLAGS "$ref:$old" "$TAG"; then
+    for t in ${EXTRA_TAGS:-}; do crane tag @FLAGS "$ref:$old" "$t"; done
+    action=retagged
+  fi
+fi
+echo "$ref:$TAG: $action"
+echo "ACTION=$action" >> "$CICD_OUTPUT"
+]]
+
+local IMAGE_COPY_SH = [[
+set -eu
+for r in $ALSO; do
+  for t in $TAGS; do
+    crane copy @FLAGS "$REG/$NAME:$t" "$r/$NAME:$t"
+  done
+done
+]]
+
 local Job_mt = { __index = {
   -- `j:env{ NAME = "value" }`: variables for the steps of this job that follow (no Pod is started); the env of the job in VAR-004
   env = function(self, tbl)
@@ -786,6 +989,62 @@ local Job_mt = { __index = {
     if d.kind == "sh" then r = run_sh(self, d) else r = run_cache(self, d) end
     self.__results[d.id] = r
     return r
+  end,
+  checkout = function(self, opts)
+    local repo, ref, image, submodules = checkout_opts(opts)
+    local prefix = "git-" .. checkout_slug(repo, 80) .. "-"
+    self:run(step.cache_restore["ck01"]{ keys = { prefix .. checkout_slug(ref, 100), prefix } })
+    local done = self:run(step.sh["ck02"]{ cmd = CHECKOUT_SH, image = image, env = { REPO = repo, REF = ref, SUBMODULES = submodules and "yes" or "no" } })
+    local sha = done.outputs.SHA
+    if type(sha) ~= "string" or #sha < 40 then error("Job:checkout: the step did not say which commit it checked out", 2) end
+    if done.outputs.FETCHED == "yes" then self:run(step.cache_save["ck03"]{ key = prefix .. sha, paths = { "mirror.git" } }) end
+    done.commit, done.dir, done.url = sha, "src", repo
+    return done
+  end,
+  image = function(self, opts)
+    local o = image_opts(opts)
+    self.__images = (self.__images or 0) + 1
+    if self.__images > IMAGE_MAX_PER_JOB then error("Job:image: a job builds at most " .. IMAGE_MAX_PER_JOB .. " images", 2) end
+    local function id(k) return "mg" .. tostring_(self.__images) .. tostring_(k) end
+    local secrets = o.secret and { o.secret } or nil
+    local flags = o.insecure and "--insecure" or ""
+    local alltags = { o.tag }
+    for _, t in ipairs(o.tags) do alltags[#alltags + 1] = t end
+    local base = { REG = o.registry, NAME = o.name, TAG = o.tag }
+    local function env_with(extra)
+      local e = {}
+      for k, v in pairs(base) do e[k] = v end
+      for k, v in pairs(extra) do e[k] = v end
+      return e
+    end
+    local action = "build"
+    -- 1. is it there, or is there an image to tag (only when asked)
+    if o.skip or o.suffix then
+      local e = {}
+      if o.skip then e.SKIP_IF_PRESENT = "yes" end
+      if o.suffix then e.REUSE_SUFFIX = o.suffix end
+      if #o.tags > 0 then e.EXTRA_TAGS = table.concat(o.tags, " ") end
+      local checked = self:run(step.sh[id(1)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_CHECK_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets })
+      action = checked.outputs.ACTION
+      if action ~= "build" and action ~= "present" and action ~= "retagged" then error("Job:image: the check step did not say what to do (got '" .. tostring_(action) .. "')", 2) end
+    end
+    -- 2. the build and the push
+    if action == "build" then
+      local k = { image_login_sh("/kaniko/.docker", o.secret), "/kaniko/executor --dockerfile=/cicd/workspace/", o.context, "/", o.dockerfile, " --context=dir:///cicd/workspace/", o.context }
+      if o.target then k[#k + 1] = " --target=" .. o.target end
+      for _, a in ipairs(o.args) do k[#k + 1] = " --build-arg " .. shell_quote(a) end
+      for _, t in ipairs(alltags) do k[#k + 1] = " --destination=" .. o.registry .. "/" .. o.name .. ":" .. t end
+      if o.cache then k[#k + 1] = " --cache=true --cache-repo=" .. (o.cache_repo or (o.registry .. "/cinim-cache")) else k[#k + 1] = " --cache=false" end
+      k[#k + 1] = " --log-format=text"
+      if o.insecure then k[#k + 1] = " --insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull" end
+      self:run(step.sh[id(2)]{ cmd = table.concat(k), image = o.kaniko, secrets = secrets })
+    end
+    -- 3. the other registries
+    if #o.also > 0 then
+      local e = { ALSO = table.concat(o.also, " "), TAGS = table.concat(alltags, " ") }
+      self:run(step.sh[id(3)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_COPY_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets })
+    end
+    return { action = action, ref = o.registry .. "/" .. o.name .. ":" .. o.tag, tag = o.tag, name = o.name, registry = o.registry }
   end,
   sh = function() error("Job:sh is gone (D-67): a step is described by step.sh[\"ab\"]{ cmd = \"make\" }, in the list `steps` of the job or run by j:run(...)", 2) end,
 } }
@@ -1483,6 +1742,21 @@ end })
 
 -- `run` is the argument for a real (`ci.pipeline`) script's `main(run)`; a script that returns a
 -- plain value directly, as the sandbox test fixtures do, is unaffected.
+-- the date (UTC) of a time in seconds as YYYYMMDD: days since 1970-01-01 to a civil date (the algorithm of Howard Hinnant, for any date of the proleptic Gregorian calendar), in whole numbers
+local function utc_date(t)
+  local z = math.floor(t / 86400) + 719468
+  local era = (z >= 0 and z or z - 146096) // 146097
+  local doe = z - era * 146097
+  local yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+  local y = yoe + era * 400
+  local doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+  local mp = (5 * doy + 2) // 153
+  local d = doy - (153 * mp + 2) // 5 + 1
+  local m = mp < 10 and mp + 3 or mp - 9
+  if m <= 2 then y = y + 1 end
+  return string.format("%04d%02d%02d", y, m, d)
+end
+
 local function run_main(fn, run)
   state.main = running()
   local given = rawget(run, "__given") or {}
@@ -1494,7 +1768,20 @@ local function run_main(fn, run)
     local v = given["@source." .. k]
     if v ~= nil then source[k] = v; given["@source." .. k] = nil end
   end
+  source.short = (#source.commit >= 7) and source.commit:sub(1, 7) or ""      -- PRJ-004: the short commit, for a tag or a log; "" when the script did not come from a repository
+  source.sha = source.commit                                                  -- the full SHA the core resolved the run's commit to (`commit` is what the run was made for, a SHA once it is read from the repository)
   run.source = source
+  run.sha = source.sha                                                        -- declared in lua/stdlib/cicd.d.lua as `run.sha`: the same as `run.source.sha`
+  -- `run.tag`: the tag a run gives what it makes, `<date>-<short commit>` (the date of the day it is read, UTC; the short commit is left out when the run has none). Read lazily, so that a script that
+  -- does not use it asks the host for nothing; the time is a journaled host call, so a replay gives the same tag; the same value every time it is read.
+  setmetatable(run, { __index = function(t, k)
+    if k ~= "tag" then return nil end
+    local tag = utc_date(tonumber(call("now", ""))) .. (source.short ~= "" and ("-" .. source.short) or "")
+    rawset(t, "tag", tag)
+    return tag
+  end })
+  state.source = source                                                       -- what `j:checkout()` takes the repository and the commit from
+  state.run = run                                                             -- what `j:image()` takes its default tag from (`run.tag`)
   local v = fn()
   if type(v) == "table" and type(rawget(v, "main")) == "function" then
     pipeline_env = norm_env(rawget(v, "env"), "ci.pipeline env", 0)

@@ -2068,6 +2068,17 @@ proc onRequest() {.raises: [], gcsafe.} =
           return
         if action == "" and tmeth == "GET":
           jsonOk(Http200, found.row.view)
+        elif action == "" and tmeth == "PATCH":
+          # TRG-005: params, concurrency, ref, path (and the schedule of a schedule trigger) change; the name, the kind and the project do not
+          if not who.mayIn("trigger.write", slug, found.row.groupPath):
+            problem(Http403, "forbidden", "you may not change triggers of the project " & found.row.groupPath & ": it needs trigger.write there")
+            return
+          let upd = parseTriggerUpdate(try: parseJson(getBody()) except JsonParsingError: nil, found.row)
+          if upd.error.len > 0:
+            problem(Http400, "invalid_request", upd.error)
+            return
+          discard c.updateTrigger(org.id, tid, upd.spec, refChanged = upd.spec.ref0 != found.row.ref0)
+          jsonOk(Http200, c.getTrigger(org.id, tid).row.view)
         elif action == "" and tmeth == "DELETE":
           discard c.deleteTrigger(org.id, tid)
           jsonOk(Http200, %*{"id": tid, "deleted": true})
@@ -2111,7 +2122,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           else:
             problem((if fired.reason == "queue_full": Http429 else: Http409), fired.reason, "no run was started: " & fired.reason)
         else:
-          problem(Http405, "method_not_allowed", "GET, DELETE, or POST :enable :disable :rotate-secret :fire")
+          problem(Http405, "method_not_allowed", "GET, PATCH, DELETE, or POST :enable :disable :rotate-secret :fire")
         return
       if path.startsWith("/api/v1/organizations/"):
         # SHD-007: switching an organisation off (DELETE) and deleting it for good (DELETE ?purge=true)

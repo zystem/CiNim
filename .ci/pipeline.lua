@@ -1,31 +1,28 @@
--- CiNim builds, tests and rolls itself out (D-42, D-47, D-48, D-63). This is the script of the repository: a trigger or a run names the repository and the commit and a conductor of the
--- organisation reads this file at that commit (`run.source`), so a change of the pipeline is a commit like any other.
---   1. `prep`: fetch the repository into a bare mirror kept as a cache of the organisation (`git-<commit>`, docs/cache.md; the next run fetches only what is new), find the commit,
---      the tag of the images and the hash of what the libraries image is made of,
+-- CiNim builds, tests and rolls itself out (D-42, D-47, D-48, D-63, D-82, D-107, D-109, D-110). This is the script of the repository: a trigger or a run names the repository and the commit and a conductor of
+-- the organisation reads this file at that commit (`run.source`), so a change of the pipeline is a commit like any other. What it does is what the platform's helpers cannot know: which images, which tests, what
+-- is rolled out. The rest is theirs: `j:checkout()` puts the commit in `src` (the mirror of the repository is a cache of the organisation), `j:image{...}` builds an image and pushes it (is it there already, tag the
+-- image of the last good commit, copy to other registries, the login), `run.tag` is the tag, `run.source` the commit and the last good one.
+--   1. `prep` (D-82): the commit checked out, the hashes of what the libraries and the tests images are made of, and the files that differ between the last good commit and this one,
 --   2. `deps`: the image of the libraries (libsodium, nghttp2, the Kubernetes C client, the nimble packages; tools/image/Dockerfile.deps) as `cinim-deps:<hash>`, and the image of the tests
 --      (tools/image/Dockerfile.test: Nim on glibc as on a workstation, the system libraries, the nimble packages and `rqlited`) as `cinim-test:<hash>`, each made once and found in the registry afterwards,
---   3. side by side, and the first failure stops the other: the images of the components (`ci.matrix`: each build restores the mirror of its commit, clones from it into its own volume and runs
---      Kaniko on the Dockerfile of its component with DEPS_IMAGE) and the tests (`tools/test/run.sh` in a Pod of the test image: the integration tests start their own `rqlited` processes,
---      no Docker; `TEST_JOBS` workers, `TEST` false leaves them out; the compiled C of the tests is a cache of the organisation (`nim-<hash>-<commit>`), so that only a first run compiles everything),
+--   3. side by side, and the first failure stops the other: the images of the components (`ci.matrix`: each in a job of its own that checks the commit out and calls `j:image`; an image that nothing changed for is the
+--      image of the last good commit under the new tag) and the tests (`tools/test/run.sh` in a Pod of the test image: the integration tests start their own `rqlited` processes, no Docker; `TEST_JOBS`
+--      workers, `TEST` false leaves them out; the compiled C of the tests is a cache of the organisation (`nim-<hash>-<commit>`), so that only a first run compiles everything),
 --   4. a deploy step (profile = "deploy": an ordinary, non-root Pod that may reach the Kubernetes API server with the token of deployer.yaml) when DEPLOY is true: `helm upgrade --atomic --wait`
 --      of the storage module and of the shard with the new tag of the images (the controllers and the conductors follow the core by themselves, D-62), a rollback of both releases to the
 --      revisions they had if either fails, and a look at what runs afterwards.
 -- D-82: what a commit changes decides what is done. The platform tells the script `run.source.base`, the commit of the last run of this pipeline that ended OK; the first job reduces the files that differ
 -- between it and the commit to the areas of the tree and the changed test files, and this script decides (`plan` below): the images that must be built, and the tests that must run (those that import a
--- component that changed). An image that is not affected is not built but tagged from the one of the base (its manifest is put under the new tag in the registry), so that the deploy finds all five;
--- with no base (a first run, a run whose script came in the request) or with no image of the base, everything is built and tested.
+-- component that changed). With no base (a first run, a run whose script came in the request) or with no image of the base, everything is built and tested.
 -- Start it with the commit to run, from a webhook (the trigger of the organisation names the repository; a git server calls it with {"commit": "<sha>"}), by the clock, or by hand:
---   POST /api/v1/runs  {"organization": "<slug>", "repository": "https://github.com/zystem/CiNim.git", "commit": "main",
---                       "params": {"REGISTRY": "<host[:port][/path] the build Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}
+--   POST /api/v1/runs  {"organization": "<slug>", "project": "<path>", "commit": "main", "params": {"REGISTRY": "<host[:port][/path] the build Pods push to>", "PULL_REGISTRY": "<the name the nodes pull from>"}}
 -- Any registry that speaks the Docker registry API: the plain one of the cluster (the default: HTTP, no login), or one with TLS and a login (REGISTRY_INSECURE=false, REGISTRY_LOGIN=true): Gitea, GitHub
--- (ghcr.io/<owner>), GitLab, Docker Hub, Quay, Harbor, ... The images are `$REGISTRY/<image>`, so a registry that wants an owner or a project in the path has it in REGISTRY. The login is the Docker `config.json` of
--- the registry, kept as the organisation's secret REGISTRY_DOCKER_CONFIG (docs/deployment.md "Where the images go"); Kaniko and crane (which does the rest: is an image there, tag an image) read it, and they
--- answer the registry's own challenge (a token, as Docker Hub, GitHub and GitLab ask for, or a password), which a plain password in a header could not. The nodes pull with their own login (PULL_REGISTRY).
--- Leave TAG out and every run tags its images <date>-<commit>. A run that came with the script in the request (no repository) takes REPO and REF from its parameters.
--- The organisation needs the build profile (build.enabled) with a build.egress rule for the registry, and a store for caches (the storage module); for the deploy step the deploy
+-- (ghcr.io/<owner>), GitLab, Docker Hub, Quay, Harbor, ... The images are `$REGISTRY/<image>`, so a registry that wants an owner or a project in the path has it in REGISTRY. The login is the Docker `config.json`
+-- of the registry, the organisation's secret REGISTRY_DOCKER_CONFIG (docs/deployment.md "Where the images go"); PUSH_ALSO lists other registries that every image is copied to. The nodes pull with their own login (PULL_REGISTRY).
+-- Leave TAG out and every run tags its images `run.tag`, <date>-<commit>. A run that came with the script in the request (no repository) takes REPO and REF from its parameters.
+-- The organisation needs the build profile (build.enabled) with a build.egress rule for every registry, and a store for caches (the storage module); for the deploy step the deploy
 -- profile (deploy.enabled, deploy.kubeApiServer) and the secrets DEPLOY_TOKEN and DEPLOY_CA (deployer.yaml). A step that exits non-zero fails the job and so the run (6.7).
 -- Parameters are plain environment variables of every step (VAR-002); the secrets are fetched by the shim and are never in the script.
-local KANIKO = "ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572"
 local GIT = "alpine/git:v2.47.2"
 local KUBECTL = "alpine/k8s:1.34.1"             -- kubectl, helm, git, jq
 
@@ -34,19 +31,13 @@ local COMPONENTS = { { target = "core", image = "cinim" }, { target = "controlle
                      { target = "conductor", image = "cinim-conductor" }, { target = "storage", image = "cinim-storage" },
                      { target = "ui", image = "cinim-ui" } }
 
--- the mirror, the commit and the hashes, returned to the script as outputs: SHA, TAG, DEPS (the hash of the stage of the libraries, cinim.nimble and the script of the Kubernetes client) TESTDEPS (cinim.nimble and the Dockerfile of the tests) and HELMDEPS (the lock of the subcharts of the shard chart)
-local PREP = [[
+-- What the checked-out commit says, returned to the script as outputs: DEPS (the hash of what the image of the libraries is made of: cinim.nimble, the script of the Kubernetes client and the Dockerfile), TESTDEPS
+-- (cinim.nimble and the Dockerfile of the tests), HELMDEPS (Chart.lock), and what changed since BASE (D-82). The commit is in `src`, its history in `mirror.git` (`j:checkout()`).
+local FACTS = [[
 set -eu
-[ -f mirror.git/HEAD ] || git init -q --bare mirror.git
-if printf '%s' "$REF" | grep -Eq '^[0-9a-f]{40}$'; then
-  git -C mirror.git fetch -q "$REPO" "$REF"                  # a commit by its SHA (what a webhook or `run.source` gives)
-else
-  git -C mirror.git fetch -q "$REPO" "+refs/heads/$REF:refs/heads/$REF" || git -C mirror.git fetch -q "$REPO" "+refs/tags/$REF:refs/tags/$REF"
-fi
-sha=$(git -C mirror.git rev-parse "$REF^{commit}")
-deps=$({ git -C mirror.git show "$sha:cinim.nimble"; git -C mirror.git show "$sha:tools/k8s/build_client.sh"; git -C mirror.git show "$sha:tools/image/Dockerfile.deps"; } | sha256sum | cut -c1-16)
-tests=$({ git -C mirror.git show "$sha:cinim.nimble"; git -C mirror.git show "$sha:tools/image/Dockerfile.test"; } | sha256sum | cut -c1-16)
-helm=$(git -C mirror.git show "$sha:deploy/charts/cinim-shard/Chart.lock" | sha256sum | cut -c1-16)
+deps=$(cat src/cinim.nimble src/tools/k8s/build_client.sh src/tools/image/Dockerfile.deps | sha256sum | cut -c1-16)
+tests=$(cat src/cinim.nimble src/tools/image/Dockerfile.test | sha256sum | cut -c1-16)
+helm=$(sha256sum < src/deploy/charts/cinim-shard/Chart.lock | cut -c1-16)
 # D-82: the files that differ between BASE (the last good commit, told by the platform) and the commit, reduced to the areas of the tree (`src/core`, `docs`, ...) and the changed test files: what the
 # script decides by. Without a usable BASE nothing is said and the script builds and tests everything.
 base="${BASE:-}"
@@ -54,81 +45,15 @@ printf '%s' "$base" | grep -Eq '^[0-9a-f]{40}$' || base=""
 [ -z "$base" ] || git -C mirror.git fetch -q "$REPO" "$base" 2>/dev/null || base=""
 areas=""; ctests=""
 if [ -n "$base" ]; then
-  if changed=$(git -C mirror.git diff --name-only "$base" "$sha"); then
+  if changed=$(git -C mirror.git diff --name-only "$base" "$SHA"); then
     areas=$(printf '%s\n' "$changed" | awk -F/ 'NF == 0 {next} NF == 1 {print $1; next} $1 == "src" || $1 == "tests" {print $1 "/" $2; next} $1 == "tools" && $2 == "image" {print $1 "/" $2 "/" $3; next} $1 == "tools" {print $1 "/" $2; next} {print $1}' | sort -u | paste -sd, -)
     ctests=$(printf '%s\n' "$changed" | grep -E '^tests/(unit|integration)/t[^/]*\.nim(\.cfg)?$' | sed 's/\.cfg$//' | sort -u | paste -sd, - || true)
     [ ${#ctests} -le 1500 ] || ctests=all
   else base=""; fi
 fi
 echo "changed since ${base:-nothing known}: ${areas:-nothing}"
-{ echo "SHA=$sha"; echo "TAG=${TAG:-$(date -u +%Y%m%d)-$(echo "$sha" | cut -c1-7)}"; echo "DEPS=$deps"; echo "TESTDEPS=$tests"; echo "HELMDEPS=$helm"
+{ echo "DEPS=$deps"; echo "TESTDEPS=$tests"; echo "HELMDEPS=$helm"
   echo "BASE=${base:-none}"; echo "AREAS=${areas:-none}"; echo "CHANGED_TESTS=${ctests:-none}"; } >> "$CICD_OUTPUT"
-]]
-
--- the source of the commit in the volume of the job: from the mirror that the cache gave, the files written by one worker (checkout.workers=0 was the fastest, docs/storage-module.md)
-local CLONE = [[
-set -eu
-git clone -q -n --shared mirror.git src
-git -C src -c advice.detachedHead=false -c checkout.workers=0 checkout -q "$SHA"
-]]
-
-local CRANE = "gcr.io/go-containerregistry/crane:debug@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b"   -- crane: is an image there, tag an image; no daemon
-
--- The login and the transport of the registry for the shell of a step that talks to it. The Docker config (the secret REGISTRY_DOCKER_CONFIG, only with REGISTRY_LOGIN) is put where Kaniko and crane look for it;
--- REGISTRY_INSECURE (the registry of the cluster speaks plain HTTP) gives the flags that allow it.
-local REGISTRY_FLAGS = "--insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull"
-local function registry_sh(config_dir)
-  return 'CRANE_FLAGS=""; KANIKO_FLAGS=""\n' ..
-         'if [ "${REGISTRY_INSECURE:-true}" = true ]; then CRANE_FLAGS=--insecure; KANIKO_FLAGS="' .. REGISTRY_FLAGS .. '"; fi\n' ..
-         'export DOCKER_CONFIG=' .. config_dir .. '\n' ..
-         'if [ -n "${REGISTRY_DOCKER_CONFIG:-}" ]; then mkdir -p "$DOCKER_CONFIG" && printf \'%s\' "$REGISTRY_DOCKER_CONFIG" > "$DOCKER_CONFIG/config.json"; fi\n'
-end
-local function kaniko(component, image, tag, extra)
-  return registry_sh("/kaniko/.docker") ..
-         "/kaniko/executor --dockerfile=/cicd/workspace/src/tools/image/Dockerfile." .. component .. " --context=dir:///cicd/workspace/src " .. (extra or "") ..
-         " --destination=$REGISTRY/" .. image .. ":" .. tag .. " --cache=true --cache-repo=$REGISTRY/cinim-cache --log-format=text $KANIKO_FLAGS"
-end
-
--- a job (its id is the first argument, 2 characters, D-67) in a volume of its own with the source of the commit in it; its steps 1 and 2 are the mirror and the clone, the steps of `fn` are 3 on
-local function checked_out(id, env, fn, opts)
-  opts = opts or {}
-  ci.single[id]{ image = opts.image or GIT, profile = opts.profile or "build", workspace = "isolated", env = env, timeout = opts.timeout, secrets = opts.secrets, shm = opts.shm, body = function(j)
-    j:run(step.cache_restore['1']{ keys = {"git-" .. env.SHA} })
-    j:run(step.sh['2']{ cmd = CLONE })
-    fn(j)
-  end }
-end
-
--- Is the image in the registry? (the images of the libraries and of the tests are made once.) A step of crane; its output PRESENT is yes or no, and the build step follows only on no.
-local function in_registry(name, hash)
-  return "set -eu\nNAME=" .. name .. "\nHASH=$" .. hash .. "\n" .. registry_sh("$CICD_RUN_DIR/docker") ..
-         'if crane manifest $CRANE_FLAGS "$REGISTRY/$NAME:$HASH" >/dev/null 2>&1; then echo "$NAME:$HASH is in the registry"; echo PRESENT=yes >> "$CICD_OUTPUT"; ' ..
-         'else echo PRESENT=no >> "$CICD_OUTPUT"; fi\n'
-end
-
--- D-82: an image that nothing changed for is not built again: the manifest of the image of BASE (the commit that was last good) is put under the new tag, in the registry that the Pods reach (a PUT of the
--- same manifest: the layers are there already). RETAGGED=no when there is no such image: the caller builds it.
-local RETAG = registry_sh("$CICD_RUN_DIR/docker") .. [[
-set -eu
-base7=$(printf '%s' "$BASE" | cut -c1-7)
-no() { echo "RETAGGED=no" >> "$CICD_OUTPUT"; exit 0; }
-[ -n "$base7" ] && [ "$base7" != none ] || no
-old=$(crane ls $CRANE_FLAGS "$REGISTRY/$NAME" 2>/dev/null | grep -- "-$base7\$" | tail -n 1) || old=""
-[ -n "$old" ] || { echo "no $NAME image of $base7: it is built"; no; }
-crane tag $CRANE_FLAGS "$REGISTRY/$NAME:$old" "$IMAGE_TAG" || { echo "cannot tag $NAME:$IMAGE_TAG"; no; }
-echo "$NAME:$IMAGE_TAG is $NAME:$old: nothing of it changed since $base7"
-echo "RETAGGED=yes" >> "$CICD_OUTPUT"
-]]
-
--- Several registries for one project (PUSH_ALSO): the images are in $REGISTRY, built or tagged, and are copied from there, blob by blob only what the other registry lacks. One Docker config holds the
--- logins of all of them.
-local REPLICATE = registry_sh("$CICD_RUN_DIR/docker") .. [[
-set -eu
-for r in $(printf '%s' "$PUSH_ALSO" | tr ',' ' '); do
-  for name in $IMAGES; do
-    crane copy $CRANE_FLAGS "$REGISTRY/$name:$IMAGE_TAG" "$r/$name:$IMAGE_TAG"
-  done
-done
 ]]
 
 -- The tests, in a Pod: the integration tests start `rqlited` themselves (tools/test/run.sh), the unit tests need nothing. The nimble packages of the image are in the home of root, which is what
@@ -282,7 +207,7 @@ return ci.pipeline({
     PUSH_ALSO = ci.string{default = "", max_length = 500},                            -- other registries the images are copied to, host[:port][/path], separated by commas (the same names and tags)
     REGISTRY_LOGIN = ci.bool{default = false},                                        -- the steps that talk to the registry log in with the secret REGISTRY_DOCKER_CONFIG (the text of a Docker config.json)
     PULL_REGISTRY = ci.string{default = "", max_length = 200},                        -- the name the nodes pull the images from; empty: the same as REGISTRY
-    TAG = ci.string{default = "", max_length = 100, pattern = "[%w%._%-]*"},          -- the tag of the images; empty: <date>-<commit>
+    TAG = ci.string{default = "", max_length = 100, pattern = "[%w%._%-]*"},          -- the tag of the images; empty: run.tag (<date>-<commit>)
     REPO = ci.string{default = "https://github.com/zystem/CiNim.git", max_length = 300},   -- when the run did not come from a repository (run.source)
     REF = ci.string{default = "main", max_length = 100, pattern = "[%w%._%-/]+"},     -- a branch, a tag or a SHA; the same
     NAMESPACE = ci.string{default = "cinim-001", max_length = 63},                    -- the namespace of the shard that is rolled out
@@ -297,21 +222,36 @@ return ci.pipeline({
   main = function(run)
     local p = run.params
     local pull = (p.PULL_REGISTRY ~= "") and p.PULL_REGISTRY or p.REGISTRY
-    local login = p.REGISTRY_LOGIN and {"REGISTRY_DOCKER_CONFIG"} or nil      -- given to the steps that talk to the registry and to no other
     -- where the commit is: the repository and the commit that the conductor read this script from, or the parameters
     local repo = (run.source.repository ~= "") and run.source.repository or p.REPO
     local ref = (run.source.commit ~= "") and run.source.commit or p.REF
-    local tag = p.TAG
+    local also = {}
+    for r in p.PUSH_ALSO:gmatch("[^,%s]+") do also[#also + 1] = r end
     local info
-    -- 1. the mirror (a cache of the organisation: the first run fetches everything, the next ones what is new) and what the commit is
-    ci.single['p']{ image = GIT, profile = "build", workspace = "isolated", env = {REPO = repo, REF = ref, BASE = run.source.base}, body = function(j)
-      j:run(step.cache_restore['1']{ keys = {"git-none", "git-"} })            -- no key is exactly "git-none": the latest "git-<commit>" is the one restored
-      info = j:run(step.sh['2']{ cmd = PREP }).outputs
-      if not (info.SHA and info.TAG and info.DEPS and info.TESTDEPS and info.HELMDEPS) then error("no commit found for " .. ref) end
-      j:run(step.cache_save['3']{ key = "git-" .. info.SHA, paths = {"mirror.git"} })
+    -- a job in a volume of its own with the commit checked out in `src`; its steps are `fn`'s
+    local function checked_out(id, env, fn, opts)
+      opts = opts or {}
+      ci.single[id]{ image = opts.image or GIT, profile = opts.profile or "build", workspace = "isolated", env = env, timeout = opts.timeout, secrets = opts.secrets, shm = opts.shm, body = function(j)
+        j:checkout{ url = repo, ref = info.SHA }
+        fn(j)
+      end }
+    end
+    -- the options of an image that are the same for all of them
+    local function image(name, dockerfile, tag, more)
+      local o = { name = name, registry = p.REGISTRY, dockerfile = dockerfile, tag = tag, insecure = p.REGISTRY_INSECURE, login = p.REGISTRY_LOGIN }
+      for k, v in pairs(more or {}) do o[k] = v end
+      return o
+    end
+    -- 1. the commit, and what it says (the mirror of the repository is a cache of the organisation: the first run fetches everything, the next ones what is new)
+    ci.single['p']{ image = GIT, profile = "build", workspace = "isolated", env = { REPO = repo, BASE = run.source.base }, body = function(j)
+      local co = j:checkout{ url = repo, ref = ref }
+      info = j:run(step.sh['1']{ cmd = FACTS, env = { SHA = co.commit } }).outputs
+      info.SHA = co.commit
+      if not (info.DEPS and info.TESTDEPS and info.HELMDEPS) then error("no commit found for " .. ref) end
     end }
-    tag = info.TAG
-    -- D-82: the images that are built (the others are tagged from the image of BASE) and whether the tests run at all
+    local tag = p.TAG
+    if tag == "" then tag = (run.source.short ~= "") and run.tag or (run.tag .. "-" .. info.SHA:sub(1, 7)) end
+    -- D-82: the images that are built (the others are the image of BASE under the new tag) and whether the tests run at all
     local base = (info.BASE and info.BASE ~= "none") and info.BASE or ""
     local decided
     if base == "" then   -- nothing is known of the last good commit: everything is built and tested
@@ -321,21 +261,15 @@ return ci.pipeline({
     end
     local affected = decided.images
     local run_tests = p.TEST and decided.tests ~= "none"
-    local env = { SHA = info.SHA, IMAGE_TAG = info.TAG, DEPS = info.DEPS, TESTDEPS = info.TESTDEPS, TEST_JOBS = tostring(p.TEST_JOBS), BASE = base,
+    local env = { SHA = info.SHA, IMAGE_TAG = tag, DEPS = info.DEPS, TESTDEPS = info.TESTDEPS, TEST_JOBS = tostring(p.TEST_JOBS), BASE = base,
                   COMPONENTS = (decided.tests == "some") and decided.components or "", CHANGED_TESTS = (decided.tests == "some") and decided.changed_tests or "" }
     if p.BUILD or run_tests then
       -- 2. the libraries, and the tests' image, once for as long as what they are made of stays the same
       if p.BUILD then
-        checked_out('d', env, function(j)
-          local have = j:run(step.sh['3']{ cmd = in_registry("cinim-deps", "DEPS"), image = CRANE, secrets = login }).outputs.PRESENT == "yes"
-          if not have then j:run(step.sh['4']{ cmd = kaniko("deps", "cinim-deps", "$DEPS"), image = KANIKO, secrets = login }) end
-        end)
+        checked_out('d', env, function(j) j:image(image("cinim-deps", "tools/image/Dockerfile.deps", info.DEPS, { skip_if_present = true })) end)
       end
       if run_tests then
-        checked_out('t', env, function(j)
-          local have = j:run(step.sh['3']{ cmd = in_registry("cinim-test", "TESTDEPS"), image = CRANE, secrets = login }).outputs.PRESENT == "yes"
-          if not have then j:run(step.sh['4']{ cmd = kaniko("test", "cinim-test", "$TESTDEPS"), image = KANIKO, secrets = login }) end
-        end)
+        checked_out('t', env, function(j) j:image(image("cinim-test", "tools/image/Dockerfile.test", info.TESTDEPS, { skip_if_present = true })) end)
       end
       -- 3. the images of the components, and the tests, side by side: the first that fails stops the others
       local names, by, number = {}, {}, {}
@@ -345,22 +279,13 @@ return ci.pipeline({
         branches.images = function()
           ci.parallel(ci.matrix{axes = {component = names}, fail_fast = true, max_parallel = p.BUILD_JOBS}, function(c)
             local comp = by[c.component]
-            local function build()
-              checked_out(b32f("{xx}", 32 + number[comp.target]), env, function(j)         -- the jobs 11, 12, ... one for each component
-                j:run(step.sh['3']{ cmd = kaniko(comp.target, comp.image, "$IMAGE_TAG", "--build-arg DEPS_IMAGE=$REGISTRY/cinim-deps:$DEPS"), image = KANIKO, secrets = login })
-              end)
-            end
-            if affected[comp.target] then
-              build()
-            else
-              -- nothing of it changed since BASE: the image of BASE under the new tag (the jobs 49, 50, ...); if there is none, it is built
-              local retagged = false
-              ci.single[b32f("{xx}", 48 + number[comp.target])]{ image = CRANE, profile = "build", workspace = "isolated",
-                env = { BASE = base, NAME = comp.image, IMAGE_TAG = info.TAG }, body = function(j)
-                  retagged = j:run(step.sh['1']{ cmd = RETAG, secrets = login }).outputs.RETAGGED == "yes"
-                end }
-              if not retagged then build() end
-            end
+            checked_out(b32f("{xx}", 32 + number[comp.target]), env, function(j)         -- the jobs 11, 12, ... one for each component
+              j:image(image(comp.image, "tools/image/Dockerfile." .. comp.target, tag, {
+                build_args = { DEPS_IMAGE = p.REGISTRY .. "/cinim-deps:" .. info.DEPS },
+                -- nothing of it changed since BASE: the image of BASE under the new tag; if the registry has none, it is built
+                reuse = (not affected[comp.target] and base ~= "") and { suffix = "-" .. base:sub(1, 7) } or nil,
+                also = also }))
+            end)
           end)
         end
       end
@@ -376,14 +301,6 @@ return ci.pipeline({
         end
       end
       ci.parallel(branches, {fail_fast = true})
-      -- the other registries of the project (the images are in $REGISTRY by now, built or tagged): one copy of each image to each of them
-      if p.BUILD and p.PUSH_ALSO ~= "" then
-        local images = {}
-        for _, c in ipairs(COMPONENTS) do images[#images + 1] = c.image end
-        ci.single['y']{ image = CRANE, profile = "build", workspace = "isolated", env = { IMAGE_TAG = info.TAG, IMAGES = table.concat(images, " ") }, body = function(j)
-          j:run(step.sh['1']{ cmd = REPLICATE, secrets = login })
-        end }
-      end
     end
     -- 4. the new tag in the cluster
     if p.DEPLOY then

@@ -1,6 +1,6 @@
 ## T-03: the core writes the run journal with a hash chain, keeps the newest hash with the run, and checks the chain before a run goes to an
 ## executor (against a real rqlite). Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
-import std/[unittest, json, os, strutils, sequtils, options]
+import std/[unittest, json, os, strutils, sequtils, options, times]
 import common/rqlite
 import core/[schema, scheduler, runlease, journalchain, journaldb, retrypolicy]
 
@@ -97,3 +97,22 @@ suite "T-03 the hash chain of the journal":
           r, i, "p" & $i]])
       check leaseIt(r).isNone
       check stateOf(r) == "INFRASTRUCTURE_ERROR" and failCode(r) == "journal_corrupt"
+    test "a call to now is answered at once with the time of the core, and the answer is a record of the journal (a replay reads it there; it is not asked again)":
+      let r = co.createRun("return 1")
+      let tok = c.takeRunLease(master, r, "exec-t")
+      let resp = handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 0, key: "now#0", kind: "now", payload: @[]), master)
+      check resp.body.kind == ExecutorResponseBodyKind.result and not resp.body.result.suspended
+      let told = parseBiggestInt(cast[string](resp.body.result.result))
+      check abs(told - getTime().toUnix) <= 5
+      let rows = c.readRows(r)
+      check rows.len == 1 and rows[0].kind == "now" and rows[0].result == $told
+      check checkChain(rows, c.readTip(r)).verdict == cvOk
+    test "a call without the key of its record is refused (the record could not be found again), and a caller without the lease is turned away":
+      let r = co.createRun("return 1")
+      let tok = c.takeRunLease(master, r, "exec-t")
+      let nokey = handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 0, kind: "now", payload: @[]), master)
+      check nokey.body.kind == ExecutorResponseBodyKind.failure
+      let stranger = handleCall(c, co, HostCall(run_id: r, lease_token: "not-the-token", seq: 0, key: "now#0", kind: "now", payload: @[]), master)
+      check stranger.body.kind == ExecutorResponseBodyKind.failure and stranger.body.failure.code == "lease_lost"
+      check c.readRows(r).len == 0
+

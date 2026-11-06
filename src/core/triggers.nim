@@ -96,6 +96,24 @@ proc parseTriggerSpec*(j: JsonNode): tuple[error: string, spec: TriggerSpec] =
   if p.error.len > 0: return ("params: " & p.error, result.spec)
   result.spec.params = p.pairs
 
+proc parseTriggerUpdate*(j: JsonNode; cur: TriggerRow): tuple[error: string, spec: TriggerSpec] =
+  ## The body of a change (`PATCH .../triggers/{id}`, TRG-005): the fields named replace the trigger's own, the rest stay, and the result is checked as a trigger that is made. What may change:
+  ## `params` (as a whole; `{}` clears them), `concurrency`, `ref`, `path`, and `schedule` of a schedule trigger. The name, the kind and the project make it another trigger (a webhook's secret,
+  ## the runs it started), so they are not changed here; on and off are `:enable` and `:disable`.
+  if j == nil or j.kind != JObject: return ("the body is a JSON object", result.spec)
+  for key, _ in j.pairs:
+    if key in ["name", "kind", "project", "group", "repository", "script"]:
+      return (key & " cannot be changed: make a new trigger (its runs, and a webhook's secret, belong to this one)", result.spec)
+    if key == "enabled": return ("enabled cannot be changed here: POST :enable or :disable", result.spec)
+    if key notin ["params", "concurrency", "ref", "path", "schedule"]:
+      return ("unknown field " & key & " (params, concurrency, ref, path or schedule can be changed)", result.spec)
+  if j.len == 0: return ("nothing to change: give params, concurrency, ref, path or schedule", result.spec)
+  var merged = %*{"name": cur.name, "kind": cur.kind, "project": cur.groupPath, "concurrency": cur.concurrency, "ref": cur.ref0, "path": cur.scriptPath,
+                  "params": (if cur.params.len > 0: parseJson(toJson(cur.params)) else: newJObject())}
+  if cur.kind == "schedule": merged["schedule"] = %cur.schedule
+  for key, v in j.pairs: merged[key] = v
+  parseTriggerSpec(merged)
+
 # ------------------------------------------------------------------ the rows
 
 const columns = "t.id, t.tenant_id, o.slug, t.name, t.kind, t.schedule, t.secret_hash, t.group_id, t.script, t.concurrency, t.last_run_id, " &
@@ -174,6 +192,15 @@ proc createTrigger*(c: var RqClient; tenantId: string; s: TriggerSpec; now: int6
   discard c.execute(%*[["INSERT INTO triggers (id, tenant_id, name, kind, schedule, secret_hash, group_id, script, params, concurrency, enabled, created_at, last_fired_at, repository, ref, script_path) " &
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", result.id, tenantId, s.name, s.kind, s.schedule, hash, groupId, s.script,
     (if s.params.len > 0: toJson(s.params) else: ""), s.concurrency, (if s.enabled: 1 else: 0), now, now, "", s.ref0, s.scriptPath]])      # the repository is the project's, read at every firing
+
+proc updateTrigger*(c: var RqClient; tenantId, id: string; s: TriggerSpec; refChanged: bool): bool =
+  ## TRG-005: the changed fields of a trigger (`parseTriggerUpdate` made `s` from the trigger and the change). A poll trigger whose ref changed has seen nothing on the new one: it looks again from
+  ## nothing, and runs at once on what the ref is at, as a new trigger does; one whose parameters changed keeps the commit it has seen (a change of parameters is not a new commit). False if there is
+  ## no such trigger in the organisation.
+  c.execute(%*[["UPDATE triggers SET schedule = ?, concurrency = ?, ref = ?, script_path = ?, params = ?, " &
+                "seen_commit = CASE WHEN ? = 1 THEN '' ELSE seen_commit END, last_checked_at = CASE WHEN ? = 1 THEN 0 ELSE last_checked_at END WHERE tenant_id = ? AND id = ?",
+                s.schedule, s.concurrency, s.ref0, s.scriptPath, (if s.params.len > 0: toJson(s.params) else: ""),
+                (if refChanged: 1 else: 0), (if refChanged: 1 else: 0), tenantId, id]])["results"][0]{"rows_affected"}.getInt > 0
 
 proc deleteTrigger*(c: var RqClient; tenantId, id: string): bool =
   c.execute(%*[["DELETE FROM triggers WHERE tenant_id = ? AND id = ?", tenantId, id]])["results"][0]{"rows_affected"}.getInt > 0

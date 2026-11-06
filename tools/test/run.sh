@@ -5,6 +5,8 @@
 # The integration tests need a scratch rqlite each. With Docker they are containers (cinim-rqlite-N, ports 24600+N), made new at every run and left running afterwards; remove them with
 #   docker rm -f $(docker ps -aq --filter name=cinim-rqlite-)
 # CINIM_TEST_NICE=<n> runs the compilers and the tests at that nice value, so that the databases (not niced) answer first on a busy machine.
+# CINIM_TEST_FILE_TIMEOUT=<seconds> (default 900) is what a file may take, compiling it included: a file that hangs is killed and reported as failed ("TIMED OUT"), and the run goes on, instead of one
+# file holding the pool until the whole run is killed by its own limit (a run of the pipeline once lost two hours to one file, with no word of which).
 # Without Docker, or with CINIM_RQLITE_BIN=<path of rqlited>, they are rqlited processes of this script (ports 24600+N and 24700+N, data in /dev/shm when it has room, else in the temporary directory), stopped when it ends:
 # this is how the pipeline of the repository runs the tests in a Pod (.ci/pipeline.lua; tools/image/Dockerfile.test has rqlited).
 # The log of a file that failed is build/test-logs/<name>.log. Exit code: the number of failed files (capped at 100).
@@ -65,11 +67,15 @@ one() {   # file slot
   mkdir -p build/tests/$kind     # unit and integration files may share a name: their binaries and logs must not
   case $f in tests/integration/*) export CINIM_RQLITE_URL=http://127.0.0.1:$((24600 + slot));; *) unset CINIM_RQLITE_URL;; esac
   start=$(date +%s)
-  ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
+  limit=${CINIM_TEST_FILE_TIMEOUT:-900}
+  timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
   rc=$?
   ok=$(grep -c '\[OK\]' "$log"); bad=$(grep -c '\[FAILED\]' "$log")
   if [ $rc -eq 0 ] && [ "$bad" = 0 ]; then printf 'ok    %-34s %3d tests %4ds\n' "$kind/$name" "$ok" $(( $(date +%s) - start )); rm -f "$log"
-  else printf 'FAIL  %-34s %3d ok, %d failed, exit %d  (%s)\n' "$kind/$name" "$ok" "$bad" $rc "$log"; fi
+  else
+    [ $rc -ne 124 ] || { echo "TIMED OUT: no answer within ${limit} s, killed" >>"$log"; echo "$name: TIMED OUT after ${limit} s" >&2; }
+    printf 'FAIL  %-34s %3d ok, %d failed, exit %d%s  (%s)\n' "$kind/$name" "$ok" "$bad" $rc "$([ $rc -ne 124 ] || echo ' TIMED OUT')" "$log"
+  fi
 }
 export -f one
 # a free slot number for every job: xargs -P gives no slot, so a slot is a lock directory

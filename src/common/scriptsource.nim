@@ -78,6 +78,26 @@ proc git(dir: string; args: seq[string]; transports: string; timeoutMs: int): tu
   result.output = p.outputStream.readAll()
   result.code = p.peekExitCode
 
+proc fetchCommit(dir, repository, ref0, transports: string; timeoutSeconds: int; started: float): tuple[sha, code, message: string] =
+  ## `git fetch --depth 1` of the one commit `ref0` (a SHA, a branch or a tag) into `dir`, which `git init` has made: no history, and no blobs when the server can filter them (the trees are all
+  ## that a look at the files needs). A server that cannot filter is asked again without the filter. `sha` is the full SHA of the commit; on failure `code` and `message`.
+  proc left(): int = max(int((timeoutSeconds.float - (epochTime() - started)) * 1000), 1000)
+  var fetched = false
+  var last = ""
+  for filter in [@["--filter=blob:none"], @[]]:
+    let r = git(dir, @["fetch", "-q", "--depth", "1", "--no-tags", "--no-recurse-submodules"] & filter & @["--", repository, ref0], transports, left())
+    if r.timedOut: return ("", "fetch_failed", "the repository did not answer within " & $timeoutSeconds & " s")
+    if r.code == 0:
+      fetched = true
+      break
+    last = r.output.strip
+    if "too slow" in last: return ("", "fetch_failed", "the repository did not answer in time (" & last.splitLines()[^1] & ")")
+    if "filter" notin last.toLowerAscii: break          # a server that cannot filter is asked again without the filter; any other refusal is final
+  if not fetched: return ("", "fetch_failed", "could not read " & ref0 & " from the repository: " & last.splitLines()[^1])
+  let r = git(dir, @["rev-parse", "--verify", "-q", "FETCH_HEAD^{commit}"], transports, 10_000)
+  if r.code != 0 or r.output.strip.len < 40: return ("", "fetch_failed", ref0 & " is not a commit")
+  (r.output.strip, "", "")
+
 proc fetchScript*(s: Source; timeoutSeconds = 40; transports = defaultTransports; schemes: openArray[string] = defaultSchemes): Fetched =
   ## Reads `s.path` at `s.commit` from `s.repository`. Never raises: a refusal or a failure is `code` and `message`.
   let path = if s.path.len == 0: defaultPath else: s.path
@@ -95,22 +115,10 @@ proc fetchScript*(s: Source; timeoutSeconds = 40; transports = defaultTransports
     proc left(): int = max(int((timeoutSeconds.float - (epochTime() - started)) * 1000), 1000)
     var r = git(dir, @["init", "-q"], transports, 10_000)
     if r.code != 0: return Fetched(code: "git_unavailable", message: "git did not start: " & r.output.strip)
-    # the commit alone: no history. A server that cannot filter is asked again without the filter.
-    var fetched = false
-    var last = ""
-    for filter in [@["--filter=blob:none"], @[]]:
-      r = git(dir, @["fetch", "-q", "--depth", "1", "--no-tags", "--no-recurse-submodules"] & filter & @["--", s.repository, ref0], transports, left())
-      if r.timedOut: return Fetched(code: "fetch_failed", message: "the repository did not answer within " & $timeoutSeconds & " s")
-      if r.code == 0:
-        fetched = true
-        break
-      last = r.output.strip
-      if "too slow" in last: return Fetched(code: "fetch_failed", message: "the repository did not answer in time (" & last.splitLines()[^1] & ")")
-      if "filter" notin last.toLowerAscii: break          # a server that cannot filter is asked again without the filter; any other refusal is final
-    if not fetched: return Fetched(code: "fetch_failed", message: "could not read " & ref0 & " from the repository: " & last.splitLines()[^1])
-    r = git(dir, @["rev-parse", "--verify", "-q", "FETCH_HEAD^{commit}"], transports, 10_000)
-    if r.code != 0 or r.output.strip.len < 40: return Fetched(code: "fetch_failed", message: ref0 & " is not a commit")
-    let sha = r.output.strip
+    # the commit alone: no history
+    let one = fetchCommit(dir, s.repository, ref0, transports, timeoutSeconds, started)
+    if one.code.len > 0: return Fetched(code: one.code, message: one.message)
+    let sha = one.sha
     r = git(dir, @["cat-file", "-s", sha & ":" & path], transports, left())
     if r.code != 0: return Fetched(code: "script_missing", message: "no file " & path & " in the commit " & sha[0 ..< 12], commit: sha)
     let size = try: parseInt(r.output.strip) except ValueError: -1
@@ -121,6 +129,49 @@ proc fetchScript*(s: Source; timeoutSeconds = 40; transports = defaultTransports
     Fetched(ok: true, script: r.output, commit: sha)
   except CatchableError as e:
     Fetched(code: "fetch_failed", message: e.msg)
+
+type
+  Changed* = object
+    ok*: bool
+    paths*: seq[string]                        ## the paths whose content differs between the two commits (added, changed, deleted), in order, at most `maxPaths`
+    truncated*: bool                           ## there were more
+    base*, commit*: string                     ## the full SHAs of the two commits
+    code*, message*: string                    ## when not ok: invalid_source, fetch_failed, git_unavailable
+
+proc changedPaths*(repository, base, commit: string; timeoutSeconds = 40; transports = defaultTransports; schemes: openArray[string] = defaultSchemes; maxPaths = 5000): Changed =
+  ## PRJ-004, D-82: the paths that differ between `base` (the commit of the last run of the pipeline that ended OK) and `commit`, for a script that decides what to do by what changed. Each commit is
+  ## fetched alone, trees only (no history, no blobs), and the two trees are compared by `git diff-tree`, which needs no file: a few seconds even for a big repository. The commits need no
+  ## history in common. Never raises: a refusal or a failure is `code` and `message`.
+  for name in [base, commit]:
+    if not validRef(name): return Changed(code: "invalid_source", message: "a commit is a SHA, a branch or a tag name")
+  if not validRepository(repository, schemes): return Changed(code: "invalid_source", message: "the repository must be an https:// or http:// URL")
+  let started = epochTime()
+  randomize()
+  let dir = getTempDir() / ("cinim-changed-" & $getCurrentProcessId() & "-" & $rand(high(int32)) & "-" & $(hash(repository & base & commit) and 0xffff))
+  try:
+    createDir(dir)
+    defer:
+      try: removeDir(dir) except OSError: discard
+    var r = git(dir, @["init", "-q"], transports, 10_000)
+    if r.code != 0: return Changed(code: "git_unavailable", message: "git did not start: " & r.output.strip)
+    let b = fetchCommit(dir, repository, base, transports, timeoutSeconds, started)
+    if b.code.len > 0: return Changed(code: b.code, message: "the base: " & b.message)
+    let c = fetchCommit(dir, repository, commit, transports, timeoutSeconds, started)
+    if c.code.len > 0: return Changed(code: c.code, message: "the commit: " & c.message)
+    # to a file: the list of a big change does not fit the pipe that `git` has to a process that waits for it to end
+    let left = max(int((timeoutSeconds.float - (epochTime() - started)) * 1000), 1000)
+    r = git(dir, @["diff-tree", "-r", "--name-only", "--no-renames", "-z", "--output=" & (dir / "changed.list"), b.sha, c.sha], transports, left)
+    if r.timedOut: return Changed(code: "fetch_failed", message: "git did not finish comparing the two commits within " & $timeoutSeconds & " s")
+    if r.code != 0: return Changed(code: "fetch_failed", message: "could not compare the two commits: " & r.output.strip)
+    result = Changed(ok: true, base: b.sha, commit: c.sha)
+    for name in readFile(dir / "changed.list").split('\0'):
+      if name.len == 0: continue
+      if result.paths.len >= maxPaths:
+        result.truncated = true
+        break
+      result.paths.add name
+  except CatchableError as e:
+    result = Changed(code: "fetch_failed", message: e.msg)
 
 proc resolveRef*(repository, ref0: string; timeoutSeconds = 30; transports = defaultTransports; schemes: openArray[string] = defaultSchemes): Fetched =
   ## D-76: the commit that `ref0` (a branch, a tag, HEAD; empty is HEAD) is at in `repository`, by `git ls-remote`: nothing is fetched. A SHA names itself. Never raises: a refusal or a failure is `code` and `message`.

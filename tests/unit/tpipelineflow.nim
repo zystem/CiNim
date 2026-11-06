@@ -10,11 +10,12 @@ type Flow = object
   tests, deploy, depsImage, testImage: bool
   registrySteps, withLogin, strayLogin: int   ## the steps that talk to the registry (Kaniko, crane), how many of them were given the Docker config, and how many steps that do not talk to it were
   checks: seq[string]              ## the images whose presence in the registry was asked (the libraries, the tests)
-  copies: seq[string]              ## the copies of the images to the other registries (`crane copy`): the names of the images the job was given
+  copies: seq[string]              ## the images that were copied to the other registries (`crane copy`)
+  tags: seq[string]                ## the tag of every image that was built (the first `--destination`)
   testEnv: string                  ## COMPONENTS and CHANGED_TESTS of the job of the tests
   status: string
 
-proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; deploy = false; login = false; present: seq[string] = @[]; pushAlso = ""; build = true): Flow =
+proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; deploy = false; login = false; present: seq[string] = @[]; pushAlso = ""; build = true; tag = ""): Flow =
   ## `prepOutputs`: the lines the first step answers (name=value). `base`: what the platform tells (run.source.base). `retagged`: for which component the retag finds an image (a component not named
   ## is found, when none is named all are)
   var answer = initHashSet[string]()
@@ -22,6 +23,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
   let inRegistry = present.toHashSet
   var res = Flow()
   proc host(seq: int; kind, payload: string): Option[string] =
+    if kind == "now": return some("1793921212")                  # run.tag: the date of the day (2026-11-05)
     if kind != "job_sh": return some("")
     let parts = payload.split('\t')
     let cmd = parts[^1]
@@ -29,32 +31,40 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
     let talks = "/kaniko/executor" in cmd or "crane " in cmd
     if talks: inc res.registrySteps
     if "REGISTRY_DOCKER_CONFIG" in meta: (if talks: inc res.withLogin else: inc res.strayLogin)
-    if "git init -q --bare mirror.git" in cmd: return some("0\n" & prepOutputs)
-    if "crane copy" in cmd:
-      let at = meta.find("\"IMAGES\":\"")
-      res.copies.add (if at >= 0: meta[at + 10 ..< meta.find('"', at + 10)] else: "?")
-    if "crane manifest" in cmd:                                  # is the image of the libraries or of the tests there already?
-      for name in ["cinim-deps", "cinim-test"]:
-        if "NAME=" & name in cmd:
-          res.checks.add name
-          return some("0\nPRESENT=" & (if name in inRegistry: "yes" else: "no") & "\n")
-      return some("0\nPRESENT=no\n")
-    if "RETAGGED" in cmd and "base7" in cmd:
-      let opts = parts[3]
-      for c in ["cinim-controller", "cinim-conductor", "cinim-storage", "cinim-ui", "cinim"]:
-        if "\"NAME\":\"" & c & "\"" in opts:
-          let comp = if c == "cinim": "core" else: c.replace("cinim-", "")
-          res.retags.add comp
-          return some("0\nRETAGGED=" & (if (retagged.len == 0) or comp in answer: "yes" else: "no") & "\n")       # a pair is a line: it ends with a line break
-      return some("0\nRETAGGED=no\n")
+    let opts = parts[3]
+    proc nameOf(): string =                                      # the image a step of `j:image` is about
+      for c in ["cinim-controller", "cinim-conductor", "cinim-storage", "cinim-ui", "cinim-deps", "cinim-test", "cinim"]:
+        if "\"NAME\":\"" & c & "\"" in opts: return c
+    proc componentOf(c: string): string = (if c == "cinim": "core" else: c.replace("cinim-", ""))
+    if "git init -q --bare mirror.git" in cmd:                   # `j:checkout()`: the commit it checked out
+      let at = prepOutputs.find("SHA=")
+      let sha = if at >= 0: prepOutputs[at + 4 ..< prepOutputs.find('\n', at)] else: "c".repeat(40)
+      return some("0\nSHA=" & sha & "\nFETCHED=no\n")
+    if "DEPS=$deps" in cmd:                                      # what the commit says: the hashes and what changed since the base
+      var lines: seq[string]
+      for l in prepOutputs.splitLines:
+        if l.len > 0 and not l.startsWith("SHA=") and not l.startsWith("TAG="): lines.add l
+      return some("0\n" & lines.join("\n") & "\n")
+    if "ACTION=" in cmd and "$CICD_OUTPUT" in cmd:               # the check of `j:image`: is the image there, or is there the image of the base to tag
+      let name = nameOf()
+      if "\"REUSE_SUFFIX\"" in opts:
+        let comp = componentOf(name)
+        res.retags.add comp
+        return some("0\nACTION=" & (if (retagged.len == 0) or comp in answer: "retagged" else: "build") & "\n")
+      res.checks.add name
+      return some("0\nACTION=" & (if name in inRegistry: "present" else: "build") & "\n")
+    if "crane copy" in cmd: res.copies.add nameOf()
     if "/kaniko/executor" in cmd:
+      let d = cmd.find("--destination=")
+      if d >= 0:
+        let ref0 = cmd[d + 14 ..< cmd.find(' ', d)]
+        res.tags.add ref0[ref0.rfind(':') + 1 .. ^1]
       for comp in ["core", "controller", "conductor", "storage", "ui"]:
         if "Dockerfile." & comp & " " in cmd: res.builds.add comp
       if "Dockerfile.deps " in cmd: res.depsImage = true
       if "Dockerfile.test " in cmd: res.testImage = true
     if "tools/test/run.sh" in cmd:
       res.tests = true
-      let opts = parts[3]
       for k in ["COMPONENTS", "CHANGED_TESTS"]:
         let at = opts.find("\"" & k & "\":\"")
         if at >= 0:
@@ -69,6 +79,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
   if login: params.add ("REGISTRY_LOGIN", "true")
   if pushAlso.len > 0: params.add ("PUSH_ALSO", pushAlso)
   if not build: params.add ("BUILD", "false")
+  if tag.len > 0: params.add ("TAG", tag)
   if base.len > 0: params.add [("@source.repository", "https://x/r.git"), ("@source.commit", "c"), ("@source.path", ".ci/pipeline.lua"), ("@source.base", base)]
   let r = execute(sb, j, script, host, runId = "flow", params = params)
   res.status = $r.status & (if r.message.len > 0: ": " & r.message else: "")
@@ -174,12 +185,25 @@ suite "the registry: any one, with a login or without (Docker config, crane and 
 suite "several registries for one project: the images are copied to the others":
   test "no other registry: nothing is copied":
     check flow(common).copies.len == 0
-  test "other registries: one step copies the five images to each of them, and it is given the login (the Docker config holds them all)":
+  test "other registries: each of the five images is copied to them by its own job, which is given the login (the Docker config holds them all)":
     let f = flow(common, login = true, pushAlso = "ghcr.io/acme, quay.io/acme")
-    check f.copies.len == 1 and f.copies[0] == "cinim cinim-controller cinim-conductor cinim-storage cinim-ui"
+    check f.copies.sorted == @["cinim", "cinim-conductor", "cinim-controller", "cinim-storage", "cinim-ui"]
     check f.withLogin == f.registrySteps and f.strayLogin == 0
   test "when nothing is built (BUILD is off) there is nothing new to copy":
     check flow(common, pushAlso = "ghcr.io/acme", build = false).copies.len == 0
   test "an image tagged from the base is copied as well: the other registries get the five tags of every run":
     let f = flow(common & "BASE=" & goodBase & "\nAREAS=src/ui\nCHANGED_TESTS=none\n", base = goodBase, pushAlso = "ghcr.io/acme")
-    check f.retags.len == 4 and f.copies.len == 1
+    check f.retags.len == 4 and f.copies.len == 5
+
+suite "the tag of the images is the platform's run.tag unless the pipeline is told one":
+  test "by default the date of the day and the short commit (the commit the checkout says it checked out, when the run has none of its own)":
+    let f = flow(common)
+    check f.tags.len == 7 and f.tags.deduplicate.len == 3          # the libraries and the tests by their hashes, the five components by the tag of the run
+    check "20261105-aaaaaaa" in f.tags
+  test "a run from a repository has the short commit of its own":
+    let f = flow(common & "BASE=" & goodBase & "\nAREAS=src/ui\nCHANGED_TESTS=none\n", base = goodBase)
+    check "20261105-c" notin f.tags and f.tags.anyIt(it.startsWith("20261105-"))
+  test "the parameter TAG wins":
+    let f = flow(common, tag = "v1.2.3")
+    check "v1.2.3" in f.tags and not f.tags.anyIt(it.startsWith("2026"))
+

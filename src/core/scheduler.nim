@@ -1149,6 +1149,15 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     discard c.appendRow(req.run_id, req.key, "params", json, "")
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
+  if req.kind == "now":
+    # the time of the core, in seconds: `run.tag` and `ci.now()`. It answers at once, and the answer is written to the journal here (the replay of a restarted executor finds it there, and the time does not change)
+    if req.key.len == 0:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a host call without its key in the journal")))
+    let told = $getTime().toUnix()
+    discard c.appendRow(req.run_id, req.key, "now", "", told)
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]](told), suspended: false)))
   if req.kind == "par_cancel":
     # The decision of `fail_fast` (docs/parallel.md section 6): a branch of a ci.parallel failed, the steps of the branches still running are cancelled. Each cancelled step is answered in the
     # journal at once (`~canceled:<path of the ci.parallel>`), so the answer is the same in every replay whatever the Pod does meanwhile; a step that has ended already has its record and is

@@ -101,3 +101,42 @@ suite "TRG-004 concurrency of a trigger":
       let f = co.fire(t, @[], getTime().toUnix())
       check not f.started and f.reason == "project_has_no_repository" and f.status == 409
       check "no repository" in resultOf(t)
+
+suite "TRG-005 a trigger is changed (against a real rqlite)":
+  if url.len == 0:
+    echo "  skipped: CINIM_RQLITE_URL is not set"
+  else:
+    var c = newRq(url)
+    migrate(c)
+    let sfx = newId()[^6 .. ^1].toLowerAscii
+    let orgId = c.addOrganization("tu" & sfx, "Trigger update")
+    let other = c.addOrganization("tv" & sfx, "Trigger update, another organisation")
+    proc poll(name: string; params: seq[(string, string)] = @[("A", "1")]): TriggerRow =
+      let made = c.createTrigger(orgId, TriggerSpec(name: name, kind: "poll", ref0: "main", concurrency: "abort_previous", params: params, enabled: true), getTime().toUnix())
+      discard c.execute(%*[["UPDATE triggers SET seen_commit = 'abc', last_checked_at = 77, last_result = 'started' WHERE id = ?", made.id]])
+      c.getTriggerById(made.id).row
+    test "the parameters and the concurrency are replaced, the commit the poll has seen stays (no run starts for it), the id, the name and the secret stay":
+      let t = poll("keeps")
+      var s = TriggerSpec(name: t.name, kind: t.kind, groupPath: t.groupPath, ref0: t.ref0, concurrency: "parallel", params: @[("B", "2"), ("C", "3")], enabled: true)
+      check c.updateTrigger(orgId, t.id, s, refChanged = false)
+      let n = c.getTriggerById(t.id).row
+      check n.params == @[("B", "2"), ("C", "3")] and n.concurrency == "parallel" and n.id == t.id and n.name == "keeps"
+      check n.seenCommit == "abc" and n.lastCheckedAt == 77 and n.lastResult == "started" and n.enabled
+    test "another ref makes the poll look again from nothing: the first look on the new ref runs at once, as a new trigger does":
+      let t = poll("moves")
+      let s = TriggerSpec(name: t.name, kind: t.kind, ref0: "release", scriptPath: "ci/p.lua", concurrency: t.concurrency, params: t.params, enabled: true)
+      check c.updateTrigger(orgId, t.id, s, refChanged = true)
+      let n = c.getTriggerById(t.id).row
+      check n.ref0 == "release" and n.scriptPath == "ci/p.lua" and n.seenCommit == "" and n.lastCheckedAt == 0 and n.params == t.params
+    test "the parameters can be cleared":
+      let t = poll("clears")
+      let s = TriggerSpec(name: t.name, kind: t.kind, ref0: t.ref0, concurrency: t.concurrency, params: @[], enabled: true)
+      check c.updateTrigger(orgId, t.id, s, refChanged = false)
+      check c.getTriggerById(t.id).row.params.len == 0
+    test "a trigger of another organisation is not touched, and an unknown id changes nothing":
+      let t = poll("mine")
+      let s = TriggerSpec(name: t.name, kind: t.kind, ref0: t.ref0, concurrency: "parallel", params: @[("X", "1")], enabled: true)
+      check not c.updateTrigger(other, t.id, s, refChanged = false)
+      check not c.updateTrigger(orgId, "s1_nosuchtrigger", s, refChanged = false)
+      check c.getTriggerById(t.id).row.params == @[("A", "1")]
+
