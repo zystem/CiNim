@@ -1,5 +1,5 @@
 ## D-63: the pipeline of the repository (`.ci/pipeline.lua`) is a script that the platform can run: it loads, its parameters are declared, `run.source` is used, and the pass against the stub host
-## gets as far as the first step's answer (the stub gives an empty answer to the step that finds the commit, which the script refuses: that is the first thing it needs to know).
+## gets as far as the first step's answer (the stub gives an empty answer to the step of `j:checkout` that finds the commit, which the helper refuses: that is the first thing it needs to know).
 import std/[unittest, strutils, json, re, sets]
 import executor/pass
 import common/crockford
@@ -10,7 +10,7 @@ let script = readFile(if fileExists(".ci/pipeline.lua"): ".ci/pipeline.lua" else
 suite "D-63 .ci/pipeline.lua":
   test "it loads, declares its parameters, and asks the first step for the commit":
     let p = preflight(script, @[("REGISTRY", "registry:5000")], 1)
-    check p.code == "script_error" and "no commit found" in p.message and not p.certain
+    check p.code == "script_error" and "did not say which commit it checked out" in p.message and not p.certain
     check "REGISTRY" in p.paramsJson and "TEST_JOBS" in p.paramsJson and "DEPLOY" in p.paramsJson
   test "REGISTRY is required, and a parameter of the wrong kind is refused before any step":
     let none = preflight(script, @[], 1)
@@ -20,8 +20,9 @@ suite "D-63 .ci/pipeline.lua":
   test "the source of the run reaches the script (run.source) and is not a parameter":
     let p = preflight(script, @[("REGISTRY", "registry:5000"), ("@source.repository", "https://example.test/r.git"), ("@source.commit", "0123456789abcdef0123456789abcdef01234567"),
                                 ("@source.path", ".ci/pipeline.lua")], 1)
-    check p.code == "script_error" and "no commit found for 0123456789abcdef0123456789abcdef01234567" in p.message      # it took the commit from run.source, not from REF
+    check p.code == "script_error" and "did not say which commit it checked out" in p.message      # the pass stops at the first step: it cannot show which ref it was given
     check "@source" notin p.paramsJson
+    check script.contains("run.source.commit ~= \"\"") and script.contains("run.source.repository ~= \"\"")       # the commit and the repository are taken from run.source, the parameters are the fallback
 
 suite "D-67 the ids written in .ci/pipeline.lua (the pass stops at the first step, so it cannot see them)":
   test "every job id and step id of the script is a valid id of its width, and the jobs written out are all different":
@@ -49,20 +50,20 @@ suite "D-67 the ids written in .ci/pipeline.lua (the pass stops at the first ste
       check checkId(id, jobIdWidth).ok
       check id notin jobs
 
-  test "D-82 the jobs that tag an image of BASE instead of building it (48 + the number of the component) are valid and meet neither the builds (32 + the number) nor the jobs written out":
+  test "D-82 the jobs of the images (32 + the number of the component; the retag of an image of BASE is a step of the same job: `reuse` of j:image) are valid and do not meet the jobs written out":
     var jobs = initHashSet[string]()
     for m in script.findAll(re"(?:checked_out|ci\.single)[\(\[]'(\w+)'"):
       jobs.incl normalizeId(m.split('\'')[1], jobIdWidth)
     var all = jobs
     for n in 1 .. 5:                                              # the five images of the pipeline
-      for base in [32, 48]:
+      for base in [32]:
         let id = idOfNumber(base + n, jobIdWidth)
         check checkId(id, jobIdWidth).ok
         check id notin all
         all.incl id
-    check script.contains("48 + number[comp.target]") and script.contains("32 + number[comp.target]")
+    check script.contains("32 + number[comp.target]") and not script.contains("48 + number[comp.target]")
   test "D-82 the pipeline decides by what changed since the base the platform tells (run.source.base), and does not take the base as a parameter":
-    check script.contains("run.source.base") and script.contains("local function plan(") and script.contains("RETAGGED")
+    check script.contains("run.source.base") and script.contains("local function plan(") and script.contains("reuse = ")
     check not script.contains("BASE = ci.string")                    # the base is not a parameter: a trigger does not have to be told to give it
 
 suite "D-63 the caches of .ci/pipeline.lua":
