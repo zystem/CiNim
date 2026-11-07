@@ -317,7 +317,8 @@ const columnsAdded: seq[(string, string, string)] = @[
   ("runs", "source_ref", "TEXT NOT NULL DEFAULT ''"),                      # D-86: the name the commit was asked by (a branch or a tag; "" for a SHA), and whether it is a protected ref of the project
   ("runs", "trusted", "INTEGER NOT NULL DEFAULT 0"),
   ("runs", "source_base", "TEXT NOT NULL DEFAULT ''"),
-  ("runs", "verified", "INTEGER NOT NULL DEFAULT 0")]                    # D-82: the commit of the last run of this pipeline that ended OK, when this one was made (2026-10-23)                   # D-68: a group with a main repository is a project (2026-10-23)
+  ("runs", "verified", "INTEGER NOT NULL DEFAULT 0"),
+  ("groups", "default_ref", "TEXT NOT NULL DEFAULT ''")]                    # D-82: the commit of the last run of this pipeline that ended OK, when this one was made (2026-10-23)                   # D-68: a group with a main repository is a project (2026-10-23)
   ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
   ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
   ## next fold, here too.

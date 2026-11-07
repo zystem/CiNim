@@ -1896,7 +1896,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           let lim = gc.groupLimit(sg.id)
           jsonOk(Http200, %*{"organization": slugG, "group": normalPath(sp), "cache_quota_bytes": lim.quota, "cache_retention_days": lim.retentionDays,
                              "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.requiredApprovals(sg.id), "allowed_callers": gc.allowedCallers(sg.id), "status": gc.statusTargetOf(sg.id).viewOf,
-                             "protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id)})
+                             "protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id), "default_ref": gc.defaultRef(sg.id)})
           return
         let vpos = segs.find("variables")
         let groupPath = if vpos >= 0: segs[0 ..< vpos].join("/") else: gpath

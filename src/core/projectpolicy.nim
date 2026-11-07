@@ -40,8 +40,16 @@ proc protectedPatterns*(c: var RqClient; groupId: string): seq[string] =
   let v = c.query(%*[["SELECT protected_refs FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
   if v != nil and v.len > 0: return entries(v[0][0].getStr)
 
+proc setDefaultRef*(c: var RqClient; groupId, name: string) =
+  ## D-82: what the repository itself says its default branch is (a poll trigger asks every minute); a name that is not one is not kept
+  if groupId.len == 0 or name.len == 0 or name.len > maxPatternLen or not isRefPattern(name) or name.endsWith("*"): return
+  discard c.execute(%*[["UPDATE groups SET default_ref = ? WHERE id = ? AND default_ref <> ?", name, groupId, name]])
+
 proc defaultRef*(c: var RqClient; groupId: string): string =
-  ## D-82: the branch of a project that the base of a run falls back to: the first protected ref that is a name (not a prefix such as `release/*`), otherwise `main`
+  ## D-82: the branch of a project that the base of a run falls back to: what the repository says (`default_ref`), else the first protected ref that is a name (not a prefix such as `release/*`), otherwise `main`
+  if groupId.len > 0:
+    let v = c.query(%*[["SELECT default_ref FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
+    if v != nil and v.len > 0 and v[0][0].getStr.len > 0: return v[0][0].getStr
   for p in c.protectedPatterns(groupId):
     if not p.endsWith("*"): return p
   "main"

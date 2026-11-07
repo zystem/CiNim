@@ -55,6 +55,7 @@ proc checkMode(payload: string; toSup: cint) =
       res.message = f.message
       res.certain = true
       res.resolved_commit = f.commit
+      res.default_branch = f.defaultBranch
       if not writePipeFd(toSup, pkChecked, wireString(Protobuf.encode(res))): quit(2)
       quit(0)
     if req.repository.len > 0:

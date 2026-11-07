@@ -338,6 +338,7 @@ proc pollTriggers*(co: Core; now: int64; resolve: Resolver): int =
     if not r.ok:
       discard c.execute(%*[["UPDATE triggers SET last_result = ? WHERE id = ?", "not looked at: " & r.code & (if r.message.len > 0: ": " & r.message else: ""), t.id]])
       continue
+    c.setDefaultRef(t.groupId, r.defaultBranch)            # D-82: the base of a run falls back to the branch the repository calls its own
     if r.commit == t.seenCommit: continue
     # the commit is remembered whatever the firing came to: a script that cannot be read at it is said in `last_result` and not tried again every minute
     discard c.execute(%*[["UPDATE triggers SET seen_commit = ? WHERE id = ?", r.commit, t.id]])

@@ -52,6 +52,7 @@ message CheckResult {
   string params = 6;                  // the parameters a run would have (a JSON object of text), defaults completed, when the pass got that far
   string script = 7;                  // D-63: the text read from the repository (only when the check was asked for one)
   string resolved_commit = 8;         // D-63: the SHA of the commit that `commit` named
+  string default_branch = 9;          // D-82: the branch the repository's HEAD points to (`git ls-remote --symref`), when the answer to a resolve_only said so; "" when it did not (a host that does not tell)
 }
 
 message HostCall {

@@ -20,6 +20,7 @@ type
     script*: string
     commit*: string                            ## the full SHA-1 (or SHA-256) of the commit that the name resolved to
     code*, message*: string                    ## when not ok: invalid_source, fetch_failed, script_missing, script_too_large, git_unavailable
+    defaultBranch*: string                     ## `resolveRef` only: the branch that HEAD of the repository points to (`main`), "" when the host did not say (D-82)
 
 const defaultSchemes* = ["https://", "http://"]
 
@@ -185,14 +186,18 @@ proc resolveRef*(repository, ref0: string; timeoutSeconds = 30; transports = def
     createDir(dir)
     defer:
       try: removeDir dir except OSError: discard
-    let r = git(dir, @["ls-remote", "--", repository, wanted], transports, timeoutSeconds * 1000)
+    let r = git(dir, @["ls-remote", "--symref", "--", repository, wanted] & (if wanted == "HEAD": @[] else: @["HEAD"]), transports, timeoutSeconds * 1000)
     if r.timedOut: return Fetched(code: "fetch_failed", message: "the repository did not answer within " & $timeoutSeconds & " s")
     if r.code != 0: return Fetched(code: "fetch_failed", message: "could not read the refs of the repository: " & r.output.strip.splitLines()[^1])
     # "<sha>\t<name>" lines: the name asked for beats a name that only ends the same way, a branch beats a tag, and a peeled tag (`^{}`) is the commit of an annotated one
     var best = ""
     var bestRank = high(int)
+    var head = ""            # `ref: refs/heads/main<TAB>HEAD`: the branch HEAD points to (D-82)
     for line in r.output.splitLines():
       let cols = line.split('\t')
+      if cols.len == 2 and cols[1] == "HEAD" and cols[0].startsWith("ref: refs/heads/"):
+        head = cols[0]["ref: refs/heads/".len .. ^1]
+        continue
       if cols.len != 2 or cols[0].len != 40: continue
       let name = cols[1]
       let rank =
@@ -206,7 +211,7 @@ proc resolveRef*(repository, ref0: string; timeoutSeconds = 30; transports = def
         bestRank = rank
         best = cols[0]
     if best.len == 0: return Fetched(code: "fetch_failed", message: wanted & " is not in the repository")
-    Fetched(ok: true, commit: best)
+    Fetched(ok: true, commit: best, defaultBranch: (if validRef(head): head else: ""))
   except CatchableError as e:
     Fetched(code: "fetch_failed", message: e.msg)
 

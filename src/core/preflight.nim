@@ -63,6 +63,7 @@ proc checkSource*(ns: string; source: Source; given: seq[(string, string)]; apiV
 type ResolvedRef* = object
   ok*: bool
   commit*: string
+  defaultBranch*: string        ## D-82: the branch HEAD of the repository points to, "" when the host did not say
   code*, message*: string       ## when not ok: `no_conductor`, `busy`, `timeout`, `unavailable`, or what the conductor's git said (`fetch_failed`, `invalid_source`)
 
 proc resolveCommit*(ns, repository, ref0: string): ResolvedRef =
@@ -79,7 +80,7 @@ proc resolveCommit*(ns, repository, ref0: string): ResolvedRef =
   let res = try: decodeCheckResult(got.answer) except CatchableError: return ResolvedRef(code: "unavailable", message: "the answer of the conductor cannot be read")
   if res.code.len > 0: return ResolvedRef(code: res.code, message: res.message)
   if res.resolved_commit.len == 0: return ResolvedRef(code: "unavailable", message: "the conductor is of a version that cannot read a ref (it is being replaced)")
-  ResolvedRef(ok: true, commit: res.resolved_commit)
+  ResolvedRef(ok: true, commit: res.resolved_commit, defaultBranch: res.default_branch)
 
 func fetchProblem*(a: Answer): tuple[status: int, code, message: string] =
   ## what to tell the caller when the script could not be had: (0, ...) when it was

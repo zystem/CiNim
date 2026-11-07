@@ -2,7 +2,7 @@
 ## conductor). The first look starts a run on the commit the ref is at. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, strutils, times]
 import common/rqlite
-import core/[schema, scheduler, triggers]
+import core/[schema, scheduler, triggers, projectpolicy, groups]
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -19,12 +19,13 @@ suite "D-76 poll triggers":
     var n = 0
     var commit = "a".repeat(40)                    # what the stand-in says the ref is at
     var answerCode = ""                           # a code: the stand-in could not read it
+    var headBranch = ""                           # the branch the stand-in says HEAD of the repository points to
     var asked = 0
     let resolver: Resolver = proc (t: TriggerRow): ResolvedRef {.gcsafe.} =
       {.cast(gcsafe).}:
         inc asked
         if answerCode.len > 0: ResolvedRef(code: answerCode, message: "the repository did not answer")
-        else: ResolvedRef(ok: true, commit: commit)
+        else: ResolvedRef(ok: true, commit: commit, defaultBranch: headBranch)
     proc newPoll(): TriggerRow =
       inc n
       # a script of its own stands in for the repository, which the conductor would read: what is tested is when a firing happens
@@ -56,6 +57,20 @@ suite "D-76 poll triggers":
       answerCode = ""
       discard co.pollTriggers(3122, resolver)
       check row(t).seenCommit == commit
+    test "D-82 the branch the repository calls its own is kept for the project, and is what the base of a run falls back to":
+      discard c.createProject(orgId, "dflt", "https://example.test/r.git", getTime().toUnix())
+      let gid = c.resolveProject(orgId, "dflt").id
+      discard c.createTrigger(orgId, TriggerSpec(name: "pd", kind: "poll", groupPath: "dflt", script: "return 1", concurrency: "parallel", enabled: true), getTime().toUnix(), groupId = gid)
+      check c.defaultRef(gid) == "main"                                         # nothing is known: the guess
+      headBranch = "trunk"
+      discard co.pollTriggers(5000, resolver)
+      check c.defaultRef(gid) == "trunk"
+      headBranch = ""                                                           # a host that does not say: what was learnt stays
+      discard co.pollTriggers(5061, resolver)
+      check c.defaultRef(gid) == "trunk"
+      headBranch = "bad name*"                                                  # not a name: not kept
+      discard co.pollTriggers(5122, resolver)
+      check c.defaultRef(gid) == "trunk"
     test "a trigger that is off is not looked at, and a schedule or a webhook is not a poll":
       let t = newPoll()
       discard c.execute(%*[["UPDATE triggers SET enabled = 0 WHERE id = ?", t.id]])

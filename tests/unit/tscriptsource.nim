@@ -67,6 +67,13 @@ suite "D-63 a script read from a repository":
     check at(second).commit == second                                  # a SHA names itself
     check at("no-such-branch").code == "fetch_failed"
     check at("main", "file://" & root & "/nothing").code == "fetch_failed"
+  test "D-82 the branch HEAD of the repository points to is told with the commit, whatever ref was asked":
+    proc at(ref0: string): Fetched = resolveRef(url, ref0, timeoutSeconds = 20, transports = "file", schemes = ["file://"])
+    check at("main").defaultBranch == "main" and at("HEAD").defaultBranch == "main" and at("").defaultBranch == "main" and at("v1").defaultBranch == "main"
+    run repo, "git symbolic-ref HEAD refs/heads/side"
+    check at("main").defaultBranch == "side" and at("main").commit == second and at("HEAD").commit == first
+    run repo, "git symbolic-ref HEAD refs/heads/main"
+    check at("side").defaultBranch == "main"
   test "D-76 a ref is refused before git is run when it is not a name":
     check resolveRef("https://example.test/x.git", "--upload-pack=x").code == "invalid_source"
     check resolveRef("ssh://git@example.test/x.git", "main").code == "invalid_source"
