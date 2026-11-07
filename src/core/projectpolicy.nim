@@ -40,6 +40,12 @@ proc protectedPatterns*(c: var RqClient; groupId: string): seq[string] =
   let v = c.query(%*[["SELECT protected_refs FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
   if v != nil and v.len > 0: return entries(v[0][0].getStr)
 
+proc defaultRef*(c: var RqClient; groupId: string): string =
+  ## D-82: the branch of a project that the base of a run falls back to: the first protected ref that is a name (not a prefix such as `release/*`), otherwise `main`
+  for p in c.protectedPatterns(groupId):
+    if not p.endsWith("*"): return p
+  "main"
+
 proc isProtectedRef*(c: var RqClient; groupId, name: string): bool =
   ## whether a run of this project asked for `name` is on a protected ref
   name.len > 0 and protectedBy(c.protectedPatterns(groupId), name)

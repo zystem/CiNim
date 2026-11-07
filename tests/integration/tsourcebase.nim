@@ -1,5 +1,6 @@
 ## D-82: a run made from a repository is told the last commit of its pipeline that went well (`source_base`, `run.source.base` in the script): the commit of the latest run of the same
-## organisation, project, repository and script that ended OK, before this run was made. Against a real rqlite. Needs CINIM_RQLITE_URL.
+## organisation, project, repository, script **and ref** that ended OK, before this run was made; a ref with none (a new branch) falls back to the default branch of the project (the first
+## protected ref that is a name, otherwise `main`). Against a real rqlite. Needs CINIM_RQLITE_URL.
 import std/[unittest, json, os, strutils, times]
 import common/[rqlite, scriptsource]
 import core/[schema, scheduler, groups]
@@ -21,11 +22,13 @@ suite "D-82 the base of a run":
     discard c.createProject(org, "two", "https://example.test/r.git", now)
     let one = c.resolveProject(org, "one").id
     let two = c.resolveProject(org, "two").id
-    func src(commit: string; path = ".ci/pipeline.lua"; repository = "https://example.test/r.git"): Source = Source(repository: repository, commit: commit, path: path)
+    func src(commit: string; path = ".ci/pipeline.lua"; repository = "https://example.test/r.git"; refName = ""): Source = Source(repository: repository, commit: commit, path: path, refName: refName)
     proc baseOf(run: string): string = c.query(%*[["SELECT source_base FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getStr
-    proc state(run, s: string) = discard c.execute(%*[["UPDATE runs SET state = ? WHERE id = ?", s, run]])
-    proc make(project: string; commit: string; path = ".ci/pipeline.lua"; repository = "https://example.test/r.git"): string =
-      co.createRun("return 1", org, orgProfile, @[], groupId = project, source = src(commit, path, repository))
+    proc state(run, s: string; verified = true) =
+      ## `OK` is a run that ended well and whose script called `ci.verified()` (D-112), unless `verified = false`
+      discard c.execute(%*[["UPDATE runs SET state = ?, verified = ? WHERE id = ?", s, (if s == "OK" and verified: 1 else: 0), run]])
+    proc make(project: string; commit: string; path = ".ci/pipeline.lua"; repository = "https://example.test/r.git"; refName = ""): string =
+      co.createRun("return 1", org, orgProfile, @[], groupId = project, source = src(commit, path, repository, refName))
 
     test "the first run has none; a run after a good one has its commit; a failed or aborted or running one does not count":
       let r1 = make(one, "1".repeat(40))
@@ -58,3 +61,38 @@ suite "D-82 the base of a run":
       let b = make(two, "d2".repeat(20), path = ".ci/09.lua")
       check co.getRun(b)["source"]["base"].getStr == "d".repeat(40)
       check not co.getRun(a)["source"].hasKey("base") or co.getRun(a)["source"]["base"].getStr == ""
+    test "D-112 a run that ended OK without being verified (the tests were off, the build was off) is no base":
+      discard c.createProject(org, "five", "https://example.test/r.git", now)
+      let five = c.resolveProject(org, "five").id
+      let v = make(five, "c1".repeat(20), refName = "main")
+      state(v, "OK")
+      let u = make(five, "c2".repeat(20), refName = "main")
+      state(u, "OK", verified = false)
+      check baseOf(make(five, "c3".repeat(20), refName = "main")) == "c1".repeat(20)          # the newer run was not verified: the older one stays the base
+      let g = make(five, "c4".repeat(20), refName = "side")
+      state(g, "OK", verified = false)
+      check baseOf(make(five, "c5".repeat(20), refName = "side")) == "c1".repeat(20)          # nothing verified on the branch: main's
+    test "D-82 the base is of the same ref: a good run of a branch is not the base of main, and a new branch falls back to the default branch":
+      discard c.createProject(org, "three", "https://example.test/r.git", now)
+      let three = c.resolveProject(org, "three").id
+      let f = make(three, "f1".repeat(20), refName = "feature")
+      state(f, "OK")
+      check baseOf(make(three, "f2".repeat(20), refName = "main")) == ""                      # the green run of a branch is not main's base
+      check baseOf(make(three, "f3".repeat(20), refName = "other")) == ""                     # no run of main either: nothing
+      let m = make(three, "a1".repeat(20), refName = "main")
+      state(m, "OK")
+      check baseOf(make(three, "f4".repeat(20), refName = "feature")) == "f1".repeat(20)      # its own base first
+      check baseOf(make(three, "f5".repeat(20), refName = "brand-new")) == "a1".repeat(20)    # a new branch: the default branch's
+      check baseOf(make(three, "f6".repeat(20))) == "a1".repeat(20)                           # a bare SHA (no ref) too
+      let m2 = make(three, "a2".repeat(20), refName = "main")
+      state(m2, "OK")
+      check baseOf(make(three, "a3".repeat(20), refName = "main")) == "a2".repeat(20)         # main's own newest
+    test "D-82 the default branch is the first protected ref that is a name, not a prefix":
+      discard c.createProject(org, "four", "https://example.test/r.git", now)
+      let four = c.resolveProject(org, "four").id
+      discard c.execute(%*[["UPDATE groups SET protected_refs = ? WHERE id = ?", "release/*\ntrunk", four]])
+      let t = make(four, "b1".repeat(20), refName = "trunk")
+      state(t, "OK")
+      let m = make(four, "b2".repeat(20), refName = "main")
+      state(m, "OK")
+      check baseOf(make(four, "b3".repeat(20), refName = "topic")) == "b1".repeat(20)         # trunk, not main

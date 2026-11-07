@@ -1669,6 +1669,7 @@ end
 G.ci = {
   trigger = trigger,
   now = function() return tonumber(call("now", "")) end,
+  verified = function() call("verify", "") end,
   random = function() return tonumber(call("random", "")) end,
   sleep = function(seconds)
     if type(seconds) ~= "number" then error("ci.sleep: number expected", 2) end

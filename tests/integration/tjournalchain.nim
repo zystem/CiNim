@@ -107,6 +107,20 @@ suite "T-03 the hash chain of the journal":
       let rows = c.readRows(r)
       check rows.len == 1 and rows[0].kind == "now" and rows[0].result == $told
       check checkChain(rows, c.readTip(r)).verdict == cvOk
+    test "D-112 a call to verify sets the flag of the run once, answers at once, and is a record of the journal":
+      let r = co.createRun("return 1")
+      let tok = c.takeRunLease(master, r, "exec-t")
+      proc flag(): int = c.query(%*[["SELECT verified FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getInt
+      check flag() == 0
+      let resp = handleCall(c, co, HostCall(run_id: r, lease_token: tok, seq: 0, key: "verify#0", kind: "verify", payload: @[]), master)
+      check resp.body.kind == ExecutorResponseBodyKind.result and not resp.body.result.suspended
+      check flag() == 1
+      let rows = c.readRows(r)
+      check rows.len == 1 and rows[0].kind == "verify"
+      check checkChain(rows, c.readTip(r)).verdict == cvOk
+      check co.getRun(r){"verified"}.getBool
+      let stranger = handleCall(c, co, HostCall(run_id: r, lease_token: "not-the-token", seq: 1, key: "verify#1", kind: "verify", payload: @[]), master)
+      check stranger.body.kind == ExecutorResponseBodyKind.failure
     test "a call without the key of its record is refused (the record could not be found again), and a caller without the lease is turned away":
       let r = co.createRun("return 1")
       let tok = c.takeRunLease(master, r, "exec-t")

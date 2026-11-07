@@ -11,7 +11,7 @@
 --   4. a deploy step (profile = "deploy": an ordinary, non-root Pod that may reach the Kubernetes API server with the token of deployer.yaml) when DEPLOY is true: `helm upgrade --atomic --wait`
 --      of the storage module and of the shard with the new tag of the images (the controllers and the conductors follow the core by themselves, D-62), a rollback of both releases to the
 --      revisions they had if either fails, and a look at what runs afterwards.
--- D-82: what a commit changes decides what is done. The platform tells the script `run.source.base`, the commit of the last run of this pipeline that ended OK; the first job reduces the files that differ
+-- D-82: what a commit changes decides what is done. The platform tells the script `run.source.base`, the commit of the last run of this pipeline on the same ref that ended OK and called `ci.verified()` (a new branch: on the default branch); the first job reduces the files that differ
 -- between it and the commit to the areas of the tree and the changed test files, and this script decides (`plan` below): the images that must be built, and the tests that must run (those that import a
 -- component that changed). With no base (a first run, a run whose script came in the request) or with no image of the base, everything is built and tested.
 -- Start it with the commit to run, from a webhook (the trigger of the organisation names the repository; a git server calls it with {"commit": "<sha>"}), by the clock, or by hand:
@@ -302,6 +302,8 @@ return ci.pipeline({
       end
       ci.parallel(branches, {fail_fast = true})
     end
+    -- D-112: built (or tagged from the base) and tested (or nothing changed that a test covers): this commit is a base for the runs that come after, on this ref
+    if p.BUILD and p.TEST then ci.verified() end
     -- 4. the new tag in the cluster
     if p.DEPLOY then
       local helm_key = "helm-" .. info.HELMDEPS

@@ -8,6 +8,7 @@ let script = readFile(if fileExists(".ci/pipeline.lua"): ".ci/pipeline.lua" else
 type Flow = object
   builds, retags: seq[string]      ## the components whose image was built (Kaniko) and tagged from BASE's
   tests, deploy, depsImage, testImage: bool
+  verified: bool                   ## the script called ci.verified() (D-112)
   registrySteps, withLogin, strayLogin: int   ## the steps that talk to the registry (Kaniko, crane), how many of them were given the Docker config, and how many steps that do not talk to it were
   checks: seq[string]              ## the images whose presence in the registry was asked (the libraries, the tests)
   copies: seq[string]              ## the images that were copied to the other registries (`crane copy`)
@@ -15,7 +16,7 @@ type Flow = object
   testEnv: string                  ## COMPONENTS and CHANGED_TESTS of the job of the tests
   status: string
 
-proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; deploy = false; login = false; present: seq[string] = @[]; pushAlso = ""; build = true; tag = ""): Flow =
+proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; deploy = false; login = false; present: seq[string] = @[]; pushAlso = ""; build = true; tag = ""; test = true): Flow =
   ## `prepOutputs`: the lines the first step answers (name=value). `base`: what the platform tells (run.source.base). `retagged`: for which component the retag finds an image (a component not named
   ## is found, when none is named all are)
   var answer = initHashSet[string]()
@@ -23,6 +24,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
   let inRegistry = present.toHashSet
   var res = Flow()
   proc host(seq: int; kind, payload: string): Option[string] =
+    if kind == "verify": res.verified = true; return some("ok")
     if kind == "now": return some("1793921212")                  # run.tag: the date of the day (2026-11-05)
     if kind != "job_sh": return some("")
     let parts = payload.split('\t')
@@ -79,6 +81,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
   if login: params.add ("REGISTRY_LOGIN", "true")
   if pushAlso.len > 0: params.add ("PUSH_ALSO", pushAlso)
   if not build: params.add ("BUILD", "false")
+  if not test: params.add ("TEST", "false")
   if tag.len > 0: params.add ("TAG", tag)
   if base.len > 0: params.add [("@source.repository", "https://x/r.git"), ("@source.commit", "c"), ("@source.path", ".ci/pipeline.lua"), ("@source.base", base)]
   let r = execute(sb, j, script, host, runId = "flow", params = params)
@@ -160,6 +163,16 @@ suite "D-82 what the pipeline builds, tags and runs":
   test "the deploy follows whatever was built or tagged":
     let f = flow(common & "BASE=" & goodBase & "\nAREAS=docs\nCHANGED_TESTS=none\n", base = goodBase, deploy = true)
     check f.status.startsWith("esDone") and f.deploy
+
+suite "D-112 the run says when it was verified":
+  test "a run that built (or tagged) and tested is verified, also when nothing changed and no test was needed":
+    check flow(common).verified
+    check changed("src/ui").verified
+    check changed("docs").verified and not changed("docs").tests
+  test "a run with the tests off or the build off is not: its commit must not be the base of a run that tests nothing because it trusts this one":
+    check not flow(common, test = false).verified
+    check not flow(common, build = false).verified
+    check flow(common, test = false).status.startsWith("esDone")
 
 suite "the registry: any one, with a login or without (Docker config, crane and Kaniko)":
   test "no login (the plain registry of the cluster): no step is given the credential, and Kaniko and crane are the steps that talk to the registry":

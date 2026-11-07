@@ -30,7 +30,7 @@
 ---@field sha string                       # the same as `commit` (D-109)
 ---@field short string                     # its first seven characters, "" when there is no commit
 ---@field path string                      # the path of the script in the repository
----@field base string                      # D-82: the commit of the last run of this pipeline that ended OK, "" when there is none
+---@field base string                      # D-82: the commit of the last run of this pipeline on the same ref that ended OK and called ci.verified() (D-112), else on the default branch of the project, "" when there is none
 ---@class Run                              # argument of main
 ---@field params table<string,any>
 ---@field source RunSource
@@ -219,6 +219,8 @@ function ci.finally(fn) end
 function ci.sleep(seconds) end
 ---@return number                          # Unix time in seconds (fractional), from the journal on replay
 function ci.now() end
+--- D-112: this run built and tested what it had to. Its commit may then be the base (`run.source.base`) of later runs of the same ref; a run that does not call it is never a base. Journaled: the flag is set once.
+function ci.verified() end
 ---@param n integer                        # 0 to 57
 ---@return string                          # exactly one character of Base58 (`123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz`, no 0 O I l); an error if n does not fit; results sort like the numbers. Pure, not journaled
 function b58x(n) end

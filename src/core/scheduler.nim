@@ -74,12 +74,18 @@ proc createRun*(co: Core; script: string; tenantId = "t1"; profileId = ""; param
   var c = newRq(co.rqliteUrl)
   result = newId()
   let now = $getTime().toUnix()
-  # D-82: the commit of the last run of this pipeline (this organisation, project, repository and script) that ended OK: what a pipeline compares the commit with to see what it changed
+  # D-82: the commit of the last run of this pipeline (this organisation, project, repository and script) that ended OK **on the same ref** and that its script called verified (`ci.verified()`, D-112): what a pipeline compares the commit with to see what it
+  # changed. A ref with no such run (a new branch) falls back to the default branch of the project (`defaultRef`); a run with no ref (a bare SHA) is told the base of runs with no ref, then that one
   var base = ""
   if source.repository.len > 0:
-    let last = c.query(%*[["SELECT source_commit FROM runs WHERE tenant_id = ? AND group_id = ? AND source_repository = ? AND source_path = ? AND state = ? AND source_commit <> '' " &
-      "ORDER BY created_at DESC, id DESC LIMIT 1", tenantId, groupId, source.repository, source.path, protoName(rsOk)]])["results"][0]{"values"}
-    if last != nil and last.len > 0: base = last[0][0].getStr
+    proc lastOk(refName: string): string =
+      let last = c.query(%*[["SELECT source_commit FROM runs WHERE tenant_id = ? AND group_id = ? AND source_repository = ? AND source_path = ? AND source_ref = ? AND state = ? AND verified = 1 AND source_commit <> '' " &
+        "ORDER BY created_at DESC, id DESC LIMIT 1", tenantId, groupId, source.repository, source.path, refName, protoName(rsOk)]])["results"][0]{"values"}
+      if last != nil and last.len > 0: last[0][0].getStr else: ""
+    base = lastOk(source.refName)
+    if base.len == 0:
+      let fallback = c.defaultRef(groupId)
+      if fallback != source.refName: base = lastOk(fallback)
   # D-86: a run on a protected ref of its project is trusted (its protected secrets, the profile deploy)
   let trusted = source.refName.len > 0 and c.isProtectedRef(groupId, source.refName)
   var initial = protoName(rsQueued)          # D-94: a new run is queued until a conductor leads it (the first lease makes it RUNNING)
@@ -258,7 +264,7 @@ proc stateOfRun*(co: Core; runId: string): string =
 
 proc getRun*(co: Core; runId: string): JsonNode =
   var c = newRq(co.rqliteUrl)
-  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path, r.source_base, r.source_ref, r.trusted, COALESCE(r.actor_id, ''), r.approval_required, r.approval_deadline " &
+  let r = c.query(%*[["SELECT r.id, COALESCE((SELECT g.path FROM groups g WHERE g.id = r.group_id), ''), r.state, r.created_at, r.updated_at, COALESCE(o.slug, ''), r.params, COALESCE(r.trigger_id, ''), r.fail_code, r.fail_message, r.source_repository, r.source_commit, r.source_path, r.source_base, r.source_ref, r.trusted, COALESCE(r.actor_id, ''), r.approval_required, r.approval_deadline, r.verified " &
     "FROM runs r LEFT JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", runId]])
   let vals = r["results"][0]{"values"}
   if vals == nil or vals.len == 0: return nil
@@ -280,6 +286,7 @@ proc getRun*(co: Core; runId: string): JsonNode =
         if a[1].getStr == "approve": yes.add a[0].getStr else: no.add a[0].getStr
     result["approval"] = %*{"required": row[17].getInt, "approved_by": yes, "rejected_by": no, "deadline": row[18].getBiggestInt, "waiting": row[2].getStr == protoName(rsWaiting)}
   result["trusted"] = %(row[15].getInt > 0)                                          # D-86: a run on a protected ref of its project
+  if row[19].getInt > 0: result["verified"] = %true                                   # D-112: its script called ci.verified()
   if row[8].getStr.len > 0 or row[9].getStr.len > 0: result["failure"] = %*{"code": row[8].getStr, "message": row[9].getStr}
   if row[6].getStr.len > 0:
     result["params"] = (try: parseJson(row[6].getStr) except JsonParsingError: newJObject())
@@ -1158,6 +1165,16 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     discard c.appendRow(req.run_id, req.key, "now", "", told)
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]](told), suspended: false)))
+  if req.kind == "verify":
+    # `ci.verified()` (D-112): the script says that this run built and tested what it had to, so its commit may be the base of later runs of the same ref. It answers at once, the flag is
+    # set here and the answer is written to the journal (a replay finds it there and does not ask again)
+    if req.key.len == 0:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a host call without its key in the journal")))
+    discard c.execute(%*[["UPDATE runs SET verified = 1 WHERE id = ?", req.run_id]])
+    discard c.appendRow(req.run_id, req.key, "verify", "", "ok")
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]]("ok"), suspended: false)))
   if req.kind == "par_cancel":
     # The decision of `fail_fast` (docs/parallel.md section 6): a branch of a ci.parallel failed, the steps of the branches still running are cancelled. Each cancelled step is answered in the
     # journal at once (`~canceled:<path of the ci.parallel>`), so the answer is the same in every replay whatever the Pod does meanwhile; a step that has ended already has its record and is
