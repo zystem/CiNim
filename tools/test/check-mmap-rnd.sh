@@ -23,8 +23,12 @@ printf 'int main(void) { return 0; }\n' > "$d/p.c"
 "$cc" -fsanitize=address -o "$d/p" "$d/p.c" 2>"$d/err" || { echo "check-mmap-rnd: a program with -fsanitize=address cannot be built here: $(head -3 "$d/err")" >&2; exit 1; }
 i=0
 while [ $i -lt 12 ]; do
-  if ! "$d/p" >"$d/out" 2>&1 || grep -q DEADLYSIGNAL "$d/out"; then
-    echo "check-mmap-rnd: a test program built with -fsanitize=address crashed at start (run $((i + 1)) of 12; $f cannot be read, probably vm.mmap_rnd_bits=32); $cure" >&2
+  "$d/p" >"$d/out" 2>&1; rc=$?
+  if [ $rc -ne 0 ] || grep -q DEADLYSIGNAL "$d/out"; then
+    echo "check-mmap-rnd: a test program built with -fsanitize=address failed at start (run $((i + 1)) of 12, exit $rc; $f cannot be read; vm.mmap_rnd_bits=32 is one cause, others: a limit of the address space (ulimit -v), a sandbox that forbids what ASan needs). Its output:" >&2
+    head -c 1500 "$d/out" | head -12 >&2
+    # shellcheck disable=SC3045
+    echo "ulimit -v: $(ulimit -v), overcommit: $(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo unreadable), user: $(id -u); $cure" >&2
     exit 1
   fi
   i=$((i + 1))
