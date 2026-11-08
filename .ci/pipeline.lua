@@ -108,8 +108,8 @@ set -eu
 [ -d charts-cache ] && exit 0
 export HELM_CACHE_HOME=$PWD/.helm/cache HELM_CONFIG_HOME=$PWD/.helm/config HELM_DATA_HOME=$PWD/.helm/data
 cd src
-# the repositories of the subcharts are named by URL in Chart.yaml and must be known to helm before it fetches from them
-for u in $(grep -h '^[[:space:]]*repository:' deploy/charts/cinim-shard/Chart.yaml | awk '{print $2}' | sort -u); do helm repo add "r$(printf %s "$u" | cksum | cut -d' ' -f1)" "$u" >/dev/null; done
+# the repositories of the subcharts are named by URL in Chart.yaml and must be known to helm before it fetches from them (not the file:// one of hsmgate: helm has no handler to add it, and builds it from the path)
+for u in $(grep -h '^[[:space:]]*repository:' deploy/charts/cinim-shard/Chart.yaml | awk '{print $2}' | grep -v '^file://' | sort -u); do helm repo add "r$(printf %s "$u" | cksum | cut -d' ' -f1)" "$u" >/dev/null; done
 helm dependency build deploy/charts/cinim-shard >/dev/null
 cp -r deploy/charts/cinim-shard/charts ../charts-cache
 ]=]
