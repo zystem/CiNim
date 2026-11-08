@@ -9,6 +9,7 @@ import ../support/testcerts
 
 let url = getEnv("CINIM_RQLITE_URL")
 let certs = testCerts()
+drainGraceSeconds = 0.0      # D-113: a core that has just started drains no conductor for 120 s; these tests start one and want the drain at once (the pause itself: tconductorplan)
 const port = 29847
 
 proc runStream(a: tuple[co: Core, port: int]) {.thread.} = serveStream(a.co, a.port, workers = 4)
