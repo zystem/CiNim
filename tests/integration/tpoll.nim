@@ -57,6 +57,15 @@ suite "D-76 poll triggers":
       answerCode = ""
       discard co.pollTriggers(3122, resolver)
       check row(t).seenCommit == commit
+    test "a failed look is not the last word once a look works again, even when the commit is the one already seen":
+      let t = newPoll()
+      discard co.pollTriggers(6000, resolver)
+      answerCode = "no_conductor"
+      discard co.pollTriggers(6061, resolver)
+      check "no_conductor" in row(t).lastResult
+      answerCode = ""
+      discard co.pollTriggers(6122, resolver)
+      check row(t).lastResult == ""
     test "D-82 the branch the repository calls its own is kept for the project, and is what the base of a run falls back to":
       discard c.createProject(orgId, "dflt", "https://example.test/r.git", getTime().toUnix())
       let gid = c.resolveProject(orgId, "dflt").id

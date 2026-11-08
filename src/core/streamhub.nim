@@ -27,6 +27,7 @@ const
   maxPeers = 5000
 
 var drainPassSeconds* = 10.0         ## how often the conductors above the number wanted are looked at: idle times are minutes, so it is not urgent
+var drainGraceSeconds* = (try: parseFloat(getEnv("CINIM_CONDUCTOR_DRAIN_GRACE_SECONDS", "120")) except ValueError: 120.0)   ## D-113: a core that has just started drains no conductor for this long (`drainSettled`)
 var conductorIdleSeconds* = (try: parseFloat(getEnv("CINIM_CONDUCTOR_IDLE_SECONDS", "300")) except ValueError: 300.0)   ## a conductor above the number wanted that has had no run for this long is told to drain (docs/conductors.md section 5)
 var safetyPassSeconds* = 3.0   ## the safety net under the kicks: a controller whose organisation has a step waiting is looked at this often (a pause that ended, a step the watchdog put back)
 
@@ -52,6 +53,7 @@ type
   Hub = object
     co: Core
     lastDrainPass: float
+    startedAt: float                  ## when this worker of the hub started: the conductors reconnect within the grace time before any is drained (D-113)
     conds: Table[string, Cond]
     checks: Table[string, tuple[session: string, at: float]]     ## the checks of scripts sent to a conductor and not answered yet (PIP-016), by the check's id
     outq: ptr ShmQueue                ## what the worker wants sent: the I/O thread owns the socket
@@ -225,6 +227,7 @@ proc giveBackLeases(h: var Hub; c: Cond; unackedOnly: bool) =
 
 proc dropCond(h: var Hub; session, reason: string) =
   if session in h.conds:
+    echo "core: conductor ", h.conds[session].id, " (session ", session, ") dropped: ", reason, (if h.conds[session].draining: " (it was draining)" else: "")
     # a replaced conductor is alive somewhere else and says what it still holds in its hello; a silent one is gone, and all it held is given back
     h.giveBackLeases(h.conds[session], unackedOnly = reason == "replaced")
     h.conds.del session
@@ -459,7 +462,7 @@ proc housekeeping(h: var Hub) =
   var wanted: Table[string, int]
   var states: seq[CondState]
   var sessions: seq[string]
-  let drainPass = h.conds.len > 0 and now - h.lastDrainPass >= drainPassSeconds       # not urgent: idle time is minutes
+  let drainPass = h.conds.len > 0 and now - h.lastDrainPass >= drainPassSeconds and drainSettled(now, h.startedAt, drainGraceSeconds)       # not urgent: idle time is minutes; not in the first minutes of a core
   if drainPass: h.lastDrainPass = now
   for session, c in h.conds:
     if drainPass and c.profileId notin wanted:
@@ -477,7 +480,7 @@ proc housekeeping(h: var Hub) =
         if h.conds[session].id == id:
           h.conds[session].draining = true
           h.conds[session].credit.set(0)
-          echo "core: conductor ", id, " drains (idle above the ", desired, " wanted, or not from the image ", conductorImage, ")"
+          echo "core: conductor ", id, " (session ", session, ") drains (idle above the ", desired, " wanted, or not from the image ", conductorImage, ")"
   for session, c in h.conds.mpairs:
     if c.draining: h.emit(c.routingId, frame("core", "conductor.drain"))
 
@@ -533,7 +536,7 @@ func unpackTime(s: string): float =
 
 proc runWorker(a: WorkerArgs) {.thread.} =
   {.cast(gcsafe).}:
-    var h = Hub(co: a.co, c: newRq(a.co.rqliteUrl), defaultProfile: a.co.profileId, peers: initTable[string, Peer](), conds: initTable[string, Cond](),
+    var h = Hub(startedAt: epochTime(), co: a.co, c: newRq(a.co.rqliteUrl), defaultProfile: a.co.profileId, peers: initTable[string, Peer](), conds: initTable[string, Cond](),
                 checks: initTable[string, tuple[session: string, at: float]](), outq: a.outq, idx: a.idx)
     h.master = coreSecretKey(a.co.certs)
     var lastTick = epochTime()

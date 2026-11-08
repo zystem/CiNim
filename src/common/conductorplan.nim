@@ -36,6 +36,11 @@ func conductorNumber*(id: string): Option[int] =
   let n = parseInt(id[conductorPrefix.len .. ^1])
   if n >= 1: some(n) else: none(int)
 
+func drainSettled*(now, startedAt, graceSeconds: float): bool =
+  ## D-113: a core that has just started does not drain conductors yet (a replacement of the image goes together with the restart of the core that brings the image): they reconnect first and
+  ## the core knows which of them are there, from which image and how long idle; then the replacement goes one at a time as before
+  now - startedAt >= graceSeconds
+
 func drainTargets*(conds: seq[CondState]; desired: int; now, idleSeconds: float): seq[string] =
   ## the conductors to tell to drain: above the wanted number, holding nothing, idle for the idle time, not told already
   for c in conds:

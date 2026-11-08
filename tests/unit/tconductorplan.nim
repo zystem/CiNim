@@ -3,6 +3,13 @@ import std/[unittest, options, strutils]
 import common/conductorplan
 import core/retrypolicy
 
+suite "D-113 a core that has just started drains no conductor":
+  test "nothing is drained until the grace time has passed since the start; after it, as before":
+    check not drainSettled(1000.0, 950.0, 120.0)
+    check not drainSettled(1069.0, 950.0, 120.0)
+    check drainSettled(1070.0, 950.0, 120.0) and drainSettled(5000.0, 950.0, 120.0)
+    check drainSettled(1000.0, 1000.0, 0.0)                          # no grace: always
+
 suite "RUN-009 the number of conductors":
   test "at least conductor_min, even with nothing to do":
     check desiredConductors(0, 0, 10, 1, 20) == 1
