@@ -93,7 +93,7 @@ if [ -n "${COMPONENTS:-}${CHANGED_TESTS:-}" ]; then
   echo "the tests that import what changed:"; echo "$files"
 fi
 # the compilers and the tests are niced: on a busy node the databases of the tests starve otherwise (a query waited 15 s)
-CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" $files || rc=$?
+CINIM_TEST_DBPROBE=1 CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" $files || rc=$?
 # the tail of the log of every file that failed, so that the log of the step says why
 for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(.*\))$/\1/'); do echo "=== $log"; tail -n 30 "$log"; done
 exit $rc

@@ -9,6 +9,9 @@
 # file holding the pool until the whole run is killed by its own limit (a run of the pipeline once lost two hours to one file, with no word of which).
 # Without Docker, or with CINIM_RQLITE_BIN=<path of rqlited>, they are rqlited processes of this script (ports 24600+N and 24700+N, data in /dev/shm when it has room, else in the temporary directory), stopped when it ends:
 # this is how the pipeline of the repository runs the tests in a Pod (.ci/pipeline.lua; tools/image/Dockerfile.test has rqlited).
+# CINIM_TEST_DBPROBE=1 measures the databases while the tests run: every second a trivial query and a one-row write to each worker's rqlite, with the load average, into build/test-logs/dbprobe.txt
+# (time, worker, query s, write s, load); at the end the percentiles are printed, and the samples above one second (a test waits 8 s for a frame of a hub that waits for a query: tconductorhub).
+# The write goes to the table zz_probe of the worker's database. The pipeline sets it.
 # The log of a file that failed is build/test-logs/<name>.log. Exit code: the number of failed files (capped at 100).
 cd "$(dirname "$0")/../.." || exit 2
 jobs=8; unit=1; integ=1; files=()
@@ -64,6 +67,26 @@ elif [ $need_db = 1 ]; then
   done
 fi
 export jobs
+probe_pid=""
+if [ $need_db = 1 ] && [ "${CINIM_TEST_DBPROBE:-0}" = 1 ]; then
+  : > build/test-logs/dbprobe.txt
+  probe() {
+    local i base q w
+    for ((i = 0; i < jobs; i++)); do
+      curl -s -o /dev/null --max-time 30 -XPOST "127.0.0.1:$((24600 + i))/db/execute" -H 'Content-Type: application/json' -d '[["CREATE TABLE IF NOT EXISTS zz_probe (t INTEGER)"]]'
+    done
+    while :; do
+      for ((i = 0; i < jobs; i++)); do
+        base="127.0.0.1:$((24600 + i))"
+        q=$(LC_ALL=C curl -s -o /dev/null -w '%{time_total}' --max-time 60 "$base/db/query?q=SELECT%201")
+        w=$(LC_ALL=C curl -s -o /dev/null -w '%{time_total}' --max-time 60 -XPOST "$base/db/execute" -H 'Content-Type: application/json' -d '[["INSERT INTO zz_probe VALUES (1)"]]')
+        echo "$(date +%T) $i $q $w $(cut -d' ' -f1 /proc/loadavg)" >> build/test-logs/dbprobe.txt
+      done
+      sleep 1
+    done
+  }
+  probe & probe_pid=$!
+fi
 one() {   # file slot
   f=$1; slot=$2; kind=$(basename "$(dirname "$f")"); name=$(basename "$f" .nim); log=build/test-logs/$kind-$name.log
   mkdir -p build/tests/$kind     # unit and integration files may share a name: their binaries and logs must not
@@ -76,7 +99,7 @@ one() {   # file slot
   if [ $rc -eq 0 ] && [ "$bad" = 0 ]; then printf 'ok    %-34s %3d tests %4ds\n' "$kind/$name" "$ok" $(( $(date +%s) - start )); rm -f "$log"
   else
     [ $rc -ne 124 ] || { echo "TIMED OUT: no answer within ${limit} s, killed" >>"$log"; echo "$name: TIMED OUT after ${limit} s" >&2; }
-    printf 'FAIL  %-34s %3d ok, %d failed, exit %d%s  (%s)\n' "$kind/$name" "$ok" "$bad" $rc "$([ $rc -ne 124 ] || echo ' TIMED OUT')" "$log"
+    printf 'FAIL  %-34s %3d ok, %d failed, exit %d%s [%s-%s]  (%s)\n' "$kind/$name" "$ok" "$bad" $rc "$([ $rc -ne 124 ] || echo ' TIMED OUT')" "$(date -d "@$start" +%T 2>/dev/null)" "$(date +%T)" "$log"
   fi
 }
 export -f one
@@ -91,6 +114,14 @@ run() {
 }
 export -f run
 printf '%s\n' "${files[@]}" | xargs -P "$jobs" -I{} bash -c 'run {}' | tee build/test-logs/summary.txt
+if [ -n "$probe_pid" ]; then
+  kill "$probe_pid" 2>/dev/null; wait "$probe_pid" 2>/dev/null
+  for col in 3 4; do
+    awk -v c=$col '{print $c}' build/test-logs/dbprobe.txt | LC_ALL=C sort -n | LC_ALL=C awk -v n="$([ $col = 3 ] && echo query || echo write)" \
+      '{a[NR]=$1} END {if (NR) {i95 = int(NR * 0.95); if (i95 < 1) i95 = 1; printf "dbprobe %s: %d samples, p50 %.3f s, p95 %.3f s, max %.3f s\n", n, NR, a[int((NR + 1) / 2)], a[i95], a[NR]}}'
+  done
+  LC_ALL=C awk '$3 > 1 || $4 > 1 {print "dbprobe slow: " $0 "  (time worker query write load)"}' build/test-logs/dbprobe.txt | head -30
+fi
 fails=$(grep -c '^FAIL' build/test-logs/summary.txt)
 echo "$(grep -c '^ok' build/test-logs/summary.txt) files ok, $fails failed"
 exit $(( fails > 100 ? 100 : fails ))
