@@ -78,6 +78,11 @@ const ddl = [
        group_base TEXT NOT NULL DEFAULT '', group_filter TEXT NOT NULL DEFAULT '', group_attr TEXT NOT NULL DEFAULT '',
        enabled INTEGER NOT NULL DEFAULT 1, auto_create INTEGER NOT NULL DEFAULT 0, tls_insecure INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_sync_at INTEGER NOT NULL DEFAULT 0, last_sync_result TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS ldap_servers_name ON ldap_servers (tenant_id, name)",
+  # D-114: the image registries of an organisation (an address, plain HTTP or not, a login whose password is sealed with the organisation's data key)
+  """CREATE TABLE IF NOT EXISTS registries (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL, insecure INTEGER NOT NULL DEFAULT 0, username TEXT NOT NULL DEFAULT '',
+       secret_enc TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS registries_name ON registries (tenant_id, name)",
   # D-91: the teams of an organisation. A team is made by hand or takes its members from a group of a directory (`group_dn`, of the directory `server_id`, or of any when it is empty); its roles
   # are rows of `role_bindings` whose user_name is `team:<slug>/<name>`. A member is a manual one (`source` '') or one the directory gives (`ldap:<server id>`)
   # D-93: who approved or rejected a run that waited for approval, and when (one answer from each person)

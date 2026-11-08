@@ -529,6 +529,62 @@ suite "D-84 D-85 D-87 the pages of roles, members and directories":
     let n = get("/ui/orgs")
     check "href=\"/ui/roles\"" notin n.body and "href=\"/ui/orgs/acme/ldap\"" notin n.body
 
+suite "D-114 the registries of an organisation":
+  setup: reset()
+  let writerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["registry.read", "registry.write"]}, "groups": {}}}
+  let readerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["registry.read"]}, "groups": {}}}
+  proc get(path: string): UiResponse = handle(cfg, fakeCore(), req("GET", path, cookie = session))
+  proc post(path: string; pairs: seq[(string, string)]; origin = ""): UiResponse = handle(cfg, fakeCore(), req("POST", path, cookie = session, pairs = pairs, origin = origin))
+  proc seed(me: JsonNode) =
+    routes["/api/v1/me"] = me
+    routes["/api/v1/organizations/acme/registries"] = %*{"organization": "acme", "registries": [
+      {"name": "gh", "address": "ghcr.io/acme", "insecure": false, "username": "ann", "has_password": true, "description": "the <b>public</b> images", "password": "tok-LEAK-1", "secret_enc": "SEALED-LEAK"},
+      {"name": "local", "address": "registry.registry.svc:5000", "insecure": true, "username": "", "has_password": false, "description": ""}]}
+  test "the page lists the registries with their address, whether it is plain HTTP and whether there is a login; nothing of the password":
+    seed(readerMe)
+    let r = get("/ui/orgs/acme/registries")
+    check r.status == 200 and "<code>gh</code>" in r.body and "ghcr.io/acme" in r.body and "registry.registry.svc:5000" in r.body
+    check "the &lt;b&gt;public&lt;/b&gt; images" in r.body and "<b>public</b>" notin r.body
+    check "plain HTTP" in r.body and "login of ann" in r.body and "no login" in r.body
+    check "tok-LEAK-1" notin r.body and "SEALED-LEAK" notin r.body                                    # a field the page does not know is not shown, whatever the core sent
+  test "a reader sees no form; a writer gets the form to add or change one and a button to remove each":
+    seed(readerMe)
+    let ro = get("/ui/orgs/acme/registries")
+    check "<form" notin ro.body.replace("<form class=\"logout\"", "").replace("class=\"logout\" method=\"post\"", "")
+    seed(writerMe)
+    let w = get("/ui/orgs/acme/registries")
+    check "action=\"/ui/orgs/acme/registries/save\"" in w.body and "name=\"password\"" in w.body and "type=\"password\"" in w.body and "autocomplete=\"new-password\"" in w.body
+    check "action=\"/ui/orgs/acme/registries/gh/delete\"" in w.body and "action=\"/ui/orgs/acme/registries/local/delete\"" in w.body
+  test "the form saves what is typed, leaves out the password when it is empty, and goes back to the page":
+    seed(writerMe)
+    let r = post("/ui/orgs/acme/registries/save", @[("name", "gh"), ("address", "ghcr.io/acme"), ("insecure", ""), ("username", "ann"), ("password", "tok-1"), ("description", "images")])
+    check r.status == 303 and r.header("Location") == "/ui/orgs/acme/registries"
+    check sent == @["PUT /api/v1/organizations/acme/registries/gh {\"address\":\"ghcr.io/acme\",\"insecure\":false,\"description\":\"images\",\"username\":\"ann\",\"password\":\"tok-1\"}"]
+    reset(); seed(writerMe)
+    discard post("/ui/orgs/acme/registries/save", @[("name", "local"), ("address", "registry.registry.svc:5000"), ("insecure", "1"), ("username", ""), ("password", ""), ("description", "")])
+    check sent == @["PUT /api/v1/organizations/acme/registries/local {\"address\":\"registry.registry.svc:5000\",\"insecure\":true,\"description\":\"\"}"]
+    reset(); seed(writerMe)
+    discard post("/ui/orgs/acme/registries/save", @[("name", "gh"), ("address", "ghcr.io/acme"), ("remove_login", "1"), ("description", "")])
+    check sent == @["PUT /api/v1/organizations/acme/registries/gh {\"address\":\"ghcr.io/acme\",\"insecure\":false,\"description\":\"\",\"username\":\"\",\"password\":\"\"}"]
+  test "a registry is removed by its name":
+    seed(writerMe)
+    check post("/ui/orgs/acme/registries/gh/delete", @[]).header("Location") == "/ui/orgs/acme/registries"
+    check sent == @["DELETE /api/v1/organizations/acme/registries/gh "]
+  test "bad input to the forms is refused before the core is asked, and a form not from this site is refused":
+    seed(writerMe)
+    for pairs in [@[("name", "Bad Name"), ("address", "ghcr.io")], @[("name", "gh"), ("address", "")], @[("name", "gh"), ("address", "x".repeat(201))],
+                  @[("name", "gh"), ("address", "ghcr.io"), ("description", "x".repeat(301))], @[("name", "gh"), ("address", "ghcr.io"), ("username", "a:b"), ("password", "p")]]:
+      check post("/ui/orgs/acme/registries/save", pairs).status == 400
+    check post("/ui/orgs/acme/registries/Bad/delete", @[]).status == 404 and post("/ui/orgs/acme/registries/nothing", @[]).status == 404
+    check post("/ui/orgs/acme/registries/save", @[("name", "gh"), ("address", "ghcr.io")], origin = "https://evil.example").status == 403
+    check post("/ui/orgs/acme/registries/gh/delete", @[], origin = "https://evil.example").status == 403
+    check sent.len == 0
+  test "what the core says when it refuses is shown, and a missing right is explained":
+    seed(writerMe)
+    sendAnswer = ApiResult(status: asRefused, code: 409, message: "username needs password (a login is both)")
+    let r = post("/ui/orgs/acme/registries/save", @[("name", "gh"), ("address", "ghcr.io/acme"), ("username", "ann"), ("password", "")])
+    check r.status == 409 and "username needs password" in r.body
+
 suite "D-87 the organisation in the login form":
   setup: reset()
   proc withDirectories() =

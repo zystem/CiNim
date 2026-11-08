@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, webhooks, approvals, teams, ldapauth, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, webhooks, approvals, teams, ldapauth, registries, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -1340,6 +1340,56 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"organization": slugT, "team": partsT[2], "user": partsT[4], "member": false})
         else:
           problem(Http404, "not_found", "no such route")
+        return
+      if path.startsWith("/api/v1/organizations/") and "/registries" in path:
+        # D-114: the image registries of an organisation (registry.read; registry.write for adding, changing and removing; the gate has checked the permission for this organisation)
+        #   GET /organizations/{slug}/registries      GET|PUT|DELETE /organizations/{slug}/registries/{name}
+        #   PUT {"address": "ghcr.io/acme", "insecure": false, "username": "ann", "password": "...", "description": "..."}: a field that is left out keeps its value; the password is never answered
+        let partsR = path["/api/v1/organizations/".len .. ^1].split('/')
+        if partsR.len < 2 or partsR[1] != "registries" or partsR.len > 3:
+          problem(Http404, "not_found", "no such route")
+          return
+        let slugR = partsR[0]
+        var rc = newRq(coreRef.rqliteUrl)
+        let orgR = rc.organizationRow(slugR)
+        if orgR.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugR)
+          return
+        let rmeth = getMethod()
+        let vkR = vaultKek()
+        let nowR = getTime().toUnix()
+        if partsR.len == 2:
+          if rmeth != "GET":
+            problem(Http405, "method_not_allowed", "GET")
+            return
+          var rs = newJArray()
+          for r in rc.registriesOf(orgR.id): rs.add r.view
+          jsonOk(Http200, %*{"organization": slugR, "registries": rs})
+        else:
+          let nameR = partsR[2]
+          if rmeth == "GET":
+            let found = rc.registryNamed(orgR.id, nameR)
+            if not found.found:
+              problem(Http404, "not_found", "no such registry")
+              return
+            jsonOk(Http200, found.registry.view)
+          elif rmeth == "PUT":
+            let rj = try: parseJson(getBody()) except JsonParsingError: nil
+            let done = rc.putRegistry(vkR.kek, vkR.ready, orgR.id, nameR, rj, nowR)
+            if done.error.len > 0:
+              problem(HttpCode(done.status), "invalid_registry", done.error)
+              return
+            let saved = rc.registryNamed(orgR.id, nameR).registry
+            rc.record(nowR, actorOf(who), "registry.put", slugR & "/" & nameR, "ok", saved.address & (if saved.secretEnc.len > 0: " (with a login)" else: ""))
+            jsonOk(if done.created: Http201 else: Http200, saved.view)
+          elif rmeth == "DELETE":
+            if not rc.deleteRegistry(orgR.id, nameR):
+              problem(Http404, "not_found", "no such registry")
+              return
+            rc.record(nowR, actorOf(who), "registry.delete", slugR & "/" & nameR, "ok")
+            jsonOk(Http200, %*{"organization": slugR, "registry": nameR, "deleted": true})
+          else:
+            problem(Http405, "method_not_allowed", "GET, PUT, DELETE")
         return
       if path.startsWith("/api/v1/organizations/") and "/ldap" in path:
         # D-87: the directories of an organisation and the map of their groups to roles. The gate has checked the permission for this organisation (ldap.read; ldap.map for the map and for a

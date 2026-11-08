@@ -56,6 +56,8 @@ const
     ("profile.grant", lvGroup, "choose which privileged profiles (build, deploy) the pipelines of a project may use"),
     ("access.read", lvGroup, "see who has which role in an organisation, and the roles and permissions"),
     ("access.write", lvGroup, "give and take away roles in an organisation"),
+    ("registry.read", lvOrg, "see the image registries of an organisation (the address, whether there is a login; never the password)"),
+    ("registry.write", lvOrg, "add, change and remove the image registries of an organisation and their logins"),
     ("ldap.read", lvOrg, "see the directories of an organisation and which of their groups give which role"),
     ("ldap.map", lvOrg, "choose which groups of a directory give which role in the organisation, and sync now"),
     ("oidc.read", lvOrg, "see the OpenID Connect providers of an organisation and which claims give which role"),
@@ -75,7 +77,7 @@ const
     ("audit.read", lvShard, "read the audit log"),
     ("audit.export", lvShard, "choose where the audit log is sent (syslog, an HTTP receiver)")]
 
-  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "webhook.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read"]
+  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "webhook.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read", "registry.read"]
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
@@ -176,6 +178,7 @@ func orgNeed(meth, org, rest: string): Need =
     if onTree(): return treeNeed(if write: "group.write" else: "group.read")
     return need(if write: "group.write" else: "group.read", (if write: nsOrg else: nsInOrg), org)       # the list of groups; making one names a path
   if has("/caches"): return need(if write: "cache.delete" else: "cache.read", nsOrg, org)
+  if has("/registries"): return need(if write: "registry.write" else: "registry.read", nsOrg, org)       # D-114: a registry belongs to the organisation
   if has("/secrets"): return need(if write: "secret.write" else: "secret.read", nsOrg, org)
   if has("/members"): return need(if write: "access.write" else: "access.read", nsOrg, org)
   if has("/identities"): return need(if write: "access.write" else: "access.read", nsOrg, org)         # D-100: logins of a host of repositories

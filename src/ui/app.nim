@@ -78,6 +78,9 @@ type
   TeamRow = object
     name, description, ldap, roles: string
     members: seq[TeamMemberRow]
+  RegistryRow = object
+    name, address, username, description: string
+    insecure, hasPassword: bool
   DirRow = object
     name, url, warnings, lastSync: string
     priority: int
@@ -349,6 +352,10 @@ proc renderMembers(base, scopeText, group, here, orgMembers: string; members: se
 proc renderTeams(base, org, here: string; teams: seq[TeamRow]; roleNames: seq[string]; canEdit: bool): string =
   let loggedIn = true
   compileTemplateFile("teams.nimja", templateDir)
+
+proc renderRegistries(base, org, here: string; registries: seq[RegistryRow]; canWrite: bool): string =
+  let loggedIn = true
+  compileTemplateFile("registries.nimja", templateDir)
 
 proc renderLdap(base, org, here: string; dirs: seq[DirRow]; maps: seq[MapRow]; accounts: seq[AccountRow]; roleNames: seq[string]; canMap, canWrite: bool): string =
   let loggedIn = true
@@ -819,6 +826,44 @@ proc teamsAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, slug: strin
       return afterAction(cfg, api, token, r, back, "The roles were not changed", "the roles of the team " & name, "PUT", path)
   messagePage(cfg, 404, true, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
 
+proc registriesPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
+  let base = "/api/v1/organizations/" & slug & "/registries"
+  let r = api.get(token, base)
+  if r.status != asOk: return explained(cfg, api, token, r, "the registries of " & slug, "GET", base)
+  var rows: seq[RegistryRow]
+  for x in r.body{"registries"}.getElems:
+    if isDirName(x{"name"}.getStr):
+      rows.add RegistryRow(name: x["name"].getStr, address: x{"address"}.getStr, username: x{"username"}.getStr, description: x{"description"}.getStr,
+                           insecure: x{"insecure"}.getBool, hasPassword: x{"has_password"}.getBool)
+  page(200, renderRegistries(cfg.base, slug, cfg.base & "/orgs/" & slug & "/registries", rows, can("registry.write", slug, "")))
+
+proc registriesAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, slug: string; rest: seq[string]): UiResponse =
+  ## the forms of the Registries page: save one (a new name, or a change), remove one
+  let base = "/api/v1/organizations/" & slug & "/registries"
+  let back = cfg.base & "/orgs/" & slug & "/registries"
+  let f = req.form
+  if rest == @["save"]:
+    let name = f.getOrDefault("name")
+    let address = f.getOrDefault("address")
+    let username = f.getOrDefault("username")
+    let password = f.getOrDefault("password")
+    let description = f.getOrDefault("description")
+    if not isDirName(name) or address.len < 1 or address.len > 200 or description.len > 300 or username.len > 200 or password.len > 4096 or ':' in username:
+      return messagePage(cfg, 400, true, "Not saved", "Give a name (lowercase letters, digits, - and _), an address (host[:port][/path]) and, for a login, a user name with no colon.", "", back, "Back")
+    var body = %*{"address": address, "insecure": f.getOrDefault("insecure").len > 0, "description": description}
+    if f.getOrDefault("remove_login").len > 0:
+      body["username"] = %""
+      body["password"] = %""
+    else:
+      if username.len > 0: body["username"] = %username
+      if password.len > 0: body["password"] = %password
+    let r = api.send("PUT", token, base & "/" & name, $body)
+    return afterAction(cfg, api, token, r, back, "The registry was not saved", "save the registry " & name, "PUT", base & "/" & name)
+  if rest.len == 2 and isDirName(rest[0]) and rest[1] == "delete":
+    let r = api.send("DELETE", token, base & "/" & rest[0], "")
+    return afterAction(cfg, api, token, r, back, "The registry was not removed", "remove the registry " & rest[0], "DELETE", base & "/" & rest[0])
+  messagePage(cfg, 404, true, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
+
 proc ldapPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
   let base = "/api/v1/organizations/" & slug & "/ldap"
   let r = api.get(token, base)
@@ -1024,13 +1069,14 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
     return runAction(cfg, api, req, token, parts[1], parts[2])
   if req.meth == "POST":
     # the forms of the access pages: a POST from this host, then the thing is asked of the core with the token of the user
-    let isAccessPost = parts == @["new-role"] or (parts.len in [2, 3] and parts[0] == "roles") or (parts.len >= 3 and parts[0] == "orgs" and (parts[2] == "ldap" or parts[2] == "teams" or "members" in parts))
+    let isAccessPost = parts == @["new-role"] or (parts.len in [2, 3] and parts[0] == "roles") or (parts.len >= 3 and parts[0] == "orgs" and (parts[2] == "ldap" or parts[2] == "registries" or parts[2] == "teams" or "members" in parts))
     if isAccessPost:
       if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
       if parts == @["new-role"]: return saveRole(cfg, api, req, token, "")
       if parts.len == 2 and parts[1].isRoleName: return saveRole(cfg, api, req, token, parts[1])
       if parts.len == 3 and parts[0] == "roles" and parts[1].isRoleName and parts[2] == "delete": return deleteRole(cfg, api, token, parts[1])
       if parts.len >= 4 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
+      if parts.len >= 4 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "registries": return registriesAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
       if parts.len >= 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "teams": return teamsAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
       if parts.len >= 4 and parts[^2] == "members" and parts[^1] in ["set", "remove"]:
         let t = targetOf(parts, parts.len - 2)
@@ -1050,6 +1096,7 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
     if t.ok: return membersPage(cfg, api, token, t)
   if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapPage(cfg, api, token, parts[1])
   if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "teams": return teamsPage(cfg, api, token, parts[1])
+  if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "registries": return registriesPage(cfg, api, token, parts[1])
   if parts == @["orgs"]: return orgsPage(cfg, api, token)
   if parts == @["runs"]: return runsPage(cfg, api, token, "", query)
   if parts == @["status"]: return statusPage(cfg, api, token)

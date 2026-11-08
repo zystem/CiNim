@@ -84,7 +84,8 @@ suite "D-84 what a request needs":
                    ("GET", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/organizations"), ("GET", "/api/v1/roles"), ("PUT", "/api/v1/organizations/o/members/u"),
                    ("GET", "/api/v1/components"), ("PUT", "/api/v1/profile"), ("PUT", "/api/v1/variables/V"), ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/o"),
                    ("PUT", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/stores"), ("GET", "/api/v1/users"), ("PUT", "/api/v1/roles/r"), ("GET", "/api/v1/tokens"), ("GET", "/api/v1/audit"), ("PUT", "/api/v1/audit/sinks/s"), ("GET", "/api/v1/organizations/o/oidc/providers"), ("PUT", "/api/v1/organizations/o/oidc/providers/p"), ("POST", "/api/v1/organizations/o/oidc/mappings"),
-                   ("GET", "/api/v1/organizations/o/ldap"), ("POST", "/api/v1/organizations/o/ldap/mappings"), ("PUT", "/api/v1/organizations/o/ldap/servers/s")]:
+                   ("GET", "/api/v1/organizations/o/ldap"), ("POST", "/api/v1/organizations/o/ldap/mappings"), ("PUT", "/api/v1/organizations/o/ldap/servers/s"),
+                   ("GET", "/api/v1/organizations/o/registries"), ("PUT", "/api/v1/organizations/o/registries/r")]:
       used.incl needOf(m, p).permission
     for p in catalogue: check p.name in used or p.name in checkedByHandlers
 
@@ -115,6 +116,25 @@ suite "D-87 the directories of an organisation":
     for (m, p) in [("GET", "/api/v1/organizations/acme/ldap"), ("POST", "/api/v1/organizations/acme/ldap/mappings"), ("PUT", "/api/v1/organizations/acme/ldap/servers/corp")]:
       check not rw.allows(needOf(m, p))
     check grantsOfRoles(["admin"]).allows(needOf("PUT", "/api/v1/organizations/acme/ldap/servers/corp"))
+
+suite "D-114 the registries of an organisation":
+  test "reading is for every role that reads, writing is the organisation\'s administrators\' and rw\'s; both are of the organisation":
+    for (m, p, want) in [("GET", "/api/v1/organizations/acme/registries", "registry.read"), ("GET", "/api/v1/organizations/acme/registries/gh", "registry.read"),
+                         ("PUT", "/api/v1/organizations/acme/registries/gh", "registry.write"), ("DELETE", "/api/v1/organizations/acme/registries/gh", "registry.write")]:
+      let n = needOf(m, p)
+      check n.permission == want and n.scope == nsOrg and n.org == "acme"
+    check needOf("GET", "/api/v1/organizations/acme/registriesx").permission == ""
+    check levelOf("registry.read") == lvOrg and levelOf("registry.write") == lvOrg
+  test "ro and dev read the registries, rw writes them, a role of a group does not reach them":
+    for r in ["ro", "dev", "rw", "admin"]: check "registry.read" in builtinPermissions(r)
+    check "registry.write" notin builtinPermissions("ro") and "registry.write" notin builtinPermissions("dev")
+    check "registry.write" in builtinPermissions("rw") and "registry.write" in builtinPermissions("admin")
+    var org, grp: Grants
+    org.addRole("org:acme", builtinPermissions("rw"))
+    grp.addRole("org:acme/ci", builtinPermissions("admin"))
+    check org.allows(needOf("PUT", "/api/v1/organizations/acme/registries/gh")) and org.allows(needOf("GET", "/api/v1/organizations/acme/registries"))
+    check not org.allows(needOf("PUT", "/api/v1/organizations/beta/registries/gh"))
+    check not grp.allows(needOf("PUT", "/api/v1/organizations/acme/registries/gh")) and not grp.allows(needOf("GET", "/api/v1/organizations/acme/registries"))
 
 suite "D-84 groups and projects":
   test "the routes of a group name its path (variables, settings and hold are not part of it), the lists name only the organisation":
