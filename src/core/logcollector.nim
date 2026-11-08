@@ -25,7 +25,7 @@ import common/[rqlite, shimstate, states]
 import grpcserve
 import crunchy
 import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, apiauth
-import common/[ctrlauth]
+import common/[ctrlauth, bytestr]
 import scheduler   ## for stopServers*, the shared shutdown flag every core REP-server thread polls
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
@@ -58,7 +58,7 @@ initLock(streamsLock)
 
 func verifyChunk*(chunk: LogChunk): bool =
   ## true iff the chunk's declared crc32c matches its (compressed) bytes - checked without decompressing.
-  crc32c(cast[string](chunk.data)) == chunk.crc32c
+  crc32c(bytesToStr(chunk.data)) == chunk.crc32c
 
 func classifyStatus*(code: int): ForwardResult =
   ## vlagent's answer: 2xx done; 408/429/5xx (and no answer at all) are worth retrying; other 4xx will never succeed.
@@ -169,7 +169,7 @@ proc handleBatch(c: var RqClient; co: Collector; req: LogBatch): LogAck =
     var j = i
     var body = ""
     while j < chunks.len and chunks[j].encoding == chunks[i].encoding:
-      body.add cast[string](chunks[j].data)
+      body.add bytesToStr(chunks[j].data)
       inc j
     case forward(co, body, chunks[i].encoding)
     of frRetry:

@@ -259,5 +259,17 @@ suite "RUN-016 the push channel":
       check fresh.receive(1500).isNone or fresh.receive(100).isNone
       fresh.close()
       old.close()
+    test "a client closed at any moment of its connecting frees nothing its reader still uses, and the core goes on serving (AddressSanitizer is what sees the use of freed memory; a plain run sees a hang now and then)":
+      let o = newOrg()
+      for i in 1 .. 40:
+        var cl = connectStream(serverAddr, certs)
+        if i mod 2 == 0:
+          check cl.sendFrame(report("jc-" & $(9400 + i) & ".5", o.ns, 1))
+          if i mod 4 == 0: sleep 20
+        cl.close()
+      var last = connectStream(serverAddr, certs)
+      check last.sendFrame(report("jc-9500.5", o.ns, 10))
+      check last.receive(8000).isSome                               # still accepting, and answering
+      last.close()
     stopServers.store(true)
     joinThread(th)

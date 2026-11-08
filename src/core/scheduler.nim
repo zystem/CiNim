@@ -9,7 +9,7 @@
 import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, tables]
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource]
+import common/[rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource, bytestr]
 import ctrlpresence, logwindow, keptpods, stepsecrets, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import groups, apiauth, approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
@@ -1143,7 +1143,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
   if not caller.ok: return leaseLost(caller.why)
   if req.kind == "params":
     # the complete launch parameters of the run, from the script's declarations (PIP-012): kept with the run and given to its steps as environment variables
-    let json = cast[string](req.payload)
+    let json = bytesToStr(req.payload)
     let why = checkEffective(json)
     if why.len > 0:
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
@@ -1183,7 +1183,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     if req.key.len == 0:
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a host call without its key in the journal")))
-    let text = cast[string](req.payload)
+    let text = bytesToStr(req.payload)
     var by = ""
     var unstarted: seq[string]
     var keys: seq[string]
@@ -1219,13 +1219,13 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     if req.payload.len > maxStepTable:
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "the table of step numbers is too large")))
-    discard c.execute(%*[["UPDATE runs SET step_table = ? WHERE id = ? AND step_table = ''", cast[string](req.payload), req.run_id]])
+    discard c.execute(%*[["UPDATE runs SET step_table = ? WHERE id = ? AND step_table = ''", bytesToStr(req.payload), req.run_id]])
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind == lockKind or req.kind == unlockKind:
     # PIP-014: the lock of a job (core/joblocks.nim). `lock` answers at once when the lock is the run's, and suspends the run (no place, no Pod) when it is not; the record
     # of the call is written when the lock is granted. `unlock` lets go of one level and answers at once.
-    let payloadParts = cast[string](req.payload).split('\t', 1)         # `lock`: the name and the job (its key in the run); `unlock`: the name
+    let payloadParts = bytesToStr(req.payload).split('\t', 1)         # `lock`: the name and the job (its key in the run); `unlock`: the name
     let name = payloadParts[0]
     let jobKey = if payloadParts.len > 1: payloadParts[1] else: ""
     let bad = if req.key.len == 0: "a host call without its key in the journal" elif not validLockName(name): "a lock is a name of 1 to " & $maxLockName & " letters, digits and . _ : -" else: ""
@@ -1235,7 +1235,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     let lockProfile = profileOfRun(c, req.run_id, co.profileId)
     let nowL = getTime().toUnix()
     if req.kind == lockKind:
-      if not c.acquire(req.run_id, lockProfile, name, req.key, cast[string](req.payload), nowL, jobKey):
+      if not c.acquire(req.run_id, lockProfile, name, req.key, bytesToStr(req.payload), nowL, jobKey):
         # pending: the executor gives the lease back (`park`) when no branch can go on
         return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
           kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: true)))
@@ -1249,11 +1249,11 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     if req.key.len == 0:
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a host call without its key in the journal")))
-    let made = c.startChildRun(co, req.run_id, req.key, cast[string](req.payload))
+    let made = c.startChildRun(co, req.run_id, req.key, bytesToStr(req.payload))
     if made.error.len > 0:
       return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: made.error)))
-    discard c.appendRow(req.run_id, req.key, triggerKind, cast[string](req.payload), made.id)
+    discard c.appendRow(req.run_id, req.key, triggerKind, bytesToStr(req.payload), made.id)
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]](made.id), suspended: false)))
   if req.kind != "job_sh":
@@ -1262,7 +1262,7 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
   if not req.numbered:
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure,
       failure: Failure(code: "executor_too_old", detail: "the step has no number from a table of step numbers; rebuild the executor")))
-  let parts = cast[string](req.payload).split('\t', 4)   # key, image, profile ("" = ordinary), options JSON ("" = none), command (bootstrap.lua)
+  let parts = bytesToStr(req.payload).split('\t', 4)   # key, image, profile ("" = ordinary), options JSON ("" = none), command (bootstrap.lua)
   let jobKey = parts[0]
   let image = if parts.len > 1: parts[1] else: ""
   let profile = if parts.len > 2: parts[2] else: ""

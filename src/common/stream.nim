@@ -312,11 +312,12 @@ proc clientMain(st: ptr ClientState) {.thread.} =
       var readerOn = false
       var ch: GrpcChannel
       var chOpen = false
+      var down: ClientCall                 # the reader's call: made in the try below, used by the reader thread until it is joined
       try:
         ch = dial(host, st.port, clientTls(certs), serverName = coreServerName, keepalive = keepalive, connectTimeoutMs = 5000)
         chOpen = true
         let token = newToken()
-        var down = ch.newCall(downMethod, @[(peerKey, token)], maxMessage = maxMessageBytes)
+        down = ch.newCall(downMethod, @[(peerKey, token)], maxMessage = maxMessageBytes)
         down.send(newSeq[byte]())
         down.closeSend()
         var first: seq[byte]
@@ -338,8 +339,13 @@ proc clientMain(st: ptr ClientState) {.thread.} =
         try: up.closeSend() except CatchableError: discard
       except CatchableError: discard
       st.connected.store(false)
-      if chOpen: (try: ch.close() except CatchableError: discard)          # ends the reader's wait
-      if readerOn: joinThread(reader)
+      # The reader thread is in `down.recv` on the channel, and `ch.close()` frees the channel (its documentation: the calls fail and it must not be used afterwards): closing it first let
+      # the reader's failing call touch freed memory (found with AddressSanitizer in tconductorhub; the corrupted heap showed as a cycle in the allocator's free list, a thread that
+      # spun for ever holding the lock of a connection, and a server that accepted nobody). So: cancel the call (a reset of the stream wakes the reader), join the reader, then close.
+      if readerOn:
+        try: down.cancel() except CatchableError: discard
+        joinThread(reader)
+      if chOpen: (try: ch.close() except CatchableError: discard)
       if not st.stop.load:
         var waited = 0
         while waited < pause and not st.stop.load:

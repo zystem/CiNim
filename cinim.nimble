@@ -49,6 +49,7 @@ task testint, "Run integration tests (need a cluster: CINIM_RQLITE_URL, K8S_PREF
   exec "nim c -r --hints:off --warnings:off --outdir:build/tests tests/integration/tm1skeleton.nim"
 
 task testsan, "Run unit tests under AddressSanitizer/LeakSanitizer (E-004)":
+  exec "sh tools/test/check-mmap-rnd.sh"        # fails with the cure when ASan binaries would crash at start (vm.mmap_rnd_bits above 28)
   for f in listFiles("tests/unit"):
     if f.endsWith(".nim") and f.extractFilename.startsWith("t"):
       exec "nim c -r --hints:off --outdir:build/tests-san -d:sanitize " &

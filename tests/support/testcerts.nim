@@ -4,9 +4,10 @@ import std/[os, osproc]
 
 var made = false
 var dir = ""
+var dirAtExit: cstring = nil     # a copy that nothing frees: the quit procedure runs after the module's globals are destroyed (a read of the freed `dir`, AddressSanitizer)
 
 proc removeCerts() {.noconv.} =
-  if dir.len > 0: removeDir dir
+  if dirAtExit != nil: removeDir $dirAtExit
 
 proc testCerts*(): string =
   if not made:
@@ -15,6 +16,8 @@ proc testCerts*(): string =
     createDir d
     if execCmd("sh " & quoteShell(getCurrentDir() / "tools" / "grpc" / "gen_tls.sh") & " " & quoteShell(d) & " 2 >/dev/null 2>&1") == 0:
       dir = d
+      dirAtExit = cast[cstring](allocShared0(d.len + 1))
+      copyMem(dirAtExit, d.cstring, d.len)
       addQuitProc(removeCerts)
     else:
       removeDir d

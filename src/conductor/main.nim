@@ -7,7 +7,7 @@ import std/[os, options, strutils, times, tables, sequtils, random]
 import posix
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
-import common/[stream, streamstate, runpipe, heartbeat, scriptsource]
+import common/[stream, streamstate, runpipe, heartbeat, scriptsource, bytestr]
 import executor/[sandbox, journal, replay, pass]
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
@@ -23,8 +23,8 @@ proc wireString(b: seq[byte]): string =
 proc toJournal(entries: seq[JournalEntry]): Journal =
   # the core keeps the hash chain (T-03) and sends each record with its hash: taken as they come, and replay checks the chain
   for e in entries:
-    result.entries.add Entry(seq: int(e.seq), key: e.key, kind: e.kind, payload: cast[string](e.payload), result: cast[string](e.result),
-                             hash: cast[string](e.hash))
+    result.entries.add Entry(seq: int(e.seq), key: e.key, kind: e.kind, payload: bytesToStr(e.payload), result: bytesToStr(e.result),
+                             hash: bytesToStr(e.hash))
 
 # ------------------------------------------------------------------ the run process
 
@@ -132,7 +132,7 @@ proc runMode() =
       raise (ref HostRefusal)(code: resp.body.failure.code, msg: resp.body.failure.detail)
     if resp.body.kind != ExecutorResponseBodyKind.result: return none(string)
     if resp.body.result.suspended: return none(string)               # pending: the branch that asked waits, the others go on (docs/parallel.md section 5)
-    some(cast[string](resp.body.result.result))
+    some(bytesToStr(resp.body.result.result))
   let r = replay.execute(sb, jj, g.script, host, runId = runId, params = g.params.mapIt((it.key, it.value)),
                          onPlace = proc (seq: int; kind: string; line: int; ctx: string; nth: int) = (if kind == "job_sh": lastStep = nth),
                          onCall = proc (seq: int; kind, key: string) = (lastKey = key))

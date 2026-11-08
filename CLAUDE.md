@@ -31,6 +31,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 
 ## Things that cost time (do not repeat)
 
+- **ASan on a machine with `vm.mmap_rnd_bits` above 28 crashes at start now and then** (`AddressSanitizer:DEADLYSIGNAL` printed for ever, 12 of 30 starts in a test; the Ubuntu 24.04 kernel has 32, gcc 12 images are hit): `tools/test/check-mmap-rnd.sh` checks it and fails with the cure (`sysctl vm.mmap_rnd_bits=28` as root); `nimble testsan` and `tools/soak/run72.sh` run it first. A runner of ASan of your own calls it too, and repeats a start that crashed until it has the clean runs it needs.
 - A segmentation fault with no trace in the shim or a thread: iterate a possibly-`nil` `JsonNode` only through `.elems` after a `kind` check (`n{"key"}.kind` is a crash too when the key is missing: test `not n.isNil` first, as `isKind` in `src/ui/app.nim`; a test whose fake body always has every key does not see it). `for x in items(node)` always picks the iterator of `std/json`,
   whatever a function of your own with that name does. Build with `--stackTrace:on --lineTrace:on` and run the binary locally; it shows the line.
 - `declared` is a magic of Nim: do not name a proc or a constant so. `func` cannot call `parseJson` (side effects): use `proc`.
