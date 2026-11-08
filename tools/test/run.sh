@@ -12,6 +12,10 @@
 # CINIM_TEST_DBPROBE=1 measures the databases while the tests run: every second a trivial query and a one-row write to each worker's rqlite, with the load average, into build/test-logs/dbprobe.txt
 # (time, worker, query s, write s, load); at the end the percentiles are printed, and the samples above one second (a test waits 8 s for a frame of a hub that waits for a query: tconductorhub).
 # The write goes to the table zz_probe of the worker's database. The pipeline sets it.
+# CINIM_TEST_ASAN=1 builds every file with AddressSanitizer on the system allocator (-d:useMalloc, a nimcache of its own under build/nimcache-asan, the binary in build/tests-asan) and runs it:
+# a use after free or an overflow is a FAIL with the report in the log (the leaks are not looked for: ASAN_OPTIONS detect_leaks=0). It first runs tools/test/check-mmap-rnd.sh and stops with its error
+# when an ASan binary would crash at start (vm.mmap_rnd_bits above 28); a start that crashed all the same (`DEADLYSIGNAL`, nothing else) is repeated, up to 3 times, and the output of a test is cut at
+# 20 MB (that crash prints for ever). Meant for the files that start threads: .ci/pipeline.lua passes those (parameter ASAN, a schedule trigger makes the nightly run).
 # The log of a file that failed is build/test-logs/<name>.log. Exit code: the number of failed files (capped at 100).
 cd "$(dirname "$0")/../.." || exit 2
 jobs=8; unit=1; integ=1; files=()
@@ -34,6 +38,12 @@ if [ ${#files[@]} -eq 0 ]; then
   done
 fi
 mkdir -p build/tests build/test-logs
+asan=${CINIM_TEST_ASAN:-0}
+if [ "$asan" = 1 ]; then
+  sh tools/test/check-mmap-rnd.sh || exit 2
+  export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}
+  mkdir -p build/tests-asan build/nimcache-asan
+fi
 need_db=0; for f in "${files[@]}"; do case $f in tests/integration/*) need_db=1;; esac; done
 native=${CINIM_RQLITE_BIN:-}
 [ -z "$native" ] && ! command -v docker >/dev/null && native=$(command -v rqlited || true)
@@ -66,7 +76,7 @@ elif [ $need_db = 1 ]; then
     until curl -sf "127.0.0.1:$((24600 + i))/readyz" >/dev/null; do sleep 0.5; done
   done
 fi
-export jobs
+export jobs asan
 probe_pid=""
 if [ $need_db = 1 ] && [ "${CINIM_TEST_DBPROBE:-0}" = 1 ]; then
   : > build/test-logs/dbprobe.txt
@@ -93,8 +103,24 @@ one() {   # file slot
   case $f in tests/integration/*) export CINIM_RQLITE_URL=http://127.0.0.1:$((24600 + slot));; *) unset CINIM_RQLITE_URL;; esac
   start=$(date +%s)
   limit=${CINIM_TEST_FILE_TIMEOUT:-900}
-  timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
-  rc=$?
+  if [ "$asan" = 1 ]; then
+    mkdir -p build/tests-asan/$kind
+    bin=build/tests-asan/$kind/$name
+    attempt=0
+    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c --hints:off --warnings:off -p:src -d:useMalloc --debugger:native --passC:-fsanitize=address \
+      --passC:-fno-omit-frame-pointer --passL:-fsanitize=address --nimcache:build/nimcache-asan/$kind-$name --outdir:build/tests-asan/$kind "$f" >"$log" 2>&1
+    rc=$?
+    while [ $rc -eq 0 ]; do
+      ( ulimit -f 20000; timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} "$bin" >"$log" 2>&1 )
+      rc=$?
+      if grep -q DEADLYSIGNAL "$log" && ! grep -q "ERROR: AddressSanitizer" "$log" && [ $attempt -lt 3 ]; then attempt=$((attempt + 1)); : >"$log"; rc=0; continue; fi
+      break
+    done
+  else
+    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
+    rc=$?
+  fi
+  grep -q "ERROR: AddressSanitizer" "$log" && [ $rc -eq 0 ] && rc=1
   ok=$(grep -c '\[OK\]' "$log"); bad=$(grep -c '\[FAILED\]' "$log")
   if [ $rc -eq 0 ] && [ "$bad" = 0 ]; then printf 'ok    %-34s %3d tests %4ds\n' "$kind/$name" "$ok" $(( $(date +%s) - start )); rm -f "$log"
   else

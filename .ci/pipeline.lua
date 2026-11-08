@@ -73,6 +73,21 @@ LINT_REQUIRE=1 LINT_RENDER="$PWD/rendered" sh src/tools/test/lint.sh helm
 ]]
 local LINT_KUBECONFORM = "set -eu\nPATH=/:$PATH LINT_REQUIRE=1 LINT_RENDER=\"$PWD/rendered\" sh src/tools/test/lint.sh kubeconform"
 
+-- The ASan run (parameter ASAN; a schedule trigger with ASAN=true makes it nightly): the files that start threads and talk over the push channel, built with AddressSanitizer on the system allocator
+-- (tools/test/run.sh, CINIM_TEST_ASAN). A use after free there (the client closed its channel under its reader) showed as a hang now and then, and as the whole corrupted heap, not as a report; with ASan it is
+-- a report at once. The conductor test starts a binary of the conductor that is not built with ASan and is left out.
+local ASAN_TESTS = [[
+set -eu
+cd src
+export XDG_CACHE_HOME=/cicd/workspace/nimcache TMPDIR=/cicd/workspace/tmp; mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
+tools/proto/nim_flatten.sh build/nimproto
+for v in $(env | grep -o '^CICD_[A-Z_]*'); do unset "$v"; done
+rc=0
+CINIM_TEST_ASAN=1 CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" tests/unit/tstream.nim tests/integration/tstream.nim tests/integration/tconductorhub.nim || rc=$?
+for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(.*\))$/\1/'); do echo "=== $log"; tail -n 40 "$log"; done
+exit $rc
+]]
+
 local TESTS = [[
 set -eu
 cd src
@@ -230,6 +245,7 @@ return ci.pipeline({
     STORAGE_RELEASE = ci.string{default = "cinim-storage", max_length = 53},          -- the Helm release of the storage module
     BUILD = ci.bool{default = true},
     TEST = ci.bool{default = true},
+    ASAN = ci.bool{default = false},                                                  -- the files of the push channel under AddressSanitizer (a schedule trigger sets it for the nightly run); needs vm.mmap_rnd_bits <= 28 on the nodes
     LINT = ci.bool{default = true},                                                   -- shellcheck, hadolint, helm lint and kubeconform (tools/test/lint.sh), each in the image of its tool, side by side with the tests
     TEST_JOBS = ci.number{default = 2, min = 1, max = 16, integer = true},            -- workers of tools/test/run.sh in the Pod (a compile takes a gigabyte or two)
     BUILD_JOBS = ci.number{default = 2, min = 1, max = 4, integer = true},            -- images built at a time (each is a Kaniko Pod with its own volume; a small cluster cannot take four and a test run)
@@ -279,12 +295,12 @@ return ci.pipeline({
     local run_tests = p.TEST and decided.tests ~= "none"
     local env = { SHA = info.SHA, IMAGE_TAG = tag, DEPS = info.DEPS, TESTDEPS = info.TESTDEPS, TEST_JOBS = tostring(p.TEST_JOBS), BASE = base,
                   COMPONENTS = (decided.tests == "some") and decided.components or "", CHANGED_TESTS = (decided.tests == "some") and decided.changed_tests or "" }
-    if p.BUILD or run_tests or p.LINT then
+    if p.BUILD or run_tests or p.LINT or p.ASAN then
       -- 2. the libraries, and the tests' image, once for as long as what they are made of stays the same
       if p.BUILD then
         checked_out('d', env, function(j) j:image(image("cinim-deps", "tools/image/Dockerfile.deps", info.DEPS, { skip_if_present = true })) end)
       end
-      if run_tests then
+      if run_tests or p.ASAN then
         checked_out('t', env, function(j) j:image(image("cinim-test", "tools/image/Dockerfile.test", info.TESTDEPS, { skip_if_present = true })) end)
       end
       -- 3. the images of the components, and the tests, side by side: the first that fails stops the others
@@ -314,6 +330,12 @@ return ci.pipeline({
             j:run(step.cache_save['5']{ key = key .. info.SHA, paths = {"nimcache"} })          -- also after a failed run: the compiling is what took the time, and it was done
             if not ok then error(err, 0) end
           end, {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "120m", shm = "1Gi"})      -- the databases of the tests are in memory: the disks of a node fsync in 1 ms or in 160
+        end
+      end
+      if p.ASAN then
+        branches.asan = function()
+          checked_out('z', env, function(j) j:run(step.sh['4']{ cmd = ASAN_TESTS }) end,
+                      {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "60m", shm = "1Gi"})
         end
       end
       if p.LINT then
