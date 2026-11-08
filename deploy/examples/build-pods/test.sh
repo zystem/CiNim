@@ -5,7 +5,7 @@
 # Needs: Kubernetes 1.30+, user.max_user_namespaces on the nodes, the seccomp profile of deploy/seccomp on the nodes (for BuildKit and Buildah),
 # and the base image `base/alpine:3.20` in REGISTRY.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 REG="${REGISTRY:?registry host:port as the Pods reach it}"
 K="kubectl ${KUBECTL_CONTEXT:+--context $KUBECTL_CONTEXT}"
 NS=org-example

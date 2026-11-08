@@ -13,7 +13,7 @@
 # process then ends with SIGXFSZ (exit 153), and a run that died in its first SOAK_SAN_START_SECONDS is made again (at most SOAK_SAN_ATTEMPTS times).
 # The cure for the crash itself is `sysctl vm.mmap_rnd_bits=28` on the node.
 set -u
-OUT="$(realpath -m "${1:?outdir}")"; HOURS="${2:-72}"; mkdir -p "$OUT"; cd "$(dirname "$0")/../.."
+OUT="$(realpath -m "${1:?outdir}")"; HOURS="${2:-72}"; mkdir -p "$OUT"; cd "$(dirname "$0")/../.." || exit 1
 BIN="${SOAK_BIN:-build/soak}"; SAN_BIN="${SOAK_SAN_BIN:-build/soak-san}"
 SAN_OUT_KIB="${SOAK_SAN_OUT_KIB:-1048576}"; SAN_START="${SOAK_SAN_START_SECONDS:-10}"; SAN_ATTEMPTS="${SOAK_SAN_ATTEMPTS:-3}"
 SOAK_PORT=19720 SOAK_SECONDS=$((HOURS*3600)) SOAK_SAMPLE_SECONDS=60 SOAK_WARMUP_SECONDS=3600 \

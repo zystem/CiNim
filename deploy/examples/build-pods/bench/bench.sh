@@ -6,7 +6,7 @@
 #   KUBECTL="kubectl --kubeconfig ... --tls-server-name=..."  REGISTRY=<host:port as the Pods reach it, plain HTTP>  [NS=bench-builders] [TOOLS="kaniko ..."] [FILES=40000] ./bench.sh
 # This is about speed, not about the admission policy of the build profile (D-42): the namespace has none, and BuildKit and Buildah run with Unconfined seccomp and AppArmor profiles (the node's AppArmor stops a user namespace in a container otherwise).
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 K="${KUBECTL:-kubectl}"
 REG="${REGISTRY:?registry host:port as the Pods reach it, plain HTTP}"
 NS="${NS:-bench-builders}"

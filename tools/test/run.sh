@@ -39,6 +39,8 @@ if [ $need_db = 1 ] && [ -n "$native" ]; then
   # RAM (faster, and no fsync to wait for) when /dev/shm has 150 MB for every worker (a container has 64 MiB of it by default; a job of the pipeline asks for more with `shm`), else the temporary directory
   shm=""; [ -d /dev/shm ] && [ "$(df -Pk /dev/shm | awk 'NR==2 {print $4}')" -gt $((jobs * 150000)) ] && shm=/dev/shm
   rqdir=$(mktemp -d "${shm:-${TMPDIR:-/tmp}}/cinim-rqlite.XXXXXX")
+  # p is the variable of the loop inside the single-quoted trap
+  # shellcheck disable=SC2154
   trap 'for p in "${rqpids[@]}"; do kill "$p" 2>/dev/null; done; wait; rm -rf "$rqdir"' EXIT
   for ((i = 0; i < jobs; i++)); do
     "$native" -node-id "n$i" -http-addr "127.0.0.1:$((24600 + i))" -raft-addr "127.0.0.1:$((24700 + i))" -fk -disco-mode= "$rqdir/$i" >"$rqdir/$i.log" 2>&1 &

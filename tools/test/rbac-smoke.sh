@@ -25,7 +25,7 @@ declare -A TOKEN PASS
 
 # --- the administrator
 check "no token: components" 401 "$(code '' GET /api/v1/components)"
-check "a made-up token: components" 401 "$(code cnm_000000000000_$(printf '0%.0s' {1..64}) GET /api/v1/components)"
+check "a made-up token: components" 401 "$(code cnm_000000000000_"$(printf '0%.0s' {1..64})" GET /api/v1/components)"
 ADMINPW=${ADMIN_PASSWORD:-}
 if [ -z "$ADMINPW" ]; then
   [ -n "$LOGPW" ] || { echo "FAIL  no administrator line in the log, and no ADMIN_PASSWORD"; exit 1; }
@@ -95,7 +95,7 @@ rows=(
   "PUT /api/v1/users/smoke-rw/password|{\"password\":\"too short\"}|400 400 403 403"
 )
 for row in "${rows[@]}"; do
-  IFS='|' read -r mp body exp <<<"$row"; read -r m p <<<"$mp"; e=($exp); i=0
+  IFS='|' read -r mp body exp <<<"$row"; read -r m p <<<"$mp"; read -r -a e <<<"$exp"; i=0
   for u in admin rw dev ro; do check "$u $m $p" "${e[$i]}" "$(code "${TOKEN[$u]}" "$m" "$p" "$body")"; i=$((i + 1)); done
 done
 # a user's own password: the current one is asked for, and the new one must differ

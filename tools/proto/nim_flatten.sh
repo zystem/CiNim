@@ -14,6 +14,8 @@ done
 rm "$OUT/plugin.proto"
 sed -E '/import "google\/protobuf\/struct.proto";/d; s/google\.protobuf\.Struct/bytes/' "$SRC/cicd/plugin/v1/plugin.proto" > "$OUT/plugin_nim.proto"
 { echo 'syntax = "proto3";'; echo 'package cicd.all;'
+  # the names are those of the proto files of this repository: plain
+  # shellcheck disable=SC2010
   for f in $(cd "$OUT" && ls *.proto | grep -v '^all.proto$'); do echo "import \"$f\";"; done; } > "$OUT/all.proto"
 echo "flattened $(ls "$OUT" | wc -l) files into $OUT"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"; ABS="$(cd "$OUT" && pwd)"

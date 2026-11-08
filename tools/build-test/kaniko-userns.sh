@@ -7,7 +7,6 @@
 # `base/alpine:3.20` in the registry. KUBECTL_CONTEXT picks the cluster.
 set -uo pipefail
 REG="${1:?registry host:port, as the cluster resolves it}"
-HOST="${REG%%:*}"
 K="kubectl ${KUBECTL_CONTEXT:+--context $KUBECTL_CONTEXT}"
 PFX="kaniko-userns"
 RS=registry   # the namespace of the registry (for the network policy)
