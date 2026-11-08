@@ -21,7 +21,10 @@ have() {
 }
 tracked() {         # the files of the working tree that git tracks, else the ones a find sees; $@ are the patterns of the names
   if git rev-parse --git-dir >/dev/null 2>&1; then git ls-files -- "$@"
-  else find . \( -path ./build -o -path ./third_party -o -path ./docs-tr -o -path ./.git \) -prune -o -type f \( $(printf -- '-name %s -o ' "$@" | sed 's/ -o $//') \) -print | sed 's#^\./##'
+  else
+    local names=() n
+    for n in "$@"; do names+=(-o -name "$n"); done
+    find . \( -path ./build -o -path ./third_party -o -path ./docs-tr -o -path ./.git \) -prune -o -type f \( "${names[@]:1}" \) -print | sed 's#^\./##'
   fi
 }
 
