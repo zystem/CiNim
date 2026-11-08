@@ -4,11 +4,12 @@
 FROM nimlang/nim:2.2.4
 RUN apt-get update && apt-get install -y --no-install-recommends libsodium-dev git ca-certificates procps curl xz-utils cmake build-essential openssl zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.57 or later)
-RUN set -eu; W=$(mktemp -d); cd "$W"; \
-    curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ; \
-    cmake -S nghttp2-1.68.0 -B b -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
-    cmake --build b -j"$(nproc)" --target install >/dev/null; rm -rf "$W"
+RUN set -eu; W=$(mktemp -d); \
+    curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ -C "$W"; \
+    cmake -S "$W/nghttp2-1.68.0" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
+    cmake --build "$W/b" -j"$(nproc)" --target install >/dev/null; rm -rf "$W"
 WORKDIR /cinim
 COPY cinim.nimble /cinim/cinim.nimble
 RUN nimble install -y --depsOnly

@@ -1,6 +1,7 @@
 # The workload of bench.sh: a context with many small files and two big ones, and RUN steps that read and change them, so that what is measured is what a build of a big
 # repository spends its time on - the transfer of the context, the layers of many files, the snapshots after each RUN, the cache, the push. Offline but for the base image.
 FROM alpine:3.20
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 WORKDIR /app
 COPY tree/ /app/tree/
 COPY blob1.bin blob2.bin /app/

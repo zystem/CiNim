@@ -1,0 +1,7 @@
+# The rules of hadolint that the repository does not follow, and why (tools/test/lint.sh).
+ignored:
+  # DL3018 (apk) and DL3008 (apt): pin the versions of the system packages. Not done: the base images are pinned (by tag, golang by digest), the images are made once per hash of their
+  # Dockerfile, and the distributions drop the old version of a package from the index when a new one comes, so a pin breaks the build with "package not found" with no change of ours.
+  # What a build needs in a given version (nghttp2, libsodium, rqlited, Go, hsmgate) is pinned by hand in the Dockerfile.
+  - DL3018
+  - DL3008
