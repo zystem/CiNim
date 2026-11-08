@@ -25,6 +25,10 @@
 -- Parameters are plain environment variables of every step (VAR-002); the secrets are fetched by the shim and are never in the script.
 local GIT = "alpine/git:v2.47.2"
 local KUBECTL = "alpine/k8s:1.34.1"             -- kubectl, helm, git, jq
+-- the images of the checks of tools/test/lint.sh, one tool each (none has bash: the script is POSIX sh); the pins are those of the tools run on the workstation
+local SHELLCHECK = "koalaman/shellcheck-alpine:v0.11.0"
+local HADOLINT = "hadolint/hadolint:v2.14.0-alpine"
+local KUBECONFORM = "ghcr.io/yannh/kubeconform:v0.8.0-alpine"       -- the binary is /kubeconform and the image has no PATH to it
 
 -- the component (tools/image/Dockerfile.<component>) and the image it is pushed as
 local COMPONENTS = { { target = "core", image = "cinim" }, { target = "controller", image = "cinim-controller" },
@@ -58,6 +62,17 @@ echo "changed since ${base:-nothing known}: ${areas:-nothing}"
 
 -- The tests, in a Pod: the integration tests start `rqlited` themselves (tools/test/run.sh), the unit tests need nothing. The nimble packages of the image are in the home of root, which is what
 -- the build profile gives a step (root of a user namespace of its own); the cache of the compiler is in the volume of the job, where the organisation's cache puts it.
+-- tools/test/lint.sh in the image of its tool (LINT_REQUIRE: a tool that is missing is a failure, not a skipped check). The charts are rendered by the first step into `rendered` of the workspace, the second step
+-- (the image of kubeconform, which has the Kubernetes schemas' address in its egress: raw.githubusercontent.com) checks what is there. The subcharts of the shard come from the cache that the deploy step uses.
+local LINT_SHELL = "set -eu\nLINT_REQUIRE=1 sh src/tools/test/lint.sh shell"
+local LINT_DOCKER = "set -eu\nLINT_REQUIRE=1 sh src/tools/test/lint.sh docker"
+local LINT_HELM = [[
+set -eu
+mkdir -p src/deploy/charts/cinim-shard/charts && cp -r charts-cache/. src/deploy/charts/cinim-shard/charts/
+LINT_REQUIRE=1 LINT_RENDER="$PWD/rendered" sh src/tools/test/lint.sh helm
+]]
+local LINT_KUBECONFORM = "set -eu\nPATH=/:$PATH LINT_REQUIRE=1 LINT_RENDER=\"$PWD/rendered\" sh src/tools/test/lint.sh kubeconform"
+
 local TESTS = [[
 set -eu
 cd src
@@ -215,6 +230,7 @@ return ci.pipeline({
     STORAGE_RELEASE = ci.string{default = "cinim-storage", max_length = 53},          -- the Helm release of the storage module
     BUILD = ci.bool{default = true},
     TEST = ci.bool{default = true},
+    LINT = ci.bool{default = true},                                                   -- shellcheck, hadolint, helm lint and kubeconform (tools/test/lint.sh), each in the image of its tool, side by side with the tests
     TEST_JOBS = ci.number{default = 2, min = 1, max = 16, integer = true},            -- workers of tools/test/run.sh in the Pod (a compile takes a gigabyte or two)
     BUILD_JOBS = ci.number{default = 2, min = 1, max = 4, integer = true},            -- images built at a time (each is a Kaniko Pod with its own volume; a small cluster cannot take four and a test run)
     DEPLOY = ci.bool{default = false},
@@ -263,7 +279,7 @@ return ci.pipeline({
     local run_tests = p.TEST and decided.tests ~= "none"
     local env = { SHA = info.SHA, IMAGE_TAG = tag, DEPS = info.DEPS, TESTDEPS = info.TESTDEPS, TEST_JOBS = tostring(p.TEST_JOBS), BASE = base,
                   COMPONENTS = (decided.tests == "some") and decided.components or "", CHANGED_TESTS = (decided.tests == "some") and decided.changed_tests or "" }
-    if p.BUILD or run_tests then
+    if p.BUILD or run_tests or p.LINT then
       -- 2. the libraries, and the tests' image, once for as long as what they are made of stays the same
       if p.BUILD then
         checked_out('d', env, function(j) j:image(image("cinim-deps", "tools/image/Dockerfile.deps", info.DEPS, { skip_if_present = true })) end)
@@ -298,6 +314,24 @@ return ci.pipeline({
             j:run(step.cache_save['5']{ key = key .. info.SHA, paths = {"nimcache"} })          -- also after a failed run: the compiling is what took the time, and it was done
             if not ok then error(err, 0) end
           end, {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "120m", shm = "1Gi"})      -- the databases of the tests are in memory: the disks of a node fsync in 1 ms or in 160
+        end
+      end
+      if p.LINT then
+        branches.lint = function()
+          ci.parallel({
+            shell = function() checked_out('w', env, function(j) j:run(step.sh['1']{ cmd = LINT_SHELL, image = SHELLCHECK }) end) end,
+            docker = function() checked_out('x', env, function(j) j:run(step.sh['1']{ cmd = LINT_DOCKER, image = HADOLINT }) end) end,
+            helm = function()
+              local helm_key = "helm-" .. info.HELMDEPS
+              checked_out('y', env, function(j)
+                j:run(step.cache_restore['3']{ keys = {helm_key} })
+                j:run(step.sh['4']{ cmd = HELM_DEPS, image = KUBECTL })
+                pcall(function() j:run(step.cache_save['5']{ key = helm_key, paths = {"charts-cache"} }) end)       -- there already for this lock: nothing to keep
+                j:run(step.sh['6']{ cmd = LINT_HELM, image = KUBECTL })
+                j:run(step.sh['7']{ cmd = LINT_KUBECONFORM, image = KUBECONFORM })
+              end)
+            end,
+          })       -- all three are reported: a failed one does not cancel the others
         end
       end
       ci.parallel(branches, {fail_fast = true})
