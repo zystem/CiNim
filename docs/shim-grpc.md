@@ -26,8 +26,8 @@ reconnect, as a ZeroMQ routing id did. The `Down` call is opened first and the c
 each is then used by one thread on each side (a call of nimgrpc is not meant to be read and written by two). Frames cross threads in `ShmQueue` (`common/shmq.nim`), never as Nim strings. A peer takes two workers of the gRPC server for as long as it is
 connected (`maxWorkers` is twice the number of peers plus a few).
 
-Build: nimgrpc is a nimble package (`requires "nimgrpc >= 0.2.0"` in `cinim.nimble`; the repository is `zystem/nimgrpc`, the modules are `nimgrpc`: `import nimgrpc`; version 0.2.0 was used). It needs a
-static nghttp2 1.57 or later, which it looks for in `/opt/nghttp2` (`include/` and `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>`, or `NGHTTP2_PREFIX` for `config.nims`, names another place), zlib, and the Nim
+Build: nimgrpc is a nimble package (`requires "nimgrpc >= 0.3.0"` in `cinim.nimble`; the repository is `zystem/nimgrpc`, the modules are `nimgrpc`: `import nimgrpc`; version 0.3.0 was used). It needs a
+static nghttp2 1.61 or later, which it looks for in `/opt/nghttp2` (`include/` and `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>`, or `NGHTTP2_PREFIX` for `config.nims`, names another place), zlib, and the Nim
 package `bearssl` that nimble brings. `tools/image/Dockerfile.deps` (and `Dockerfile.test`, `tools/soak/Dockerfile`, `tools/shim/build_static.sh`) build nghttp2 1.68.0. The shim, the conductor and the controller no longer need libzmq, libsodium or a C++ toolchain;
 libsodium stays in the core and the storage module (the sealing of the secrets), at `/opt/sodium`.
 

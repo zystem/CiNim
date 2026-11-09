@@ -13,7 +13,7 @@ RUN set -eu; W=$(mktemp -d); cd "$W"; \
     git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium; \
     (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix=/opt/sodium --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null); \
     rm -rf "$W"
-# nghttp2 as a static archive, where nimgrpc looks for it by default (the shim's gRPC channels, docs/shim-grpc.md); 1.57 or later is required
+# nghttp2 as a static archive, where nimgrpc looks for it by default (the shim's gRPC channels, docs/shim-grpc.md); 1.61 or later is required
 RUN set -eu; W=$(mktemp -d); \
     curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ -C "$W"; \
     cmake -S "$W/nghttp2-1.68.0" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel \

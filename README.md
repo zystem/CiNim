@@ -57,7 +57,7 @@ nimble testcontract  # Protobuf contracts
 
 Dependencies that are not plain nimble packages:
 
-- `nimgrpc` (`requires "nimgrpc >= 0.2.0"`, github.com/zystem/nimgrpc): gRPC on nghttp2 and BearSSL. It links a **static nghttp2 1.57 or later** from `/opt/nghttp2` (`include/`, `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>` or `NGHTTP2_PREFIX` for `config.nims` for another place; the recipe is in `tools/image/Dockerfile.deps`) and zlib.
+- `nimgrpc` (`requires "nimgrpc >= 0.3.0"`, github.com/zystem/nimgrpc): gRPC on nghttp2 and BearSSL. It links a **static nghttp2 1.61 or later** from `/opt/nghttp2` (`include/`, `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>` or `NGHTTP2_PREFIX` for `config.nims` for another place; the recipe is in `tools/image/Dockerfile.deps`) and zlib.
 - `guildenstern`: upstream 9.0.1 or later (it carries the fixes that were a local patch on 9.0.0).
 - libsodium (the sealing of the secrets): the distribution package.
 - libpcre (`libpcre3` on Debian and Ubuntu): the UI templates load it at run time (`tests/unit/ttemplates.nim` fails with `could not load: libpcre.so` without it).

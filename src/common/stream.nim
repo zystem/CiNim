@@ -339,11 +339,11 @@ proc clientMain(st: ptr ClientState) {.thread.} =
         try: up.closeSend() except CatchableError: discard
       except CatchableError: discard
       st.connected.store(false)
-      # The reader thread is in `down.recv` on the channel, and `ch.close()` frees the channel (its documentation: the calls fail and it must not be used afterwards): closing it first let
-      # the reader's failing call touch freed memory (found with AddressSanitizer in tconductorhub; the corrupted heap showed as a cycle in the allocator's free list, a thread that
-      # spun for ever holding the lock of a connection, and a server that accepted nobody). So: cancel the call (a reset of the stream wakes the reader), join the reader, then close.
+      # The reader thread is in `down.recv` on the channel, and `ch.close()` frees the channel: closing it first let the reader's failing call touch freed memory (found with AddressSanitizer
+      # in tconductorhub; the corrupted heap showed as a cycle in the allocator's free list, a thread that spun for ever holding the lock of a connection, and a server that accepted nobody).
+      # nimgrpc 0.3.0 has the order for it: `shutdown` closes the connections and frees nothing (the calls of any thread fail at once, from any thread), the reader is joined, then `close` frees.
       if readerOn:
-        try: down.cancel() except CatchableError: discard
+        try: ch.shutdown() except CatchableError: discard
         joinThread(reader)
       if chOpen: (try: ch.close() except CatchableError: discard)
       if not st.stop.load:

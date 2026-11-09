@@ -20,7 +20,7 @@ Read `README.md` first (what works, the structure, the build), then `docs/specif
 
 ## Building
 
-- Nim 2.2.4 (ORC), `nimble install -d`. System: libsodium (`libsodium-dev`; tests of modules that import `src/common/sodiumaead.nim` link `-lsodium`), a static nghttp2 1.57 or later in `/opt/nghttp2` (nimgrpc links it; `-d:nghttp2Prefix=<dir>` for another place; the image `Dockerfile.deps` and `Dockerfile.test` build it), libpcre (the UI templates).
+- Nim 2.2.4 (ORC), `nimble install -d`. System: libsodium (`libsodium-dev`; tests of modules that import `src/common/sodiumaead.nim` link `-lsodium`), a static nghttp2 1.61 or later in `/opt/nghttp2` (nimgrpc links it; `-d:nghttp2Prefix=<dir>` for another place; the image `Dockerfile.deps` and `Dockerfile.test` build it), libpcre (the UI templates).
 - `tests/unit/thsmgate_tls.nim.cfg` (`-d:ssl`) belongs to the TLS test of the key service; `thsmgate.nim`, `thsmgate_tls.nim` and `integration/tkeyservice.nim` run the real hsmgate: the test image has it (built from the tag `HSMGATE_REF` of `Dockerfile.test`, `HSMGATE_BIN` is set; a new hsmgate is a change of that ARG, and the run says whether the core still speaks with it), and they are skipped on a machine without `HSMGATE_BIN=<path>` (`go build -o /tmp/hsmgate ./cmd/hsmgate` in `~/github/hsmgate`; the TLS one needs the `openssl` command for `tests/support/mkcerts.sh`).
 - The shim has two builds: without `-d:shimLogging` (no gRPC client, what the unit tests use) and with it (the real one). Check both: `nim check -d:shimLogging src/shim/shim.nim` and without.
 - The job controller needs the Kubernetes C client (`-d:k8sPrefix=...`); without it use `nim check -d:k8sPrefix=/opt/k8s src/jobcontroller/main.nim` to type-check only.
