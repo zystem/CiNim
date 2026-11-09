@@ -226,13 +226,18 @@ suite "real Lua API (ci.pipeline, ci.job, Job:sh)":
       return "ok" end })""", fakeHost)
     check r.code == "ok"
     check j.entries[0].payload == "0k\talpine/k8s\tdeploy\t\tkubectl version"
-  test "an unknown profile is a script error":
+  test "a profile that is not a word of the profiles is a script error; the name of an organisation's deploy profile is passed on (D-115: the core says whether it has it)":
     var sb = newSandbox()
     var j = Journal()
-    let r = sb.execute(j, """return ci.pipeline({ main = function(run)
-      ci.single['0m']{ image = "a", profile = "privileged", body = function(j) j:run(step.sh['1']{ cmd = "x" })  end }
+    for bad in ["Privileged", "has space", "-x", "1x", "x.y"]:
+      let r = sb.execute(j, "return ci.pipeline({ main = function(run)\n ci.single['0m']{ image = \"a\", profile = \"" & bad & "\", body = function(j) j:run(step.sh['1']{ cmd = \"x\" })  end }\n return \"ok\" end })", fakeHost)
+      check r.code != "ok"
+    var sb2 = newSandbox()
+    var j2 = Journal()
+    let named = sb2.execute(j2, """return ci.pipeline({ main = function(run)
+      ci.single['0m']{ image = "a", profile = "test1", body = function(j) j:run(step.sh['1']{ cmd = "x" })  end }
       return "ok" end })""", fakeHost)
-    check r.code != "ok"
+    check named.code == "ok"
   test "the key of a job is its id (D-67), and a step is told by one number made of the ids":
     var sb = newSandbox()
     var j = Journal()

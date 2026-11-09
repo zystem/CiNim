@@ -517,10 +517,13 @@ end
 
 -- The execution profile of a job (RUN-004): "" is the organisation's ordinary one, "build" the build profile (A.13), whose steps run
 -- as build Pods in the organisation's own namespace (D-42), and "deploy" the deploy profile (D-48): an ordinary step that may reach the
--- targets of a deployment (the Kubernetes API server, what the operator lists). Core refuses a profile that the shard does not have.
+-- targets of a deployment (the Kubernetes API server, what the operator lists). Any other word is a deploy profile of the organisation (D-115): the same kind of Pod, run as
+-- the ServiceAccount that the profile names. Core refuses a profile that the shard or the organisation does not have.
 local function norm_profile(v)
   if v == nil or v == "default" then return "" end
-  if v ~= "build" and v ~= "deploy" then error("ci.job: profile must be \"default\", \"build\" or \"deploy\"", 3) end
+  if type(v) ~= "string" or #v > 40 or not v:match("^[a-z][a-z0-9_-]*$") then
+    error("ci.job: profile must be \"default\", \"build\", \"deploy\" or the name of a deploy profile of the organisation (lowercase letters, digits, - and _)", 3)
+  end
   return v
 end
 

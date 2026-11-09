@@ -154,7 +154,10 @@ build:
 # unlike the other steps they may reach what `egress` lists: a list of NetworkPolicy egress rules (a cluster's address, a registry), or the string `all`.
 # `kubeApiServer: true` also lets them reach the Kubernetes API server of this cluster, with a CiliumNetworkPolicy (Cilium sees the API server at the
 # addresses of the control-plane nodes, which a NetworkPolicy cannot name); the core then needs the right to make those (rbac, admission policy). What a step
-# may do there is decided by the credential it is given (a token as a step secret), not by the platform. See docs/deployment.md.
+# may do there is decided by the credential it is given, not by the platform: a step secret (a token and a CA, D-45), or, for a deployment into this cluster, the token
+# of a ServiceAccount: an organisation makes deploy profiles of its own (PUT /api/v1/organizations/<slug>/deploy-profiles/<name>, D-115), each with an account and the
+# namespaces it deploys into, and a project may use the profiles that it lists in `allowed_profiles`; the core makes the accounts in the namespace of the organisation, the
+# operator binds the rights to them (deploy/examples/self-build/deployer.yaml). The profile `deploy` itself is the local one, with no token. See docs/deployment.md.
 deploy:
   enabled: false
   egress: []

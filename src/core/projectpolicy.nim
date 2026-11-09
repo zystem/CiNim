@@ -4,7 +4,7 @@
 ## the names a commit was asked by (a branch or a tag): a run started by a bare SHA has no ref and is not trusted, whatever branch the commit is on.
 import std/[json, strutils]
 import ../common/rqlite
-import groups, refpattern
+import groups, refpattern, deployprofiles
 export refpattern
 
 const
@@ -112,16 +112,27 @@ proc allowedProfiles*(c: var RqClient; groupId: string): seq[string] =
       for p in entries(v[0][0].getStr):
         if p notin result: result.add p
 
+func isDeployKind*(profile: string): bool =
+  ## `deploy` and a deploy profile of the organisation (D-115) are the same kind of thing for the gate: privileged, and for trusted runs only
+  profile == "deploy" or (profile.len > 0 and profile notin privilegedProfiles and profile notin reservedProfileNames)
+
 proc setAllowedProfiles*(c: var RqClient; groupId: string; profiles: seq[string]): string =
+  ## `build`, `deploy`, and the name of a deploy profile that the organisation of the project has (D-115): one that is not defined is refused, so that a typo does not grant nothing quietly
+  var tenant = ""
   for p in profiles:
-    if p notin privilegedProfiles: return "a profile that needs a grant is build or deploy (" & p & ")"
+    if p in privilegedProfiles: continue
+    if not validDeployProfileName(p): return "a profile that needs a grant is build, deploy or a deploy profile of the organisation (" & p & ")"
+    if tenant.len == 0:
+      let g = c.query(%*[["SELECT tenant_id FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
+      if g != nil and g.len > 0: tenant = g[0][0].getStr
+    if not c.deployProfileNamed(tenant, p).found: return "this organisation has no deploy profile " & p & " (PUT /api/v1/organizations/{slug}/deploy-profiles/" & p & ")"
   discard c.execute(%*[["UPDATE groups SET allowed_profiles = ? WHERE id = ?", profiles.join("\n"), groupId]])
 
 proc profileProblem*(c: var RqClient; groupId, profile: string; trusted: bool): string =
   ## why a job of this profile may not be made in a run of this project, "" when it may. The ordinary profile is for everyone.
-  if profile notin privilegedProfiles: return ""
+  if profile notin privilegedProfiles and not profile.isDeployKind: return ""
   if profile notin c.allowedProfiles(groupId):
     return "the profile \"" & profile & "\" is not allowed for this project: someone with profile.grant sets allowed_profiles of the project (PUT .../projects/{path}/settings)"
-  if profile == "deploy" and not trusted:
-    return "the profile \"deploy\" is for runs on a protected ref of the project (protected_refs), and this run is not on one"
+  if profile.isDeployKind and not trusted:
+    return "the profile \"" & profile & "\" is for runs on a protected ref of the project (protected_refs), and this run is not on one"
   ""

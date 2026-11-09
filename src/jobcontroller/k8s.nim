@@ -121,6 +121,10 @@ proc podBody(r: PodRequest): JsonNode =
         (if r.logging: @[%*{"name": "certs", "secret": {"secretName": tlsSecret, "items": [   # shim reads <certs-dir>/tls/{ca.pem,client.pem,client.key}
           {"key": "ca.pem", "path": "tls/ca.pem"}, {"key": "client.pem", "path": "tls/client.pem"},
           {"key": "client.key", "path": "tls/client.key"}]}}] else: @[]))}}
+  if r.deployAccount.len > 0:
+    # D-115: the credential of a deployment into this cluster is the Pod's own token, of the account the profile names and the operator has bound a role to; no other step has a token of the cluster
+    result["spec"]["serviceAccountName"] = %r.deployAccount
+    result["spec"]["automountServiceAccountToken"] = %true
   if vol.initContainers.len > 0: result["spec"]["initContainers"] = %vol.initContainers
   if vol.affinity != nil: result["spec"]["affinity"] = vol.affinity
   if vol.spread != nil: result["spec"]["topologySpreadConstraints"] = vol.spread

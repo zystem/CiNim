@@ -55,8 +55,20 @@ ORG=${SMOKE_ORG:-$(curl -s -H "Authorization: Bearer $ADMIN" "$base/api/v1/organ
 echo "note  the test users belong to the organisation $ORG"
 check "a person who is not an administrator has to belong to an organisation" 400 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-x\",\"role\":\"ro\",\"password\":\"$(rand)\"}")"
 
+# --- a user of the shard is an administrator: made, shown with the role admin at the shard, working, and deleted (D-90); the user admin itself cannot be deleted
+code "$ADMIN" DELETE /api/v1/users/smoke-root >/dev/null
+ROOTPW=$(rand)
+check "an administrator of the shard is made (no organisation, role admin)" 201 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-root\",\"role\":\"admin\",\"password\":\"$ROOTPW\"}")"
+check "a name that is taken" 409 "$(code "$ADMIN" POST /api/v1/users "{\"name\":\"smoke-root\",\"role\":\"admin\",\"password\":\"$ROOTPW\"}")"
+ROOT=$(login smoke-root "$ROOTPW" | field token)
+check "the new administrator reads the components" 200 "$(code "$ROOT" GET /api/v1/components)"
+check "the administrator is deleted" 200 "$(code "$ADMIN" DELETE /api/v1/users/smoke-root)"
+check "its token stops working" 401 "$(code "$ROOT" GET /api/v1/components)"
+check "a second delete finds none" 404 "$(code "$ADMIN" DELETE /api/v1/users/smoke-root)"
+check "the user admin cannot be deleted" 403 "$(code "$ADMIN" DELETE /api/v1/users/admin)"
+
 # --- the users, made by the administrator
-cleanup() { for u in rw dev ro; do code "$ADMIN" DELETE "/api/v1/users/smoke-$u" >/dev/null; done; }
+cleanup() { for u in rw dev ro; do code "$ADMIN" DELETE "/api/v1/users/smoke-$u" >/dev/null; done; code "$ADMIN" DELETE /api/v1/users/smoke-root >/dev/null; }
 trap cleanup EXIT
 cleanup
 for u in rw dev ro; do

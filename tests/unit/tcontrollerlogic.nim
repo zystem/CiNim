@@ -81,6 +81,13 @@ suite "creating Pods":
     check r.spoolBytes == 2097152
     let d = buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x"))
     check d.cmd[d.cmd.find("--log-hold-timeout") + 1] == "600"
+  test "D-115 only a Pod of the deploy profile runs as an account with its token: a build step, an ordinary one and a deploy step that names no account have none":
+    check deployAccount(true, false, "deploy-test1") == "deploy-test1"
+    check deployAccount(true, false, "") == "" and deployAccount(false, false, "deploy-test1") == "" and deployAccount(false, true, "deploy-test1") == "" and deployAccount(true, true, "x") == ""
+    let withAccount = buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", profile: "deploy", serviceAccount: "deploy-test1"))
+    check withAccount.deploy and withAccount.deployAccount == "deploy-test1"
+    check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", profile: "build", serviceAccount: "deploy-test1")).deployAccount == ""
+    check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", serviceAccount: "deploy-test1")).deployAccount == ""
   test "a step of the build profile is a build request, any other is not (D-42)":
     check buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x", profile: "build")).build
     check not buildRequest(cfg, StartRequest(runId: "s1_a", seq: 0, attempt: 1, image: "x")).build

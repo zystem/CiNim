@@ -9,6 +9,7 @@ type Flow = object
   builds, retags: seq[string]      ## the components whose image was built (Kaniko) and tagged from BASE's
   tests, deploy, depsImage, testImage: bool
   verified: bool                   ## the script called ci.verified() (D-112)
+  rollout: string                  ## the step that runs `helm upgrade` as the script made it (the job, the step, its options and the command)
   registrySteps, withLogin, strayLogin: int   ## the steps that talk to the registry (Kaniko, crane), how many of them were given the Docker config, and how many steps that do not talk to it were
   checks: seq[string]              ## the images whose presence in the registry was asked (the libraries, the tests)
   copies: seq[string]              ## the images that were copied to the other registries (`crane copy`)
@@ -72,7 +73,9 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
         if at >= 0:
           let from0 = at + k.len + 4
           res.testEnv.add k & "=" & opts[from0 ..< opts.find('"', from0)] & ";"
-    if "helm upgrade" in cmd: res.deploy = true
+    if "helm upgrade" in cmd:
+      res.deploy = true
+      res.rollout = payload
     some("0\n")
   var sb = newSandbox()
   var j: Journal
@@ -163,6 +166,11 @@ suite "D-82 what the pipeline builds, tags and runs":
   test "the deploy follows whatever was built or tagged":
     let f = flow(common & "BASE=" & goodBase & "\nAREAS=docs\nCHANGED_TESTS=none\n", base = goodBase, deploy = true)
     check f.status.startsWith("esDone") and f.deploy
+  test "D-48 the rollout runs as a Pod of the deploy profile with no step secret: its credential is the token of the Pod, and the repository of the images is set":
+    let f = flow(common & "BASE=" & goodBase & "\nAREAS=docs\nCHANGED_TESTS=none\n", base = goodBase, deploy = true)
+    check f.rollout.len > 0 and "\tplatform\t" in f.rollout
+    check "DEPLOY_TOKEN" notin f.rollout and "DEPLOY_CA" notin f.rollout and "kubeconfig" notin f.rollout and "set-credentials" notin f.rollout
+    check "--set image.repository=" in f.rollout and "--set image.tag=" in f.rollout
 
 suite "D-112 the run says when it was verified":
   test "a run that built (or tagged) and tested is verified, also when nothing changed and no test was needed":

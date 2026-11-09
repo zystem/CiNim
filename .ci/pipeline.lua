@@ -8,7 +8,7 @@
 --   3. side by side, and the first failure stops the other: the images of the components (`ci.matrix`: each in a job of its own that checks the commit out and calls `j:image`; an image that nothing changed for is the
 --      image of the last good commit under the new tag) and the tests (`tools/test/run.sh` in a Pod of the test image: the integration tests start their own `rqlited` processes, no Docker; `TEST_JOBS`
 --      workers, `TEST` false leaves them out; the compiled C of the tests is a cache of the organisation (`nim-<hash>-<commit>`), so that only a first run compiles everything),
---   4. a deploy step (profile = "deploy": an ordinary, non-root Pod that may reach the Kubernetes API server with the token of deployer.yaml) when DEPLOY is true: `helm upgrade --atomic --wait`
+--   4. a deploy step (profile = DEPLOY_PROFILE, "platform": a deploy profile of the organisation (D-115), an ordinary, non-root Pod that may reach the Kubernetes API server with the token of its account, the rights of deployer.yaml) when DEPLOY is true: `helm upgrade --atomic --wait`
 --      of the storage module and of the shard with the new tag of the images (the controllers and the conductors follow the core by themselves, D-62), a rollback of both releases to the
 --      revisions they had if either fails, and a look at what runs afterwards.
 -- D-82: what a commit changes decides what is done. The platform tells the script `run.source.base`, the commit of the last run of this pipeline on the same ref that ended OK and called `ci.verified()` (a new branch: on the default branch); the first job reduces the files that differ
@@ -21,7 +21,7 @@
 -- of the registry, the organisation's secret REGISTRY_DOCKER_CONFIG (docs/deployment.md "Where the images go"); PUSH_ALSO lists other registries that every image is copied to. The nodes pull with their own login (PULL_REGISTRY).
 -- Leave TAG out and every run tags its images `run.tag`, <date>-<commit>. A run that came with the script in the request (no repository) takes REPO and REF from its parameters.
 -- The organisation needs the build profile (build.enabled) with a build.egress rule for every registry, and a store for caches (the storage module); for the deploy step the deploy
--- profile (deploy.enabled, deploy.kubeApiServer) and the secrets DEPLOY_TOKEN and DEPLOY_CA (deployer.yaml). A step that exits non-zero fails the job and so the run (6.7).
+-- profile (deploy.enabled, deploy.kubeApiServer, deploy.serviceAccount: the token of the Pod is the credential, its rights are deployer.yaml). A step that exits non-zero fails the job and so the run (6.7).
 -- Parameters are plain environment variables of every step (VAR-002); the secrets are fetched by the shim and are never in the script.
 local GIT = "alpine/git:v2.47.2"
 local KUBECTL = "alpine/k8s:1.34.1"             -- kubectl, helm, git, jq
@@ -132,12 +132,9 @@ cp -r deploy/charts/cinim-shard/charts ../charts-cache
 -- The core's own restart ends the Pod that this step runs next to, and the step's result is delivered to the new core when it is up (the shim keeps trying).
 local ROLLOUT = [[
 set -eu
-printf '%s\n' "$DEPLOY_CA" > "$CICD_RUN_DIR/ca.crt"
-export KUBECONFIG="$CICD_RUN_DIR/kubeconfig"
-kubectl config set-cluster c --server=https://kubernetes.default.svc --certificate-authority="$CICD_RUN_DIR/ca.crt" --embed-certs=true >/dev/null
-kubectl config set-credentials d --token="$DEPLOY_TOKEN" >/dev/null
-kubectl config set-context x --cluster=c --user=d --namespace="$NAMESPACE" >/dev/null
-kubectl config use-context x >/dev/null
+# the credential is the Pod's own token (D-48, deploy.serviceAccount of the shard): helm and kubectl read it as the in-cluster configuration, whose namespace is that of the Pod, not the shard's
+kubectl() { command kubectl -n "$NAMESPACE" "$@"; }
+pull=${PULL_REGISTRY:-$REGISTRY}               # the name the nodes pull the images by (the parameter is empty when it is the one the build pushes to)
 mkdir -p src/deploy/charts/cinim-shard/charts
 cp -r charts-cache/. src/deploy/charts/cinim-shard/charts/               # the subcharts that the job of the build profile fetched
 cd src
@@ -149,8 +146,9 @@ back() {
   helm rollback "$RELEASE" "$shard_was" -n "$NAMESPACE" --wait --timeout 5m || true
   exit 1
 }
-helm upgrade "$STORAGE_RELEASE" deploy/charts/cinim-storage -n "$NAMESPACE" --reset-then-reuse-values --set image.tag="$IMAGE_TAG" --atomic --wait --timeout 10m || back
-helm upgrade "$RELEASE" deploy/charts/cinim-shard -n "$NAMESPACE" --reset-then-reuse-values --set image.tag="$IMAGE_TAG" --atomic --wait --timeout 10m || back
+# the repository is set too: the values a release was made with can name a registry that is gone (the storage release did), and `--reset-then-reuse-values` keeps them
+helm upgrade "$STORAGE_RELEASE" deploy/charts/cinim-storage -n "$NAMESPACE" --reset-then-reuse-values --set image.repository="$pull/cinim-storage" --set image.tag="$IMAGE_TAG" --atomic --wait --timeout 10m || back
+helm upgrade "$RELEASE" deploy/charts/cinim-shard -n "$NAMESPACE" --reset-then-reuse-values --set image.repository="$pull/cinim" --set image.tag="$IMAGE_TAG" --atomic --wait --timeout 10m || back
 # what runs now: the core and the module are at the tag, and ready
 for d in cinim-core cinim-storage; do
   img=$(kubectl get deploy "$d" -o jsonpath='{.spec.template.spec.containers[0].image}')
@@ -250,6 +248,7 @@ return ci.pipeline({
     TEST_JOBS = ci.number{default = 2, min = 1, max = 16, integer = true},            -- workers of tools/test/run.sh in the Pod (a compile takes a gigabyte or two)
     BUILD_JOBS = ci.number{default = 2, min = 1, max = 4, integer = true},            -- images built at a time (each is a Kaniko Pod with its own volume; a small cluster cannot take four and a test run)
     DEPLOY = ci.bool{default = false},
+    DEPLOY_PROFILE = ci.string{default = "platform", max_length = 40},                -- the deploy profile of the organisation whose account (and token) the rollout uses (D-115, deployer.yaml)
   },
   main = function(run)
     local p = run.params
@@ -371,7 +370,7 @@ return ci.pipeline({
       checked_out('r', env, function(j)
         j:run(step.cache_restore['3']{ keys = {helm_key} })
         j:run(step.sh['4']{ cmd = ROLLOUT })
-      end, {image = KUBECTL, profile = "deploy", secrets = {"DEPLOY_TOKEN", "DEPLOY_CA"}})
+      end, {image = KUBECTL, profile = p.DEPLOY_PROFILE})
     end
     return tag
   end,

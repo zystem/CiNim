@@ -329,12 +329,6 @@ proc rolePermissions*(c: var RqClient; role: string): seq[string] =
   if r != nil:
     for v in r: result.add v[0].getStr
 
-proc legacyShardBindings*(c: var RqClient): seq[tuple[user, role: string]] =
-  ## roles other than `admin` given at the shard before D-90: they are not rights any more, and this lists them so that they can be seen and the users moved into an organisation or deleted
-  let v = c.query(%*[["SELECT user_name, role FROM role_bindings WHERE scope = ? AND role != ? ORDER BY user_name", shardScope, roleAdmin]])["results"][0]{"values"}
-  if v != nil:
-    for r in v: result.add (r[0].getStr, r[1].getStr)
-
 func conditionOf*(expiresAt: int64; onlyOwn: bool; refs: string): BindingCondition =
   ## the condition of a row: the refs are kept one to a line
   result = BindingCondition(expiresAt: expiresAt, onlyOwn: onlyOwn)
@@ -342,7 +336,7 @@ func conditionOf*(expiresAt: int64; onlyOwn: bool; refs: string): BindingConditi
     let t = l.strip
     if t.len > 0: result.refs.add t
 
-proc userRoles*(c: var RqClient; name: string; now = 0'i64): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope, source: string, cond: BindingCondition]], grants: Grants, ignored: seq[string]] =
+proc userRoles*(c: var RqClient; name: string; now = 0'i64): tuple[found, disabled, mustChange: bool, roles: seq[string], bindings: seq[tuple[role, scope, source: string, cond: BindingCondition]], grants: Grants] =
   ## the user; the roles it has at the shard level (the ones every organisation inherits); every binding, at the shard and in an organisation; and what they give (D-84).
   ## A binding whose term has passed (`expires_at`, D-92) is not read at all: it gives nothing and is not listed.
   let at = if now > 0: now else: getTime().toUnix()
@@ -359,8 +353,7 @@ proc userRoles*(c: var RqClient; name: string; now = 0'i64): tuple[found, disabl
       let role = v[0].getStr
       let scope = v[1].getStr
       if scope == shardScope and not allowedAtShard(role):
-        result.ignored.add role                       # D-90: the shard has no users but administrators; a role of another kind given there before is not a right any more
-        continue
+        continue                                      # D-90: the shard has no users but administrators: a role of another kind given there is no right
       let cond = conditionOf(v[3].getBiggestInt, v[4].getInt > 0, v[5].getStr)
       result.bindings.add (role, scope, v[2].getStr, cond)
       if scope == shardScope: result.roles.add role
@@ -394,10 +387,11 @@ proc newUserToken(c: var RqClient; user: string; now: int64): string =
   c.createApiToken("user " & user, userScope(user), 0, now).token
 
 proc bootstrapAdminUser*(c: var RqClient; now: int64): seq[UserCredential] =
-  ## The first start (no user exists): the user `admin`, with a password and a token made here and returned for the log once, and the duty to change the password before
-  ## anything else is done (the other users are made by an administrator). The roles of the shard are made too. Nothing is made if there is a user already.
+  ## A start with no user `admin` (the first one, or one after the user was lost: it cannot be deleted through the API, but a database can lose it): the user `admin`, with a
+  ## password and a token made here and returned for the log once, and the duty to change the password before anything else is done (the other users are made by an
+  ## administrator). The roles of the shard are made too. Nothing is made if there is the user `admin`, whatever other users there are.
   c.ensureRoles()
-  let have = c.query(%*[["SELECT count(*) FROM users"]])["results"][0]{"values"}[0][0].getInt
+  let have = c.query(%*[["SELECT count(*) FROM users WHERE name = ?", roleAdmin]])["results"][0]{"values"}[0][0].getInt
   if have > 0: return
   let pw = mintPassword()
   discard c.execute(%*[
@@ -575,7 +569,7 @@ proc listUsers*(c: var RqClient): JsonNode =
         if isOrgScope(b.scope):
           if not inOrgs.hasKey(b.scope[4 .. ^1]): inOrgs[b.scope[4 .. ^1]] = newJArray()
           inOrgs[b.scope[4 .. ^1]].add %b.role
-      result.add %*{"name": v[0].getStr, "roles": u.roles, "ignored_shard_roles": u.ignored, "organizations": inOrgs, "source": v[4].getStr, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
+      result.add %*{"name": v[0].getStr, "roles": u.roles, "organizations": inOrgs, "source": v[4].getStr, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
 
 proc passwordIs*(c: var RqClient; user, password: string): bool =
   ## whether this is the user's password. For a user who does not exist the same work is done (a hash is made), so that the time does not tell.

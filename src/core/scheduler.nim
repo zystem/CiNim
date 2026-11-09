@@ -10,7 +10,7 @@ import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, table
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource, bytestr]
-import ctrlpresence, logwindow, keptpods, stepsecrets, registries, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
+import ctrlpresence, logwindow, keptpods, stepsecrets, registries, deployprofiles, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import groups, apiauth, approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
@@ -886,11 +886,21 @@ proc handlePoll*(c: var RqClient; defaultProfile, master: string; req: PollReque
     let vals = r["results"][0]{"values"}
     if vals == nil or vals.len == 0: continue    # another poll took it first
     let row = vals[0]
+    # D-115: a deploy profile of the organisation is a `deploy` Pod run as the profile's account; the step is told the profile and, when it names one, the namespace it deploys into
+    let asked = row[6].getStr
+    let own = if asked.isDeployKind and asked != "deploy": c.deployProfileForRun(row[0].getStr, asked) else: (known: false, account: "", targetNamespace: "")
+    var stepEnvList = startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow, row[5].getStr)
+    if own.known:
+      stepEnvList.add ("CINIM_DEPLOY_PROFILE", asked)
+      if own.targetNamespace.len > 0:
+        stepEnvList.add ("CINIM_DEPLOY_NAMESPACES", own.targetNamespace)
+        if own.targetNamespace.isPlainNamespace: stepEnvList.add ("CINIM_DEPLOY_NAMESPACE", own.targetNamespace)      # one namespace: what `kubectl -n` takes
     commands.add Command(seq: seq, body: CommandBody(kind: CommandBodyKind.start, start: StartStep(
       step: StepRef(run_id: row[0].getStr, seq: uint32(row[1].getInt), attempt: uint32(row[4].getInt)),
       image: row[2].getStr, command: @["sh", "-c", row[3].getStr], opts_json: row[5].getStr, log_max_bytes: uint64(settings.logMaxBytes),
       log_spool_bytes: uint64(settings.logSpoolBytes), log_hold_timeout_seconds: uint32(settings.logHoldTimeout),
-      profile: row[6].getStr, volume: (if isolatedWorkspace(row[5].getStr): row[7].getStr else: ""), secret_names: secretNamesOf(row[5].getStr), env: startEnv(c, row[0].getStr, row[1].getInt, row[4].getInt, claimedNow, row[5].getStr).mapIt(EnvEntry(key: it[0], value: it[1])),
+      profile: (if asked.isDeployKind: "deploy" else: asked), service_account: own.account,        # a profile deleted since the step was made is the local `deploy` (no token)
+       volume: (if isolatedWorkspace(row[5].getStr): row[7].getStr else: ""), secret_names: secretNamesOf(row[5].getStr), env: stepEnvList.mapIt(EnvEntry(key: it[0], value: it[1])),
       step_token: (if secretNamesOf(row[5].getStr).len > 0 or hasArtifacts(row[5].getStr) or cacheDecls(row[5].getStr).len > 0: stepToken(master, row[0].getStr, row[1].getInt, row[4].getInt) else: ""))))
     inc seq
   # STO-006: the controller deleted these volumes; and the runs whose volume may go now (it is told again until it says it is done)
@@ -1287,14 +1297,16 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
   let cmd = if parts.len > 4: parts[4] else: ""
   let now = $getTime().toUnix()
   let profileId = profileOfRun(c, req.run_id, co.profileId)    # the profile of the run's organisation (SHD-007)
-  if profile in ["build", "deploy"]:
+  if profile in ["build", "deploy"] or profile.isDeployKind:
     # the build profile (D-42): a build Pod in the organisation's own namespace, made by its controller; the shard must allow it
     # and the run must belong to an organisation (the namespace that carries the admission policy)
     let fail = proc (detail: string): ExecutorResponse =
       ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
     if profile == "build" and not co.buildOn: return fail("profile \"build\" is not enabled on this shard (CINIM_BUILD)")
-    if profile == "deploy" and not co.deployOn: return fail("profile \"deploy\" is not enabled on this shard (CINIM_DEPLOY)")
+    if profile.isDeployKind and not co.deployOn: return fail("profile \"" & profile & "\" is not enabled on this shard (CINIM_DEPLOY)")
+    if profile.isDeployKind and profile != "deploy" and not c.deployProfileForRun(req.run_id, profile).known:      # D-115: a deploy profile of the organisation
+      return fail("this organisation has no deploy profile \"" & profile & "\" (PUT /api/v1/organizations/{slug}/deploy-profiles/" & profile & ")")
     let o = c.query(%*[["SELECT o.id FROM runs r JOIN organizations o ON o.id = r.tenant_id WHERE r.id = ?", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("profile \"" & profile & "\" needs a run that belongs to an organisation")

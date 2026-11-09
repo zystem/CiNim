@@ -9,7 +9,7 @@
 import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options, sets]
 import ../common/httpsrv
 import ../common/scriptsource
-import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, webhooks, approvals, teams, ldapauth, registries, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
+import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, webhooks, approvals, teams, ldapauth, registries, deployprofiles, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
 import ../common/[ctrlauth, envname, luaapi]
 import ../common/rqlite
 import ../common/dbready
@@ -1391,6 +1391,56 @@ proc onRequest() {.raises: [], gcsafe.} =
           else:
             problem(Http405, "method_not_allowed", "GET, PUT, DELETE")
         return
+      if path.startsWith("/api/v1/organizations/") and "/deploy-profiles" in path:
+        # D-115: the deploy profiles of an organisation (deploy_profile.read; deploy_profile.write for adding, changing and removing; the gate has checked the permission for this organisation)
+        #   GET /organizations/{slug}/deploy-profiles      GET|PUT|DELETE /organizations/{slug}/deploy-profiles/{name}
+        #   PUT {"service_account": "deploy-test1", "namespace": "test1", "description": "..."}: a field that is left out keeps its value (a new profile: the account is deploy-<name>);
+        #   "service_account": "" takes the token away; "namespace": "*" is every namespace. A project uses a profile by its name only if it lists it in allowed_profiles (D-86).
+        let partsD = path["/api/v1/organizations/".len .. ^1].split('/')
+        if partsD.len < 2 or partsD[1] != "deploy-profiles" or partsD.len > 3:
+          problem(Http404, "not_found", "no such route")
+          return
+        let slugD = partsD[0]
+        var dc = newRq(coreRef.rqliteUrl)
+        let orgD = dc.organizationRow(slugD)
+        if orgD.id.len == 0:
+          problem(Http404, "organization_not_found", "this shard has no organisation " & slugD)
+          return
+        let dmeth = getMethod()
+        let nowD = getTime().toUnix()
+        if partsD.len == 2:
+          if dmeth != "GET":
+            problem(Http405, "method_not_allowed", "GET")
+            return
+          var ps = newJArray()
+          for p in dc.deployProfilesOf(orgD.id): ps.add p.view
+          jsonOk(Http200, %*{"organization": slugD, "deploy_profiles": ps, "built_in": "deploy: local, no token of the cluster"})
+        else:
+          let nameD = partsD[2]
+          if dmeth == "GET":
+            let found = dc.deployProfileNamed(orgD.id, nameD)
+            if not found.found:
+              problem(Http404, "not_found", "no such deploy profile")
+              return
+            jsonOk(Http200, found.profile.view)
+          elif dmeth == "PUT":
+            let dj = try: parseJson(getBody()) except JsonParsingError: nil
+            let done = dc.putDeployProfile(orgD.id, nameD, dj, nowD)
+            if done.error.len > 0:
+              problem(HttpCode(done.status), "invalid_deploy_profile", done.error)
+              return
+            let saved = dc.deployProfileNamed(orgD.id, nameD).profile
+            dc.record(nowD, actorOf(who), "deploy_profile.put", slugD & "/" & nameD, "ok", "account " & (if saved.serviceAccount.len > 0: saved.serviceAccount else: "(none)") & ", namespace " & (if saved.targetNamespace.len > 0: saved.targetNamespace else: "(not told)"))
+            jsonOk(if done.created: Http201 else: Http200, saved.view)
+          elif dmeth == "DELETE":
+            if not dc.deleteDeployProfile(orgD.id, nameD):
+              problem(Http404, "not_found", "no such deploy profile")
+              return
+            dc.record(nowD, actorOf(who), "deploy_profile.delete", slugD & "/" & nameD, "ok")
+            jsonOk(Http200, %*{"organization": slugD, "deploy_profile": nameD, "deleted": true})
+          else:
+            problem(Http405, "method_not_allowed", "GET, PUT, DELETE")
+        return
       if path.startsWith("/api/v1/organizations/") and "/ldap" in path:
         # D-87: the directories of an organisation and the map of their groups to roles. The gate has checked the permission for this organisation (ldap.read; ldap.map for the map and for a
         # sync; ldap.write, the shard's, for adding, changing, checking and removing a directory: the core connects to the address that is given).
@@ -2704,12 +2754,6 @@ proc serveApi*(co: Core; port: int) =
   if authOn:
     # IAM-001: the user `admin` at the first start; the password and the token are written once, in a line that a test can parse. The password has to be changed first.
     var uc = newRq(co.rqliteUrl)
-    let legacy = uc.legacyShardBindings()
-    if legacy.len > 0:
-      var names: seq[string]
-      for l in legacy: names.add l.user & ":" & l.role
-      stderr.writeLine "core: WARNING - these users have a role at the shard that is not admin, which is no right any more (the shard has no users but its administrators; D-90): " & names[0 ..< min(20, names.len)].join(", ") &
-        (if names.len > 20: " and " & $(names.len - 20) & " more" else: "") & ". Give them a role in an organisation (PUT /api/v1/organizations/{slug}/members/{user}) or delete them."
     let made = uc.bootstrapAdminUser(getTime().toUnix())
     if made.len > 0:
       echo "core: FIRST START. The administrator (shown only now): the password is for POST /api/v1/login, the token for 'Authorization: Bearer'; the password has to be changed first,"

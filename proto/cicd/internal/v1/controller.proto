@@ -127,6 +127,7 @@ message StartStep {
   string step_token = 13;            // the step's own credential for fetching its secrets from core: an HMAC bound to this run, step and attempt, good while the step runs
   string opts_json = 8;              // the Lua step options as one canonical JSON object: mask, metrics, timeout (docs/metrics.md, docs/secrets-masking.md); "" = none
   string volume = 14;                // STO-002: "" = the run's volume, shared by the jobs of the run; else the id of the job, whose steps share a volume of their own (`workspace = "isolated"`)
+  string service_account = 15;       // D-115: the ServiceAccount a Pod of the deploy profile runs as, with its token mounted (the profile of the organisation says it; "" = no token of the cluster)
 }
 
 message CancelStep {

@@ -18,7 +18,7 @@
 ## `tests/unit/torgreconcile.nim` runs them against a fake cluster. `runPass` and `runReconciler` are the glue.
 import std/[json, locks, atomics, os, strutils, times, algorithm]
 import health
-import kubeapi, orgprovision, schema, keptpods, ctrlpresence, keysapplied
+import kubeapi, orgprovision, schema, keptpods, ctrlpresence, keysapplied, deployprofiles
 import ../common/[rqlite, ctrlauth]
 
 type
@@ -33,6 +33,7 @@ type
     forget*: proc (slug, namespace: string) {.gcsafe.}                          ## the rows of a deleted organisation
     keysSeen*: proc (namespace: string): int64 {.gcsafe.}                       ## the digest (`keysDigest`) of the transport keys the core last put in the Secret of that namespace; 0: it has not since it started
     noteKeys*: proc (namespace: string; digest: int64) {.gcsafe.}
+    deployAccounts*: proc (slug: string): seq[string] {.gcsafe.}                ## D-115: the ServiceAccounts of the organisation's deploy profiles, which the core makes in its namespace (nil: none)
 
   OrgReport* = object
     slug*, state*: string
@@ -147,7 +148,8 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; keys: T
   if nsGot.error.len > 0:
     result.error = "reading the namespace: " & nsGot.error
     return
-  let r = provision(k, cfg, o.slug, keys, active)
+  let accounts = if hooks.deployAccounts != nil: hooks.deployAccounts(o.slug) else: @[]
+  let r = provision(k, cfg, o.slug, keys, active, accounts)
   for s in r.steps:
     if s.outcome == oCreated: result.created.add s.name
   if not r.ok:
@@ -155,7 +157,7 @@ proc reconcileOne(k: KubeApi; cfg: ProvisionConfig; o: OrganizationFull; keys: T
     return
   # A policy that differs from what the core makes now (a new port in the rules of the shard, a changed network mode) is deleted and made again: it carries the fingerprint of the
   # object the core made (`hashAnnotation`), and one that carries another, or none (made before the fingerprint), is not the policy the core means. Nothing else is replaced.
-  let (steps, _) = organizationSteps(cfg, o.slug, keys, active)
+  let (steps, _) = organizationSteps(cfg, o.slug, keys, active, accounts)
   for st in steps:
     if st.kind notin policyKinds: continue
     let have = k.getObject(st.kind, st.namespace, st.objectName)
@@ -313,6 +315,10 @@ proc makeHooks(e: PassEnv; master: string): Hooks =
         startRetention: proc (slug: string; at: int64) =
           var db = newRq(e.rqliteUrl)
           db.startRetention(slug, at),
+        deployAccounts: proc (slug: string): seq[string] =
+          var db = newRq(e.rqliteUrl)
+          let org = db.organizationRow(slug)
+          if org.id.len > 0: db.deployAccountsOf(org.id) else: @[],
         keysSeen: proc (namespace: string): int64 = keysapplied.keysSeen(namespace),
         noteKeys: proc (namespace: string; digest: int64) = keysapplied.noteKeys(namespace, digest),
         forget: proc (slug, namespace: string) =

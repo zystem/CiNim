@@ -83,6 +83,11 @@ const ddl = [
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, address TEXT NOT NULL, insecure INTEGER NOT NULL DEFAULT 0, username TEXT NOT NULL DEFAULT '',
        secret_enc TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS registries_name ON registries (tenant_id, name)",
+  # D-115: the deploy profiles of an organisation besides the built-in `deploy` (local, no token): a name and the ServiceAccount its Pods run as, with its token ('' = none)
+  """CREATE TABLE IF NOT EXISTS deploy_profiles (
+       id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, service_account TEXT NOT NULL DEFAULT '', target_namespace TEXT NOT NULL DEFAULT '',
+       description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)""",
+  "CREATE UNIQUE INDEX IF NOT EXISTS deploy_profiles_name ON deploy_profiles (tenant_id, name)",
   # D-91: the teams of an organisation. A team is made by hand or takes its members from a group of a directory (`group_dn`, of the directory `server_id`, or of any when it is empty); its roles
   # are rows of `role_bindings` whose user_name is `team:<slug>/<name>`. A member is a manual one (`source` '') or one the directory gives (`ldap:<server id>`)
   # D-93: who approved or rejected a run that waited for approval, and when (one answer from each person)

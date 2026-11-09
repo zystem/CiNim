@@ -26,6 +26,7 @@ type
 
   StartRequest* = object
     runId*, image*, optsJson*, profile*: string       ## profile: "" = ordinary, "build" = an image build (D-42)
+    serviceAccount*: string                           ## D-115: the account a Pod of the deploy profile runs as, with its token ("" = no token)
     seq*, attempt*: int
     command*: seq[string]
     logMaxBytes*, logSpoolBytes*: uint64
@@ -61,6 +62,10 @@ func drainDir*(seq, attempt: int): string =
   ## spool. On the run's volume, so it outlives the Pod; the path is the same in the step's Pod and in the reader's.
   "/cicd/state/drain/" & $seq & "-" & $attempt
 
+func deployAccount*(deploy, build: bool; account: string): string =
+  ## D-115: the ServiceAccount a step Pod runs as with its token mounted: only a Pod of the deploy profile gets one (a build Pod never, no other step), and only when the profile names one
+  if deploy and not build: account else: ""
+
 proc buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   let logging = cfg.collectorAddr.len > 0 and cfg.stepReportAddr.len > 0
   let spool = if r.logSpoolBytes > 0: int(r.logSpoolBytes) else: cfg.logSpoolBytes
@@ -85,7 +90,7 @@ proc buildRequest*(cfg: Config; r: StartRequest): PodRequest =
   cmd.add "--"
   cmd.add (if r.command.len > 0: r.command else: @["sh", "-c", "true"])
   PodRequest(name: podName(r.runId, r.seq, r.attempt), image: r.image, runId: r.runId, volume: r.volume, cmd: cmd, logging: logging,
-             spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", shm: shmSize(r.optsJson), env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
+             spoolBytes: spool, build: r.profile == "build", deploy: r.profile == "deploy", deployAccount: deployAccount(r.profile == "deploy", r.profile == "build", r.serviceAccount), shm: shmSize(r.optsJson), env: r.env, secrets: (if r.stepToken.len > 0: r.secretNames else: @[]))
 
 proc startPod*(be: Backend; st: CtrlState; cfg: Config; r: StartRequest; now: int64): CreateOutcome =
   ## State first, Pod second: a controller that dies in between leaves a row for a Pod that may not exist (the poll finds

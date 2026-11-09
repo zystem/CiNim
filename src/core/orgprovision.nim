@@ -280,7 +280,7 @@ func ingressObject(cfg: ProvisionConfig; slug: string): JsonNode =
   if cfg.tlsSecret.len > 0 and cfg.host.len > 0:
     result["spec"]["tls"] = %*[{"hosts": [cfg.host], "secretName": cfg.tlsSecret}]
 
-proc organizationSteps*(cfg: ProvisionConfig; slug: string; keys: TlsKeys; active = true): tuple[steps: seq[Step], skipped: seq[string]] =
+proc organizationSteps*(cfg: ProvisionConfig; slug: string; keys: TlsKeys; active = true; deployAccounts: seq[string] = @[]): tuple[steps: seq[Step], skipped: seq[string]] =
   ## SHD-007 (2)..(5): the objects of the namespace of the organisation, in the order of the specification, and its Ingress in the `multi` mode.
   ## Builds (D-42) need none of their own: a build Pod is made by the same controller, in the same namespace. A switched-off organisation
   ## (`active` false) is expected without its Ingress (SHD-008); everything else of it stays. The controller's Pod is not here: the core starts it with a token of its own
@@ -302,6 +302,12 @@ proc organizationSteps*(cfg: ProvisionConfig; slug: string; keys: TlsKeys; activ
     result.steps.add step("controller state volume", "PersistentVolumeClaim", ns, stateClaimName, stateClaim(cfg, slug))
   else:
     result.skipped.add "job controller: CINIM_CONTROLLER_IMAGE is not set"
+  if cfg.deploy:
+    # D-115: the Pod of a step of a deploy profile runs as the profile's account and gets its token (the controller sets both); the account has no right until the operator binds one to it
+    # (deploy/examples/self-build/deployer.yaml). The Pod asks for the token itself, so the account does not mount one into every Pod that might name it.
+    for account in deployAccounts:
+      result.steps.add step("deploy service account " & account, "ServiceAccount", ns, account,
+        %*{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": meta(cfg, slug, account, ns), "automountServiceAccountToken": false})
   result.steps.add step("resource quota", "ResourceQuota", ns, "cinim-default",
     %*{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": meta(cfg, slug, "cinim-default", ns),
        "spec": {"hard": {"pods": "100", "requests.cpu": "16", "requests.memory": "32Gi", "limits.memory": "64Gi",
@@ -319,9 +325,9 @@ proc organizationSteps*(cfg: ProvisionConfig; slug: string; keys: TlsKeys; activ
   if cfg.multi and active:
     result.steps.add Step(name: "ingress", kind: "Ingress", namespace: cfg.shardNamespace, objectName: ingressName(slug), obj: ingressObject(cfg, slug))
 
-proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; keys: TlsKeys; active = true): ProvisionResult =
+proc provision*(k: KubeApi; cfg: ProvisionConfig; slug: string; keys: TlsKeys; active = true; deployAccounts: seq[string] = @[]): ProvisionResult =
   ## stops at the first failure and says which step it was; what was created stays (a retry creates the rest)
-  let (steps, skipped) = organizationSteps(cfg, slug, keys, active)
+  let (steps, skipped) = organizationSteps(cfg, slug, keys, active, deployAccounts)
   result.skipped = skipped
   for s in steps:
     let r = k.create(s.kind, s.namespace, s.obj)

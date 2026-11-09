@@ -36,6 +36,20 @@ suite "SHD-007 the objects of an organisation":
     check ns["metadata"]["name"].getStr == "cinim-001-acme"
     for m in ["enforce", "audit", "warn"]: check ns["metadata"]["labels"]["pod-security.kubernetes.io/" & m].getStr == "restricted"
     check ns["metadata"]["labels"]["cinim.io/shard"].getStr == "001" and ns["metadata"]["labels"]["cinim.io/organization"].getStr == "acme"
+  test "D-115 a shard with the deploy profile gets a ServiceAccount in the organisation's namespace for each account of the organisation's profiles, and no right with it":
+    var c = cfg()
+    c.deploy = true
+    var made: seq[string]
+    var bindings = 0
+    for s in organizationSteps(c, "acme", tlskeys, true, @["deploy-test1", "deploy-test2"]).steps:
+      if s.kind == "ServiceAccount" and s.objectName.startsWith("deploy-"):
+        made.add s.objectName
+        check s.obj["metadata"]["namespace"].getStr == "cinim-001-acme" and s.obj["automountServiceAccountToken"].getBool == false      # the Pod asks for the token itself
+      if s.kind == "RoleBinding" and s.objectName != "cinim-job-controller": inc bindings                                            # the operator binds the rights (deployer.yaml); the core binds nothing to these accounts
+    check made == @["deploy-test1", "deploy-test2"] and bindings == 0
+    for s in organizationSteps(c, "acme", tlskeys).steps: check not (s.kind == "ServiceAccount" and s.objectName.startsWith("deploy-"))   # a profile-less organisation has none
+    c.deploy = false                                                                                                                       # no deploy profile on the shard: no accounts
+    for s in organizationSteps(c, "acme", tlskeys, true, @["deploy-test1"]).steps: check not (s.kind == "ServiceAccount" and s.objectName.startsWith("deploy-"))
   test "the controller's role binding gives the step role of the shard in that namespace only":
     var rb: JsonNode
     for s in organizationSteps(cfg(), "acme", tlskeys).steps:

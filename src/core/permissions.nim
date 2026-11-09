@@ -58,6 +58,8 @@ const
     ("access.write", lvGroup, "give and take away roles in an organisation"),
     ("registry.read", lvOrg, "see the image registries of an organisation (the address, whether there is a login; never the password)"),
     ("registry.write", lvOrg, "add, change and remove the image registries of an organisation and their logins"),
+    ("deploy_profile.read", lvOrg, "see the deploy profiles of an organisation (the name, the ServiceAccount of its Pods, the namespace it deploys into)"),
+    ("deploy_profile.write", lvOrg, "add, change and remove the deploy profiles of an organisation: which account (and so which token and which rights) a deploy step has"),
     ("ldap.read", lvOrg, "see the directories of an organisation and which of their groups give which role"),
     ("ldap.map", lvOrg, "choose which groups of a directory give which role in the organisation, and sync now"),
     ("oidc.read", lvOrg, "see the OpenID Connect providers of an organisation and which claims give which role"),
@@ -77,9 +79,9 @@ const
     ("audit.read", lvShard, "read the audit log"),
     ("audit.export", lvShard, "choose where the audit log is sent (syslog, an HTTP receiver)")]
 
-  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "webhook.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read", "registry.read"]
+  roAdds = ["run.read", "log.read", "artifact.read", "trigger.read", "webhook.read", "lock.read", "variable.read", "group.read", "hold.read", "cache.read", "storage.read", "org.read", "registry.read", "deploy_profile.read"]
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
-  rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write"]
+  rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write", "deploy_profile.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
   checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "approval.configure", "caller.allow", "status.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
 
@@ -178,6 +180,7 @@ func orgNeed(meth, org, rest: string): Need =
     if onTree(): return treeNeed(if write: "group.write" else: "group.read")
     return need(if write: "group.write" else: "group.read", (if write: nsOrg else: nsInOrg), org)       # the list of groups; making one names a path
   if has("/caches"): return need(if write: "cache.delete" else: "cache.read", nsOrg, org)
+  if has("/deploy-profiles"): return need(if write: "deploy_profile.write" else: "deploy_profile.read", nsOrg, org)       # D-115: a deploy profile belongs to the organisation
   if has("/registries"): return need(if write: "registry.write" else: "registry.read", nsOrg, org)       # D-114: a registry belongs to the organisation
   if has("/secrets"): return need(if write: "secret.write" else: "secret.read", nsOrg, org)
   if has("/members"): return need(if write: "access.write" else: "access.read", nsOrg, org)

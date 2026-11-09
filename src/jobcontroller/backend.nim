@@ -17,6 +17,7 @@ type
     env*: seq[(string, string)]  ## plain environment of the step: the run's launch parameters (VAR-002); never a secret
     build*: bool                 ## a step of the build profile: the adapter makes a build Pod of it (podsec.nim, D-42)
     shm*: string                 ## "2Gi": the job asked for a /dev/shm of this size, backed by memory ("" = the 64Mi of a Pod)
+    deployAccount*: string       ## D-115: a deploy Pod runs as this ServiceAccount with its token mounted ("" = no token of the cluster); only a deploy Pod ever has one
     deploy*: bool                ## a step of the deploy profile: an ordinary Pod with the label that the network policies of a deployment select (D-48)
 
   PodSummary* = object

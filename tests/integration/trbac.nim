@@ -70,21 +70,58 @@ suite "IAM-001 users, roles and their tokens":
       for role in ["rw", "dev", "ro"]:
         let p = who(makeUser("u-" & role, role))
         check p.ok and not p.admin and p.roles.len == 0 and p.user == "u-" & role and p.mayUseOrg("acme") and not p.mayUseOrg("other")
-    test "D-90 the shard has no users but its administrators: a role other than admin given there is no right, the user is listed with it ignored, and the start warns":
+    test "D-90 the shard has no users but its administrators: a role other than admin given there is no right":
       discard first()
       discard c.execute(%*[["INSERT INTO users (name, password_hash, created_at) VALUES ('legacy', ?, ?)", passwordHash(pwOf & "legacy"), t0], ["INSERT INTO role_bindings (user_name, role, scope) VALUES ('legacy', 'rw', 'shard')"]])
       let token = c.createApiToken("t", userScope("legacy"), 0, t0).token
       let gone = who(token)
       check not gone.ok and gone.why == "revoked"                                                         # nothing is left of them: the user has no right at all
-      check c.legacyShardBindings() == @[("legacy", "rw")]
-      check c.listUsers().filterIt(it["name"].getStr == "legacy")[0]["ignored_shard_roles"] == %*["rw"] and c.listUsers().filterIt(it["name"].getStr == "legacy")[0]["roles"].len == 0
+      check c.listUsers().filterIt(it["name"].getStr == "legacy")[0]["roles"].len == 0
       check not c.login("legacy", pwOf & "legacy", t0).ok
-      # given a role in an organisation the same user is a person of that organisation, and the shard role stays ignored
+      # given a role in an organisation the same user is a person of that organisation, and the shard role still gives nothing
       check c.setMember("org:acme", "legacy", @["dev"]) == ""
       let p = who(token)
       check p.ok and p.roles.len == 0 and p.mayIn("run.start", "acme") and not p.mayCall("GET", "/api/v1/components") and not p.mayCall("GET", "/api/v1/variables")
       check c.login("legacy", pwOf & "legacy", t0).ok
       check allowedAtShard("admin") and not allowedAtShard("dev")
+    test "the users of the shard are its administrators: made, listed, switched off and deleted as the users of an organisation are":
+      let a = first()
+      check a.user == "admin"
+      # an administrator of the shard is made with role admin at the shard (POST /api/v1/users without an organisation)
+      check c.createUser("root2", "admin", pwOf & "root2", t0)
+      check not c.createUser("root2", "admin", pwOf & "root2", t0)                                         # a name is taken once
+      let t2 = c.createApiToken("test root2", userScope("root2"), 0, t0).token
+      let p2 = who(t2)
+      check p2.ok and p2.admin and p2.roles == @["admin"] and p2.mayCall("GET", "/api/v1/components")
+      check c.login("root2", pwOf & "root2", t0).ok
+      let listed = c.listUsers()
+      check listed.filterIt(it["name"].getStr == "root2")[0]["roles"] == %*["admin"] and listed.filterIt(it["name"].getStr == "admin")[0]["roles"] == %*["admin"]
+      # switched off: the token and the login stop at once, the other administrator is not touched
+      discard c.execute(%*[["UPDATE users SET disabled = 1 WHERE name = 'root2'"]])
+      check not who(t2).ok and not c.login("root2", pwOf & "root2", t0).ok and who(a.token).ok
+      discard c.execute(%*[["UPDATE users SET disabled = 0 WHERE name = 'root2'"]])
+      check who(t2).ok and c.login("root2", pwOf & "root2", t0).ok
+      # deleted: the user, the binding, every token and every session are gone, and `admin` is not touched
+      let li = c.login("root2", pwOf & "root2", t0 + 1)
+      check c.deleteUser("root2", t0 + 2)
+      check not c.userRoles("root2").found and who(t2, t0 + 3).why == "revoked" and who(li.token, t0 + 3).why == "revoked"
+      check not c.login("root2", pwOf & "root2", t0 + 3).ok and not c.deleteUser("root2", t0 + 4)
+      check c.query(%*[["SELECT count(*) FROM role_bindings WHERE user_name = 'root2'"]])["results"][0]["values"][0][0].getInt == 0
+      check who(a.token).ok and c.userRoles("admin").roles == @["admin"]
+    test "the user admin is made at a start that finds none, whatever other users there are, with a password of its own and a token; one that is there is left alone":
+      let first1 = first()
+      check c.createUser("root2", "admin", pwOf & "root2", t0)
+      check c.createUser("ann", "rw", pwOf & "ann", t0, "org:acme")
+      check c.bootstrapAdminUser(t0 + 5).len == 0                                                           # the user is there: nothing is made, the log has no password
+      # a database that lost the user: it is made again at the next start and its credentials are for the log, as at the first
+      check c.deleteUser("admin", t0 + 6)
+      let again = c.bootstrapAdminUser(t0 + 7)
+      check again.len == 1 and again[0].user == "admin" and again[0].role == "admin" and again[0].password.len == 64 and splitToken(again[0].token).ok
+      check again[0].password != first1.password and again[0].token != first1.token
+      check who(first1.token, t0 + 8).why == "revoked"                                                      # the old token went with the old user
+      check c.userRoles("admin").roles == @["admin"] and c.userRoles("admin").mustChange                     # the password has to be changed first
+      check c.userRoles("root2").found and c.userRoles("ann").found                                         # the others were not touched
+      check c.bootstrapAdminUser(t0 + 9).len == 0
     test "what a user's token may do is what its role may (the gate of the API asks rolesMay)":
       discard first()
       let rw = @["rw"]

@@ -85,7 +85,8 @@ suite "D-84 what a request needs":
                    ("GET", "/api/v1/components"), ("PUT", "/api/v1/profile"), ("PUT", "/api/v1/variables/V"), ("POST", "/api/v1/organizations"), ("DELETE", "/api/v1/organizations/o"),
                    ("PUT", "/api/v1/organizations/o/storage"), ("GET", "/api/v1/stores"), ("GET", "/api/v1/users"), ("PUT", "/api/v1/roles/r"), ("GET", "/api/v1/tokens"), ("GET", "/api/v1/audit"), ("PUT", "/api/v1/audit/sinks/s"), ("GET", "/api/v1/organizations/o/oidc/providers"), ("PUT", "/api/v1/organizations/o/oidc/providers/p"), ("POST", "/api/v1/organizations/o/oidc/mappings"),
                    ("GET", "/api/v1/organizations/o/ldap"), ("POST", "/api/v1/organizations/o/ldap/mappings"), ("PUT", "/api/v1/organizations/o/ldap/servers/s"),
-                   ("GET", "/api/v1/organizations/o/registries"), ("PUT", "/api/v1/organizations/o/registries/r")]:
+                   ("GET", "/api/v1/organizations/o/registries"), ("PUT", "/api/v1/organizations/o/registries/r"),
+                   ("GET", "/api/v1/organizations/o/deploy-profiles"), ("PUT", "/api/v1/organizations/o/deploy-profiles/p")]:
       used.incl needOf(m, p).permission
     for p in catalogue: check p.name in used or p.name in checkedByHandlers
 
@@ -116,6 +117,17 @@ suite "D-87 the directories of an organisation":
     for (m, p) in [("GET", "/api/v1/organizations/acme/ldap"), ("POST", "/api/v1/organizations/acme/ldap/mappings"), ("PUT", "/api/v1/organizations/acme/ldap/servers/corp")]:
       check not rw.allows(needOf(m, p))
     check grantsOfRoles(["admin"]).allows(needOf("PUT", "/api/v1/organizations/acme/ldap/servers/corp"))
+
+suite "D-115 the deploy profiles of an organisation":
+  test "reading is for every role that reads, writing is the organisation\'s administrators\' alone (a profile is a token and its rights); both are of the organisation":
+    for (m, p, want) in [("GET", "/api/v1/organizations/acme/deploy-profiles", "deploy_profile.read"), ("GET", "/api/v1/organizations/acme/deploy-profiles/test1", "deploy_profile.read"),
+                         ("PUT", "/api/v1/organizations/acme/deploy-profiles/test1", "deploy_profile.write"), ("DELETE", "/api/v1/organizations/acme/deploy-profiles/test1", "deploy_profile.write")]:
+      let n = needOf(m, p)
+      check n.permission == want and n.scope == nsOrg and n.org == "acme"
+    check levelOf("deploy_profile.read") == lvOrg and levelOf("deploy_profile.write") == lvOrg
+    for r in ["ro", "dev", "rw", "admin"]: check "deploy_profile.read" in builtinPermissions(r)
+    for r in ["ro", "dev", "rw"]: check "deploy_profile.write" notin builtinPermissions(r)
+    check "deploy_profile.write" in builtinPermissions("admin")
 
 suite "D-114 the registries of an organisation":
   test "reading is for every role that reads, writing is the organisation\'s administrators\' and rw\'s; both are of the organisation":
