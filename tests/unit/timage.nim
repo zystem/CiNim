@@ -16,6 +16,12 @@ proc runScript(body: string; action = "build"; buildExit = 0): Out =
   var res = Out()
   proc host(seq: int; kind, payload: string): Option[string] =
     if kind == "now": return some("1793921212")
+    if kind == "registry":            # D-114: the registry objects of the organisation: the address, plain HTTP, a login
+      case payload
+      of "gh": return some("ghcr.io/acme\n0\n1")
+      of "hub": return some("docker.io/acme\n0\n1")
+      of "lan": return some("10.0.0.5:5000\n1\n0")
+      else: raise newException(HostRefusal, "this organisation has no registry " & payload)
     if kind != "job_sh": return some("")
     let parts = payload.split('\t')
     let cmd = parts[4 .. ^1].join("\t")
@@ -147,3 +153,46 @@ suite "D-110 j:image(): what is asked is checked before any step is made":
         for i = 1, 10 do j:image({ name = 'n' .. i, tag = 'T', registry = 'r', dockerfile = 'D' }) end
       end }""")
     check many.status == "esFailed" and "at most" in many.message
+
+suite "D-114 j:image(): a registry given by name":
+  test "the address comes from the registry object, and so does the login: the steps that talk to it are given the registry by name, never a secret of the pipeline":
+    let o = runScript(imageJob("{ name = 'cinim', tag = 'T1', registry = { name = 'gh' }, dockerfile = 'D', skip_if_present = true }"), action = "build")
+    check o.status == "esDone" and o.calls.len == 2
+    check o.value == "build|ghcr.io/acme/cinim:T1|T1"
+    check "--destination=ghcr.io/acme/cinim:T1" in o.calls[1].cmd and "--cache-repo=ghcr.io/acme/cinim-cache" in o.calls[1].cmd
+    for c in o.calls:
+      check "\"registries\":[\"gh\"]" in c.opts and "\"secrets\"" notin c.opts and "CINIM_REGISTRY_CONFIG" in c.cmd and "config.json" in c.cmd
+    check "\"REG\":\"ghcr.io/acme\"" in o.calls[0].opts
+  test "a registry that has no login (the registry of the cluster) gets no login: no step is given a Docker config, and its plain HTTP is used":
+    let o = runScript(imageJob("{ name = 'cinim', tag = 'T1', registry = { name = 'lan' }, dockerfile = 'D' }"))
+    check o.status == "esDone" and o.calls.len == 1
+    check "registries" notin o.calls[0].opts and "config.json" notin o.calls[0].cmd
+    check "--destination=10.0.0.5:5000/cinim:T1" in o.calls[0].cmd and "--insecure" in o.calls[0].cmd and "--skip-tls-verify" in o.calls[0].cmd
+  test "other registries by name: their logins are in the same config, the names sorted and told once":
+    let o = runScript(imageJob("{ name = 'cinim', tag = 'T1', registry = { name = 'gh' }, dockerfile = 'D', also = { { name = 'hub' }, { name = 'gh' }, 'quay.io/acme' } }"))
+    check o.status == "esDone" and o.calls.len == 2
+    check "\"ALSO\":\"docker.io/acme ghcr.io/acme quay.io/acme\"" in o.calls[1].opts
+    for c in o.calls: check "\"registries\":[\"gh\",\"hub\"]" in c.opts
+  test "a registry given by name beside `login` is refused, so is a name that is not one, and so is one that the organisation has not":
+    check runScript(imageJob("{ name = 'cinim', tag = 'T1', registry = { name = 'gh' }, dockerfile = 'D', login = true }")).status == "esFailed"
+    for bad in ["{ name = 'Gh' }", "{ name = 'gh', path = 'x' }", "{ }", "{ name = 5 }", "{ name = 'a b' }", "{ name = 'gh;rm' }"]:
+      let o = runScript(imageJob("{ name = 'cinim', tag = 'T1', registry = " & bad & ", dockerfile = 'D' }"))
+      check o.status == "esFailed" and o.calls.len == 0
+    let n = runScript(imageJob("{ name = 'cinim', tag = 'T1', registry = { name = 'nowhere' }, dockerfile = 'D' }"))
+    check n.status == "esFailed" and "no registry nowhere" in n.message and n.calls.len == 0
+
+suite "D-114 step.sh: registries":
+  proc shRun(opts: string): Out =
+    runScript("""
+    ci.single['a']{ image = 'alpine', steps = { step.sh['b']{ cmd = 'echo hi', """ & opts & """ } } }
+    """)
+  test "a step that names registries asks for them in its options, sorted and without repeats":
+    let o = shRun("registries = { 'hub', 'gh', 'hub' }")
+    check o.status == "esDone" and o.calls.len == 1 and "\"registries\":[\"gh\",\"hub\"]" in o.calls[0].opts
+  test "a name that is not a registry name is refused, so is a list of more than eight, so is the variable that the core makes in `secrets`":
+    for bad in ["registries = 'gh'", "registries = { 5 }", "registries = { 'Gh' }", "registries = { 'a b' }", "registries = { 'a','b','c','d','e','f','g','h','i' }",
+                "secrets = { 'CINIM_REGISTRY_CONFIG' }", "secrets = { 'CINIM_API_TOKEN' }"]:
+      check shRun(bad).status == "esFailed"
+  test "an empty list asks for nothing":
+    let o = shRun("registries = { }")
+    check o.status == "esDone" and "registries" notin o.calls[0].opts

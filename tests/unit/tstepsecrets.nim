@@ -15,6 +15,16 @@ suite "what may be a step secret":
     check checkValue("").len > 0 and checkValue("x".repeat(8 * 1024 + 1)).len > 0 and checkValue("x".repeat(8 * 1024)) == ""
     check checkValue("a\x00b").len > 0 and checkValue("a\rb").len > 0 and checkValue("a\x7fb").len > 0
 
+suite "D-114 the registries a step names":
+  test "the names come from the options JSON, once each; a step that names registries asks for the Docker config the way it asks for a secret":
+    check registryNamesOf("""{"registries":["gh","hub","gh"],"timeout":60}""") == @["gh", "hub"]
+    check registryNamesOf("").len == 0 and registryNamesOf("""{"timeout":5}""").len == 0 and registryNamesOf("{oops").len == 0 and registryNamesOf("""{"registries":"gh"}""").len == 0
+    check secretNamesOf("""{"registries":["gh"],"secrets":["A"]}""") == @["A", registryConfigName]
+    check secretNamesOf("""{"registries":[]}""").len == 0
+  test "the variable the core makes, and the token of the API, are not names of stored secrets":
+    check checkName(registryConfigName).len > 0 and checkName("CINIM_API_TOKEN").len > 0
+    check checkName("CINIM_OTHER") == ""
+
 suite "the placeholder in the Pod":
   test "the Pod's environment holds a name-bearing placeholder, never a value":
     check stepSecretPlaceholder("REGISTRY_PASSWORD") == "cinim-secret:REGISTRY_PASSWORD"

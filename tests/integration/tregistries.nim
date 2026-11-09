@@ -1,8 +1,9 @@
 ## D-114, against a real rqlite: the registries of an organisation - saved with the password sealed, changed field by field, listed and deleted, the Docker config made from them, what is
 ## wrong with a request told. Needs CINIM_RQLITE_URL; without it the suite is skipped.
 import std/[unittest, json, os, times, strutils, base64]
-import common/rqlite
-import core/[schema, secretvault, registries]
+import common/[rqlite, scriptsource, bytestr]
+import core/[schema, secretvault, registries, scheduler, groups, loggate, logcircuit, runlease]
+import ../../build/nimproto/protos
 import ../support/testkek
 
 let url = getEnv("CINIM_RQLITE_URL")
@@ -89,3 +90,72 @@ suite "D-114 registries of an organisation":
       check c.deleteRegistry(orgId, "gh")
       check not c.registryNamed(orgId, "gh").found
       check not c.deleteRegistry(orgId, "gh")
+
+suite "D-114 registries given to the steps that push":
+  if url.len == 0:
+    echo "  skipped: CINIM_RQLITE_URL is not set"
+  else:
+    var c = newRq(url)
+    migrate(c)
+    initGate(Watch(disabled: true, cfg: defaultConfig()))
+    setDekCacheSeconds(0.0)
+    let sfx = newId()
+    let kek = derivedKek("registries-steps-" & sfx)
+    let now = getTime().toUnix()
+    let orgId = c.addOrganization("rs" & sfx, "S")
+    let otherOrg = c.addOrganization("rt" & sfx, "T")
+    proc put(name: string; j: JsonNode; org = orgId) = check c.putRegistry(kek, true, org, name, j, now).error == ""
+    put("gh", %*{"address": "ghcr.io/acme", "username": "ann", "password": "tok-gh"})
+    put("hub", %*{"address": "docker.io/acme", "username": "bob", "password": "tok-hub"})
+    put("lan", %*{"address": "10.0.0.5:5000", "insecure": true})
+    put("gh", %*{"address": "quay.io/other"}, org = otherOrg)
+
+    test "the logins of the named registries are one Docker config; a registry without a login adds nothing; Docker Hub is keyed as `docker login` keys it":
+      let cfg = c.registriesConfig(kek, true, orgId, @["gh", "hub", "lan"])
+      check cfg.ok
+      let auths = parseJson(cfg.config)["auths"]
+      check auths.len == 2
+      check decode(auths["ghcr.io"]["auth"].getStr) == "ann:tok-gh"
+      check decode(auths["https://index.docker.io/v1/"]["auth"].getStr) == "bob:tok-hub"
+      let none = c.registriesConfig(kek, true, orgId, @["lan"])
+      check none.ok and parseJson(none.config) == %*{"auths": {}}
+    test "a name the organisation has not is refused, and a registry of another organisation is not seen; a vault that does not answer is a retry":
+      let unknown = c.registriesConfig(kek, true, orgId, @["gh", "nowhere"])
+      check not unknown.ok and not unknown.retry and "no registry nowhere" in unknown.error
+      check parseJson(c.registriesConfig(kek, true, otherOrg, @["gh"]).config)["auths"].len == 0     # the other organisation's `gh` has no login: nothing of ours is in it
+      let down = c.registriesConfig(kek, false, orgId, @["gh"])
+      check not down.ok and down.retry
+    test "the password is in the config as the login needs it and nowhere else the core wrote: the registry's own row holds it sealed":
+      let row = c.query(%*[["SELECT secret_enc FROM registries WHERE tenant_id = ? AND name = 'gh'", orgId]])["results"][0]["values"][0][0].getStr
+      check "tok-gh" notin row and "ann" notin row
+
+    test "the host calls: `registry` answers the address, plain HTTP and login of the object, and a step that names registries is made only when they exist":
+      let defaultProfile = c.seedDefaultProfile("cinim-default-ns")
+      let co = Core(rqliteUrl: url, profileId: defaultProfile, namespace: "cinim-default-ns", buildOn: true, deployOn: true, orgPrefix: "cinim", orgShard: "001")
+      let prof = c.ensureOrganizationProfile(orgId, "cinim-001-rs-" & sfx)
+      check c.createGroup(orgId, "g", now).error.len == 0
+      let p1 = c.createProject(orgId, "g/p1", "https://example.test/p1.git", now)
+      check p1.error.len == 0
+      let run = co.createRun("return 1", orgId, prof, groupId = p1.id, source = Source(repository: "https://example.test/p1.git", commit: "0123456789abcdef0123456789abcdef01234567", path: ".ci/pipeline.lua", refName: "main"))
+      var next = 0'u64
+      proc call(kind, payload: string; key = ""; numbered = false): ExecutorResponse =
+        var tok = takeRunLease(c, "master", run, "test")
+        if tok.len == 0:
+          tok = leaseToken("master", run, c.query(%*[["SELECT lease_attempt FROM runs WHERE id = ?", run]])["results"][0]["values"][0][0].getInt)
+        inc next
+        handleCall(c, co, HostCall(run_id: run, lease_token: tok, seq: next, kind: kind, key: key, numbered: numbered, step_no: uint32(next), payload: cast[seq[byte]](payload)), "master")
+      proc ok(r: ExecutorResponse): bool = r.body.kind == ExecutorResponseBodyKind.result
+      proc why(r: ExecutorResponse): string = (if r.body.kind == ExecutorResponseBodyKind.failure: r.body.failure.detail else: "")
+      proc said(r: ExecutorResponse): string = bytesToStr(r.body.result.result)
+      let gh = call("registry", "gh", key = "registry#0")
+      check ok(gh) and said(gh) == "ghcr.io/acme\n0\n1"
+      check said(call("registry", "lan", key = "registry#1")) == "10.0.0.5:5000\n1\n0"
+      check "no registry nowhere" in why(call("registry", "nowhere", key = "registry#2"))
+      check "without its key" in why(call("registry", "gh"))
+      let step = proc (opts: string): ExecutorResponse = call("job_sh", "job-" & $(next + 1) & "\tkaniko\t\t" & opts & "\techo x", numbered = true)
+      check ok(step("""{"registries":["gh","hub"]}"""))
+      check "no registry nowhere" in why(step("""{"registries":["gh","nowhere"]}"""))
+      check "at most 8" in why(step("""{"registries":["a","b","c","d","e","f","g","h","i"]}"""))
+      # the variables the core makes are not stored secrets: a step may ask for them (D-99, D-114) without a secret of that name
+      check ok(step("""{"api":["run.read"],"secrets":["CINIM_API_TOKEN"]}"""))
+      check ok(step("""{"registries":["gh"],"secrets":["CINIM_REGISTRY_CONFIG"]}"""))

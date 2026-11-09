@@ -10,7 +10,7 @@ import std/[json, os, strutils, times, atomics, httpclient, uri, sequtils, table
 import protobuf_serialization
 import protobuf_serialization/files/type_generator
 import common/[rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource, bytestr]
-import ctrlpresence, logwindow, keptpods, stepsecrets, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
+import ctrlpresence, logwindow, keptpods, stepsecrets, registries, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
 import groups, apiauth, approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
@@ -1165,6 +1165,23 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     discard c.appendRow(req.run_id, req.key, "now", "", told)
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]](told), suspended: false)))
+  if req.kind == "registry":
+    # `j:image{ registry = { name = "..." } }` (D-114): the address of the registry object of the run's organisation, whether it speaks plain HTTP and whether it has a login, as text: address, line break,
+    # 0 or 1, line break, 0 or 1. It answers at once and the answer is written to the journal here (a replay finds it there: a registry that is edited or moved while a run is led changes the next run, not this one).
+    let fail = proc (detail: string): ExecutorResponse =
+      ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
+    if req.key.len == 0: return fail("a host call without its key in the journal")
+    let name = bytesToStr(req.payload)
+    let o = c.query(%*[["SELECT tenant_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
+    let ov = o["results"][0]{"values"}
+    if ov == nil or ov.len == 0: return fail("a registry by name needs a run that belongs to an organisation")
+    let reg = c.registryNamed(ov[0][0].getStr, name)
+    if not reg.found: return fail("this organisation has no registry " & name & " (PUT /api/v1/organizations/{slug}/registries/{name})")
+    let told = reg.registry.address & "\n" & (if reg.registry.insecure: "1" else: "0") & "\n" & (if reg.registry.secretEnc.len > 0: "1" else: "0")
+    discard c.appendRow(req.run_id, req.key, "registry", name, told)
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, result: cast[seq[byte]](told), suspended: false)))
   if req.kind == "verify":
     # `ci.verified()` (D-112): the script says that this run built and tested what it had to, so its commit may be the base of later runs of the same ref. It answers at once, the flag is
     # set here and the answer is written to the journal (a replay finds it there and does not ask again)
@@ -1298,7 +1315,22 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
   if badEnv.len > 0:
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: badEnv)))
-  let wantedSecrets = secretNamesOf(opts)
+  var wantedSecrets = secretNamesOf(opts)
+  wantedSecrets.keepItIf(it notin [registryConfigName, apiTokenName])    # made by the core when the step starts (D-114, D-99), not stored secrets
+  let wantedRegistries = registryNamesOf(opts)
+  if wantedRegistries.len > maxRegistriesPerStep:
+    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+      kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "a step may name at most " & $maxRegistriesPerStep & " registries")))
+  if wantedRegistries.len > 0:
+    # D-114: the registries are objects of the organisation: they must exist now (a name that is not one is found before the step is made, not when it cannot log in)
+    let fail = proc (detail: string): ExecutorResponse =
+      ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
+        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
+    let o = c.query(%*[["SELECT tenant_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
+    let ov = o["results"][0]{"values"}
+    if ov == nil or ov.len == 0: return fail("registries need a run that belongs to an organisation")
+    for n in wantedRegistries:
+      if not c.registryNamed(ov[0][0].getStr, n).found: return fail("this organisation has no registry " & n & " (PUT /api/v1/organizations/{slug}/registries/{name})")
   if wantedSecrets.len > 0:
     # the step asks for secrets of the organisation (6.7): they must exist now, and the run must belong to an organisation
     let fail = proc (detail: string): ExecutorResponse =

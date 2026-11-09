@@ -100,6 +100,7 @@
 ---@field metrics? MetricsSpec|false      # overrides the job's declaration; false switches it off for this step
 ---@field image? string
 ---@field env? table<string,string>
+---@field registries? string[]             # D-114: the names of registries of the organisation; the step gets their logins as one Docker config in CINIM_REGISTRY_CONFIG (write it to $DOCKER_CONFIG/config.json)
 ---@field timeout? Duration
 ---@field capture? boolean
 ---@field ignore_failure? boolean          # a non-zero code is returned instead of failing the job
@@ -269,8 +270,8 @@ local Job = {}
 ---@param opts? {url?:string, ref?:string, image?:string, submodules?:boolean, depth?:integer, lfs?:boolean}   # `url` and `ref` default to the run's own; `depth` and `lfs` are refused (not built yet)
 ---@return StepResult                      # the result of the step that cloned, with `commit` (the full SHA), `dir` ("src") and `url`
 function Job:checkout(opts) end
----@param opts {name:string, registry:string, dockerfile:string, tag?:string, tags?:string[], context?:string, target?:string, build_args?:table<string,string>, cache?:boolean, cache_repo?:string, insecure?:boolean, login?:boolean|string, skip_if_present?:boolean, reuse?:{suffix:string}, also?:string[], kaniko_image?:string, crane_image?:string}
----@return {action:"build"|"retagged"|"present", ref:string, tag:string, name:string, registry:string}   # D-110: build and push the image of the source in `src` to `registry/name:tag` (`tag` defaults to `run.tag`); `skip_if_present`, `reuse` and `also` as in docs/deployment.md "Where the images go"
+---@param opts {name:string, registry:string|{name:string}, dockerfile:string, tag?:string, tags?:string[], context?:string, target?:string, build_args?:table<string,string>, cache?:boolean, cache_repo?:string, insecure?:boolean, login?:boolean|string, skip_if_present?:boolean, reuse?:{suffix:string}, also?:(string|{name:string})[], kaniko_image?:string, crane_image?:string}
+---@return {action:"build"|"retagged"|"present", ref:string, tag:string, name:string, registry:string}   # D-110: build and push the image of the source in `src` to `registry/name:tag` (`tag` defaults to `run.tag`); `skip_if_present`, `reuse` and `also` as in docs/deployment.md "Where the images go"; `registry = { name = "gh" }` (also in `also`) is a registry object of the organisation (D-114): its address, its plain HTTP and its login are used, and `login` is not given
 function Job:image(opts) end
 ---@param step Step                        # a step that `step.sh[id]{...}` (or a cache constructor) described
 ---@return StepResult                      # { status = "ok"|"failed", code, outputs, stdout }; a non-zero code fails the job unless `ignore_failure`

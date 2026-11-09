@@ -14,11 +14,15 @@ import ../common/[rqlite, envname]
 const
   maxValueBytes* = 8 * 1024         ## VAR-003
   maxSecretsPerStep* = 32
+  maxRegistriesPerStep* = 8
+  registryConfigName* = "CINIM_REGISTRY_CONFIG"   ## the variable that holds the Docker config of the registries a step names with `registries` (D-114); the shim asks for it as for a secret, the core makes it
+  apiTokenVarName = "CINIM_API_TOKEN"             ## D-99 (apiauth.nim `apiTokenName`): made by the core as well, never a stored secret
 
 func checkName*(name: string): string =
   ## "" if the name may be a secret, else what is wrong
   if not validEnvName(name, 64): "a secret is named like an environment variable: capital letters, digits and _, not starting with a digit, at most 64 characters"
   elif deniedEnvName(name): name & " cannot be set in a step's environment (STO-004)"
+  elif name in [registryConfigName, apiTokenVarName]: name & " is made by the core for a step that asks for `registries` or `api`: it cannot be a secret"
   else: ""
 
 func checkValue*(value: string): string =
@@ -28,8 +32,18 @@ func checkValue*(value: string): string =
     if (c < ' ' and c != '\t' and c != '\n') or c == '\x7f': return "the value has a control character (a line break and a tab are allowed)"
   ""
 
+proc registryNamesOf*(optsJson: string): seq[string] =
+  ## the registries of the organisation a step named with `registries = {...}` (D-114), from its options JSON; a damaged JSON names none
+  if optsJson.len == 0: return
+  try:
+    let j = parseJson(optsJson)
+    if j.kind == JObject and j.hasKey("registries") and j["registries"].kind == JArray:
+      for n in j["registries"]:
+        if n.kind == JString and n.getStr notin result: result.add n.getStr
+  except JsonParsingError: discard
+
 proc secretNamesOf*(optsJson: string): seq[string] =
-  ## the names a step asked for, from its options JSON ("" = none); a damaged JSON asks for nothing
+  ## the names a step asked for, from its options JSON ("" = none); a damaged JSON asks for nothing. A step that names registries asks for `registryConfigName` too: the shim fetches it the way it fetches a secret.
   if optsJson.len == 0: return
   try:
     let j = parseJson(optsJson)
@@ -37,6 +51,7 @@ proc secretNamesOf*(optsJson: string): seq[string] =
       for n in j["secrets"]:
         if n.kind == JString: result.add n.getStr
   except JsonParsingError: discard
+  if registryNamesOf(optsJson).len > 0 and registryConfigName notin result: result.add registryConfigName
 
 # ------------------------------------------------------------------ the rows
 

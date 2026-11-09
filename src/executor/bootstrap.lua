@@ -378,11 +378,36 @@ local function norm_secrets(v, depth)
     if type(n) ~= "string" or #n > 64 or not n:match("^[A-Z_][A-Z0-9_]*$") then
       error("secrets: a name is capital letters, digits and _, not starting with a digit, at most 64 characters", depth)
     end
+    if n == "CINIM_REGISTRY_CONFIG" or n == "CINIM_API_TOKEN" then
+      error("secrets: " .. n .. " is made by the core for a step that asks for `registries` or `api`: it is not a secret to list", depth)
+    end
     if not seen[n] then seen[n] = true; names[#names + 1] = n end
   end
   if #names > 32 then error("secrets: at most 32 per step", depth) end
   tsort(names)
   return names
+end
+
+-- D-114: `registries = { "gh" }` on a step gives it the login of the registries of the organisation that are named (the objects under /organizations/{slug}/registries), as the text of one Docker
+-- `config.json` in the variable CINIM_REGISTRY_CONFIG. The core makes it when the step starts and nothing of it is kept in Kubernetes; the shim masks it in the log. Returns a sorted list without repeats.
+local REGISTRY_NAME_PAT = "^[a-z][a-z0-9_%-]*$"
+local function check_registry_name(n, what, depth)
+  if type(n) ~= "string" or #n > 40 or not n:match(REGISTRY_NAME_PAT) then
+    error(what .. ": the name of a registry is lowercase letters, digits, - and _, starting with a letter, at most 40 characters", depth)
+  end
+  return n
+end
+local function norm_registries(v, depth)
+  if v == nil then return nil end
+  if type(v) ~= "table" then error("registries: a list of names of registries, for example {\"gh\"}", depth) end
+  local names, seen = {}, {}
+  for i = 1, rawlen(v) do
+    local n = check_registry_name(v[i], "registries", depth)
+    if not seen[n] then seen[n] = true; names[#names + 1] = n end
+  end
+  if #names > 8 then error("registries: at most 8 per step", depth) end
+  tsort(names)
+  return #names > 0 and names or nil
 end
 
 local function merge_secrets(a, b)
@@ -636,6 +661,7 @@ local function step_opts(job, opts)
   local env, step_env = job.__env, nil
   local cache = job.__cache
   local api = nil
+  local registries = nil
   if opts then
     if opts.env ~= nil then step_env = norm_env(opts.env, "Job:sh env", 4) end
     if opts.cache ~= nil then cache = merge_cache(cache, norm_cache(opts.cache, 4)) end
@@ -645,6 +671,7 @@ local function step_opts(job, opts)
       api = norm_api(opts.api, 4)
       secrets = merge_secrets(secrets, { API_TOKEN_NAME })            -- the shim asks the core for it the way it asks for a secret
     end
+    if opts.registries ~= nil then registries = norm_registries(opts.registries, 4) end
     if opts.metrics ~= nil then metrics = norm_metrics(opts.metrics) end
     if opts.mask ~= nil then mask = norm_mask(opts.mask) end
     if opts.timeout ~= nil then timeout = norm_timeout(opts.timeout) end
@@ -656,6 +683,7 @@ local function step_opts(job, opts)
   if env then parts[#parts + 1] = '"env":' .. env_json(env) end
   if mask ~= "" then parts[#parts + 1] = '"mask":' .. mask end
   if metrics ~= "" then parts[#parts + 1] = '"metrics":' .. metrics end
+  if registries then parts[#parts + 1] = '"registries":' .. secrets_json(registries) end
   if secrets and #secrets > 0 then parts[#parts + 1] = '"secrets":' .. secrets_json(secrets) end
   if api then parts[#parts + 1] = '"api":' .. secrets_json(api) end
   if job.__shm then parts[#parts + 1] = '"shm":' .. jstr(job.__shm) end
@@ -679,7 +707,7 @@ end
 -- The id is the index (D-67), so a step without one cannot be written; it is checked at once, with the line. A job runs its list of steps in order (`steps = { ... }`) or, for the logic
 -- that needs a result of a step to go on (`body = function(j) ... end`), runs them one by one with `j:run(step)`. A step that fails (a code other than 0, unless `ignore_failure`) fails the job.
 local STEP_FIELDS = {
-  sh = { cmd = true, name = true, ignore_failure = true, capture = true, image = true, env = true, cache = true, artifacts = true, secrets = true, api = true, metrics = true, mask = true, timeout = true },
+  sh = { cmd = true, name = true, ignore_failure = true, capture = true, image = true, env = true, cache = true, artifacts = true, secrets = true, registries = true, api = true, metrics = true, mask = true, timeout = true },
   cache_restore = { keys = true, name = true },
   cache_save = { key = true, paths = true, name = true },
 }
@@ -854,6 +882,15 @@ local function image_text(v, what, pattern, max)
   return v
 end
 
+-- D-114: a registry given by name, `{ name = "gh" }`: its address and whether it speaks plain HTTP come from the registry object of the organisation, asked of the core once (a host call, journaled: a run
+-- keeps the answer it had at that point), and so does the login (the steps that talk to it are given `registries`).
+local function registry_info(name, what)
+  local r = call("registry", name)
+  local address, insecure, login = r:match("^([^\n]+)\n([01])\n([01])$")
+  if not address then error(what .. ": the core did not say what the registry '" .. name .. "' is", 4) end
+  return { name = name, address = address, insecure = insecure == "1", login = login == "1" }
+end
+
 local function image_registry(v, what)
   -- host[:port][/path]: the host is letters, digits, `.` and `-`; the port is digits; the path is parts of letters, digits and `. _ -` between single slashes; no scheme, no spaces, no quotes
   image_text(v, what, "^[%w%.%-:/_]+$", 200)
@@ -902,7 +939,19 @@ local function image_opts(opts)
     if opts[k] == nil then image_fail(k .. " is required") end
   end
   o.name = image_text(opts.name, "name", "^[a-z0-9][a-z0-9%._/%-]*$", 128)
-  o.registry = image_registry(opts.registry, "registry")
+  -- a registry is an address (`reg.example.org/team`) or an object of the organisation by name (`{ name = "gh" }`, D-114); the address of one given by name and its plain HTTP come from the object
+  local named, named_insecure = {}, false
+  local function registry_of(v, what)
+    if type(v) ~= "table" then return image_registry(v, what) end
+    for k in rawnext, v do
+      if k ~= "name" then image_fail(what .. ": a registry given by name is { name = \"...\" } and nothing more") end
+    end
+    local info = registry_info(check_registry_name(v.name, what, 5), "Job:image: " .. what)
+    named[#named + 1] = info
+    if info.insecure then named_insecure = true end
+    return info.address
+  end
+  o.registry = registry_of(opts.registry, "registry")
   o.context = image_path(opts.context == nil and "src" or opts.context, "context")
   o.dockerfile = image_path(opts.dockerfile, "dockerfile")
   local tag = opts.tag
@@ -910,17 +959,29 @@ local function image_opts(opts)
   local tagpat = "^[%w_][%w_%.%-]*$"
   o.tag = image_text(tag, "tag", tagpat, 128)
   o.tags = image_list(opts.tags, "tags", function(t, w) return image_text(t, w, tagpat, 128) end)
-  o.also = image_list(opts.also, "also", image_registry)
+  o.also = image_list(opts.also, "also", registry_of)
   for _, b in ipairs({ "cache", "insecure", "skip_if_present" }) do
     if opts[b] ~= nil and type(opts[b]) ~= "boolean" then image_fail(b .. " is true or false") end
   end
   o.cache = opts.cache ~= false
-  o.insecure = opts.insecure == true
+  o.insecure = opts.insecure == true or named_insecure
   o.skip = opts.skip_if_present == true
   if opts.cache_repo ~= nil then o.cache_repo = image_registry(opts.cache_repo, "cache_repo") end
   if opts.target ~= nil then o.target = image_text(opts.target, "target", "^[%w][%w%._%-]*$", 100) end
   local login = opts.login
-  if login == true then o.secret = "REGISTRY_DOCKER_CONFIG"
+  if #named > 0 then
+    -- the login of a registry given by name is the object's own: the steps that talk to registries are given the logins of those that have one
+    if login ~= nil and login ~= false then image_fail("login is for a registry given by an address; a registry given by name has its own login") end
+    local want, seen = {}, {}
+    for _, r in ipairs(named) do
+      if r.login and not seen[r.name] then seen[r.name] = true; want[#want + 1] = r.name end
+    end
+    if #want > 0 then
+      tsort(want)
+      o.registries = want
+      o.secret = "CINIM_REGISTRY_CONFIG"
+    end
+  elseif login == true then o.secret = "REGISTRY_DOCKER_CONFIG"
   elseif login ~= nil and login ~= false then
     if type(login) ~= "string" or not login:match("^[A-Z_][A-Z0-9_]*$") then image_fail("login is true, or the name of a secret (capital letters, digits and _)") end
     o.secret = login
@@ -1006,7 +1067,8 @@ local Job_mt = { __index = {
     self.__images = (self.__images or 0) + 1
     if self.__images > IMAGE_MAX_PER_JOB then error("Job:image: a job builds at most " .. IMAGE_MAX_PER_JOB .. " images", 2) end
     local function id(k) return "mg" .. tostring_(self.__images) .. tostring_(k) end
-    local secrets = o.secret and { o.secret } or nil
+    local secrets = (o.secret and not o.registries) and { o.secret } or nil
+    local registries = o.registries
     local flags = o.insecure and "--insecure" or ""
     local alltags = { o.tag }
     for _, t in ipairs(o.tags) do alltags[#alltags + 1] = t end
@@ -1024,7 +1086,7 @@ local Job_mt = { __index = {
       if o.skip then e.SKIP_IF_PRESENT = "yes" end
       if o.suffix then e.REUSE_SUFFIX = o.suffix end
       if #o.tags > 0 then e.EXTRA_TAGS = table.concat(o.tags, " ") end
-      local checked = self:run(step.sh[id(1)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_CHECK_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets })
+      local checked = self:run(step.sh[id(1)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_CHECK_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets, registries = registries })
       action = checked.outputs.ACTION
       if action ~= "build" and action ~= "present" and action ~= "retagged" then error("Job:image: the check step did not say what to do (got '" .. tostring_(action) .. "')", 2) end
     end
@@ -1037,12 +1099,12 @@ local Job_mt = { __index = {
       if o.cache then k[#k + 1] = " --cache=true --cache-repo=" .. (o.cache_repo or (o.registry .. "/cinim-cache")) else k[#k + 1] = " --cache=false" end
       k[#k + 1] = " --log-format=text"
       if o.insecure then k[#k + 1] = " --insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull" end
-      self:run(step.sh[id(2)]{ cmd = table.concat(k), image = o.kaniko, secrets = secrets })
+      self:run(step.sh[id(2)]{ cmd = table.concat(k), image = o.kaniko, secrets = secrets, registries = registries })
     end
     -- 3. the other registries
     if #o.also > 0 then
       local e = { ALSO = table.concat(o.also, " "), TAGS = table.concat(alltags, " ") }
-      self:run(step.sh[id(3)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_COPY_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets })
+      self:run(step.sh[id(3)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_COPY_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets, registries = registries })
     end
     return { action = action, ref = o.registry .. "/" .. o.name .. ":" .. o.tag, tag = o.tag, name = o.name, registry = o.registry }
   end,

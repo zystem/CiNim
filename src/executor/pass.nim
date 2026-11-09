@@ -13,6 +13,7 @@ proc stubHost(seq: int; kind, payload: string): Option[string] =
   of "job_sh": some("0\n")
   of "now": some("0")
   of "random": some("0.5")
+  of "registry": some("registry.example.test\n0\n1")       # D-114: the address, no plain HTTP, a login (the pass proves the shape of the script, not a registry)
   else: some("")
 
 type

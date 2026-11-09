@@ -24,7 +24,7 @@ import protobuf_serialization/files/type_generator
 import common/[rqlite, shimstate, states]
 import grpcserve
 import crunchy
-import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, apiauth
+import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, apiauth, registries
 import common/[ctrlauth, bytestr]
 import scheduler   ## for stopServers*, the shared shutdown flag every core REP-server thread polls
 
@@ -203,14 +203,20 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
   var names = secretNamesOf(v[0][1].getStr)
   # D-99: the token of the API that the step asked for with `api = {...}` is made here, not read from the vault
   let wantsToken = apiTokenName in names
-  names.keepItIf(it != apiTokenName)
+  # D-114: the Docker config of the registries the step named is made here from the organisation's registry objects, not read from the vault as a secret
+  let wantsRegistries = registryConfigName in names and registryNamesOf(v[0][1].getStr).len > 0
+  names.keepItIf(it notin [apiTokenName, registryConfigName])
   let vk = vaultKek()
-  if names.len > 0 and not vk.ready: return refuse("secrets_unavailable", "core's secrets are not available")
+  if (names.len > 0 or wantsRegistries) and not vk.ready: return refuse("secrets_unavailable", "core's secrets are not available")
   let got = if names.len > 0: c.getSecrets(vk.kek, v[0][2].getStr, names, v[0][3].getStr, v[0][4].getInt > 0)       # D-86: the run's project and whether its ref is protected
             else: (ok: true, retry: false, values: newSeq[(string, string)](), error: "")
   if not got.ok: return refuse(if got.retry: "secrets_unavailable" else: "unknown_secret", got.error)
   result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
   for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)
+  if wantsRegistries:
+    let made = c.registriesConfig(vk.kek, vk.ready, v[0][2].getStr, registryNamesOf(v[0][1].getStr))
+    if not made.ok: return refuse(if made.retry: "secrets_unavailable" else: "unknown_registry", made.error)
+    result.secrets.add StepSecret(name: registryConfigName, value: made.config)
   if wantsToken:
     var perms: seq[string]
     try:

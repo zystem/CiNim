@@ -134,3 +134,16 @@ proc dockerConfigFor*(c: var RqClient; kek: KekProvider; vaultReady: bool; r: Re
   let pw = c.openOrgText(kek, r.tenantId, "registry:" & r.id, r.secretEnc)
   if not pw.ok: return (false, "", "the password of the registry cannot be read: " & pw.error)
   (true, dockerConfigOf(r.address, r.username, pw.plain), "")
+
+proc registriesConfig*(c: var RqClient; kek: KekProvider; vaultReady: bool; tenantId: string; names: seq[string]): tuple[ok, retry: bool, config, error: string] =
+  ## the one Docker config that holds the logins of the named registries (D-114): what a step that names `registries` gets in `CINIM_REGISTRY_CONFIG`. A registry without a login adds nothing;
+  ## the result is always a config (`{"auths":{}}` when none has a login), so that the step writes it where its tool looks for it. A name the organisation has not is an error.
+  var auths = newJObject()
+  for n in names:
+    let r = c.registryNamed(tenantId, n)
+    if not r.found: return (false, false, "", "this organisation has no registry " & n)
+    let d = c.dockerConfigFor(kek, vaultReady, r.registry)
+    if not d.ok: return (false, not vaultReady, "", d.error)
+    if d.config.len > 0:
+      for k, v in parseJson(d.config)["auths"]: auths[k] = v
+  (true, false, $(%*{"auths": auths}), "")
