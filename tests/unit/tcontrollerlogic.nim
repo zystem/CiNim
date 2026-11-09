@@ -56,7 +56,7 @@ proc shimLine(n: int; ev: ShimEvent; reason = ""): string =
   marker & $toJson(s, 1) & "\n"
 
 suite "D-75 the shim is told where to send its state":
-  test "with a status address the shim gets --status-addr; without one (an older core) it has no such flag and keeps the state in the log batches":
+  test "with a status address the shim gets --status-addr; without one (a core outside a cluster that was not told it) it has no such flag and sends no state":
     var c = cfg
     check "--status-addr" notin buildRequest(c, req()).cmd
     c.statusAddr = "tcp://core:3"

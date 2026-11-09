@@ -153,13 +153,14 @@ message Command {
 // poll and not as the environment of the controller's Pod, so that changing one needs no new Pod of the controller: it applies them to the next step it starts. An empty string
 // is the controller's own default.
 message ControllerConfig {
+  reserved 7, 14;                        // 7: run_storage_enabled (the run volume is not optional, D-55), 14: log_ingest_addr (the controller pulls no spool out of a Pod, D-55)
+  reserved "run_storage_enabled", "log_ingest_addr";
   bool present = 1;                      // false: the answer carries none (a core that does not send them); the controller keeps what it has
   bool build_enabled = 2;                // the shard has a build profile: a step that asks for it becomes a build Pod
   string build_seccomp = 3;              // RuntimeDefault (Kaniko) or Localhost (rootless BuildKit and Buildah)
   string build_caps = 4;                 // the capabilities a build Pod keeps, comma separated
   string build_memory_limit = 5;
   string build_ephemeral_limit = 6;      // the ephemeral-storage limit of a build Pod
-  bool run_storage_enabled = 7;          // no longer sent or read: the run volume is not optional (D-55); the number stays so that the wire form does not change
   string run_storage_size = 8;
   string run_storage_class = 9;          // "" = the cluster's default class
   string run_storage_access = 10;        // ReadWriteOnce or ReadWriteMany
@@ -167,7 +168,6 @@ message ControllerConfig {
   string collector_addr = 11;            // the core's LogIngest, as the shim in a step Pod reaches it ("" = no log streaming)
   string step_report_addr = 12;          // the core's StepReport, the same
   string artifact_addr = 13;             // the core's ArtifactIngest, the same ("" = a step with artifacts fails)
-  string log_ingest_addr = 14;           // no longer sent or read: the controller does not pull a spool out of a Pod any more (D-55); the number stays so that the wire form does not change
   uint64 log_spool_bytes = 15;           // the default size of a step's spool on the Pod (a profile's own setting wins, StartStep)
   uint32 log_hold_timeout_seconds = 16;  // the default wait for log delivery (a profile's own setting wins)
   uint32 pod_retention_read_seconds = 17;    // how long a finished Pod is kept when the core has its result and its log (0: removed at once)

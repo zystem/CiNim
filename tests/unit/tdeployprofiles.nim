@@ -9,12 +9,9 @@ suite "D-115 deploy profiles: names":
   test "an account and a namespace are DNS labels":
     for ok in ["deploy-test1", "cinim-deployer", "a", "x".repeat(63)]: check validServiceAccountName(ok)
     for bad in ["", "-a", "a-", "A", "a_b", "a.b", "x".repeat(64)]: check not validServiceAccountName(bad)
-  test "a namespace is a name, a prefix with one * at the end, or * alone; a pattern matches the names that begin so":
+  test "a namespace is a name, a prefix with one * at the end, or * alone; a plain name is told to the step as it is":
     for ok in ["test1", "test*", "*", "team-a*", "a"]: check isNamespacePattern(ok)
     for bad in ["", "Test", "te*st", "*test", "t**", "-a", "a-", "a_b", "x".repeat(64), "a b"]: check not isNamespacePattern(bad)
-    check namespaceMatches("test1", "test1") and not namespaceMatches("test1", "test10") and not namespaceMatches("test1", "test2")
-    check namespaceMatches("test*", "test1") and namespaceMatches("test*", "test") and namespaceMatches("test*", "test-eu") and not namespaceMatches("test*", "prod")
-    check namespaceMatches("*", "anything") and not namespaceMatches("*", "") and not namespaceMatches("", "x")
     check isPlainNamespace("test1") and not isPlainNamespace("test*") and not isPlainNamespace("*") and not isPlainNamespace("")
   test "the gate treats `deploy` and an organisation's profile alike, and neither the ordinary profile nor build":
     check isDeployKind("deploy") and isDeployKind("test1") and isDeployKind("self")

@@ -41,13 +41,20 @@ proc parseStatusTarget*(j: JsonNode): tuple[target: StatusTarget, error: string]
   if t.apiUrl notin allowedApiUrls(): return (StatusTarget(), "status.api_url is not one the shard allows (" & allowedApiUrls().join(", ") & ")")
   (t, "")
 
-proc statusTargetOf*(c: var RqClient; groupId: string): StatusTarget =
-  if groupId.len == 0: return
-  let v = c.query(%*[["SELECT status_target FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
-  if v == nil or v.len == 0 or v[0][0].getStr.len == 0: return
-  let j = try: parseJson(v[0][0].getStr) except CatchableError: return
+proc targetOfText(text: string): StatusTarget =
+  if text.len == 0: return
+  let j = try: parseJson(text) except CatchableError: return
   let p = parseStatusTarget(j)
   if p.error.len == 0: result = p.target                   # one that is not allowed any more (the list of the shard changed) is told nobody
+
+proc ownStatusTargetOf*(c: var RqClient; groupId: string): StatusTarget =
+  ## what this group itself says
+  let v = c.chainValues(groupId, "status_target")
+  if v.len > 0: result = targetOfText(v[^1])
+
+proc statusTargetOf*(c: var RqClient; groupId: string): StatusTarget =
+  ## where the state of the runs of a project is told: the target of the project, else the nearest group above that has one (inherited; the organisation has none)
+  targetOfText(c.nearestValue(groupId, "status_target"))
 
 proc setStatusTarget*(c: var RqClient; groupId: string; j: JsonNode): string =
   ## "" when saved; JNull clears it

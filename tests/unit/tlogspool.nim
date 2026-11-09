@@ -136,7 +136,7 @@ suite "secrets (DAT-002 in the shim)":
     let blocks = b.feed("password=Zq9-very-secret\n", 1) & b.flush(1)
     check "Zq9-very-secret" notin uncompress(blocks[0].data)
 
-  test "values shorter than minSecretLen are left alone (they would mangle ordinary output)":
+  test "values shorter than the minimum length are left alone (they would mangle ordinary output)":
     var b = newB(@["ab", "abc"])
     check msgs(b.feed("abc abcd\n", 1) & b.flush(1)) == @["abc abcd"]
 

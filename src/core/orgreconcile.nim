@@ -97,12 +97,6 @@ proc superviseController(k: KubeApi; cfg: ProvisionConfig; slug: string; active:
   ## good, makes one with the one-time token of the identity; a new generation first when the identity has been used, has expired, or a Pod of this generation has just been
   ## deleted (its name is the generation's; the same token could not be given twice anyway).
   let ns = orgNamespace(cfg, slug)
-  # a Deployment of the time before the controller became a Pod of the core (docs/compat.md): deleting it takes its Pods
-  let old = k.remove("Deployment", ns, controllerName)
-  if old.outcome == oFailed:
-    report.error = "removing the Deployment of the controller: " & old.detail
-    return
-  if old.outcome == oDeleted: report.controllerRemoved.add "Deployment " & controllerName & ": replaced by a Pod of the core"
   let listed = k.listObjects("Pod", ns, "app.kubernetes.io/name=" & controllerName)
   if listed.error.len > 0:
     report.error = "listing the controller: " & listed.error

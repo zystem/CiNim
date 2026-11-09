@@ -141,9 +141,7 @@ proc noteStream(key: StreamKey) =
 
 proc handleBatch(c: var RqClient; co: Collector; req: LogBatch): LogAck =
   let key: StreamKey = (req.step.run_id, req.step.seq, req.step.attempt)
-  # A shim of an older controller still sends its state in the batch (a batch without chunks was its heartbeat): recorded first, as it was. A shim that has the status channel (D-75) sends none here,
-  # and the log below does not touch the database.
-  if req.status.state_json.len > 0: applyStatus(c, req.step, req.status)
+  # the log below does not touch the database: the state of the shim comes on the status channel (`answerStatus`, D-75)
   if req.chunks.len == 0: return ack(req.step, 0)
   # A shim that outlived its Pod's verdict (a "ghost") is not fenced off here: its attempt number is part of the stream key
   # and of the VictoriaLogs `job` label, so whatever it still delivers lands in *its own* (earlier) attempt's log - the
@@ -214,7 +212,7 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
   result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
   for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)
   if wantsRegistries:
-    let made = c.registriesConfig(vk.kek, vk.ready, v[0][2].getStr, registryNamesOf(v[0][1].getStr))
+    let made = c.registriesConfig(vk.kek, vk.ready, v[0][2].getStr, registryNamesOf(v[0][1].getStr), trusted = v[0][4].getInt > 0)
     if not made.ok: return refuse(if made.retry: "secrets_unavailable" else: "unknown_registry", made.error)
     result.secrets.add StepSecret(name: registryConfigName, value: made.config)
   if wantsToken:

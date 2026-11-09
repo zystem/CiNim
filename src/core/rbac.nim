@@ -1,5 +1,6 @@
 ## IAM-001, RBAC (D-50, D-84): the four built-in roles - `admin`, `rw`, `dev`, `ro` - are sets of permissions made in code (permissions.nim), and an administrator makes roles of their own.
-## A role is given to a user at the **shard** (it holds in every organisation) or in one **organisation** (`role_bindings.scope`, `org:<slug>`). What the four have:
+## A role is given to a user in one **organisation** or on a group or a project in it (`role_bindings.scope`, `org:<slug>[/<path>]`); at the **shard** only `admin` is a right (D-90: the shard
+## is the super administrator's, and a role of another kind there gives nothing). What the four have in an organisation:
 ##
 ##   admin  every permission
 ##   rw     everything but who may do what (the users, the roles, the API tokens, the access of an organisation), the object stores, the audit, the choice of an organisation's
@@ -8,8 +9,8 @@
 ##   ro     reads runs (state, steps, logs, artifacts), the components, the launch gate, the profile settings, the alerts, the organisations, their triggers, groups, variables, locks
 ##
 ## Which permission a route needs is `needOf` in permissions.nim: a route that is not named there is closed to every role but `admin`, so a route added later stays closed until it is
-## named. `roleMay` here answers for a built-in role given at the shard; it is the old specification of the four roles (tests/unit/trbac.nim), kept to prove that the permissions
-## say the same. The gate asks `mayCall` of apiauth.nim, which knows the organisations too. Pure; tested in tests/unit/trbac.nim and tests/unit/tpermissions.nim.
+## named. `roleMay` here answers whether the permissions of a built-in role allow a call, what is the shard's own being the administrator's alone; it is the old specification of
+## the four roles (tests/unit/trbac.nim), kept to prove that the permissions say the same. The gate asks `mayCall` of apiauth.nim, which knows the organisations too. Pure; tested in tests/unit/trbac.nim and tests/unit/tpermissions.nim.
 import std/[strutils, unicode, json]
 import permissions
 export permissions
@@ -19,7 +20,6 @@ const
   roleRw* = "rw"
   roleRo* = "ro"
   roleDev* = "dev"
-  shardRoles* = [roleAdmin, roleRw, roleDev, roleRo]
   shardScope* = "shard"               ## a binding of this scope applies to every organisation of the shard
   userScopePrefix* = "user:"          ## the scope of an API token that stands for a user: its rights are the user's roles as they are when the request comes
   runsBase* = "/api/v1/runs"
@@ -34,8 +34,6 @@ func isString*(j: JsonNode; key: string): bool =
   ## whether `j` is an object that has `key` with a string in it. `j{key}` is **nil** when the key is missing, and `.kind` of nil is a crash that takes a thread of the
   ## server with it: a body like `{}` must be asked about this way.
   j != nil and j.kind == JObject and (let v = j{key}; v != nil and v.kind == JString)
-
-func validRole*(role: string): bool = role in shardRoles
 
 func validUserName*(name: string): bool =
   ## lowercase letters, digits, `-` and `_`, starting with a letter, at most 32

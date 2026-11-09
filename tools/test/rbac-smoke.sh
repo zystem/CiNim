@@ -66,6 +66,8 @@ check "the administrator is deleted" 200 "$(code "$ADMIN" DELETE /api/v1/users/s
 check "its token stops working" 401 "$(code "$ROOT" GET /api/v1/components)"
 check "a second delete finds none" 404 "$(code "$ADMIN" DELETE /api/v1/users/smoke-root)"
 check "the user admin cannot be deleted" 403 "$(code "$ADMIN" DELETE /api/v1/users/admin)"
+check "the user admin cannot be blocked" 403 "$(code "$ADMIN" POST /api/v1/users/admin:disable)"
+check "a user that is not there cannot be blocked" 404 "$(code "$ADMIN" POST /api/v1/users/smoke-nobody:disable)"
 
 # --- the users, made by the administrator
 cleanup() { for u in rw dev ro; do code "$ADMIN" DELETE "/api/v1/users/smoke-$u" >/dev/null; done; code "$ADMIN" DELETE /api/v1/users/smoke-root >/dev/null; }
@@ -117,6 +119,13 @@ check "rw changes its password to the same" 400 "$(code "${TOKEN[rw]}" PUT /api/
 NEW=$(rand)
 check "rw changes its password" 200 "$(code "${TOKEN[rw]}" PUT /api/v1/users/smoke-rw/password "{\"current_password\":\"${PASS[rw]}\",\"password\":\"$NEW\"}")"
 check "rw logs in with the new password" 200 "$(status -X POST "$base/api/v1/login" -d "{\"user\":\"smoke-rw\",\"password\":\"$NEW\"}")"
+check "a person who is not an administrator cannot block" 403 "$(code "${TOKEN[rw]}" POST /api/v1/users/smoke-dev:disable)"
+check "an administrator blocks smoke-dev" 200 "$(code "$ADMIN" POST /api/v1/users/smoke-dev:disable)"
+check "the token of a blocked user stops working" 401 "$(code "${TOKEN[dev]}" GET /api/v1/components)"
+check "a blocked user cannot log in" 401 "$(status -X POST "$base/api/v1/login" -d "{\"user\":\"smoke-dev\",\"password\":\"${PASS[dev]}\"}")"
+check "blocking again changes nothing" 200 "$(code "$ADMIN" POST /api/v1/users/smoke-dev:disable)"
+check "an administrator lets smoke-dev in again" 200 "$(code "$ADMIN" POST /api/v1/users/smoke-dev:enable)"
+check "its token works again" 403 "$(code "${TOKEN[dev]}" GET /api/v1/components)"
 check "rw logs in with the old password" 401 "$(status -X POST "$base/api/v1/login" -d "{\"user\":\"smoke-rw\",\"password\":\"${PASS[rw]}\"}")"
 NEW2=$(rand)
 check "admin changes the password of smoke-dev (no current one)" 200 "$(code "$ADMIN" PUT /api/v1/users/smoke-dev/password "{\"password\":\"$NEW2\"}")"

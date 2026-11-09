@@ -613,8 +613,7 @@ proc main(): int =
   if maskRuntime: childEnv["CICD_MASK"] = maskFile
   # poStdErrToStdOut, not poParentStreams: the shim needs a pipe to read the child's bytes itself (to
   # tee them to LogIngest) - inheriting the parent's fds directly (the old behavior) gives the shim no
-  # way to see them at all. stdout/stderr are merged into one stream; LogChunk.stream still carries
-  # LOG_STREAM_STDOUT/STDERR, so splitting them later is a pure addition, not a wire-format change.
+  # way to see them at all. stdout/stderr are merged into one stream (D-27).
   let p = spawnBuild(cmd, childEnv, buildNice, buildOomAdj, (if dirExists(workspace): workspace else: ""))   # the command starts in the workspace, as the examples assume
   event(seCommandStarted)
   let startedAt = epochTime()

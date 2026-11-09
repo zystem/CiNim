@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs the unit and integration test files in parallel: tools/test/run.sh [-j N] [-u|-i] [file.nim ...]
 #   -j N   workers (default 8); every worker has its own scratch rqlite in a Docker container (RAM-backed), so the suites do not meet in one database
-#   -u|-i  only the unit tests / only the integration tests (default: both)
+#   -u|-i  only the unit tests (and the protocol contract tests, tests/contract) / only the integration tests (default: both)
 # The integration tests need a scratch rqlite each. With Docker they are containers (cinim-rqlite-N, ports 24600+N), made new at every run and left running afterwards; remove them with
 #   docker rm -f $(docker ps -aq --filter name=cinim-rqlite-)
 # CINIM_TEST_NICE=<n> runs the compilers and the tests at that nice value, so that the databases (not niced) answer first on a busy machine.
@@ -32,7 +32,7 @@ if [ ${#files[@]} -eq 0 ]; then
     case $f in *tm1skeleton*) continue;; esac     # needs the Kubernetes C client (K8S_PREFIX) and a cluster: name it on the command line
     files+=("$f")
   done
-  [ $unit = 1 ] && for f in tests/unit/t*.nim; do
+  [ $unit = 1 ] && for f in tests/unit/t*.nim tests/contract/t*.nim; do        # the protocol contract tests need nothing but the compiler (and buf, which tproto_compat finds in PATH)
     case $f in *thsperf*) continue;; esac     # the performance test is a benchmark
     files+=("$f")
   done
@@ -122,6 +122,8 @@ one() {   # file slot
   fi
   grep -q "ERROR: AddressSanitizer" "$log" && [ $rc -eq 0 ] && rc=1
   ok=$(grep -c '\[OK\]' "$log"); bad=$(grep -c '\[FAILED\]' "$log")
+  # a file that reports with the summary line of another framework (`[Summary] 4 tests run`) has no [OK] lines: its count is that of the summary, so that "0 tests" means a file that skipped itself
+  if [ "$ok" = 0 ]; then n=$(sed -n 's/.*\[Summary\] \([0-9]*\) tests run.*/\1/p' "$log" | tail -1); [ -z "$n" ] || ok=$n; fi
   if [ $rc -eq 0 ] && [ "$bad" = 0 ]; then printf 'ok    %-34s %3d tests %4ds\n' "$kind/$name" "$ok" $(( $(date +%s) - start )); rm -f "$log"
   else
     [ $rc -ne 124 ] || { echo "TIMED OUT: no answer within ${limit} s, killed" >>"$log"; echo "$name: TIMED OUT after ${limit} s" >&2; }

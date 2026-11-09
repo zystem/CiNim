@@ -4,9 +4,7 @@ import ../../src/core/rbac
 
 suite "IAM-001 the roles of the shard":
   test "there are four, and no other word is a role":
-    check shardRoles == ["admin", "rw", "dev", "ro"]
-    check validRole("admin") and validRole("rw") and validRole("dev") and validRole("ro")
-    check not validRole("") and not validRole("root") and not validRole("Admin")
+    check builtinRoles == ["admin", "rw", "dev", "ro"]
   test "an administrator may do anything, a made-up role nothing":
     for (m, p) in [("GET", "/api/v1/tokens"), ("POST", "/api/v1/users/rw:reset-credentials"), ("PUT", "/api/v1/stores"), ("DELETE", "/api/v1/organizations/acme")]:
       check roleMay("admin", m, p)

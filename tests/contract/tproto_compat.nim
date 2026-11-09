@@ -2,8 +2,16 @@
 ## A change that only adds must pass, every removal, renumbering or retyping must be caught.
 import std/[unittest, os, osproc, strutils]
 
-let buf = getEnv("BUF", getHomeDir() / "go" / "bin" / "buf")
+let buf = getEnv("BUF", (let p = findExe("buf"); if p.len > 0: p else: getHomeDir() / "go" / "bin" / "buf"))
 let protoDir = getCurrentDir() / "proto"
+
+if not fileExists(buf):
+  # the image of the tests has buf (tools/image/Dockerfile.test) and the pipeline asks for it (CINIM_REQUIRE_BUF=1): there a missing tool is a failure, not a skipped check
+  if getEnv("CINIM_REQUIRE_BUF") == "1":
+    echo "  [FAILED] buf is required (CINIM_REQUIRE_BUF=1) and was not found: " & buf
+    quit 1
+  echo "  skipped: buf was not found (BUF=<path>, or go install github.com/bufbuild/buf/cmd/buf)"
+  quit 0
 
 proc breaking(mutate: proc (dir: string)): int =
   ## copies proto/ to a temp dir, applies the mutation and returns buf's exit code against the baseline

@@ -2,7 +2,7 @@
 ## (`groups.protected_refs`, `groups.allowed_profiles`, text with one entry to a line). A run on a protected ref is **trusted**: only the people who may start such a run (permission
 ## `run.start.protected`), or a trigger that one of them set up, make it; a secret marked `protected` goes to trusted runs only, and the profile `deploy` is used by them only. The refs are
 ## the names a commit was asked by (a branch or a tag): a run started by a bare SHA has no ref and is not trusted, whatever branch the commit is on.
-import std/[json, strutils]
+import std/[json, strutils, algorithm]
 import ../common/rqlite
 import groups, refpattern, deployprofiles
 export refpattern
@@ -35,10 +35,34 @@ func entries(text: string): seq[string] =
     let t = l.strip
     if t.len > 0: result.add t
 
-proc protectedPatterns*(c: var RqClient; groupId: string): seq[string] =
+const inheritedColumns = ["protected_refs", "allowed_callers", "required_approvals", "default_ref", "status_target"]     ## the settings of a group that the groups below it inherit
+
+proc chainValues*(c: var RqClient; groupId, column: string): seq[string] =
+  ## the value of a setting of `groups` in every group from the top one down to this one (an empty one too), as it is stored: where the settings are inherited from (the organisation, the root,
+  ## has none: its default is empty). `column` is one of `inheritedColumns`.
+  doAssert column in inheritedColumns
   if groupId.len == 0: return
-  let v = c.query(%*[["SELECT protected_refs FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
-  if v != nil and v.len > 0: return entries(v[0][0].getStr)
+  let own = c.query(%*[["SELECT tenant_id FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
+  if own == nil or own.len == 0: return
+  for g in c.groupChain(own[0][0].getStr, groupId):
+    let v = c.query(%*[["SELECT " & column & " FROM groups WHERE id = ?", g.id]])["results"][0]{"values"}
+    result.add (if v == nil or v.len == 0 or v[0][0].kind == JNull: "" elif v[0][0].kind == JString: v[0][0].getStr else: $v[0][0])      # a number column comes back as a number
+
+proc nearestValue*(c: var RqClient; groupId, column: string): string =
+  ## the value of the nearest group, this one first and then the ones above, that has one: a setting that is one thing (a branch, a target), not a list
+  for v in reversed(c.chainValues(groupId, column)):
+    if v.len > 0 and v != "0": return v
+
+proc ownProtectedPatterns*(c: var RqClient; groupId: string): seq[string] =
+  ## what this group itself lists (what a PUT of its settings wrote)
+  let v = c.chainValues(groupId, "protected_refs")
+  if v.len > 0: return entries(v[^1])
+
+proc protectedPatterns*(c: var RqClient; groupId: string): seq[string] =
+  ## D-86: the refs whose runs are trusted: the patterns of the group and of every group above it (inherited: a group below can add one and cannot take one away; the organisation lists none)
+  for text in c.chainValues(groupId, "protected_refs"):
+    for e in entries(text):
+      if e notin result: result.add e
 
 proc setDefaultRef*(c: var RqClient; groupId, name: string) =
   ## D-82: what the repository itself says its default branch is (a poll trigger asks every minute); a name that is not one is not kept
@@ -47,9 +71,8 @@ proc setDefaultRef*(c: var RqClient; groupId, name: string) =
 
 proc defaultRef*(c: var RqClient; groupId: string): string =
   ## D-82: the branch of a project that the base of a run falls back to: what the repository says (`default_ref`), else the first protected ref that is a name (not a prefix such as `release/*`), otherwise `main`
-  if groupId.len > 0:
-    let v = c.query(%*[["SELECT default_ref FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
-    if v != nil and v.len > 0 and v[0][0].getStr.len > 0: return v[0][0].getStr
+  let named = c.nearestValue(groupId, "default_ref")                 # the project's own, else the nearest group above that has one
+  if named.len > 0: return named
   for p in c.protectedPatterns(groupId):
     if not p.endsWith("*"): return p
   "main"
@@ -58,11 +81,16 @@ proc isProtectedRef*(c: var RqClient; groupId, name: string): bool =
   ## whether a run of this project asked for `name` is on a protected ref
   name.len > 0 and protectedBy(c.protectedPatterns(groupId), name)
 
+proc ownAllowedCallers*(c: var RqClient; groupId: string): seq[string] =
+  let v = c.chainValues(groupId, "allowed_callers")
+  if v.len > 0: return entries(v[^1])
+
 proc allowedCallers*(c: var RqClient; groupId: string): seq[string] =
-  ## D-93: the projects (a path of a project, or of a group: all the projects under it) whose pipelines may start runs of this project with ci.trigger, whoever started them
-  if groupId.len == 0: return
-  let v = c.query(%*[["SELECT allowed_callers FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
-  if v != nil and v.len > 0: return entries(v[0][0].getStr)
+  ## D-93: the projects (a path of a project, or of a group: all the projects under it) whose pipelines may start runs of this project with ci.trigger, whoever started them: the ones this group
+  ## lists and the ones of every group above it (inherited; the organisation lists none)
+  for text in c.chainValues(groupId, "allowed_callers"):
+    for e in entries(text):
+      if e notin result: result.add e
 
 proc setAllowedCallers*(c: var RqClient; groupId: string; paths: seq[string]): string =
   ## "" when saved, otherwise why not
@@ -81,11 +109,16 @@ proc callerAllowed*(c: var RqClient; groupId, callerPath: string): bool =
   for e in c.allowedCallers(groupId):
     if callerPath == e or callerPath.startsWith(e & "/"): return true
 
+proc ownRequiredApprovals*(c: var RqClient; groupId: string): int =
+  let v = c.chainValues(groupId, "required_approvals")
+  if v.len > 0: max(1, parseInt(v[^1])) else: 1
+
 proc requiredApprovals*(c: var RqClient; groupId: string): int =
-  ## D-93: how many approvals a run of this project that waits for approval needs (1 unless the project says more)
-  if groupId.len == 0: return 1
-  let v = c.query(%*[["SELECT required_approvals FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
-  if v != nil and v.len > 0: max(1, v[0][0].getInt) else: 1
+  ## D-93: how many approvals a run of this project that waits for approval needs: the most that this group or any group above it asks for, 1 when none does (inherited: a group below can ask
+  ## for more and cannot ask for fewer)
+  result = 1
+  for v in c.chainValues(groupId, "required_approvals"):
+    try: result = max(result, parseInt(v)) except ValueError: discard
 
 proc setRequiredApprovals*(c: var RqClient; groupId: string; n: int) =
   discard c.execute(%*[["UPDATE groups SET required_approvals = ? WHERE id = ?", n, groupId]])

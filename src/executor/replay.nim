@@ -54,7 +54,7 @@ proc execute*(sb: var Sandbox; j: var Journal; code: string; host: HostCallProc;
               onCall: proc (seq: int; kind, key: string) = nil;
               onPlace: proc (seq: int; kind: string; line: int; ctx: string; nth: int) = nil): ExecResult =
   ## `params` are the launch parameters given when the run was created, as text. `onSite` is told, for every host call that has one, the line of the script it was made on
-  ## (a step: docs/parallel.md section 3.4). Every call has a **key**, the identity under which the journal keeps its answer: for a step `s<number>`, the number the script made of the id
+  ## (a step). Every call has a **key**, the identity under which the journal keeps its answer: for a step `s<number>`, the number the script made of the id
   ## of the job and the id of the step (D-67: it comes as `nth`), for any other call `<kind>#<n>`, the n-th call of that kind. The journal is found by key, so
   ## a record may be missing or be anywhere (a retry of only the failed steps, branches that end in any order): a call without a record goes to the host. `onCall` is told
   ## the key before the host is.

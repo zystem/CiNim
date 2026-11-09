@@ -135,13 +135,19 @@ proc dockerConfigFor*(c: var RqClient; kek: KekProvider; vaultReady: bool; r: Re
   if not pw.ok: return (false, "", "the password of the registry cannot be read: " & pw.error)
   (true, dockerConfigOf(r.address, r.username, pw.plain), "")
 
-proc registriesConfig*(c: var RqClient; kek: KekProvider; vaultReady: bool; tenantId: string; names: seq[string]): tuple[ok, retry: bool, config, error: string] =
+func loginRefused*(name: string): string =
+  ## D-114: a registry with a login is privileged, as the profile `deploy` is (D-86): its login goes to runs on a protected ref of the project only
+  "the registry " & name & " has a login: it goes to runs on a protected ref of the project only (protected_refs), and this run is not on one"
+
+proc registriesConfig*(c: var RqClient; kek: KekProvider; vaultReady: bool; tenantId: string; names: seq[string]; trusted = false): tuple[ok, retry: bool, config, error: string] =
   ## the one Docker config that holds the logins of the named registries (D-114): what a step that names `registries` gets in `CINIM_REGISTRY_CONFIG`. A registry without a login adds nothing;
-  ## the result is always a config (`{"auths":{}}` when none has a login), so that the step writes it where its tool looks for it. A name the organisation has not is an error.
+  ## the result is always a config (`{"auths":{}}` when none has a login), so that the step writes it where its tool looks for it. A name the organisation has not is an error, and so is
+  ## a registry with a login for a run that is not `trusted` (on a protected ref): the login is not given, the step is told why.
   var auths = newJObject()
   for n in names:
     let r = c.registryNamed(tenantId, n)
     if not r.found: return (false, false, "", "this organisation has no registry " & n)
+    if r.registry.secretEnc.len > 0 and not trusted: return (false, false, "", loginRefused(n))
     let d = c.dockerConfigFor(kek, vaultReady, r.registry)
     if not d.ok: return (false, not vaultReady, "", d.error)
     if d.config.len > 0:

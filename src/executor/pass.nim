@@ -1,4 +1,4 @@
-## The pass of a script against a stub host (docs/parallel.md section 3.4, D-67): before a run is led, and before it exists (PIP-016), the script is run once in the sandbox with nothing
+## The pass of a script against a stub host (D-67): before a run is led, and before it exists (PIP-016), the script is run once in the sandbox with nothing
 ## made anywhere, to find what the script itself proves: more than 1000 steps (`step_limit`) and an id used twice (`duplicate_id`). It no longer numbers the steps: a step's number is made of
 ## the id of its job and its own (`src/executor/bootstrap.lua`, `src/common/crockford.nim`), the same in every execution, so no table of numbers is kept with a run.
 import std/[options, strutils, json, tables, sequtils]

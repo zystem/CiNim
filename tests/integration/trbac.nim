@@ -88,8 +88,8 @@ suite "IAM-001 users, roles and their tokens":
       let a = first()
       check a.user == "admin"
       # an administrator of the shard is made with role admin at the shard (POST /api/v1/users without an organisation)
-      check c.createUser("root2", "admin", pwOf & "root2", t0)
-      check not c.createUser("root2", "admin", pwOf & "root2", t0)                                         # a name is taken once
+      check c.createUser("root2", "admin", pwOf & "root2", t0, shardScope)
+      check not c.createUser("root2", "admin", pwOf & "root2", t0, shardScope)                                         # a name is taken once
       let t2 = c.createApiToken("test root2", userScope("root2"), 0, t0).token
       let p2 = who(t2)
       check p2.ok and p2.admin and p2.roles == @["admin"] and p2.mayCall("GET", "/api/v1/components")
@@ -108,9 +108,36 @@ suite "IAM-001 users, roles and their tokens":
       check not c.login("root2", pwOf & "root2", t0 + 3).ok and not c.deleteUser("root2", t0 + 4)
       check c.query(%*[["SELECT count(*) FROM role_bindings WHERE user_name = 'root2'"]])["results"][0]["values"][0][0].getInt == 0
       check who(a.token).ok and c.userRoles("admin").roles == @["admin"]
+    test "a user is blocked and let in again by an administrator: the token and the login stop at once and work again, nothing of the user is lost; admin is never blocked":
+      let a = first()
+      let tok = makeUser("ann", "rw")
+      let other = makeUser("bob", "ro")
+      check c.createUser("root2", "admin", pwOf & "root2", t0, shardScope)                                                # a user of the shard is blocked the same way
+      let rootTok = c.createApiToken("test root2", userScope("root2"), 0, t0).token
+      check who(tok).ok and c.login("ann", pwOf & "ann", t0).ok
+      check c.setUserBlocked("ann", true) == boDone
+      check not who(tok).ok and who(tok).why == "revoked" and not c.login("ann", pwOf & "ann", t0 + 1).ok
+      check c.userRoles("ann").found and c.userRoles("ann").disabled and c.userRoles("ann").bindings.len == 1          # the user and the role are there
+      check who(other).ok and who(a.token).ok                                                                 # nobody else is touched
+      let listed = c.listUsers().filterIt(it["name"].getStr == "ann")[0]
+      check listed["disabled"].getBool and listed["disabled_by"].getStr == "administrator"
+      check c.setUserBlocked("ann", true) == boAlready                                                         # nothing to change
+      check c.setUserBlocked("ann", false) == boDone
+      check who(tok).ok and c.login("ann", pwOf & "ann", t0 + 2).ok
+      check not c.listUsers().filterIt(it["name"].getStr == "ann")[0]["disabled"].getBool and c.listUsers().filterIt(it["name"].getStr == "ann")[0]["disabled_by"].getStr == ""
+      check c.setUserBlocked("ann", false) == boAlready
+      check c.setUserBlocked("root2", true) == boDone and not who(rootTok).ok and who(a.token).ok
+      check c.setUserBlocked("root2", false) == boDone and who(rootTok).ok
+      check c.setUserBlocked("admin", true) == boIsAdmin and who(a.token).ok                                  # the shard would have nobody
+      check c.setUserBlocked("admin", false) == boAlready
+      check c.setUserBlocked("nobody", true) == boNotFound and c.setUserBlocked("nobody", false) == boNotFound
+      # an account that its directory switched off is the directory's to switch on
+      discard c.execute(%*[["UPDATE users SET disabled = 2 WHERE name = 'bob'"]])
+      check c.setUserBlocked("bob", false) == boByDirectory and c.setUserBlocked("bob", true) == boByDirectory
+      check c.listUsers().filterIt(it["name"].getStr == "bob")[0]["disabled_by"].getStr == "directory"
     test "the user admin is made at a start that finds none, whatever other users there are, with a password of its own and a token; one that is there is left alone":
       let first1 = first()
-      check c.createUser("root2", "admin", pwOf & "root2", t0)
+      check c.createUser("root2", "admin", pwOf & "root2", t0, shardScope)
       check c.createUser("ann", "rw", pwOf & "ann", t0, "org:acme")
       check c.bootstrapAdminUser(t0 + 5).len == 0                                                           # the user is there: nothing is made, the log has no password
       # a database that lost the user: it is made again at the next start and its credentials are for the log, as at the first

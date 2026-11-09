@@ -122,7 +122,7 @@ proc made(f: Cluster; mk: ConfigMaker; slug: string; active = true; controller =
 
 proc ns(slug: string): string = "/api/v1/namespaces/cinim-001-" & slug
 
-proc deletes(f: Cluster): seq[string] = f.calls.filterIt(it.startsWith("DELETE") and "/deployments/" notin it)      # the Deployment of the time before is asked for every pass
+proc deletes(f: Cluster): seq[string] = f.calls.filterIt(it.startsWith("DELETE"))
 
 proc specOf(mk: ConfigMaker; slug: string): string = controllerSpecHash(mk("", ""), slug)
 
@@ -271,15 +271,6 @@ suite "IAM-003, D-62 the core supervises the controller: a Pod of its own, with 
     let rec = newRec()
     let r = f.pass(mk, rec, state = "disabled")
     check r.orgs[0].controllerRemoved.len == 1 and "switched off" in r.orgs[0].controllerRemoved[0] and f.pods.len == 0 and r.orgs[0].created.len == 0
-  test "the Deployment of the time before the controller was a Pod is deleted, with its Pods":
-    let f = Cluster()
-    let mk = maker()
-    f.made(mk, "acme", controller = false)
-    f.objects["/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller"] = %*{"metadata": {"name": "cinim-job-controller"}}
-    let rec = newRec()
-    let r = f.pass(mk, rec)
-    check "/apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller" notin f.objects
-    check r.orgs[0].controllerRemoved.anyIt(it.startsWith("Deployment cinim-job-controller"))
   test "a Pod that cannot be listed or deleted is told, and nothing is made then":
     let f = Cluster()
     let mk = maker()

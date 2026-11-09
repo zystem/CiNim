@@ -111,19 +111,24 @@ suite "D-114 registries given to the steps that push":
     put("gh", %*{"address": "quay.io/other"}, org = otherOrg)
 
     test "the logins of the named registries are one Docker config; a registry without a login adds nothing; Docker Hub is keyed as `docker login` keys it":
-      let cfg = c.registriesConfig(kek, true, orgId, @["gh", "hub", "lan"])
+      let cfg = c.registriesConfig(kek, true, orgId, @["gh", "hub", "lan"], trusted = true)
       check cfg.ok
       let auths = parseJson(cfg.config)["auths"]
       check auths.len == 2
       check decode(auths["ghcr.io"]["auth"].getStr) == "ann:tok-gh"
       check decode(auths["https://index.docker.io/v1/"]["auth"].getStr) == "bob:tok-hub"
-      let none = c.registriesConfig(kek, true, orgId, @["lan"])
+      let none = c.registriesConfig(kek, true, orgId, @["lan"])                                                   # no login: nobody needs to be trusted for it
       check none.ok and parseJson(none.config) == %*{"auths": {}}
+    test "a login goes to a trusted run only: a run that is not on a protected ref is refused and told why, and a registry without a login is still free":
+      let denied = c.registriesConfig(kek, true, orgId, @["gh", "lan"])                                        # trusted is false unless it is said
+      check not denied.ok and not denied.retry and "gh has a login" in denied.error and "protected ref" in denied.error and "tok-gh" notin denied.error
+      check c.registriesConfig(kek, true, orgId, @["gh"], trusted = false).config.len == 0
+      check c.registriesConfig(kek, true, orgId, @["gh", "lan"], trusted = true).ok
     test "a name the organisation has not is refused, and a registry of another organisation is not seen; a vault that does not answer is a retry":
-      let unknown = c.registriesConfig(kek, true, orgId, @["gh", "nowhere"])
+      let unknown = c.registriesConfig(kek, true, orgId, @["gh", "nowhere"], trusted = true)
       check not unknown.ok and not unknown.retry and "no registry nowhere" in unknown.error
-      check parseJson(c.registriesConfig(kek, true, otherOrg, @["gh"]).config)["auths"].len == 0     # the other organisation's `gh` has no login: nothing of ours is in it
-      let down = c.registriesConfig(kek, false, orgId, @["gh"])
+      check parseJson(c.registriesConfig(kek, true, otherOrg, @["gh"], trusted = true).config)["auths"].len == 0     # the other organisation's `gh` has no login: nothing of ours is in it
+      let down = c.registriesConfig(kek, false, orgId, @["gh"], trusted = true)
       check not down.ok and down.retry
     test "the password is in the config as the login needs it and nowhere else the core wrote: the registry's own row holds it sealed":
       let row = c.query(%*[["SELECT secret_enc FROM registries WHERE tenant_id = ? AND name = 'gh'", orgId]])["results"][0]["values"][0][0].getStr
@@ -153,6 +158,9 @@ suite "D-114 registries given to the steps that push":
       check "no registry nowhere" in why(call("registry", "nowhere", key = "registry#2"))
       check "without its key" in why(call("registry", "gh"))
       let step = proc (opts: string): ExecutorResponse = call("job_sh", "job-" & $(next + 1) & "\tkaniko\t\t" & opts & "\techo x", numbered = true)
+      check "has a login" in why(step("""{"registries":["gh","hub"]}""")) and "protected ref" in why(step("""{"registries":["gh"]}"""))      # the run is not on a protected ref
+      check ok(step("""{"registries":["lan"]}"""))                                                                                  # a registry without a login is for everyone
+      discard c.execute(%*[["UPDATE runs SET trusted = 1 WHERE id = ?", run]])
       check ok(step("""{"registries":["gh","hub"]}"""))
       check "no registry nowhere" in why(step("""{"registries":["gh","nowhere"]}"""))
       check "at most 8" in why(step("""{"registries":["a","b","c","d","e","f","g","h","i"]}"""))

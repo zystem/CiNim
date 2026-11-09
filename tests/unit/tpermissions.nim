@@ -118,6 +118,14 @@ suite "D-87 the directories of an organisation":
       check not rw.allows(needOf(m, p))
     check grantsOfRoles(["admin"]).allows(needOf("PUT", "/api/v1/organizations/acme/ldap/servers/corp"))
 
+suite "blocking a user":
+  test "blocking and letting in are the shard\'s user.manage, nobody else\'s":
+    for (m, p) in [("POST", "/api/v1/users/ann:disable"), ("POST", "/api/v1/users/ann:enable")]:
+      let n = needOf(m, p)
+      check n.permission == "user.manage" and n.scope == nsShard
+      check grantsOfRoles(["admin"]).allows(n)
+      check not grantsOfRoles(["rw", "dev", "ro"]).allows(n)
+
 suite "D-115 the deploy profiles of an organisation":
   test "reading is for every role that reads, writing is the organisation\'s administrators\' alone (a profile is a token and its rights); both are of the organisation":
     for (m, p, want) in [("GET", "/api/v1/organizations/acme/deploy-profiles", "deploy_profile.read"), ("GET", "/api/v1/organizations/acme/deploy-profiles/test1", "deploy_profile.read"),

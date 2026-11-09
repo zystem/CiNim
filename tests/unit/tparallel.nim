@@ -283,7 +283,7 @@ suite "PIP-003 ci.parallel: max_parallel, width and depth":
     let script = """
       return ci.pipeline({ main = function(run)
         local b = {}
-        for i = 1, N do b[b58f("x{xx}", i)] = function() return i end end
+        for i = 1, N do b[b32f("x{xx}", i)] = function() return i end end
         local r = ci.parallel(b)
         return "ok"
       end })"""

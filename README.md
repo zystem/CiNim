@@ -52,7 +52,7 @@ Working rules: tests first; the name of a test contains the ID of the requiremen
 ```bash
 nimble test          # unit tests (need a static nghttp2 in /opt/nghttp2, see below; the tests make their own TLS keys)
 nimble testsan       # the same under ASan/LSan
-nimble testcontract  # Protobuf contracts
+nimble testcontract  # Protobuf contracts (tools/test/run.sh runs them with the unit tests; the compatibility one needs buf, the test image has it)
 ```
 
 Dependencies that are not plain nimble packages:
@@ -77,7 +77,7 @@ tools/shim/build_static.sh build/core-static src/core/main.nim "-d:ssl" 0
 ```
 
 The two images of the platform need no Docker daemon: `tools/image/kaniko-build.sh` builds them in the cluster with Kaniko, as a build Pod (D-42), from
-`tools/image/Dockerfile.<component>` (each from the image of the libraries, `Dockerfile.deps`); `tools/image/build_core.sh` and `build_controller.sh` build the same images with a local Docker.
+`tools/image/Dockerfile.<component>` (each from the image of the libraries, `Dockerfile.deps`); `tools/image/build-local.sh` builds them on a workstation with a local Docker (seconds after a change).
 
 Long runs (the soak test of NFR-013) use `tools/soak/run72.sh`. `tools/bench/state_store_bench.py` is the state-store benchmark behind A.2 (rqlite, PXC, PostgreSQL); `tools/bench/postgres.helmfile.yaml` deploys the PostgreSQL cluster it uses.
 

@@ -33,7 +33,6 @@ var waitReasonSet: Atomic[bool]   ## some steps currently carry wait_reason = lo
 
 const
   maxFailMessage* = 2000
-  maxStepTable* = 64 * 1024        ## the table of step numbers of a run: 200 places at most, a few KB
   maxAdmissionCandidates = 2000   ## the pending steps of one organisation looked at in one poll: 200 steps a run, at most pod_limit active runs
 
 proc loadSettings*(c: var RqClient; profileId: string): ProfileSettings =
@@ -995,13 +994,12 @@ proc grantLease*(c: var RqClient; master, candidate, owner: string; versions: se
     discard c.execute(%*[["UPDATE runs SET state = ?, updated_at = ?, version = version + 1, fail_code = 'journal_corrupt', fail_message = ?, lease_until = 0 " &
       "WHERE id = ? AND state IN (?, ?)", protoName(rsInfrastructureError), $getTime().toUnix(), v.check.why, candidate, protoName(rsQueued), protoName(rsRunning)]])
     return none(LeaseGranted)
-  let vr = c.query(%*[["SELECT api_version, step_table, source_repository, source_commit, source_path, source_base FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
+  let vr = c.query(%*[["SELECT api_version, source_repository, source_commit, source_path, source_base FROM runs WHERE id = ?", candidate]])["results"][0]{"values"}
   var given = runParams(c, candidate).mapIt(ParamsEntry(key: it[0], value: it[1]))
-  if vr != nil and vr.len > 0 and vr[0][2].getStr.len > 0:
-    for (k, v) in sourceParams(vr[0][2].getStr, vr[0][3].getStr, vr[0][4].getStr, vr[0][5].getStr): given.add ParamsEntry(key: k, value: v)
+  if vr != nil and vr.len > 0 and vr[0][1].getStr.len > 0:
+    for (k, v) in sourceParams(vr[0][1].getStr, vr[0][2].getStr, vr[0][3].getStr, vr[0][4].getStr): given.add ParamsEntry(key: k, value: v)
   some LeaseGranted(lease_token: token, ttl_seconds: uint32(leaseTtlSeconds), run_id: candidate,
                     api_version: uint32(if vr != nil and vr.len > 0: vr[0][0].getInt(1) else: 1),
-                    step_table: (if vr != nil and vr.len > 0: vr[0][1].getStr else: ""),
                     script: loadScript(c, candidate), journal: journalEntries(v.rows),
                     params: given)
 
@@ -1241,14 +1239,6 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     giveBackLease(c, req.run_id, caller.attempt)
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
-  if req.kind == "table":
-    # the table of step numbers (docs/parallel.md section 3.4), made by the executor before the run's first call: kept once, the first one stays
-    if req.payload.len > maxStepTable:
-      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
-        kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: "the table of step numbers is too large")))
-    discard c.execute(%*[["UPDATE runs SET step_table = ? WHERE id = ? AND step_table = ''", bytesToStr(req.payload), req.run_id]])
-    return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
-      kind: ExecutorResponseBodyKind.result, result: HostResult(seq: req.seq, suspended: false)))
   if req.kind == lockKind or req.kind == unlockKind:
     # PIP-014: the lock of a job (core/joblocks.nim). `lock` answers at once when the lock is the run's, and suspends the run (no place, no Pod) when it is not; the record
     # of the call is written when the lock is granted. `unlock` lets go of one level and answers at once.
@@ -1338,11 +1328,13 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     let fail = proc (detail: string): ExecutorResponse =
       ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
-    let o = c.query(%*[["SELECT tenant_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
+    let o = c.query(%*[["SELECT tenant_id, trusted FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("registries need a run that belongs to an organisation")
     for n in wantedRegistries:
-      if not c.registryNamed(ov[0][0].getStr, n).found: return fail("this organisation has no registry " & n & " (PUT /api/v1/organizations/{slug}/registries/{name})")
+      let reg = c.registryNamed(ov[0][0].getStr, n)
+      if not reg.found: return fail("this organisation has no registry " & n & " (PUT /api/v1/organizations/{slug}/registries/{name})")
+      if reg.registry.secretEnc.len > 0 and ov[0][1].getInt == 0: return fail(loginRefused(n))      # D-114: a login goes to trusted runs only
   if wantedSecrets.len > 0:
     # the step asks for secrets of the organisation (6.7): they must exist now, and the run must belong to an organisation
     let fail = proc (detail: string): ExecutorResponse =

@@ -3,29 +3,47 @@
 # `rqlited`, so that the integration tests start their own scratch databases without Docker (tools/test/run.sh with CINIM_RQLITE_BIN). Built with the repository as the context; the hash of the
 # image is that of this file and cinim.nimble. It holds the real key service, hsmgate (github.com/zystem/hsmgate), built from the tag HSMGATE_REF with the Go of the project (the base is pinned
 # as the project pins it): the tests thsmgate.nim, thsmgate_tls.nim and tkeyservice.nim run against it when HSMGATE_BIN is set, which the image does (they are skipped on a machine without it).
-# A new version of hsmgate is a change of this ARG: the image is made again, and the tests say whether the core still speaks with it.
+# A new version of hsmgate is a change of this ARG: the image is made again, and the tests say whether the core still speaks with it. The same for `buf` (BUF_VERSION).
 FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS hsmgate
+# renovate: datasource=github-tags depName=zystem/hsmgate
 ARG HSMGATE_REF=v0.3.0
 RUN git clone -q --depth 1 --branch "${HSMGATE_REF}" https://github.com/zystem/hsmgate.git /src
 WORKDIR /src
 RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=${HSMGATE_REF}" -o /out/hsmgate ./cmd/hsmgate
+
+# buf, for the protocol contract tests (tests/contract/tproto_compat.nim: `buf breaking` against proto/compat/baseline.binpb): built from the source of the pinned version with the same Go, so that the
+# module proxy's checksums vouch for it and no binary is fetched by hand
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS buf
+# renovate: datasource=github-releases depName=bufbuild/buf
+ARG BUF_VERSION=v1.75.0
+RUN GOBIN=/out CGO_ENABLED=0 go install -trimpath "github.com/bufbuild/buf/cmd/buf@${BUF_VERSION}"
+
+# the Caddy node of the store (the fork with the WebDAV module): the binary of the image that the chart deploys (deploy/charts/cinim-storage, `caddy.image`), so that the tests of the HTTP store
+# (tstorehttp, tstorehttprepair, tstorageproc, tshimdirect) test what runs; a static Go binary. Built nowhere here: a Go build of Caddy starved the nodes of the test cluster.
+FROM zystem/cinim-store-dav:h79@sha256:0c739513af98535124e7677f8802679a8a8a5648681adcb2a56b8f61721ee6f4 AS caddy-store
 
 FROM nimlang/nim:2.2.12
 RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git procps openssl \
       cmake xz-utils zlib1g-dev libsodium-dev libpcre3-dev libsqlite3-dev libssl-dev && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.61 or later is required; the distribution's is older)
+# renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$
+ARG NGHTTP2_VERSION=1.68.0
 RUN set -eu; W=$(mktemp -d); \
-    curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ -C "$W"; \
-    cmake -S "$W/nghttp2-1.68.0" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
+    curl -fsSL "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz" | tar xJ -C "$W"; \
+    cmake -S "$W/nghttp2-${NGHTTP2_VERSION}" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
     cmake --build "$W/b" -j"$(nproc)" --target install >/dev/null; rm -rf "$W"; test -f /opt/nghttp2/lib/libnghttp2.a
 # rqlited for glibc: the release of the project (the one in its image is built for musl)
-RUN curl -fsSL https://github.com/rqlite/rqlite/releases/download/v10.5.1/rqlite-v10.5.1-linux-amd64.tar.gz | tar xz -C /tmp \
- && install -m 0755 /tmp/rqlite-v10.5.1-linux-amd64/rqlited /usr/local/bin/rqlited && rm -rf /tmp/rqlite-v10.5.1-linux-amd64
+# renovate: datasource=github-releases depName=rqlite/rqlite extractVersion=^v(?<version>.+)$
+ARG RQLITE_VERSION=10.5.1
+RUN curl -fsSL "https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VERSION}/rqlite-v${RQLITE_VERSION}-linux-amd64.tar.gz" | tar xz -C /tmp \
+ && install -m 0755 "/tmp/rqlite-v${RQLITE_VERSION}-linux-amd64/rqlited" /usr/local/bin/rqlited && rm -rf "/tmp/rqlite-v${RQLITE_VERSION}-linux-amd64"
 # the nimble packages, from the package file alone so that this layer is cached
 WORKDIR /src
 COPY cinim.nimble ./
 RUN nimble install -y --depsOnly
 WORKDIR /usr/src/app
 COPY --from=hsmgate /out/hsmgate /usr/local/bin/hsmgate
+COPY --from=buf /out/buf /usr/local/bin/buf
+COPY --from=caddy-store /usr/bin/caddy /usr/local/bin/caddy-store
 ENV HSMGATE_BIN=/usr/local/bin/hsmgate

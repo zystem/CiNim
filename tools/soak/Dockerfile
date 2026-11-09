@@ -6,9 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends libsodium-dev g
     && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.61 or later)
+# renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$
+ARG NGHTTP2_VERSION=1.68.0
 RUN set -eu; W=$(mktemp -d); \
-    curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ -C "$W"; \
-    cmake -S "$W/nghttp2-1.68.0" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
+    curl -fsSL "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz" | tar xJ -C "$W"; \
+    cmake -S "$W/nghttp2-${NGHTTP2_VERSION}" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
     cmake --build "$W/b" -j"$(nproc)" --target install >/dev/null; rm -rf "$W"
 WORKDIR /cinim
 COPY cinim.nimble /cinim/cinim.nimble

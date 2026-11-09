@@ -29,7 +29,8 @@ suite "D-27/D-29 a core whose database does not answer keeps its threads (the an
   proc dead(): RqClient = newRq("http://127.0.0.1:1", timeoutMs = 500)
   test "a batch of the log that cannot be recorded is answered with logs_unavailable: the shim keeps its buffer and tries again":
     var c = dead()
-    var req = LogBatch(step: StepRef(run_id: "s1_r", seq: 0, attempt: 1), status: ShimStatus(state_json: """{"v":1,"n":3,"t":1,"ev":"done","run":"s1_r","seq":0,"at":1,"ph":"done"}"""))
+    let data = cast[seq[byte]]("a block of the log")
+    var req = LogBatch(step: StepRef(run_id: "s1_r", seq: 0, attempt: 1), chunks: @[LogChunk(seq: 1, data: data, crc32c: crc32c(cast[string](data)), lines: 1)])
     let ack = decodeLogAck(answerLogBatch(c, Collector(rqliteUrl: "http://127.0.0.1:1"), encodeLogBatch(req)))
     check ack.failure.code == "logs_unavailable"
   test "a message that is not a batch is refused for good, not retried for ever":
@@ -75,10 +76,5 @@ suite "D-75 the log and the state of the shim do not wait for each other":
   test "a message that is not a status report is refused for good":
     var c = dead()
     check decodeStatusAck(answerStatus(c, "\xff\xff not a message")).failure.code == "rejected"
-  test "a shim without the status channel (an older controller) still sends its state in the batch: the state is recorded before the log, as before":
-    var c = dead()
-    let req = LogBatch(step: StepRef(run_id: "s1_r1", seq: 0, attempt: 1), chunks: @[chunk(5)],
-                       status: ShimStatus(state_json: """{"v":1,"n":3,"t":1,"ev":"done","run":"s1_r1","seq":0,"at":1,"ph":"done"}"""))
-    check decodeLogAck(answerLogBatch(c, col, encodeLogBatch(req))).failure.code == "logs_unavailable"
   test "teardown":
     stopFakeVlagent()

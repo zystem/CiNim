@@ -62,12 +62,5 @@ proc checkCacheDecl*(optsJson: string): string =
     for k in d.restoreKeys:
       if not validCacheKey(k): return "the cache " & d.key & ": " & k & " is not a restore key"
 
-func mayFind*(ds: seq[CacheDecl]; key: string): bool =
-  ## a step may ask for the entry it declared, or one that one of its restore keys names (a prefix)
-  for d in ds:
-    if key == d.key: return true
-    for r in d.restoreKeys:
-      if key.startsWith(r): return true
-
 func maySave*(ds: seq[CacheDecl]; key: string): bool = ds.anyIt(it.key == key)
 

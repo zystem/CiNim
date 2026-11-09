@@ -14,9 +14,11 @@ RUN set -eu; W=$(mktemp -d); cd "$W"; \
     (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix=/opt/sodium --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null); \
     rm -rf "$W"
 # nghttp2 as a static archive, where nimgrpc looks for it by default (the shim's gRPC channels, docs/shim-grpc.md); 1.61 or later is required
+# renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$
+ARG NGHTTP2_VERSION=1.68.0
 RUN set -eu; W=$(mktemp -d); \
-    curl -fsSL https://github.com/nghttp2/nghttp2/releases/download/v1.68.0/nghttp2-1.68.0.tar.xz | tar xJ -C "$W"; \
-    cmake -S "$W/nghttp2-1.68.0" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel \
+    curl -fsSL "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz" | tar xJ -C "$W"; \
+    cmake -S "$W/nghttp2-${NGHTTP2_VERSION}" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel \
       -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" >/dev/null; \
     cmake --build "$W/b" -j"$(nproc)" --target install >/dev/null; rm -rf "$W"; test -f /opt/nghttp2/lib/libnghttp2.a
 # the Kubernetes C client with libcurl, libwebsockets, libyaml (static)

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds images on this machine, much faster than a build Pod for the next build after a change: the dependencies (libzmq, libsodium, the Kubernetes C client, libcurl, the nimble packages)
+# Builds images on this machine, much faster than a build Pod for the next build after a change: the dependencies (libsodium, nghttp2, the Kubernetes C client, libcurl, the nimble packages)
 # are one image, `cinim-deps:local`, made once from tools/image/Dockerfile.deps; every binary is compiled in a container of it with the source mounted and the
 # C files of Nim kept in build/nimcache/<binary>, so that a change recompiles what it touches and nothing else; the images are put together from tools/image/Dockerfile.local.
 #   tools/image/build-local.sh <tag> [target ...]       targets: core storage conductor controller ui caddy-store   (default: core)

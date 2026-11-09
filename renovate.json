@@ -1,0 +1,57 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Dependency updates of CiNim (docs/deployment.md, \"Dependency updates\"). Nothing is merged by the bot: a pull request is built and tested by the pipeline like any other, and a person merges it.",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "automerge": false,
+  "enabledManagers": ["dockerfile", "helmv3", "helm-values", "custom.regex"],
+  "ignorePaths": ["docs-tr/**", "build/**", "third_party/**", "deploy/examples/**", "tests/certs/**"],
+  "postUpdateOptions": ["helmUpdateSubChartArchives"],
+  "pinDigests": false,
+  "customManagers": [
+    {
+      "description": "A pin that carries its source in the comment above it: `# renovate: datasource=github-releases depName=owner/repo [extractVersion=...]` and the next line `ARG NAME=value` (Dockerfiles) or `NAME=value` (scripts)",
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Dockerfile[^/]*$/", "/^tools\\/shim\\/build_static\\.sh$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>\\S+)(?:\\s+extractVersion=(?<extractVersion>\\S+))?\\s*\\n\\s*(?:ARG\\s+|ENV\\s+)?[A-Z][A-Z0-9_]*=(?<currentValue>[^\\s\"'\\\\]+)"
+      ]
+    },
+    {
+      "description": "The images the pipeline runs its steps in (.ci/pipeline.lua: `local NAME = \"image:tag\"`)",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.ci\\/pipeline\\.lua$/"],
+      "matchStrings": ["local [A-Z][A-Z0-9_]* = \"(?<depName>[a-z0-9][a-z0-9./_-]*):(?<currentValue>[^\"@\\s]+)\""],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Nim is one version everywhere: the images of the platform, the image of the tests and the workstation must agree (CLAUDE.md; 2.2.6 wrote a wrong request line for HTTPS through a proxy). One pull request for all of them, never merged by the bot.",
+      "matchDatasources": ["docker"],
+      "matchDepNames": ["nimlang/nim", "ghcr.io/zystem/nim"],
+      "groupName": "Nim",
+      "prBodyNotes": ["Nim is one version in `tools/image/Dockerfile.deps`, `Dockerfile.test`, the soak image and on the workstation (CLAUDE.md). A new version is checked by the whole pipeline before it is merged."]
+    },
+    {
+      "description": "The images that carry a digest in the repository keep it up to date",
+      "matchDatasources": ["docker"],
+      "matchDepNames": ["golang"],
+      "pinDigests": true
+    },
+    {
+      "description": "The Caddy node of the store is an image of the project with its own tags (h79): moved by hand with the chart (deploy/charts/cinim-storage)",
+      "matchDepNames": ["zystem/cinim-store-dav"],
+      "enabled": false
+    },
+    {
+      "description": "nghttp2 1.61 or later is required (nimgrpc); the four places that build it are moved together",
+      "matchDepNames": ["nghttp2/nghttp2"],
+      "groupName": "nghttp2"
+    }
+  ]
+}

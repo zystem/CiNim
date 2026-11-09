@@ -1,4 +1,4 @@
-## docs/conductors.md section 12 / RUN-008 / IAM-003: a conductor on the push channel (against a real rqlite and real CURVE sockets): it proves
+## docs/conductors.md section 12 / RUN-008 / IAM-003: a conductor on the push channel (against a real rqlite and a real gRPC channel with mutual TLS): it proves
 ## itself, says how many runs it can take, and the core pushes it the runs of its organisation within that; its calls are answered, and it can
 ## call only for the runs it holds. Needs CINIM_RQLITE_URL (a scratch rqlite); otherwise the suite is skipped.
 import std/[unittest, json, os, options, atomics, sequtils, strutils]

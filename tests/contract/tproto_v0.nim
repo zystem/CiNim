@@ -50,7 +50,7 @@ suite "proto v0 wire compatibility with the reference implementation":
     let b = Protobuf.decode(vec("log_batch"), LogBatch)
     check b.chunks.len == 2
     check b.chunks[0].crc32c == 0xDEADBEEF'u32 and b.chunks[0].data == cast[seq[byte]]("hello\n")
-    check b.chunks[1].stream == LOG_STREAM_STDERR and b.chunks[1].data == @[0'u8, 255, 10]
+    check b.chunks[1].data == @[0'u8, 255, 10] and b.chunks[1].crc32c == 1'u32
     check b.header.sent_at.seconds == 1789980000 and b.header.sent_at.nanos == 123456789
 
   test "ControllerAttach: oneof commands (start, cancel, gate) keep their variant":

@@ -7,7 +7,7 @@
 ##     `$CINIM_PRIVATE_WORDS_FILE` or `~/.config/cinim/private-words` and the test fails when a tracked file holds one; without the file this part is skipped (it says so).
 ## The rules are procs that take a path and a text and answer the lines they refuse, so that the first suite proves that each one sees a violation (a rule that sees nothing is worse than none);
 ## the second reads the repository.
-import std/[unittest, os, strutils, sequtils]
+import std/[unittest, os, strutils, sequtils, json, re]
 
 type Finding = tuple[file: string, line: int, what: string]
 
@@ -103,7 +103,32 @@ proc privateWords*(path, text: string; words: seq[string]): seq[Finding] =
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+const
+  docRoots = ["src/", "tools/", "deploy/", "tests/", "proto/", "lua/", "docs/", ".ci/"]
+  docRefExempt = [".ci/NN.lua", ".ci/lock.json", "docs/how-to/talos.md"]     ## names the specification plans (the pipeline files of a project, D-68), and a file of another repository
+
+proc missingDocPaths*(path, text: string; exists: proc (p: string): bool): seq[Finding] =
+  ## A path in code quotes (`src/core/x.nim`) in a document that names no file of the repository: a file that was deleted or renamed and is still told of. What was deleted is in git, not in
+  ## the text; a document that points at nothing misleads. Only the paths that start at a directory of the repository and end in an extension are looked at; a pattern (`*`, `<name>`, `$VAR`) is not a path.
+  if not path.endsWith(".md"): return
+  for n, line in toSeq(text.splitLines):
+    let parts = line.split('`')
+    for i in countup(1, parts.high, 2):                                       # the odd pieces are inside the quotes
+      let p = parts[i].strip(chars = {'.', ',', ';', ':'})
+      if not docRoots.anyIt(p.startsWith(it)) or p in docRefExempt: continue
+      if p.anyIt(it in {' ', '*', '<', '>', '$', '{', '}', '(', ')', '|', '"', '\''}): continue
+      let ext = p.splitFile.ext
+      if ext.len < 2 or ext.len > 6: continue
+      if not exists(p): result.add (path, n + 1, "names a file that is not in the repository: " & p)
+
 suite "CLAUDE.md rules: each rule sees a violation":
+  test "a path in quotes that names no file is seen, a pattern, an exempt name and a path that is there are not":
+    let there = proc (p: string): bool = p == "src/core/api.nim"
+    check missingDocPaths("a.md", "see `src/core/gone.nim` for it\n", there).len == 1
+    check missingDocPaths("a.md", "see `src/core/api.nim` for it\n", there).len == 0
+    check missingDocPaths("a.md", "`src/core/*.nim`, `tools/<name>.sh`, `deploy/$X.yaml`, `src/core`\n", there).len == 0
+    check missingDocPaths("a.md", "the pipeline file `.ci/NN.lua`\n", there).len == 0
+    check missingDocPaths("a.nim", "`src/core/gone.nim`\n", there).len == 0             # documents only
   test "newHttpServer outside httpsrv.nim is seen, in httpsrv.nim and in a comment it is not":
     check newHttpServerCalls("src/core/x.nim", "let s = newHttpServer(handler)\n").len == 1
     check newHttpServerCalls("src/common/httpsrv.nim", "  newHttpServer(onrequest)\n").len == 0
@@ -181,6 +206,24 @@ suite "CLAUDE.md rules: the repository keeps them":
     check scan(declaredName, files) == newSeq[string]()
   test "no file holds the shape of a token or a private key outside the places for test keys":
     check scan(tokenShapes, files) == newSeq[string]()
+  test "the documents name files that are in the repository (what was deleted is in git, not in the text)":
+    let there = proc (p: string): bool = fileExists(root() / p) or dirExists(root() / p)
+    check scan(proc (path, text: string): seq[Finding] = missingDocPaths(path, text, there), files) == newSeq[string]()
+  test "renovate.json: every custom manager finds pins in the files it names, and every `# renovate:` comment is followed by the pin it describes":
+    let cfg = parseJson(readFile(root() / "renovate.json"))
+    var annotated, matched = 0
+    for f in files:
+      if f == "tests/unit/trepository.nim": continue
+      annotated += readFile(root() / f).splitLines.countIt(it.strip.startsWith("# renovate:"))
+    for m in cfg["customManagers"]:
+      let patterns = toSeq(m["managerFilePatterns"]).mapIt(re(it.getStr[1 ..< it.getStr.len - 1]))      # "/regex/"
+      var found = 0
+      for f in files:
+        if f == "tests/unit/trepository.nim" or not patterns.anyIt(f.contains(it)): continue
+        for ms in m["matchStrings"]: found += readFile(root() / f).findAll(re(ms.getStr, {reMultiLine})).len
+      check found > 0
+      if m["matchStrings"][0].getStr.contains("renovate:"): matched = found
+    check annotated > 0 and matched == annotated
   test "no tracked file holds a word of the owner's private list":
     let listed = getEnv("CINIM_PRIVATE_WORDS_FILE", getHomeDir() / ".config" / "cinim" / "private-words")
     if not fileExists(listed):

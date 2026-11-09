@@ -740,7 +740,7 @@ proc onRequest() {.raises: [], gcsafe.} =
           # an administrator makes a user: {name, role, password}; the user can log in at once
           let nj = try: parseJson(getBody()) except JsonParsingError: nil
           if not (nj.isString("name") and nj.isString("role") and nj.isString("password")):
-            problem(Http400, "invalid_request", "{\"name\": \"...\", \"role\": \"" & shardRoles.join("|") & "\", \"password\": \"...\"} is required")
+            problem(Http400, "invalid_request", "{\"name\": \"...\", \"role\": \"" & builtinRoles.join("|") & "\", \"password\": \"...\"} is required")
             return
           let name = nj["name"].getStr
           if not validUserName(name):
@@ -782,6 +782,21 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           uc.record(getTime().toUnix(), actorOf(who), "user.delete", name, "ok")
           jsonOk(Http200, %*{"name": name, "deleted": true})
+        elif umeth == "POST" and path.startsWith("/api/v1/users/") and path.count('/') == 4 and (path.endsWith(":disable") or path.endsWith(":enable")):
+          # an administrator blocks a user or lets it in again: the token and the login stop at once (and work again), nothing of the user is deleted
+          let blocking = path.endsWith(":disable")
+          let name = path["/api/v1/users/".len ..< path.len - (if blocking: ":disable".len else: ":enable".len)]
+          if blocking and name == who.user:
+            problem(Http409, "self", "an administrator does not block themselves: another one does")
+            return
+          case uc.setUserBlocked(name, blocking)
+          of boNotFound: problem(Http404, "not_found", "no such user")
+          of boIsAdmin: problem(Http403, "forbidden", "the user admin cannot be blocked")
+          of boByDirectory: problem(Http409, "directory_user", "the directory of this account has switched it off: it is the directory's to switch on")
+          of boAlready: jsonOk(Http200, %*{"name": name, "disabled": blocking, "changed": false})
+          of boDone:
+            uc.record(getTime().toUnix(), actorOf(who), (if blocking: "user.block" else: "user.unblock"), name, "ok")
+            jsonOk(Http200, %*{"name": name, "disabled": blocking, "changed": true})
         elif umeth == "PUT" and userOfPasswordPath(path).len > 0:
           # a user changes their own password (the gate lets a user of any role in for exactly this), an administrator anyone's. A user changing their own
           # also proves the current one, so that a stolen token does not take the account over.
@@ -1995,8 +2010,9 @@ proc onRequest() {.raises: [], gcsafe.} =
             return
           let lim = gc.groupLimit(sg.id)
           jsonOk(Http200, %*{"organization": slugG, "group": normalPath(sp), "cache_quota_bytes": lim.quota, "cache_retention_days": lim.retentionDays,
-                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.requiredApprovals(sg.id), "allowed_callers": gc.allowedCallers(sg.id), "status": gc.statusTargetOf(sg.id).viewOf,
-                             "protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id), "default_ref": gc.defaultRef(sg.id)})
+                             "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.ownRequiredApprovals(sg.id), "effective_required_approvals": gc.requiredApprovals(sg.id),
+                             "allowed_callers": gc.ownAllowedCallers(sg.id), "effective_allowed_callers": gc.allowedCallers(sg.id), "status": gc.ownStatusTargetOf(sg.id).viewOf, "effective_status": gc.statusTargetOf(sg.id).viewOf,
+                             "protected_refs": gc.ownProtectedPatterns(sg.id), "effective_protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id), "default_ref": gc.defaultRef(sg.id)})
           return
         let vpos = segs.find("variables")
         let groupPath = if vpos >= 0: segs[0 ..< vpos].join("/") else: gpath

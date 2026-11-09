@@ -1,4 +1,4 @@
-## RUN-009 / docs/conductors.md section 5: the conductor program itself, started by hand against the hub of a core (real rqlite, real CURVE sockets):
+## RUN-009 / docs/conductors.md section 5: the conductor program itself, started by hand against the hub of a core (real rqlite, a real gRPC channel with mutual TLS):
 ## a run process per leased run, the run's host calls carried to the core, a run that waits for a step suspended and taken again, a refused
 ## credential, and a drain that leaves nothing behind. Needs CINIM_RQLITE_URL (a scratch rqlite); builds `build/conductor` if it is not there.
 import std/[unittest, json, os, osproc, atomics, strutils, times, strtabs]
@@ -140,7 +140,6 @@ suite "RUN-009 the conductor":
         sleep 200
       check stateOf(r) == "OK"
       check seen == @[1048576 + 1, 1048576 + 2, 1048576 + 3, 1048576 + 10]      # D-67: the job 01, the steps 1, 2, 3 of the loop and `a`: a number is job * 2^20 + step
-      check c.query(%*[["SELECT step_table FROM runs WHERE id = ?", r]])["results"][0]["values"][0][0].getStr == ""        # no table is kept with a run any more
       check c.query(%*[["SELECT group_concat(seq) FROM run_journal WHERE run_id = ? AND seq >= 0", r]])["results"][0]["values"][0][0].getStr == "0,1,2,3"
       stop p
     test "PIP-003 ci.parallel: the steps of all branches are made together, a branch goes on when its step ends while the others still run, and the run ends":

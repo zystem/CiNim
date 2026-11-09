@@ -341,18 +341,17 @@ suite "SHD-007 creating, switching off, deleting":
     let r = provision(api(f), cfg(), "acme", tlskeys)
     check not r.ok and r.failedStep == "controller keys" and r.error == "namespaces is forbidden: nope"
     check "POST /api/v1/namespaces/cinim-001-acme/persistentvolumeclaims" notin f.calls
-  test "switching off removes the Ingress and the controller (a Deployment of the time before, and every Pod of it) and leaves the namespace":
+  test "switching off removes the Ingress and every Pod of the controller and leaves the namespace":
     let f = Fake(pods: @["cinim-job-controller-2"])
     let r = disable(api(f), cfg(true), "acme")
     check r.ok
     check f.calls == @["DELETE /apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-acme",
-                       "DELETE /apis/apps/v1/namespaces/cinim-001-acme/deployments/cinim-job-controller",
                        "GET /api/v1/namespaces/cinim-001-acme/pods?labelSelector=app.kubernetes.io%2Fname%3Dcinim-job-controller",
                        "DELETE /api/v1/namespaces/cinim-001-acme/pods/cinim-job-controller-2"]
   test "an object that is already gone does not stop switching off":
     let f = Fake(absent: @["/apis/networking.k8s.io/v1/namespaces/cinim-001/ingresses/org-acme"])
     let r = disable(api(f), cfg(true), "acme")
-    check r.ok and r.steps[0].outcome == oAbsent and r.steps.len == 2     # the Deployment and no Pod to remove
+    check r.ok and r.steps[0].outcome == oAbsent and r.steps.len == 1     # no Pod to remove
   test "deleting for good removes the namespace last":
     let f = Fake()
     let r = purge(api(f), cfg(false), "acme")

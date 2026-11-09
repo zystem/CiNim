@@ -399,13 +399,30 @@ proc bootstrapAdminUser*(c: var RqClient; now: int64): seq[UserCredential] =
     ["INSERT OR IGNORE INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", roleAdmin, roleAdmin, shardScope]], transaction = true)
   @[UserCredential(user: roleAdmin, role: roleAdmin, password: pw, token: c.newUserToken(roleAdmin, now))]
 
-proc createUser*(c: var RqClient; name, role, password: string; now: int64; scope = shardScope): bool =
-  ## An administrator makes a user with one role, at the shard or (`scope` = `org:<slug>`) in one organisation, and a password (checked by the caller). False if the name is taken.
+proc createUser*(c: var RqClient; name, role, password: string; now: int64; scope: string): bool =
+  ## An administrator makes a user with one role, at the shard (`scope` = `shardScope`: only `admin` is a right there, D-90) or (`org:<slug>`) in one organisation, and a password (checked
+  ## by the caller). The scope is always given: there is no default that could make a user with no right. False if the name is taken.
   if c.userRoles(name).found: return false
   discard c.execute(%*[
     ["INSERT INTO users (name, password_hash, created_at) VALUES (?, ?, ?)", name, passwordHash(password), now],
     ["INSERT INTO role_bindings (user_name, role, scope) VALUES (?, ?, ?)", name, role, scope]], transaction = true)
   true
+
+type BlockOutcome* = enum
+  boDone, boNotFound, boIsAdmin, boByDirectory, boAlready
+
+proc setUserBlocked*(c: var RqClient; name: string; blocked: bool): BlockOutcome =
+  ## An administrator blocks a user (`users.disabled` 1: the token and the login stop at once, the user and what it has stay) or lets it in again. The user `admin` is never
+  ## blocked (as it is never deleted: the shard would have nobody). An account that its directory switched off (2) is the directory's to switch on: asking is refused. Blocking one that
+  ## is blocked, or letting in one that is not, is `boAlready` (nothing is changed).
+  let v = c.query(%*[["SELECT disabled FROM users WHERE name = ?", name]])["results"][0]{"values"}
+  if v == nil or v.len == 0: return boNotFound
+  if name == roleAdmin and blocked: return boIsAdmin
+  let now = v[0][0].getInt
+  if now == 2: return boByDirectory
+  if (now == 1) == blocked: return boAlready
+  discard c.execute(%*[["UPDATE users SET disabled = ? WHERE name = ?", (if blocked: 1 else: 0), name]])
+  boDone
 
 proc deleteUser*(c: var RqClient; name: string; now: int64): bool =
   ## The user, the bindings and every token of the user are gone. False if there is no such user.
@@ -569,7 +586,7 @@ proc listUsers*(c: var RqClient): JsonNode =
         if isOrgScope(b.scope):
           if not inOrgs.hasKey(b.scope[4 .. ^1]): inOrgs[b.scope[4 .. ^1]] = newJArray()
           inOrgs[b.scope[4 .. ^1]].add %b.role
-      result.add %*{"name": v[0].getStr, "roles": u.roles, "organizations": inOrgs, "source": v[4].getStr, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "password_change_required": v[3].getInt > 0}
+      result.add %*{"name": v[0].getStr, "roles": u.roles, "organizations": inOrgs, "source": v[4].getStr, "scope": shardScope, "created_at": v[1].getBiggestInt, "disabled": v[2].getInt > 0, "disabled_by": (if v[2].getInt == 1: "administrator" elif v[2].getInt == 2: "directory" else: ""), "password_change_required": v[3].getInt > 0}
 
 proc passwordIs*(c: var RqClient; user, password: string): bool =
   ## whether this is the user's password. For a user who does not exist the same work is done (a hash is made), so that the time does not tell.

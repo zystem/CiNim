@@ -5,7 +5,7 @@ import executor/sandbox
 # names from the table in 6.7 (plus ci.vault from the text below it)
 const specNames = ["ci.pipeline", "ci.string", "ci.number", "ci.bool", "ci.choice", "ci.list", "ci.map", "ci.secret", "ci.vault",
   "ci.stage", "ci.single", "ci.parallel", "ci.spawn", "ci.matrix", "ci.input", "ci.deploy", "ci.run", "ci.trigger", "ci.sleep", "ci.now", "ci.verified",
-  "ci.random", "ci.finally", "ci.log", "ci.fail", "b58x", "b58xx", "b58f", "b32f", "step.sh", "step.cache_restore", "step.cache_save",
+  "ci.random", "ci.finally", "ci.log", "ci.fail", "b32f", "step.sh", "step.cache_restore", "step.cache_save",
   "Job:checkout", "Job:image", "Job:run", "Job:use", "Job:env", "JobArtifact.upload", "JobArtifact.download",
   "Handle:wait", "Handle:abort"]
 
@@ -28,7 +28,7 @@ suite "PIP-017 Lua API v1 signatures":
         check lines[i - 1].startsWith("---@")
 
   test "PIP-017 the signature file is valid Lua and loads in the sandbox":
-    # the file declares the globals `b58x` and `b58xx` as well as the members of `ci`; the globals of the sandbox are write-protected, so it is run in an environment of its own
+    # the file declares the global `b32f` as well as the members of `ci`; the globals of the sandbox are write-protected, so it is run in an environment of its own
     var sb = newSandbox()
     let src = readFile("lua/stdlib/cicd.d.lua")
     check "]==]" notin src

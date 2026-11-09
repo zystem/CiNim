@@ -20,13 +20,10 @@ rules:
     resources: [persistentvolumeclaims]
     verbs: [get]
   # the controller of an organisation is a Pod of the core's own (IAM-003, D-62): the core makes it with the one-time token in its environment, lists the controller Pods of
-  # the namespace and deletes the ones it does not know or that are not healthy. The Deployment of the time before is only deleted.
+  # the namespace and deletes the ones it does not know or that are not healthy.
   - apiGroups: [""]
     resources: [pods]
     verbs: [create, delete, get, list]
-  - apiGroups: [apps]
-    resources: [deployments]
-    verbs: [delete]
   # get: the reconciliation compares a policy with the one the core makes now and replaces it when they differ (SHD-008)
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]

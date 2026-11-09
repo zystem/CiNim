@@ -352,7 +352,6 @@ proc disable*(k: KubeApi; cfg: ProvisionConfig; slug: string): ProvisionResult =
     else:
       res.steps.add StepResult(name: name, outcome: r.outcome)
   if cfg.multi: drop("ingress", "Ingress", cfg.shardNamespace, ingressName(slug), result)
-  drop("controller", "Deployment", ns, controllerName, result)           # made so before the controller became a Pod of the core
   if result.ok:
     let l = k.listObjects("Pod", ns, "app.kubernetes.io/name=" & controllerName)
     if l.error.len > 0:
@@ -373,14 +372,6 @@ proc purge*(k: KubeApi; cfg: ProvisionConfig; slug: string): ProvisionResult =
     result.error = r.detail
     return
   result.steps.add StepResult(name: "namespace", outcome: r.outcome)
-
-proc secretHolds*(have, want: JsonNode): bool =
-  ## does the Secret read from the cluster (`data`, base64) hold what `want` (`stringData`) says
-  let data = have{"data"}
-  if data == nil or data.kind != JObject: return false
-  for k, v in want{"stringData"}.pairs:
-    if not data.hasKey(k) or decode(data[k].getStr) != v.getStr: return false
-  true
 
 proc coreSecret*(certs: string): string =
   ## the core's own secret: the master of the controller identities (common/ctrlauth.nim); it leaves the core nowhere

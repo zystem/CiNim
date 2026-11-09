@@ -101,6 +101,8 @@ message ExecutorResponse {
 }
 
 message LeaseGranted {
+  reserved 9;                         // step_table: the table of step numbers is gone (D-67)
+  reserved "step_table";
   string lease_token = 1;
   uint32 ttl_seconds = 2;
   repeated JournalEntry journal = 3;  // to replay; paged for long journals
@@ -109,6 +111,5 @@ message LeaseGranted {
                                        // pipeline_bundles/blob storage yet, spec 8.2 pipeline_bundles.digest)
   map<string, string> params = 7;    // the launch parameters given when the run was created (PIP-012), as text; the script's declarations type and complete them
   uint32 api_version = 8;            // the version of the Lua host API the run was made with: the executor replays it with the prelude of that version
-  string step_table = 9;              // the table of step numbers of the run (executor/steptable.nim) as the executor sent it with its first lease; "" until it has
   string run_id = 6;                  // which run this lease is for
 }

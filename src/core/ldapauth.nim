@@ -372,7 +372,7 @@ proc ldapLogin*(c: var RqClient; kek: KekProvider; vaultReady: bool; slug, uidGi
       if roles.len == 0 and teams.len == 0 and isNew:
         return LdapLogin(outcome: loNoRole, user: name, detail: s.name & ": no group of " & name & " gives a role here")
       discard c.execute(%*[["INSERT INTO users (name, password_hash, created_at, disabled, must_change, source, dn) VALUES (?, '', ?, 0, 0, ?, ?) " &
-        "ON CONFLICT(name) DO UPDATE SET disabled = 0, dn = excluded.dn WHERE users.source = excluded.source", name, now, sourceOf(s.id), who.dn]])
+        "ON CONFLICT(name) DO UPDATE SET disabled = CASE WHEN users.disabled = 1 THEN 1 ELSE 0 END, dn = excluded.dn WHERE users.source = excluded.source", name, now, sourceOf(s.id), who.dn]])
       discard c.syncBindings(name, s.id, slug, roles)
       discard c.syncTeams(name, s.id, teams)
       # the account is let in if it has a role at all: from the groups, or one given by hand
@@ -424,7 +424,7 @@ proc makeAccount*(c: var RqClient; kek: KekProvider; vaultReady: bool; tenantId,
       let groups = service.groupsOf(s, uid, who.dn, who.entry)
       let roles = c.rolesFor(s, groups)
       discard c.execute(%*[["INSERT INTO users (name, password_hash, created_at, disabled, must_change, source, dn) VALUES (?, '', ?, 0, 0, ?, ?) " &
-        "ON CONFLICT(name) DO UPDATE SET disabled = 0, dn = excluded.dn WHERE users.source = excluded.source", name, now, sourceOf(s.id), who.dn]])
+        "ON CONFLICT(name) DO UPDATE SET disabled = CASE WHEN users.disabled = 1 THEN 1 ELSE 0 END, dn = excluded.dn WHERE users.source = excluded.source", name, now, sourceOf(s.id), who.dn]])
       discard c.syncBindings(name, s.id, slug, roles)
       discard c.syncTeams(name, s.id, c.teamsFor(s, groups))
       let outcome = if have: aoExists else: aoMade

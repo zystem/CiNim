@@ -4,7 +4,7 @@
 ## checked on the live vlagent), so nothing is ever recompressed. Pure module (no gRPC): unit-tested in tlogspool.nim.
 ##
 ## Secrets (DAT-002, second half) are masked here, before compression - core never sees the plain text. Only values
-## known when the step starts (`--secrets-file`) and at least `minSecretLen` characters long are masked (shorter ones
+## known when the step starts (`--secrets-file`) and at least `defaultMinLen` (secretmask.nim) characters long are masked (shorter ones
 ## would mangle ordinary output); a value split across two lines is not recognised.
 import std/[os, strutils, json, algorithm, atomics, unicode]
 import zippy
@@ -13,7 +13,6 @@ import secretmask, ../common/crockford
 const
   blockRawTarget* = 64 * 1024     ## uncompressed bytes at which a block is cut
   maxLineBytes* = 32 * 1024       ## a longer line is split into several records
-  minSecretLen* = 4
   encGzip* = "gzip"
 
 type
@@ -44,11 +43,6 @@ type
 var spoolBytes*: Atomic[int64]    ## compressed bytes currently queued on disk; one spool per process (shim and sender share it)
 
 # ------------------------------------------------------------------ records
-
-func maskSecrets*(line: string; secrets: openArray[string]): string =
-  result = line
-  for s in secrets:
-    if s.len >= minSecretLen and s in result: result = result.replace(s, "***")
 
 const replacementChar = "\xEF\xBF\xBD"     ## U+FFFD
 

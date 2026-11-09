@@ -73,7 +73,7 @@ const
     ("org.delete", lvShard, "switch an organisation off and delete it"),
     ("storage.write", lvShard, "choose the store of an organisation"),
     ("store.manage", lvShard, "see and check the object stores of the shard"),
-    ("user.manage", lvShard, "make, delete and reset users"),
+    ("user.manage", lvShard, "make, delete, block and reset users"),
     ("role.manage", lvShard, "make and delete roles"),
     ("token.manage", lvShard, "make, list and revoke API tokens"),
     ("audit.read", lvShard, "read the audit log"),

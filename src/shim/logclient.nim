@@ -18,7 +18,7 @@ export protos
 type
   LogCfg* = object
     collectorAddr*, coreAddr*, certs*, spoolDir*: string
-    statusAddr*: string       ## D-75: where the state, the heartbeat and the metrics go, on a channel of their own; empty (an older controller): they ride on the log batches
+    statusAddr*: string       ## D-75: where the state, the heartbeat and the metrics go, on a channel of their own; empty (a core outside a cluster that was not told one): none is sent
     step*: StepRef
     spoolCap*: int64          ## log_spool_bytes: queued, undelivered compressed bytes at which the shim stops reading
     holdSeconds*: int         ## log_hold_timeout: how long the finished step waits for the log to be delivered
@@ -27,7 +27,7 @@ type
     maskMinLen*: int
     logMaxBytes*: int64       ## 0 = unlimited (profile setting log_max_bytes)
 
-  SenderArgs = tuple[collectorAddr, certs, spoolDir, runId: string, stepSeq, attempt: uint32, statusApart: bool]
+  SenderArgs = tuple[collectorAddr, certs, spoolDir, runId: string, stepSeq, attempt: uint32]
   StatusArgs = tuple[statusAddr, certs, runId: string, stepSeq, attempt: uint32]
 
   LogPipeline* = object
@@ -74,25 +74,18 @@ proc sendLoop(a: SenderArgs) {.thread.} =
         lastWarn = epochTime()
         stderr.writeLine "cicd-shim: log delivery: " & msg
     let step = StepRef(run_id: a.runId, seq: a.stepSeq, attempt: a.attempt)
-    var lastSentN = -1
-    var lastHeartbeat = 0.0
     while not stopSender.load:
       let queued = peek(a.spoolDir)
-      # a batch with no chunks is the heartbeat: sent when the shim's state changed and at least every few seconds, so core
-      # always knows the shim is alive and what it is doing - even when the build is silent and the spool is empty
-      let due = not a.statusApart and (currentState().n != lastSentN or epochTime() - lastHeartbeat >= heartbeatSeconds)
-      if queued.len == 0 and not due:
+      # the log only: the shim's state and heartbeat go on the status channel (statusLoop, D-75), so that the log does not wait for what records them
+      if queued.len == 0:
         if finished.load: break
         sleep 50
         continue
-      if queued.len == 0 and finished.load: break
       try:
         if not connected:
           conn = dialCore(a.collectorAddr, a.certs)    # a resend after a timeout is harmless (core takes each block once)
           connected = true
-        let sentN = currentState().n
         var batch = LogBatch(step: step)
-        if not a.statusApart: batch.status = currentStatus()       # D-75: with the status channel the log carries only the log
         for q in queued: batch.chunks.add chunkOf(q)
         let bytes = Protobuf.encode(batch)
         var msg = newString(bytes.len)
@@ -113,8 +106,6 @@ proc sendLoop(a: SenderArgs) {.thread.} =
           discard delivered.fetchAdd(freed)
           case ack.failure.code
           of "":
-            lastSentN = sentN
-            lastHeartbeat = epochTime()
             backoff = 300
             if failing:
               failing = false
@@ -214,7 +205,7 @@ proc newLogPipeline*(cfg: LogCfg): LogPipeline =
                               step = cfg.step.seq, attempt = cfg.step.attempt)
   result.lastCut = epochTime()
   createThread(result.sender, sendLoop, (cfg.collectorAddr, cfg.certs, cfg.spoolDir, cfg.step.run_id,
-                                          cfg.step.seq, cfg.step.attempt, cfg.statusAddr.len > 0))
+                                          cfg.step.seq, cfg.step.attempt))
   if cfg.statusAddr.len > 0:
     createThread(result.statusSender, statusLoop, (cfg.statusAddr, cfg.certs, cfg.step.run_id, cfg.step.seq, cfg.step.attempt))
     result.statusStarted = true

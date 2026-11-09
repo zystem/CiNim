@@ -151,11 +151,11 @@ const ddl = [
        source_commit TEXT NOT NULL DEFAULT '', source_base TEXT NOT NULL DEFAULT '',
        source_path TEXT NOT NULL DEFAULT '', source_ref TEXT NOT NULL DEFAULT '', trusted INTEGER NOT NULL DEFAULT 0,
        journal_tip TEXT NOT NULL DEFAULT '', parent_key TEXT NOT NULL DEFAULT '', script_pending INTEGER NOT NULL DEFAULT 0, status_sent TEXT NOT NULL DEFAULT '',
-       step_table TEXT NOT NULL DEFAULT '',
        lease_attempt INTEGER NOT NULL DEFAULT 0,
        lease_until INTEGER NOT NULL DEFAULT 0,
        lease_owner TEXT NOT NULL DEFAULT '',
-       dirty INTEGER NOT NULL DEFAULT 0)""",
+       dirty INTEGER NOT NULL DEFAULT 0,
+       approval_required INTEGER NOT NULL DEFAULT 0, approval_deadline INTEGER NOT NULL DEFAULT 0, verified INTEGER NOT NULL DEFAULT 0)""",
   # the triggers of an organisation (6.3, core/triggers.nim): a stored way to start a run, by the clock (`schedule`), by a call with the trigger's own secret (`webhook`),
   # or by hand; `secret_hash` is the SHA-256 of the webhook's secret (shown once)
   """CREATE TABLE IF NOT EXISTS triggers (
@@ -189,7 +189,7 @@ const ddl = [
   # belongs to it). `path` is the slugs from the top joined by '/'; the variables of a group (VAR-001) are inherited by the groups below it and by its runs
   """CREATE TABLE IF NOT EXISTS groups (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL,
-       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1, allowed_callers TEXT NOT NULL DEFAULT '', status_target TEXT NOT NULL DEFAULT '')""",
+       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1, allowed_callers TEXT NOT NULL DEFAULT '', status_target TEXT NOT NULL DEFAULT '', default_ref TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS groups_tenant_path ON groups (tenant_id, path)",
   "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
   """CREATE TABLE IF NOT EXISTS group_variables (
@@ -290,66 +290,10 @@ const ddl = [
        PRIMARY KEY (job_id, step_id, attempt))""",
 ]
 
-proc hasColumn(c: var RqClient; table, column: string): bool =
-  let r = c.query(%*[["SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", table, column]])
-  r["results"][0]{"values"}[0][0].getInt > 0
-
-const columnsAdded: seq[(string, string, string)] = @[
-  ("step_drains", "volume", "TEXT NOT NULL DEFAULT ''"),      # STO-002: the id of the job whose volume the step used (2026-10-18)
-  ("runs", "source_repository", "TEXT NOT NULL DEFAULT ''"),  # D-63: the repository, the commit and the path the run's script was read from (2026-10-18)
-  ("runs", "source_commit", "TEXT NOT NULL DEFAULT ''"),
-  ("runs", "source_path", "TEXT NOT NULL DEFAULT ''"),
-  ("triggers", "repository", "TEXT NOT NULL DEFAULT ''"),     # D-63: a trigger whose script is read from a repository
-  ("triggers", "ref", "TEXT NOT NULL DEFAULT ''"),
-  ("triggers", "script_path", "TEXT NOT NULL DEFAULT ''"),
-  ("triggers", "seen_commit", "TEXT NOT NULL DEFAULT ''"),            # D-76: a poll trigger: the commit its ref was at when it last looked, and when it looked (2026-10-23)
-  ("triggers", "last_checked_at", "INTEGER NOT NULL DEFAULT 0"),
-  ("groups", "repository", "TEXT NOT NULL DEFAULT ''"),
-  ("ldap_servers", "tls_insecure", "INTEGER NOT NULL DEFAULT 0"),             # D-87: the certificate of the directory is not checked (2026-10-29)
-  ("ldap_servers", "auto_create", "INTEGER NOT NULL DEFAULT 0"),             # D-87: an account is made at the first login of a person the directory knows (off unless asked for)
-  ("users", "source", "TEXT NOT NULL DEFAULT ''"),                         # D-87: where a user comes from, and the DN the directory knows them by (2026-10-29)
-  ("users", "dn", "TEXT NOT NULL DEFAULT ''"),
-  ("role_bindings", "source", "TEXT NOT NULL DEFAULT ''"),
-  ("role_bindings", "expires_at", "INTEGER NOT NULL DEFAULT 0"),            # D-92: a binding ends at this time (unix seconds; 0 never), holds for the user's own runs only, holds for these refs only (one to a line)
-  ("role_bindings", "only_own", "INTEGER NOT NULL DEFAULT 0"),
-  ("role_bindings", "refs", "TEXT NOT NULL DEFAULT ''"),
-  ("runs", "approval_required", "INTEGER NOT NULL DEFAULT 0"),             # D-93: a run that waits (state WAITING) until this many people have approved it; 0 = it needs none
-  ("runs", "parent_key", "TEXT NOT NULL DEFAULT ''"),                       # D-93: the key of the ci.trigger call of the parent that made this run (so a replay finds it, not makes it again)
-  ("runs", "script_pending", "INTEGER NOT NULL DEFAULT 0"),                # ... and its script is not read yet (the core reads it from the repository; the run is not led until it is)
-  ("runs", "approval_deadline", "INTEGER NOT NULL DEFAULT 0"),             # ... and the time (unix seconds) after which it is TIMED_OUT
-  ("groups", "required_approvals", "INTEGER NOT NULL DEFAULT 1"),
-  ("api_tokens", "restrict", "TEXT NOT NULL DEFAULT ''"),               # D-99: a token with a subset of the permissions of its user (JSON: permissions, organization?, group?), or a token of one step (scope run:<id>)
-  ("groups", "status_target", "TEXT NOT NULL DEFAULT ''"),               # D-96: where the state of the runs of a project is told (the host of its repository: github or gitlab), as JSON
-  ("runs", "status_sent", "TEXT NOT NULL DEFAULT ''"),                     # ... and the state that was told last
-  ("groups", "allowed_callers", "TEXT NOT NULL DEFAULT ''"),              # D-93: the projects (or groups of them) whose pipelines may start runs of this project with ci.trigger, one path to a line          # D-93: how many approvals the runs of a project that ask for approval need
-  ("groups", "protected_refs", "TEXT NOT NULL DEFAULT ''"),               # D-86: the refs of a project whose runs are trusted, and the privileged profiles its pipelines may use (2026-10-29)
-  ("groups", "allowed_profiles", "TEXT NOT NULL DEFAULT ''"),
-  ("runs", "source_ref", "TEXT NOT NULL DEFAULT ''"),                      # D-86: the name the commit was asked by (a branch or a tag; "" for a SHA), and whether it is a protected ref of the project
-  ("runs", "trusted", "INTEGER NOT NULL DEFAULT 0"),
-  ("runs", "source_base", "TEXT NOT NULL DEFAULT ''"),
-  ("runs", "verified", "INTEGER NOT NULL DEFAULT 0"),
-  ("groups", "default_ref", "TEXT NOT NULL DEFAULT ''")]                    # D-82: the commit of the last run of this pipeline that ended OK, when this one was made (2026-10-23)                   # D-68: a group with a main repository is a project (2026-10-23)
-  ## Columns added to a table after a shard was made: `(table, column, definition)`, which `migrate` adds to a table that lacks them (`CREATE TABLE IF NOT EXISTS` leaves an existing table
-  ## alone). The list was folded into the `CREATE TABLE`s on 2026-10-18 (docs/compat.md) and is empty: a column that is added from now on goes into its `CREATE TABLE` and, until the
-  ## next fold, here too.
-
 proc migrate*(c: var RqClient) =
   var stmts = newJArray()
   for s in ddl: stmts.add %s
   discard c.execute(stmts, transaction = true)
-  for (table, column, definition) in columnsAdded:
-    if not c.hasColumn(table, column):
-      discard c.execute(%*[["ALTER TABLE " & table & " ADD COLUMN " & column & " " & definition]])
-  # D-86: a secret may belong to a group, so the key of the table has the group in it (2026-10-29; docs/compat.md): the table is made anew, the old rows are the organisation's
-  if not c.hasColumn("step_secrets", "group_id"):
-    discard c.execute(%*[
-      ["ALTER TABLE step_secrets RENAME TO step_secrets_old"],
-      ["""CREATE TABLE step_secrets (tenant_id TEXT NOT NULL, group_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, version INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-          value_enc TEXT NOT NULL DEFAULT '', protected INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, group_id, name))"""],
-      ["INSERT INTO step_secrets (tenant_id, group_id, name, version, updated_at, value_enc, protected) SELECT tenant_id, '', name, version, updated_at, value_enc, 0 FROM step_secrets_old"],
-      ["DROP TABLE step_secrets_old"]], transaction = true)
-  # the state of a run or a step that went well is OK (2026-10-23; it was SUCCEEDED): the rows made before are named anew (docs/compat.md)
-  discard c.execute(%*[["UPDATE runs SET state = 'OK' WHERE state = 'SUCCEEDED'"], ["UPDATE steps SET state = 'OK' WHERE state = 'SUCCEEDED'"]], transaction = true)
 
 proc seedDefaultProfile*(c: var RqClient; namespace: string; id = "default"): string =
   ## Idempotent: the one execution profile needed for now (there is no admin UI to create one yet).
@@ -377,11 +321,6 @@ proc closeLogStream*(c: var RqClient; jobId, stepId: string; attempt, lineCount:
   discard c.execute(%*[["UPDATE log_streams SET state = 'closed', line_count = ?, closed_at = ? " &
     "WHERE job_id = ? AND step_id = ? AND attempt = ?", lineCount, $getTime().toUnix(), jobId, stepId, attempt]])
 
-proc abandonLogStream*(c: var RqClient; stepId: string; attempt: int) =
-  ## The attempt was lost and the step went back to the queue: what it wrote stays (under its own label) but is marked.
-  discard c.execute(%*[["UPDATE log_streams SET state = 'abandoned', closed_at = ? WHERE step_id = ? AND attempt = ? AND state = 'open'",
-    $getTime().toUnix(), stepId, attempt]])
-
 proc streamIndexName*(c: var RqClient; jobId, stepId: string): string =
   ## The newest attempt's stream. "" if none has been opened yet (core/api.nim's log-window read 404s on that).
   let r = c.query(%*[["SELECT index_name FROM log_streams WHERE job_id = ? AND step_id = ? ORDER BY attempt DESC LIMIT 1", jobId, stepId]])
@@ -403,11 +342,6 @@ proc addOrganization*(c: var RqClient; slug, name: string; egress = ""; ingress 
   discard c.execute(%*[["INSERT INTO organizations (id, tenant_id, slug, name, created_at, network_egress, network_ingress) VALUES (?, ?, ?, ?, ?, ?, ?)",
     id, id, slug, name, $getTime().toUnix(), egress, ingress]])
   id
-
-proc organizationNetwork*(c: var RqClient; slug: string): tuple[egress, ingress: string] =
-  let r = c.query(%*[["SELECT network_egress, network_ingress FROM organizations WHERE slug = ?", slug]])
-  let vals = r["results"][0]{"values"}
-  if vals != nil and vals.len > 0: (vals[0][0].getStr, vals[0][1].getStr) else: ("", "")
 
 proc organizationState*(c: var RqClient; slug: string): string =
   ## "" if the shard has no such organisation

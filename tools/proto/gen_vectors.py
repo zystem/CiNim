@@ -21,12 +21,12 @@ r = step_pb2.StepReport(header=common_pb2.Header(protocol=1, request_id="req-1")
 r.outputs["VERSION"] = "1.2"; r.outputs["A"] = "b"
 V["step_report"] = hexof(r)
 b = logs_pb2.LogBatch(header=common_pb2.Header(protocol=1, sent_at=ts(1789980000, 123456789)), step=step, job_token="t")
-b.chunks.add(seq=1, stream=logs_pb2.LOG_STREAM_STDOUT, time=ts(1789980001, 5), data=b"hello\n", crc32c=0xDEADBEEF)
-b.chunks.add(seq=2, stream=logs_pb2.LOG_STREAM_STDERR, time=ts(1789980002, 0), data=bytes([0, 255, 10]), crc32c=1)
+b.chunks.add(seq=1, data=b"hello\n", crc32c=0xDEADBEEF)
+b.chunks.add(seq=2, data=bytes([0, 255, 10]), crc32c=1)
 V["log_batch"] = hexof(b)
 p = controller_pb2.PollResponse(header=common_pb2.Header(protocol=1), poll_after_ms=500, gate=controller_pb2.GateState(open=True))
 c1 = p.commands.add(seq=1); c1.start.step.CopyFrom(step); c1.start.image = "busybox:1.36"; c1.start.command.extend(["sh", "-c", "true"])
-c1.start.env["B"] = "2"; c1.start.env["A"] = "1"; c1.start.secret_handles.append("vault:db"); c1.start.timeout_seconds = 3600
+c1.start.env["B"] = "2"; c1.start.env["A"] = "1"; c1.start.secret_names.append("vault:db"); c1.start.timeout_seconds = 3600
 c2 = p.commands.add(seq=2); c2.cancel.step.CopyFrom(step); c2.cancel.grace_seconds = 30
 c3 = p.commands.add(seq=3); c3.gate.open = False; c3.gate.reason = "logs_unavailable"
 V["poll_response"] = hexof(p)

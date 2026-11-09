@@ -51,7 +51,7 @@ areas=""; ctests=""
 if [ -n "$base" ]; then
   if changed=$(git -C mirror.git diff --name-only "$base" "$SHA"); then
     areas=$(printf '%s\n' "$changed" | awk -F/ 'NF == 0 {next} NF == 1 {print $1; next} $1 == "src" || $1 == "tests" {print $1 "/" $2; next} $1 == "tools" && $2 == "image" {print $1 "/" $2 "/" $3; next} $1 == "tools" {print $1 "/" $2; next} {print $1}' | sort -u | paste -sd, -)
-    ctests=$(printf '%s\n' "$changed" | grep -E '^tests/(unit|integration)/t[^/]*\.nim(\.cfg)?$' | sed 's/\.cfg$//' | sort -u | paste -sd, - || true)
+    ctests=$(printf '%s\n' "$changed" | grep -E '^tests/(unit|integration|contract)/t[^/]*\.nim(\.cfg)?$' | sed 's/\.cfg$//' | sort -u | paste -sd, - || true)
     [ ${#ctests} -le 1500 ] || ctests=all
   else base=""; fi
 fi
@@ -96,19 +96,21 @@ cd src
 # temporary files are on the volume of the job.
 export XDG_CACHE_HOME=/cicd/workspace/nimcache TMPDIR=/cicd/workspace/tmp; mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
 tools/proto/nim_flatten.sh build/nimproto
+# the Caddy node of the HTTP store is in the image: the tests that start nodes look for it as build/caddy-store (they are skipped without it)
+mkdir -p build; [ ! -x /usr/local/bin/caddy-store ] || ln -sf /usr/local/bin/caddy-store build/caddy-store
 for v in $(env | grep -o '^CICD_[A-Z_]*'); do unset "$v"; done         # this is a step of a run, and the tests are about shims that make their own
 rc=0
 # D-82: when the script decided on some of the tests (COMPONENTS: what changed and what imports it), those that import one of them and the test files that changed; else all of them
 files=""
 if [ -n "${COMPONENTS:-}${CHANGED_TESTS:-}" ]; then
   pat=$(printf '%s' "${COMPONENTS:-nothing-at-all}" | tr ',' '|')
-  files=$({ grep -lE "(^|[^A-Za-z0-9_])($pat)/" tests/unit/t*.nim tests/integration/t*.nim || true
+  files=$({ grep -lE "(^|[^A-Za-z0-9_])($pat)/" tests/unit/t*.nim tests/integration/t*.nim tests/contract/t*.nim || true
             for t in $(printf '%s' "${CHANGED_TESTS:-}" | tr ',' ' '); do [ -f "$t" ] && echo "$t"; done; } | grep -v -e tm1skeleton -e thsperf | sort -u || true)
   [ -n "$files" ] || { echo "no test imports what changed: none is run"; exit 0; }
   echo "the tests that import what changed:"; echo "$files"
 fi
 # the compilers and the tests are niced: on a busy node the databases of the tests starve otherwise (a query waited 15 s)
-CINIM_TEST_DBPROBE=1 CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" $files || rc=$?
+CINIM_REQUIRE_BUF=1 CINIM_TEST_DBPROBE=1 CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" $files || rc=$?
 # the tail of the log of every file that failed, so that the log of the step says why
 for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(.*\))$/\1/'); do echo "=== $log"; tail -n 30 "$log"; done
 exit $rc

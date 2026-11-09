@@ -40,12 +40,6 @@ func isNamespacePattern*(p: string): bool =
     elif ch notin {'a' .. 'z', '0' .. '9', '-'}: return false
   p[^1] != '-'
 
-func namespaceMatches*(pattern, namespace: string): bool =
-  ## whether the profile may deploy into the namespace: the name itself, a prefix of it for `test*`, anything for `*`
-  if pattern.len == 0 or namespace.len == 0: return false
-  if pattern.endsWith("*"): return namespace.startsWith(pattern[0 ..< pattern.len - 1])
-  pattern == namespace
-
 func isPlainNamespace*(p: string): bool = p.len > 0 and '*' notin p
 
 func validServiceAccountName*(n: string): bool =

@@ -329,6 +329,18 @@ suite "D-87 LDAP":
       check c.query(%*[["SELECT disabled FROM users WHERE name = ?", "ann@" & slug]])["results"][0]["values"][0][0].getInt == 0
       check "admin|org:" & slug & "|" in bindingsOf("ann@" & slug)[0] & "|"
       check c.authenticate("", tokenOfAnn, now + 3).ok
+    test "an account that an administrator blocked stays blocked: a login with the right password and a sync do not switch it on, and the administrator lets it in again":
+      let annName = login("ann", "ann-secret-1").user
+      check c.setUserBlocked(annName, true) == boDone
+      discard login("ann", "ann-secret-1")                                                                    # the password is right: the directory vouches, the block is not the directory's
+      check c.query(%*[["SELECT disabled FROM users WHERE name = ?", annName]])["results"][0]["values"][0][0].getInt == 1
+      check not c.sessionFor(annName, now + 5).ok
+      let rep = c.syncServer(kek, true, c.serverNamed(orgId, "corp").server, now + 6)
+      check rep.error == ""
+      check c.query(%*[["SELECT disabled FROM users WHERE name = ?", annName]])["results"][0]["values"][0][0].getInt == 1
+      check c.setUserBlocked(annName, false) == boDone
+      check login("ann", "ann-secret-1").outcome == loOk
+      check c.sessionFor(annName, now + 7).ok
     test "a directory that does not answer: the login is 'unavailable', not 'wrong password'; the sync says what went wrong and changes nothing":
       check put("dead", spec("ldaps://127.0.0.1:9", %*{"priority": -1})).error == ""
       check login("ann", "ann-secret-1").outcome == loOk                                                        # the live one answers: a dead one before it does not matter
@@ -384,7 +396,7 @@ suite "D-87 LDAP":
       check not c.authenticate("", t, now + 2).ok and c.userSourceOf("bob@" & slug) == "" and bindingsOf("bob@" & slug).len == 0
       check not c.removeAccount(orgId, slug, "bob") and not c.removeAccount(otherOrg, otherSlug, "bob")
       check login("bob", "bob-secret-1").outcome == loNoAccount                                                   # and it is as it was: no account
-      discard c.createUser("localone", "ro", "a-long-password-of-localone", now)
+      discard c.createUser("localone", "ro", "a-long-password-of-localone", now, "org:" & slug)
       check not c.removeAccount(orgId, slug, "localone")                                                           # a local user is not an account of a directory
       discard c.deleteUser("localone", now)
     test "D-91 a team that takes its members from a group of the directory: joined at login with no role of their own, left at the sync, hand-made members stay, the group is the one that decides":
