@@ -81,6 +81,15 @@ type
   RegistryRow = object
     name, address, username, description: string
     insecure, hasPassword: bool
+  NodeRow = object
+    path, repository, indent: string
+    isProject: bool
+  SettingView = object
+    key, title, help, perm, effective, sources, ownText, ownNumber, hint: string
+    canEdit, isNumber: bool
+  ProfileRow = object
+    name, account, namespace, description: string
+    hasToken: bool
   DirRow = object
     name, url, warnings, lastSync: string
     priority: int
@@ -356,6 +365,18 @@ proc renderTeams(base, org, here: string; teams: seq[TeamRow]; roleNames: seq[st
 proc renderRegistries(base, org, here: string; registries: seq[RegistryRow]; canWrite: bool): string =
   let loggedIn = true
   compileTemplateFile("registries.nimja", templateDir)
+
+proc renderProjects(base, org: string; nodes: seq[NodeRow]): string =
+  let loggedIn = true
+  compileTemplateFile("projects.nimja", templateDir)
+
+proc renderSettings(base, org, path, here, defaultRef, statusText, cacheText: string; isProject: bool; sections: seq[SettingView]): string =
+  let loggedIn = true
+  compileTemplateFile("settings.nimja", templateDir)
+
+proc renderDeployProfiles(base, org, here: string; profiles: seq[ProfileRow]; canWrite: bool): string =
+  let loggedIn = true
+  compileTemplateFile("deployprofiles.nimja", templateDir)
 
 proc renderLdap(base, org, here: string; dirs: seq[DirRow]; maps: seq[MapRow]; accounts: seq[AccountRow]; roleNames: seq[string]; canMap, canWrite: bool): string =
   let loggedIn = true
@@ -864,6 +885,136 @@ proc registriesAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, slug: 
     return afterAction(cfg, api, token, r, back, "The registry was not removed", "remove the registry " & rest[0], "DELETE", base & "/" & rest[0])
   messagePage(cfg, 404, true, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
 
+# ------------------------------------------------------------------ groups, projects and their settings (docs/inheritance.md), deploy profiles (D-115)
+
+func isDnsLabel(s: string): bool =
+  ## a name of a ServiceAccount or a namespace: lowercase letters, digits and -, at most 63
+  if s.len < 1 or s.len > 63 or s[0] == '-' or s[^1] == '-': return false
+  for c in s:
+    if c notin {'a' .. 'z', '0' .. '9', '-'}: return false
+  true
+
+func linesOf(text: string): seq[string] =
+  ## a list typed one to a line (a comma or a semicolon also parts two): trimmed, no empty one, no repeat, at most 40, each of a sane length and with no control character
+  for raw in text.replace(',', '\n').replace(';', '\n').splitLines:
+    let t = raw.strip
+    if t.len > 0 and t.len <= 200 and t.allIt(it >= ' ' and it != '\x7f') and t notin result: result.add t
+  if result.len > 40: result.setLen 40
+
+proc namesOf(api: CoreApi; token, path, listKey: string): seq[string] =
+  ## the names of the objects of the organisation that a list may name (for a hint); none when the core does not say
+  let r = api.get(token, path)
+  if r.status == asOk:
+    for x in r.body{listKey}.getElems:
+      if isDirName(x{"name"}.getStr): result.add x["name"].getStr
+
+proc projectsPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
+  let base = "/api/v1/organizations/" & slug
+  let g = api.get(token, base & "/groups")
+  if g.status != asOk: return explained(cfg, api, token, g, "the groups of " & slug, "GET", base & "/groups")
+  let p = api.get(token, base & "/projects")
+  var nodes: seq[NodeRow]
+  for x in g.body{"groups"}.getElems:
+    if isGroupPath(x{"path"}.getStr): nodes.add NodeRow(path: x["path"].getStr, repository: "", indent: $(int(x{"depth"}.getBiggestInt(1)) * 2), isProject: false)
+  if p.status == asOk:
+    for x in p.body{"projects"}.getElems:
+      if isGroupPath(x{"path"}.getStr): nodes.add NodeRow(path: x["path"].getStr, repository: x{"repository"}.getStr, indent: $(int(x{"depth"}.getBiggestInt(1)) * 2), isProject: true)
+  nodes.sort(proc (a, b: NodeRow): int = cmp(a.path, b.path))          # a parent comes before what is under it
+  page(200, renderProjects(cfg.base, slug, nodes))
+
+proc sourcesText(body: JsonNode; key: string): string =
+  ## "group a: x, y; group a/b: z" - where the entries of a list come from
+  var parts: seq[string]
+  for s in body{"sources"}{key}.getElems:
+    let vals = s{"values"}.getElems.mapIt(it.getStr).join(", ")
+    parts.add "group " & s{"group"}.getStr & (if vals.len > 0: ": " & vals else: "")
+  parts.join("; ")
+
+proc settingsPage(cfg: UiConfig; api: CoreApi; token: string; t: Target): UiResponse =
+  let path = t.apiBase & "/settings"
+  let r = api.get(token, path)
+  if r.status != asOk: return explained(cfg, api, token, r, "the settings of " & t.slug & "/" & t.group, "GET", path)
+  let b = r.body
+  let org = "/api/v1/organizations/" & t.slug
+  proc list(key: string): seq[string] = b{key}.getElems.mapIt(it.getStr)
+  proc section(key, title, help, perm: string; own, effective: seq[string]; effectiveText, hint: string): SettingView =
+    SettingView(key: key, title: title, help: help, perm: perm, ownText: own.join("\n"), canEdit: can(perm, t.slug, t.group), hint: hint,
+                effective: (if effectiveText.len > 0: effectiveText elif effective.len > 0: effective.join(", ") else: "nothing"), sources: sourcesText(b, key))
+  var sections: seq[SettingView]
+  sections.add section("protected_refs", "Protected refs", "The branches and tags whose runs are trusted (their protected secrets, the deploy profiles, the logins of the registries). A group below adds to the list and cannot take one away; a name ends in * for a prefix.",
+                       "ref.protect", list("protected_refs"), list("effective_protected_refs"), "", "A branch or tag, or a prefix such as release/*, one to a line.")
+  var approvals = section("required_approvals", "Required approvals", "How many people approve a run that waits for approval. A group below can ask for more, never for fewer; 1 (or nothing) asks for no more than the groups above do.",
+                          "approval.configure", @[], @[], $b{"effective_required_approvals"}.getBiggestInt(1), "")
+  approvals.isNumber = true
+  approvals.ownNumber = $b{"required_approvals"}.getBiggestInt(1)
+  approvals.ownText = ""
+  sections.add approvals
+  sections.add section("allowed_callers", "Allowed callers", "The projects or groups whose pipelines may start runs of this place with ci.trigger. A group below adds to the list.",
+                       "caller.allow", list("allowed_callers"), list("effective_allowed_callers"), "", "The path of a project or of a group, one to a line.")
+  let profileNames = @["build", "deploy"] & namesOf(api, token, org & "/deploy-profiles", "deploy_profiles")
+  sections.add section("allowed_profiles", "Allowed profiles", "The privileged profiles the pipelines here may use: build, deploy and the deploy profiles of the organisation. Nothing is allowed until a group lists it; a deploy step also needs a protected ref.",
+                       "profile.grant", list("allowed_profiles"), list("effective_allowed_profiles"), "", "Names that exist: " & profileNames.join(", ") & ".")
+  let ea = b{"effective_allowed_registries"}
+  let regEffective = if ea.isKind(JObject) and ea{"all"}.getBool: "every registry of the organisation" elif ea.isKind(JObject): ea{"names"}.getElems.mapIt(it.getStr).join(", ") else: ""
+  sections.add section("allowed_registries", "Allowed registries", "Which registries of the organisation the pipelines here may use. The organisation has all of them; a group below only narrows the set, and an empty list inherits.",
+                       "registry.grant", list("allowed_registries"), @[], (if regEffective.len > 0: regEffective else: "no registry"), "Names that exist: " & namesOf(api, token, org & "/registries", "registries").join(", ") & ".")
+  let status = b{"effective_status"}
+  let statusText = if status.isKind(JObject): status{"provider"}.getStr & " " & status{"repository"}.getStr else: "nobody"
+  let cacheText = "quota " & $b{"cache_quota_bytes"}.getBiggestInt(0) & " bytes, retention " & $b{"cache_retention_days"}.getBiggestInt(0) & " days (0: the level above decides)"
+  page(200, renderSettings(cfg.base, t.slug, t.group, uiBase(cfg, t), b{"default_ref"}.getStr, statusText, cacheText, t.kind == "projects", sections))
+
+proc settingsAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token: string; t: Target; key: string): UiResponse =
+  ## the form of one setting of a group or a project: the own value; an empty one inherits
+  let path = t.apiBase & "/settings"
+  let back = uiBase(cfg, t) & "/settings"
+  let value = req.form.getOrDefault("value")
+  var body = newJObject()
+  case key
+  of "protected_refs", "allowed_callers", "allowed_profiles", "allowed_registries":
+    if value.len > 6000: return messagePage(cfg, 400, true, "Not saved", "The list is too long.", "", back, "Back")
+    var arr = newJArray()
+    for x in linesOf(value): arr.add %x
+    body[key] = arr
+  of "required_approvals":
+    let n = value.strip
+    if not isNumber(n, 2) or n == "0" or parseInt(n) > 20: return messagePage(cfg, 400, true, "Not saved", "Give a whole number from 1 to 20.", "", back, "Back")
+    body[key] = %parseInt(n)
+  else: return messagePage(cfg, 404, true, "Not found", "There is no such setting.", "", back, "Back")
+  let r = api.send("PUT", token, path, $body)
+  afterAction(cfg, api, token, r, back, "The setting was not saved", "save " & key & " of " & t.group, "PUT", path)
+
+proc deployProfilesPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
+  let base = "/api/v1/organizations/" & slug & "/deploy-profiles"
+  let r = api.get(token, base)
+  if r.status != asOk: return explained(cfg, api, token, r, "the deploy profiles of " & slug, "GET", base)
+  var rows: seq[ProfileRow]
+  for x in r.body{"deploy_profiles"}.getElems:
+    if isDirName(x{"name"}.getStr):
+      rows.add ProfileRow(name: x["name"].getStr, account: x{"service_account"}.getStr, namespace: x{"namespace"}.getStr, description: x{"description"}.getStr, hasToken: x{"token"}.getBool)
+  page(200, renderDeployProfiles(cfg.base, slug, cfg.base & "/orgs/" & slug & "/deploy-profiles", rows, can("deploy_profile.write", slug, "")))
+
+proc deployProfilesAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token, slug: string; rest: seq[string]): UiResponse =
+  let base = "/api/v1/organizations/" & slug & "/deploy-profiles"
+  let back = cfg.base & "/orgs/" & slug & "/deploy-profiles"
+  let f = req.form
+  if rest == @["save"]:
+    let name = f.getOrDefault("name")
+    let account = f.getOrDefault("service_account").strip
+    let ns = f.getOrDefault("namespace").strip
+    let description = f.getOrDefault("description")
+    let nsOk = ns.len == 0 or ns == "*" or isDnsLabel(ns) or (ns.endsWith("*") and ns.len <= 64 and ns.count('*') == 1 and ns[0] != '-' and ns[0 ..< ns.len - 1].allIt(it in {'a' .. 'z', '0' .. '9', '-'}))
+    if not isDirName(name) or name in ["default", "build", "deploy"] or (account.len > 0 and not isDnsLabel(account)) or not nsOk or description.len > 300:
+      return messagePage(cfg, 400, true, "Not saved", "Give a name (lowercase letters, digits, - and _; not default, build or deploy), a ServiceAccount name if you name one, and a namespace as a name, a prefix with * at the end, or *.", "", back, "Back")
+    var body = %*{"namespace": ns, "description": description}
+    if f.getOrDefault("no_token").len > 0: body["service_account"] = %""
+    elif account.len > 0: body["service_account"] = %account
+    let r = api.send("PUT", token, base & "/" & name, $body)
+    return afterAction(cfg, api, token, r, back, "The profile was not saved", "save the deploy profile " & name, "PUT", base & "/" & name)
+  if rest.len == 2 and isDirName(rest[0]) and rest[1] == "delete":
+    let r = api.send("DELETE", token, base & "/" & rest[0], "")
+    return afterAction(cfg, api, token, r, back, "The profile was not removed", "remove the deploy profile " & rest[0], "DELETE", base & "/" & rest[0])
+  messagePage(cfg, 404, true, "Not found", "There is no such page.", "", cfg.base & "/orgs", "Organisations")
+
 proc ldapPage(cfg: UiConfig; api: CoreApi; token, slug: string): UiResponse =
   let base = "/api/v1/organizations/" & slug & "/ldap"
   let r = api.get(token, base)
@@ -1069,7 +1220,7 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
     return runAction(cfg, api, req, token, parts[1], parts[2])
   if req.meth == "POST":
     # the forms of the access pages: a POST from this host, then the thing is asked of the core with the token of the user
-    let isAccessPost = parts == @["new-role"] or (parts.len in [2, 3] and parts[0] == "roles") or (parts.len >= 3 and parts[0] == "orgs" and (parts[2] == "ldap" or parts[2] == "registries" or parts[2] == "teams" or "members" in parts))
+    let isAccessPost = parts == @["new-role"] or (parts.len in [2, 3] and parts[0] == "roles") or (parts.len >= 3 and parts[0] == "orgs" and (parts[2] == "ldap" or parts[2] == "registries" or parts[2] == "deploy-profiles" or parts[2] == "teams" or "members" in parts or "settings" in parts))
     if isAccessPost:
       if not sameOrigin(req): return messagePage(cfg, 403, true, "Refused", "The form was not sent from this site.")
       if parts == @["new-role"]: return saveRole(cfg, api, req, token, "")
@@ -1077,6 +1228,10 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
       if parts.len == 3 and parts[0] == "roles" and parts[1].isRoleName and parts[2] == "delete": return deleteRole(cfg, api, token, parts[1])
       if parts.len >= 4 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
       if parts.len >= 4 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "registries": return registriesAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
+      if parts.len >= 4 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "deploy-profiles": return deployProfilesAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
+      if parts.len >= 6 and parts[^2] == "settings":
+        let t = targetOf(parts, parts.len - 2)
+        if t.ok and t.kind.len > 0: return settingsAction(cfg, api, req, token, t, parts[^1])
       if parts.len >= 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "teams": return teamsAction(cfg, api, req, token, parts[1], parts[3 .. ^1])
       if parts.len >= 4 and parts[^2] == "members" and parts[^1] in ["set", "remove"]:
         let t = targetOf(parts, parts.len - 2)
@@ -1097,6 +1252,11 @@ proc pages(cfg: UiConfig; api: CoreApi; req: UiRequest; token, path: string; que
   if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "ldap": return ldapPage(cfg, api, token, parts[1])
   if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "teams": return teamsPage(cfg, api, token, parts[1])
   if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "registries": return registriesPage(cfg, api, token, parts[1])
+  if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "deploy-profiles": return deployProfilesPage(cfg, api, token, parts[1])
+  if parts.len == 3 and parts[0] == "orgs" and isSlug(parts[1]) and parts[2] == "projects": return projectsPage(cfg, api, token, parts[1])
+  if parts.len >= 5 and parts[0] == "orgs" and parts[^1] == "settings":
+    let t = targetOf(parts, parts.len - 1)
+    if t.ok and t.kind.len > 0: return settingsPage(cfg, api, token, t)
   if parts == @["orgs"]: return orgsPage(cfg, api, token)
   if parts == @["runs"]: return runsPage(cfg, api, token, "", query)
   if parts == @["status"]: return statusPage(cfg, api, token)

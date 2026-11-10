@@ -1,0 +1,10 @@
+{% extends "layout.nimja" %}
+{% block title %}Projects - CiNim{% endblock %}
+{% block content %}<h1>Groups and projects: {{ h(org) }}</h1>
+<p><a href="{{ h(base) }}/orgs">Organisations</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/members">Members</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/registries">Registries</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/deploy-profiles">Deploy profiles</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/runs">Runs</a></p>
+<p class="detail">The organisation holds a tree of groups; a project is a group with a repository, where the pipelines are. What a group sets is inherited by the groups and projects under it (the rules: docs/inheritance.md). Open <b>Settings</b> to see what a place has, what it inherits and from where.</p>
+<table><thead><tr><th>Path</th><th>Kind</th><th>Repository</th><th></th></tr></thead><tbody>
+{% for n in nodes %}<tr id="node-{{ h(n.path) }}"><td style="padding-left: {{ h(n.indent) }}em"><code>{{ h(n.path) }}</code></td><td>{% if n.isProject %}project{% else %}group{% endif %}</td><td>{{ h(n.repository) }}</td><td><a href="{{ h(base) }}/orgs/{{ h(org) }}/{% if n.isProject %}projects{% else %}groups{% endif %}/{{ h(n.path) }}/settings">Settings</a> <a href="{{ h(base) }}/orgs/{{ h(org) }}/{% if n.isProject %}projects{% else %}groups{% endif %}/{{ h(n.path) }}/members">Members</a></td></tr>
+{% endfor %}</tbody></table>
+{% if nodes.len == 0 %}<p class="empty">This organisation has no group or project yet.</p>{% endif %}
+<p class="detail">The settings of the <b>organisation</b> itself are the defaults of every place under it and are empty: no protected ref, one approval, every registry, the branch <code>main</code>.</p>{% endblock %}

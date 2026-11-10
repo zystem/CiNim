@@ -2012,7 +2012,7 @@ proc onRequest() {.raises: [], gcsafe.} =
                              "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.ownRequiredApprovals(sg.id), "effective_required_approvals": gc.requiredApprovals(sg.id),
                              "allowed_callers": gc.ownAllowedCallers(sg.id), "effective_allowed_callers": gc.allowedCallers(sg.id), "status": gc.ownStatusTargetOf(sg.id).viewOf, "effective_status": gc.statusTargetOf(sg.id).viewOf,
                              "protected_refs": gc.ownProtectedPatterns(sg.id), "effective_protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id), "default_ref": gc.defaultRef(sg.id),
-                             "allowed_registries": gc.ownAllowedRegistries(sg.id), "effective_allowed_registries": (let a = gc.effectiveRegistries(sg.id); if a.all: %*{"all": true} else: %*{"all": false, "names": a.names}),
+                             "allowed_profiles": gc.ownAllowedProfiles(sg.id), "allowed_registries": gc.ownAllowedRegistries(sg.id), "effective_allowed_registries": (let a = gc.effectiveRegistries(sg.id); if a.all: %*{"all": true} else: %*{"all": false, "names": a.names}),
                              "sources": gc.settingSources(sg.id)})
           return
         let vpos = segs.find("variables")

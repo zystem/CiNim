@@ -1,7 +1,7 @@
 {% extends "layout.nimja" %}
 {% block title %}Registries - CiNim{% endblock %}
 {% block content %}<h1>Image registries: {{ h(org) }}</h1>
-<p><a href="{{ h(base) }}/orgs">Organisations</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/members">Members</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/teams">Teams</a> - <a href="{{ h(base) }}/roles">Roles</a></p>
+<p><a href="{{ h(base) }}/orgs">Organisations</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/members">Members</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/teams">Teams</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/projects">Projects</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/deploy-profiles">Deploy profiles</a> - <a href="{{ h(base) }}/roles">Roles</a></p>
 <p class="detail">A registry is where the pipelines of <b>{{ h(org) }}</b> push their images, found by name. The address is what the images are called under (<code>&lt;address&gt;/&lt;image&gt;</code>); the password is kept sealed and is never shown again.</p>
 <table><thead><tr><th>Name</th><th>Address</th><th>Connection</th><th>Login</th><th>Description</th>{% if canWrite %}<th></th>{% endif %}</tr></thead><tbody>
 {% for r in registries %}<tr id="registry-{{ h(r.name) }}"><td><code>{{ h(r.name) }}</code></td><td>{{ h(r.address) }}</td><td>{% if r.insecure %}plain HTTP, or no certificate to check{% else %}TLS{% endif %}</td><td>{% if r.hasPassword %}login of {{ h(r.username) }}{% else %}no login{% endif %}</td><td>{{ h(r.description) }}</td>

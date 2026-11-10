@@ -585,6 +585,92 @@ suite "D-114 the registries of an organisation":
     let r = post("/ui/orgs/acme/registries/save", @[("name", "gh"), ("address", "ghcr.io/acme"), ("username", "ann"), ("password", "")])
     check r.status == 409 and "username needs password" in r.body
 
+suite "docs/inheritance.md the settings of a group or a project, D-115 the deploy profiles":
+  setup: reset()
+  let ownerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["ref.protect", "approval.configure", "caller.allow", "profile.grant", "registry.grant", "deploy_profile.read", "deploy_profile.write"]}, "groups": {}}}
+  let readerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["deploy_profile.read"]}, "groups": {}}}
+  proc get(path: string): UiResponse = handle(cfg, fakeCore(), req("GET", path, cookie = session))
+  proc post(path: string; pairs: seq[(string, string)]; origin = ""): UiResponse = handle(cfg, fakeCore(), req("POST", path, cookie = session, pairs = pairs, origin = origin))
+  proc seed(me: JsonNode) =
+    routes["/api/v1/me"] = me
+    routes["/api/v1/organizations/acme/groups"] = %*{"groups": [{"path": "ci", "depth": 1}, {"path": "ci/<x>", "depth": 2}]}
+    routes["/api/v1/organizations/acme/projects"] = %*{"projects": [{"path": "ci/cinim", "depth": 2, "repository": "https://git.example/<r>.git"}]}
+    routes["/api/v1/organizations/acme/projects/ci/cinim/settings"] = %*{
+      "default_ref": "main", "protected_refs": ["main"], "effective_protected_refs": ["release/*", "main"], "required_approvals": 2, "effective_required_approvals": 2,
+      "allowed_callers": [], "effective_allowed_callers": [], "allowed_profiles": ["deploy"], "effective_allowed_profiles": ["build", "deploy"],
+      "allowed_registries": [], "effective_allowed_registries": {"all": false, "names": ["gh"]}, "effective_status": nil, "cache_quota_bytes": 0, "cache_retention_days": 0,
+      "sources": {"protected_refs": [{"group": "ci", "values": ["release/*"]}]}}
+    routes["/api/v1/organizations/acme/deploy-profiles"] = %*{"organization": "acme", "deploy_profiles": [
+      {"name": "test1", "service_account": "deploy-test1", "token": true, "namespace": "test1", "description": "the <b>first</b>"},
+      {"name": "local", "service_account": "", "token": false, "namespace": "", "description": ""}]}
+  test "the page of groups and projects lists both, with the links to their settings, and shows nothing as markup":
+    seed(readerMe)
+    let r = get("/ui/orgs/acme/projects")
+    check r.status == 200 and "/ui/orgs/acme/groups/ci/settings" in r.body and "/ui/orgs/acme/projects/ci/cinim/settings" in r.body
+    check "<x>" notin r.body and "<r>" notin r.body
+  test "the settings page shows the own and the effective value and where it comes from; a reader has no form and is told which right it needs":
+    seed(readerMe)
+    let r = get("/ui/orgs/acme/projects/ci/cinim/settings")
+    check r.status == 200 and "release/*, main" in r.body and "group ci: release/*" in r.body
+    check "ref.protect" in r.body and "<textarea" notin r.body
+  test "an owner gets a form for each setting, with the own list in it":
+    seed(ownerMe)
+    let r = get("/ui/orgs/acme/projects/ci/cinim/settings")
+    check "action=\"/ui/orgs/acme/projects/ci/cinim/settings/protected_refs\"" in r.body and "action=\"/ui/orgs/acme/projects/ci/cinim/settings/required_approvals\"" in r.body
+    check "action=\"/ui/orgs/acme/projects/ci/cinim/settings/allowed_profiles\"" in r.body and "action=\"/ui/orgs/acme/projects/ci/cinim/settings/allowed_registries\"" in r.body
+    check "type=\"number\"" in r.body and "Names that exist: build, deploy" in r.body
+  test "a list is sent as it is typed, one to a line, trimmed, with no empty line and no repeat; the answer goes back to the settings":
+    seed(ownerMe)
+    let r = post("/ui/orgs/acme/projects/ci/cinim/settings/protected_refs", @[("value", " main \r\n\r\nrelease/*,main\n")])
+    check r.status == 303 and r.header("Location") == "/ui/orgs/acme/projects/ci/cinim/settings"
+    check sent == @["PUT /api/v1/organizations/acme/projects/ci/cinim/settings {\"protected_refs\":[\"main\",\"release/*\"]}"]
+    reset(); seed(ownerMe)
+    discard post("/ui/orgs/acme/groups/ci/settings/allowed_registries", @[("value", "")])
+    check sent == @["PUT /api/v1/organizations/acme/groups/ci/settings {\"allowed_registries\":[]}"]
+    reset(); seed(ownerMe)
+    discard post("/ui/orgs/acme/groups/ci/settings/required_approvals", @[("value", "3")])
+    check sent == @["PUT /api/v1/organizations/acme/groups/ci/settings {\"required_approvals\":3}"]
+  test "bad input and a form from another site are refused before the core is asked":
+    seed(ownerMe)
+    check post("/ui/orgs/acme/projects/ci/cinim/settings/required_approvals", @[("value", "0")]).status == 400
+    check post("/ui/orgs/acme/projects/ci/cinim/settings/required_approvals", @[("value", "x")]).status == 400
+    check post("/ui/orgs/acme/projects/ci/cinim/settings/required_approvals", @[("value", "99")]).status == 400
+    check post("/ui/orgs/acme/projects/ci/cinim/settings/protected_refs", @[("value", "x".repeat(6001))]).status == 400
+    check post("/ui/orgs/acme/projects/ci/cinim/settings/nothing", @[("value", "x")]).status == 404
+    check post("/ui/orgs/acme/projects/ci/cinim/settings/protected_refs", @[("value", "main")], origin = "https://evil.example").status == 403
+    check sent.len == 0
+  test "what the core says when it refuses is shown":
+    seed(ownerMe)
+    sendAnswer = ApiResult(status: asRefused, code: 400, message: "no such profile: nothing")
+    let r = post("/ui/orgs/acme/projects/ci/cinim/settings/allowed_profiles", @[("value", "nothing")])
+    check r.status == 409 and "no such profile" in r.body
+  test "the deploy profiles: a reader sees the table and no form; an owner gets the form and a button to remove each":
+    seed(readerMe)
+    let ro = get("/ui/orgs/acme/deploy-profiles")
+    check ro.status == 200 and "deploy-test1" in ro.body and "the &lt;b&gt;first&lt;/b&gt;" in ro.body and "<b>first</b>" notin ro.body and "no token" in ro.body
+    check "action=\"/ui/orgs/acme/deploy-profiles/save\"" notin ro.body
+    seed(ownerMe)
+    let w = get("/ui/orgs/acme/deploy-profiles")
+    check "action=\"/ui/orgs/acme/deploy-profiles/save\"" in w.body and "action=\"/ui/orgs/acme/deploy-profiles/test1/delete\"" in w.body
+  test "a deploy profile is saved with what is typed (a namespace is a name, a prefix with * or *), and removed by its name":
+    seed(ownerMe)
+    let r = post("/ui/orgs/acme/deploy-profiles/save", @[("name", "test1"), ("service_account", "deploy-test1"), ("namespace", "test*"), ("description", "d")])
+    check r.status == 303 and r.header("Location") == "/ui/orgs/acme/deploy-profiles"
+    check sent == @["PUT /api/v1/organizations/acme/deploy-profiles/test1 {\"namespace\":\"test*\",\"description\":\"d\",\"service_account\":\"deploy-test1\"}"]
+    reset(); seed(ownerMe)
+    discard post("/ui/orgs/acme/deploy-profiles/save", @[("name", "local"), ("no_token", "1"), ("namespace", "*"), ("description", "")])
+    check sent == @["PUT /api/v1/organizations/acme/deploy-profiles/local {\"namespace\":\"*\",\"description\":\"\",\"service_account\":\"\"}"]
+    reset(); seed(ownerMe)
+    check post("/ui/orgs/acme/deploy-profiles/test1/delete", @[]).header("Location") == "/ui/orgs/acme/deploy-profiles"
+    check sent == @["DELETE /api/v1/organizations/acme/deploy-profiles/test1 "]
+  test "bad input to the deploy profile form is refused before the core is asked":
+    seed(ownerMe)
+    for pairs in [@[("name", "Bad Name")], @[("name", "build")], @[("name", "deploy")], @[("name", "t"), ("service_account", "Bad_Account")], @[("name", "t"), ("namespace", "te*st")],
+                  @[("name", "t"), ("namespace", "*test")], @[("name", "t"), ("namespace", "Test")], @[("name", "t"), ("description", "x".repeat(301))]]:
+      check post("/ui/orgs/acme/deploy-profiles/save", pairs).status == 400
+    check post("/ui/orgs/acme/deploy-profiles/save", @[("name", "t")], origin = "https://evil.example").status == 403
+    check sent.len == 0
+
 suite "D-87 the organisation in the login form":
   setup: reset()
   proc withDirectories() =

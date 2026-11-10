@@ -1,0 +1,17 @@
+{% extends "layout.nimja" %}
+{% block title %}Settings - CiNim{% endblock %}
+{% block content %}<h1>Settings: {{ h(org) }}/{{ h(path) }} ({% if isProject %}project{% else %}group{% endif %})</h1>
+<p><a href="{{ h(base) }}/orgs/{{ h(org) }}/projects">Groups and projects</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/{% if isProject %}projects{% else %}groups{% endif %}/{{ h(path) }}/members">Members</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/registries">Registries</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/deploy-profiles">Deploy profiles</a></p>
+<p class="detail">Each setting has the <b>own</b> value of this place, the <b>effective</b> one (what the pipelines here get) and <b>where it comes from</b>. An <b>empty</b> own value inherits: the place always goes back to what is above. The rules of every setting are in docs/inheritance.md.</p>
+{% for s in sections %}<h2 id="setting-{{ h(s.key) }}">{{ h(s.title) }}</h2>
+<p class="detail">{{ h(s.help) }}</p>
+<p>Effective: <b>{{ h(s.effective) }}</b>{% if s.sources.len > 0 %}<br>From: {{ h(s.sources) }}{% endif %}</p>
+{% if s.canEdit %}<form method="post" action="{{ h(here) }}/settings/{{ h(s.key) }}" class="stack">
+{% if s.isNumber %}<label>Own value <input type="number" name="value" min="1" max="20" value="{{ h(s.ownNumber) }}"></label>
+{% else %}<label>Own list (one to a line) <textarea name="value" rows="4" cols="50" maxlength="4000">{{ h(s.ownText) }}</textarea></label>
+{% endif %}{% if s.hint.len > 0 %}<p class="detail">{{ h(s.hint) }}</p>{% endif %}
+<div class="actions"><button type="submit">Save</button></div></form>
+{% else %}<p>Own: {% if s.ownText.len > 0 %}{{ h(s.ownText.replace("\n", ", ")) }}{% else %}<span class="empty">none: inherits</span>{% endif %}{% if s.isNumber %}{{ h(s.ownNumber) }}{% endif %} <span class="detail">(you may not change this here: it needs {{ h(s.perm) }})</span></p>{% endif %}
+{% endfor %}
+<h2>Also</h2>
+<p>Default branch: <b>{{ h(defaultRef) }}</b>. Status of the runs told to: <b>{{ h(statusText) }}</b>. Cache: {{ h(cacheText) }}.</p>{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "layout.nimja" %}
+{% block title %}Deploy profiles - CiNim{% endblock %}
+{% block content %}<h1>Deploy profiles: {{ h(org) }}</h1>
+<p><a href="{{ h(base) }}/orgs">Organisations</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/projects">Groups and projects</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/registries">Registries</a> - <a href="{{ h(base) }}/orgs/{{ h(org) }}/members">Members</a></p>
+<p class="detail">A step with <code>profile = "deploy"</code> is the local one: it may reach what the shard lists and has no token of the cluster. A profile of <b>{{ h(org) }}</b> runs as a ServiceAccount whose token the Pod gets, and says the namespace it deploys into (a name, <code>prefix*</code> or <code>*</code>); what the account may do is a RoleBinding that the operator makes. A project uses a profile only when its settings allow it (<b>Settings</b> of the project: allowed profiles) and only on a protected ref.</p>
+<table><thead><tr><th>Name</th><th>Account</th><th>Namespace</th><th>Description</th>{% if canWrite %}<th></th>{% endif %}</tr></thead><tbody>
+{% for p in profiles %}<tr id="profile-{{ h(p.name) }}"><td><code>{{ h(p.name) }}</code></td><td>{% if p.hasToken %}<code>{{ h(p.account) }}</code>{% else %}no token{% endif %}</td><td>{% if p.namespace.len > 0 %}<code>{{ h(p.namespace) }}</code>{% else %}not told{% endif %}</td><td>{{ h(p.description) }}</td>
+{% if canWrite %}<td><form method="post" action="{{ h(here) }}/{{ h(p.name) }}/delete" class="inline"><button type="submit">Remove</button></form></td>{% endif %}</tr>
+{% endfor %}</tbody></table>
+{% if profiles.len == 0 %}<p class="empty">This organisation has no deploy profile besides the local <code>deploy</code>.</p>{% endif %}
+{% if canWrite %}<h2>Add a profile, or change one (the same name)</h2>
+<form method="post" action="{{ h(here) }}/save" class="stack">
+<label>Name <input type="text" name="name" required maxlength="40" pattern="[a-z][a-z0-9_-]*" placeholder="test1"></label>
+<label>ServiceAccount <input type="text" name="service_account" maxlength="63" placeholder="empty: deploy-&lt;name&gt; for a new profile, the old one for a change"></label>
+<label><input type="checkbox" name="no_token" value="1"> No token (the Pod has no ServiceAccount: it deploys with a step secret)</label>
+<label>Namespace <input type="text" name="namespace" maxlength="63" placeholder="test1, test* or *"></label>
+<label>Description <input type="text" name="description" maxlength="300"></label>
+<div class="actions"><button type="submit">Save</button></div></form>{% endif %}{% endblock %}

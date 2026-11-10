@@ -35,7 +35,7 @@ func entries(text: string): seq[string] =
     let t = l.strip
     if t.len > 0: result.add t
 
-const inheritedColumns = ["protected_refs", "allowed_callers", "required_approvals", "default_ref", "status_target", "allowed_registries"]     ## the settings of a group that the groups below it inherit
+const inheritedColumns = ["protected_refs", "allowed_callers", "required_approvals", "default_ref", "status_target", "allowed_registries", "allowed_profiles"]     ## the settings of a group that the groups below it inherit
 
 proc chainValues*(c: var RqClient; groupId, column: string): seq[string] =
   ## the value of a setting of `groups` in every group from the top one down to this one (an empty one too), as it is stored: where the settings are inherited from (the organisation, the root,
@@ -176,6 +176,11 @@ proc effectiveRegistries*(c: var RqClient; groupId: string): Availability =
   for text in c.chainValues(groupId, "allowed_registries"):
     result = result.narrow(entries(text))
 
+proc ownAllowedProfiles*(c: var RqClient; groupId: string): seq[string] =
+  ## what this group itself lists (what a PUT of its settings wrote); `allowedProfiles` is the union with the groups above
+  let v = c.chainValues(groupId, "allowed_profiles")
+  if v.len > 0: return entries(v[^1])
+
 proc ownAllowedRegistries*(c: var RqClient; groupId: string): seq[string] =
   let v = c.chainValues(groupId, "allowed_registries")
   if v.len > 0: return entries(v[^1])
@@ -200,7 +205,7 @@ proc settingSources*(c: var RqClient; groupId: string): JsonNode =
   ## Where the inherited settings of a group come from (the path of each group on the way that sets one; the organisation sets none), so that a person who asks why a ref is protected or a
   ## registry is missing sees the group that did it. A list: the groups that add to it; a value: the nearest group that sets it.
   result = newJObject()
-  for column in ["protected_refs", "allowed_callers", "allowed_registries"]:
+  for column in ["protected_refs", "allowed_callers", "allowed_registries", "allowed_profiles"]:
     var from0 = newJArray()
     for e in c.chainEntries(groupId, column):
       if e.value.len > 0: from0.add %*{"group": e.group, "values": entries(e.value)}
