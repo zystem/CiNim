@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Sourced by the scripts that start something on a port they chose (the soak, the port-forwards, the smoke checks):
 #   . "$(dirname "$0")/../test/portfree.sh"; require_free_port 19720 "the soak"
 # A port that something already listens on belongs to another process (an earlier run, a forgotten forward): what is started beside it fails quietly or is answered by the old one, and the
