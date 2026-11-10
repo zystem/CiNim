@@ -23,7 +23,8 @@ RUN GOBIN=/out CGO_ENABLED=0 go install -trimpath "github.com/bufbuild/buf/cmd/b
 FROM zystem/cinim-store-dav:h79@sha256:0c739513af98535124e7677f8802679a8a8a5648681adcb2a56b8f61721ee6f4 AS caddy-store
 
 FROM nimlang/nim:2.4.0
-RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git procps openssl \
+# /run/slapd first: the post-installation script of slapd makes /var/run/slapd, and in a build by Kaniko (/var/run is not kept in a layer) /run is missing and the package fails to configure
+RUN mkdir -p /run/slapd && apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git procps openssl \
       cmake xz-utils zlib1g-dev libsodium-dev libpcre3-dev libsqlite3-dev libssl-dev slapd ldap-utils && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.61 or later is required; the distribution's is older)
