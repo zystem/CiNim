@@ -2,7 +2,7 @@
 ## (`groups.protected_refs`, `groups.allowed_profiles`, text with one entry to a line). A run on a protected ref is **trusted**: only the people who may start such a run (permission
 ## `run.start.protected`), or a trigger that one of them set up, make it; a secret marked `protected` goes to trusted runs only, and the profile `deploy` is used by them only. The refs are
 ## the names a commit was asked by (a branch or a tag): a run started by a bare SHA has no ref and is not trusted, whatever branch the commit is on.
-import std/[json, strutils, algorithm, sequtils]
+import std/[json, strutils, algorithm, sequtils, os]
 import ../common/rqlite
 import groups, refpattern, deployprofiles, registries
 export refpattern
@@ -35,7 +35,7 @@ func entries(text: string): seq[string] =
     let t = l.strip
     if t.len > 0: result.add t
 
-const inheritedColumns = ["protected_refs", "allowed_callers", "required_approvals", "default_ref", "status_target", "allowed_registries", "allowed_profiles"]     ## the settings of a group that the groups below it inherit
+const inheritedColumns = ["protected_refs", "allowed_callers", "required_approvals", "default_ref", "status_target", "allowed_registries", "allowed_profiles", "max_step_timeout"]     ## the settings of a group that the groups below it inherit
 
 proc chainValues*(c: var RqClient; groupId, column: string): seq[string] =
   ## the value of a setting of `groups` in every group from the top one down to this one (an empty one too), as it is stored: where the settings are inherited from (the organisation, the root,
@@ -201,6 +201,40 @@ proc setAllowedRegistries*(c: var RqClient; groupId: string; names: seq[string])
     if n notin seen: seen.add n
   discard c.execute(%*[["UPDATE groups SET allowed_registries = ? WHERE id = ?", seen.join("\n"), groupId]])
 
+const
+  minStepTimeoutLimit* = 60                ## seconds: the least a group can set as the longest step
+  maxStepTimeoutLimit* = 604800            ## a week: the most that any level can set; the Lua API refuses a longer `timeout` whatever is set (src/executor/bootstrap.lua: norm_timeout)
+  defaultStepTimeoutLimit* = 86400         ## 24 h, when no group and the shard say anything else
+
+func stepTimeoutDefault*(): int =
+  ## the longest step of a shard that no group says anything about: CINIM_MAX_STEP_TIMEOUT (seconds), 24 h without it
+  try: min(maxStepTimeoutLimit, max(minStepTimeoutLimit, parseInt(getEnv("CINIM_MAX_STEP_TIMEOUT", $defaultStepTimeoutLimit))))
+  except ValueError: defaultStepTimeoutLimit
+
+proc ownMaxStepTimeout*(c: var RqClient; groupId: string): int =
+  ## what this group itself says (0: it says nothing and inherits)
+  let v = c.chainValues(groupId, "max_step_timeout")
+  if v.len > 0: (try: parseInt(v[^1]) except ValueError: 0) else: 0
+
+proc maxStepTimeout*(c: var RqClient; groupId: string; shardDefault: int): int =
+  ## the longest `timeout` a step of a run of this project may ask for: the nearest group that sets one (a value, the nearest wins: docs/inheritance.md; who may set it is the permission
+  ## `limits.configure`), else the shard's default
+  result = shardDefault
+  for v in reversed(c.chainValues(groupId, "max_step_timeout")):
+    let n = try: parseInt(v) except ValueError: 0
+    if n > 0: return n
+
+proc setMaxStepTimeout*(c: var RqClient; groupId: string; seconds: int) =
+  discard c.execute(%*[["UPDATE groups SET max_step_timeout = ? WHERE id = ?", seconds, groupId]])
+
+proc stepTimeoutOf*(optsJson: string): int =
+  ## the `timeout` (seconds) that the options of a step carry; 0 when it has none
+  if optsJson.len == 0: return 0
+  try:
+    let j = parseJson(optsJson)
+    if j.kind == JObject and j.hasKey("timeout") and j["timeout"].kind == JInt: return int(j["timeout"].getBiggestInt)
+  except CatchableError: discard
+
 proc settingSources*(c: var RqClient; groupId: string): JsonNode =
   ## Where the inherited settings of a group come from (the path of each group on the way that sets one; the organisation sets none), so that a person who asks why a ref is protected or a
   ## registry is missing sees the group that did it. A list: the groups that add to it; a value: the nearest group that sets it.
@@ -214,6 +248,10 @@ proc settingSources*(c: var RqClient; groupId: string): JsonNode =
   for e in c.chainEntries(groupId, "required_approvals"):
     if e.value.len > 0 and e.value != "0" and e.value != "1": approvals.add %*{"group": e.group, "value": parseInt(e.value)}
   result["required_approvals"] = approvals
+  var longest = newJNull()
+  for e in c.chainEntries(groupId, "max_step_timeout"):
+    if e.value.len > 0 and e.value != "0": longest = %*{"group": e.group, "seconds": parseInt(e.value)}      # the nearest one that sets it (0 is "inherits")
+  result["max_step_timeout"] = longest
   for column in ["default_ref", "status_target"]:
     var nearest = newJNull()
     for e in c.chainEntries(groupId, column):

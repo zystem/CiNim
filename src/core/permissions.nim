@@ -51,6 +51,7 @@ const
     ("caller.allow", lvGroup, "choose which other projects may start runs of a project with ci.trigger"),
     ("run.approve", lvGroup, "approve or reject a run that waits for approval (not the one who started it)"),
     ("approval.configure", lvGroup, "choose how many approvals the runs of a project that wait for approval need"),
+    ("limits.configure", lvGroup, "choose the longest step (its timeout) that the pipelines of a project may ask for"),
     ("run.start.protected", lvGroup, "start a run on a protected ref of a project (the secrets marked protected go to such runs only)"),
     ("ref.protect", lvGroup, "choose which refs of a project are protected"),
     ("profile.grant", lvGroup, "choose which privileged profiles (build, deploy, the deploy profiles of the organisation) the pipelines of a project may use"),
@@ -84,7 +85,7 @@ const
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write", "deploy_profile.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
-  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "registry.grant", "approval.configure", "caller.allow", "status.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
+  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "registry.grant", "approval.configure", "limits.configure", "caller.allow", "status.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
 
 func isPermission*(name: string): bool =
   for p in catalogue:

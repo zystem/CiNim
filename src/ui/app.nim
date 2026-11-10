@@ -85,7 +85,7 @@ type
     path, repository, indent: string
     isProject: bool
   SettingView = object
-    key, title, help, perm, effective, sources, ownText, ownNumber, hint: string
+    key, title, help, perm, effective, sources, ownText, ownNumber, hint, minValue, maxValue: string
     canEdit, isNumber: bool
   ProfileRow = object
     name, account, namespace, description: string
@@ -946,9 +946,19 @@ proc settingsPage(cfg: UiConfig; api: CoreApi; token: string; t: Target): UiResp
   var approvals = section("required_approvals", "Required approvals", "How many people approve a run that waits for approval. A group below can ask for more, never for fewer; 1 (or nothing) asks for no more than the groups above do.",
                           "approval.configure", @[], @[], $b{"effective_required_approvals"}.getBiggestInt(1), "")
   approvals.isNumber = true
+  approvals.minValue = "1"
+  approvals.maxValue = "20"
   approvals.ownNumber = $b{"required_approvals"}.getBiggestInt(1)
   approvals.ownText = ""
   sections.add approvals
+  let effTimeout = int(b{"effective_max_step_timeout_seconds"}.getBiggestInt(86400))
+  var timeout = section("max_step_timeout", "Longest step (minutes)", "The longest timeout that a step of the pipelines here may ask for. The nearest group that sets one decides; with none, the default of the shard (24 hours). 0 or nothing inherits. The most that can be set is a week (10080 minutes).",
+                        "limits.configure", @[], @[], $(effTimeout div 60) & " minutes (" & (if effTimeout mod 3600 == 0: $(effTimeout div 3600) & " h" else: $(effTimeout div 60) & " min") & ")", "")
+  timeout.isNumber = true
+  timeout.minValue = "0"
+  timeout.maxValue = "10080"
+  timeout.ownNumber = (let own = int(b{"max_step_timeout_seconds"}.getBiggestInt(0)); if own > 0: $(own div 60) else: "")
+  sections.add timeout
   sections.add section("allowed_callers", "Allowed callers", "The projects or groups whose pipelines may start runs of this place with ci.trigger. A group below adds to the list.",
                        "caller.allow", list("allowed_callers"), list("effective_allowed_callers"), "", "The path of a project or of a group, one to a line.")
   let profileNames = @["build", "deploy"] & namesOf(api, token, org & "/deploy-profiles", "deploy_profiles")
@@ -975,6 +985,10 @@ proc settingsAction(cfg: UiConfig; api: CoreApi; req: UiRequest; token: string; 
     var arr = newJArray()
     for x in linesOf(value): arr.add %x
     body[key] = arr
+  of "max_step_timeout":
+    let n = value.strip
+    if n.len > 0 and (not isNumber(n, 5) or parseInt(n) > 10080): return messagePage(cfg, 400, true, "Not saved", "Give whole minutes from 1 to 10080 (a week hours), or nothing to inherit.", "", back, "Back")
+    body["max_step_timeout_seconds"] = %(if n.len == 0: 0 else: parseInt(n) * 60)
   of "required_approvals":
     let n = value.strip
     if not isNumber(n, 2) or n == "0" or parseInt(n) > 20: return messagePage(cfg, 400, true, "Not saved", "Give a whole number from 1 to 20.", "", back, "Back")

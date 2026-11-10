@@ -1972,6 +1972,16 @@ proc onRequest() {.raises: [], gcsafe.} =
                 return
               gc.setRequiredApprovals(sg.id, sj["required_approvals"].getInt)
               gc.record(getTime().toUnix(), actorOf(who), "project.required_approvals", slugG & "/" & normalPath(sp), "ok", $sj["required_approvals"].getInt)
+            if sj.hasKey("max_step_timeout_seconds"):
+              # the longest step (timeout) that the pipelines of this place may ask for; 0 takes the group's own value away (it inherits)
+              if sj["max_step_timeout_seconds"].kind != JInt or (sj["max_step_timeout_seconds"].getInt != 0 and (sj["max_step_timeout_seconds"].getInt < minStepTimeoutLimit or sj["max_step_timeout_seconds"].getInt > maxStepTimeoutLimit)):
+                problem(Http400, "invalid_request", "max_step_timeout_seconds is 0 (inherit) or a whole number of seconds from " & $minStepTimeoutLimit & " to " & $maxStepTimeoutLimit & " (a week)")
+                return
+              if not who.mayIn("limits.configure", slugG, sp):
+                problem(Http403, "forbidden", "max_step_timeout_seconds needs limits.configure on " & normalPath(sp))
+                return
+              gc.setMaxStepTimeout(sg.id, sj["max_step_timeout_seconds"].getInt)
+              gc.record(getTime().toUnix(), actorOf(who), "project.max_step_timeout", slugG & "/" & normalPath(sp), "ok", $sj["max_step_timeout_seconds"].getInt)
             let cur = gc.groupLimit(sg.id)
             var q = cur.quota
             var d = cur.retentionDays
@@ -2012,7 +2022,7 @@ proc onRequest() {.raises: [], gcsafe.} =
                              "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.ownRequiredApprovals(sg.id), "effective_required_approvals": gc.requiredApprovals(sg.id),
                              "allowed_callers": gc.ownAllowedCallers(sg.id), "effective_allowed_callers": gc.allowedCallers(sg.id), "status": gc.ownStatusTargetOf(sg.id).viewOf, "effective_status": gc.statusTargetOf(sg.id).viewOf,
                              "protected_refs": gc.ownProtectedPatterns(sg.id), "effective_protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id), "default_ref": gc.defaultRef(sg.id),
-                             "allowed_profiles": gc.ownAllowedProfiles(sg.id), "allowed_registries": gc.ownAllowedRegistries(sg.id), "effective_allowed_registries": (let a = gc.effectiveRegistries(sg.id); if a.all: %*{"all": true} else: %*{"all": false, "names": a.names}),
+                             "allowed_profiles": gc.ownAllowedProfiles(sg.id), "max_step_timeout_seconds": gc.ownMaxStepTimeout(sg.id), "effective_max_step_timeout_seconds": gc.maxStepTimeout(sg.id, stepTimeoutDefault()), "allowed_registries": gc.ownAllowedRegistries(sg.id), "effective_allowed_registries": (let a = gc.effectiveRegistries(sg.id); if a.all: %*{"all": true} else: %*{"all": false, "names": a.names}),
                              "sources": gc.settingSources(sg.id)})
           return
         let vpos = segs.find("variables")

@@ -7,7 +7,7 @@ The rules are the ones that GitLab, GitHub, Jenkins, TeamCity, Argo CD and the c
 
 | Class | The rule going down | Settings of CiNim |
 |---|---|---|
-| **Values** | the **nearest** level that sets it wins; empty inherits | variables, secrets (the nearest holder of a name), `default_ref`, `status_target`, cache quota and retention (0 inherits) |
+| **Values** | the **nearest** level that sets it wins; empty inherits | variables, secrets (the nearest holder of a name), `default_ref`, `status_target`, cache quota and retention (0 inherits), the longest step (`max_step_timeout_seconds`, `limits.configure`: the shard says 24 h, at most a week at any level) |
 | **Guardrails** | a level below can only **tighten**, never relax | `protected_refs` (the union: a group can add a protected branch and cannot take one away), `required_approvals` (the most any level asks for) |
 | **Grants** | **added** going down, nothing by default; who may grant is a permission | roles (`access.write`), `allowed_profiles` (`profile.grant`), `allowed_callers` (`caller.allow`) |
 | **Objects of the organisation** that groups choose from | the organisation is the **ceiling**; a group can only **narrow** the set, never widen it; empty inherits | registries (`allowed_registries`, `registry.grant`: the root has all of them, D-114); deploy profiles are privileged (a token) and so are a **grant**: none until a group lists them (D-115) |

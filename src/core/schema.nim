@@ -190,7 +190,7 @@ const ddl = [
   # belongs to it). `path` is the slugs from the top joined by '/'; the variables of a group (VAR-001) are inherited by the groups below it and by its runs
   """CREATE TABLE IF NOT EXISTS groups (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL,
-       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1, allowed_callers TEXT NOT NULL DEFAULT '', status_target TEXT NOT NULL DEFAULT '', default_ref TEXT NOT NULL DEFAULT '', allowed_registries TEXT NOT NULL DEFAULT '')""",
+       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1, allowed_callers TEXT NOT NULL DEFAULT '', status_target TEXT NOT NULL DEFAULT '', default_ref TEXT NOT NULL DEFAULT '', allowed_registries TEXT NOT NULL DEFAULT '', max_step_timeout INTEGER NOT NULL DEFAULT 0)""",
   "CREATE UNIQUE INDEX IF NOT EXISTS groups_tenant_path ON groups (tenant_id, path)",
   "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
   """CREATE TABLE IF NOT EXISTS group_variables (

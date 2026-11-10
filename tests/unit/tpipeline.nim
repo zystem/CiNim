@@ -345,8 +345,11 @@ suite "step options: mask and timeout (docs/secrets-masking.md)":
     check j.entries[0].payload == "01\talpine\t\t\techo hi"
   test "bad mask and timeout fail before anything runs":
     for o in ["{mask = 'yes'}", "{mask = {runtime = 'x'}}", "{mask = {min_length = 2}}", "{mask = {typo = 1}}",
-              "{timeout = 0}", "{timeout = '5x'}", "{timeout = 100000}"]:
+              "{timeout = 0}", "{timeout = '5x'}", "{timeout = 604801}", "{timeout = '169h'}"]:
       check metricsRun("j:run(step.sh['1']{ cmd = 'x', " & o[1 ..< o.len - 1] & " })").code != "ok"
+  test "a timeout of 72 hours (the soak, NFR-013) and of a week is accepted, in seconds or as a string":
+    for o in ["{timeout = '72h'}", "{timeout = 259200}", "{timeout = '168h'}", "{timeout = 604800}"]:
+      check metricsRun("j:run(step.sh['1']{ cmd = 'x', " & o[1 ..< o.len - 1] & " })").code == "ok"
 
 suite "PIP-014 the lock of a job (ci.job{lock = ...})":
   const lockedJob = "return ci.pipeline({main = function(run) ci.single['0p']{ image = 'a', lock = 'stand', body = function(j) j:run(step.sh['1']{ cmd = 'deploy' }) j:run(step.sh['2']{ cmd = 'test' })  end } return 'done' end})"

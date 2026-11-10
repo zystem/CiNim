@@ -286,6 +286,7 @@ suite "D-93 approval":
     check "run.approve" in builtinPermissions("rw") and "run.approve" in builtinPermissions("admin")
     check "run.approve" notin builtinPermissions("dev") and "run.approve" notin builtinPermissions("ro")
     check isRunPermission("run.approve") and "approval.configure" in checkedByHandlers and "approval.configure" in builtinPermissions("rw")
+    check "limits.configure" in checkedByHandlers and "limits.configure" in builtinPermissions("rw") and "limits.configure" notin builtinPermissions("dev") and levelOf("limits.configure") == lvGroup
 
 suite "D-97 D-98 D-99 D-100 D-102 the routes of this day":
   test "audit sinks, tokens of a person, the access document, identities, OIDC: who needs what":

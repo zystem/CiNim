@@ -152,6 +152,20 @@ kubectl -n cinim-soak exec job/soak72 -- /cinim/tools/soak/summarize.sh /out    
 
 The CPU and memory that other work on the same node takes do not change the RSS growth that is measured, but a restart of the node does end the run.
 
+**Weekly, in CI.** The pipeline of the repository (`.ci/pipeline.lua`) runs the same soak as one step with the parameter `SOAK=true`: it builds the image of `tools/soak/Dockerfile` for the commit, then runs
+`tools/soak/run72.sh` in it for `SOAK_HOURS` (72) hours; the log of the step is the report (the summary of `summarize.sh`, one row of the release CSV an hour), and the step fails when the release run does not end
+with `SOAK OK` or an ASan hour does not end well. A step may be a week long at most, and the shard's default is 24 hours (the soak needs 80): the project must allow it first (the settings page of the UI, "Longest step", or
+`PUT /api/v1/organizations/<org>/projects/<path>/settings {"max_step_timeout_seconds": 288000}`; permission `limits.configure`). A schedule trigger makes it weekly (`0 18 * * 5`: from Friday evening, over the weekend), and
+`skip` keeps a second one from starting while the first still runs:
+
+```json
+{"name": "soak-weekly", "kind": "schedule", "schedule": "0 18 * * 5", "project": "<path>", "concurrency": "skip",
+ "params": {"REGISTRY": "<host:port>", "SOAK": "true", "BUILD": "false", "TEST": "false", "LINT": "false", "ASAN": "false"}}
+```
+
+The node needs `vm.mmap_rnd_bits` at 28 or less (the ASan hours), the Pod about two CPUs, and the node must stay up for the three days (a restart ends the run, as it does for the Job above). Not checked yet: that the
+ordinary profile of the organisation lets LeakSanitizer work in the Pod (it needs `ptrace`).
+
 ## The registry of the MVP stand
 
 Until the images are released to ghcr by the CI, the stand uses the plain Docker registry (the image `registry`) from the chart

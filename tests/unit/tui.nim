@@ -587,7 +587,7 @@ suite "D-114 the registries of an organisation":
 
 suite "docs/inheritance.md the settings of a group or a project, D-115 the deploy profiles":
   setup: reset()
-  let ownerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["ref.protect", "approval.configure", "caller.allow", "profile.grant", "registry.grant", "deploy_profile.read", "deploy_profile.write"]}, "groups": {}}}
+  let ownerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["ref.protect", "approval.configure", "caller.allow", "profile.grant", "registry.grant", "limits.configure", "deploy_profile.read", "deploy_profile.write"]}, "groups": {}}}
   let readerMe = %*{"administrator": false, "permissions": {"shard": [], "organizations": {"acme": ["deploy_profile.read"]}, "groups": {}}}
   proc get(path: string): UiResponse = handle(cfg, fakeCore(), req("GET", path, cookie = session))
   proc post(path: string; pairs: seq[(string, string)]; origin = ""): UiResponse = handle(cfg, fakeCore(), req("POST", path, cookie = session, pairs = pairs, origin = origin))
@@ -598,7 +598,7 @@ suite "docs/inheritance.md the settings of a group or a project, D-115 the deplo
     routes["/api/v1/organizations/acme/projects/ci/cinim/settings"] = %*{
       "default_ref": "main", "protected_refs": ["main"], "effective_protected_refs": ["release/*", "main"], "required_approvals": 2, "effective_required_approvals": 2,
       "allowed_callers": [], "effective_allowed_callers": [], "allowed_profiles": ["deploy"], "effective_allowed_profiles": ["build", "deploy"],
-      "allowed_registries": [], "effective_allowed_registries": {"all": false, "names": ["gh"]}, "effective_status": nil, "cache_quota_bytes": 0, "cache_retention_days": 0,
+      "allowed_registries": [], "effective_allowed_registries": {"all": false, "names": ["gh"]}, "max_step_timeout_seconds": 259200, "effective_max_step_timeout_seconds": 259200, "effective_status": nil, "cache_quota_bytes": 0, "cache_retention_days": 0,
       "sources": {"protected_refs": [{"group": "ci", "values": ["release/*"]}]}}
     routes["/api/v1/organizations/acme/deploy-profiles"] = %*{"organization": "acme", "deploy_profiles": [
       {"name": "test1", "service_account": "deploy-test1", "token": true, "namespace": "test1", "description": "the <b>first</b>"},
@@ -630,6 +630,22 @@ suite "docs/inheritance.md the settings of a group or a project, D-115 the deplo
     reset(); seed(ownerMe)
     discard post("/ui/orgs/acme/groups/ci/settings/required_approvals", @[("value", "3")])
     check sent == @["PUT /api/v1/organizations/acme/groups/ci/settings {\"required_approvals\":3}"]
+  test "the longest step is in minutes: the own value and the effective one are shown, a form sends seconds, nothing or 0 inherits":
+    seed(readerMe)
+    let ro = get("/ui/orgs/acme/projects/ci/cinim/settings")
+    check "Longest step (minutes)" in ro.body and "4320 minutes (72 h)" in ro.body and "limits.configure" in ro.body
+    seed(ownerMe)
+    let w = get("/ui/orgs/acme/projects/ci/cinim/settings")
+    check "action=\"/ui/orgs/acme/projects/ci/cinim/settings/max_step_timeout\"" in w.body and "value=\"4320\"" in w.body and "max=\"10080\"" in w.body
+    check post("/ui/orgs/acme/projects/ci/cinim/settings/max_step_timeout", @[("value", "4320")]).status == 303
+    check sent == @["PUT /api/v1/organizations/acme/projects/ci/cinim/settings {\"max_step_timeout_seconds\":259200}"]
+    reset(); seed(ownerMe)
+    discard post("/ui/orgs/acme/projects/ci/cinim/settings/max_step_timeout", @[("value", "")])
+    check sent == @["PUT /api/v1/organizations/acme/projects/ci/cinim/settings {\"max_step_timeout_seconds\":0}"]
+    reset(); seed(ownerMe)
+    for v in ["10081", "x", "-5", "1.5"]:
+      check post("/ui/orgs/acme/projects/ci/cinim/settings/max_step_timeout", @[("value", v)]).status == 400
+    check sent.len == 0
   test "bad input and a form from another site are refused before the core is asked":
     seed(ownerMe)
     check post("/ui/orgs/acme/projects/ci/cinim/settings/required_approvals", @[("value", "0")]).status == 400

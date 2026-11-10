@@ -1306,6 +1306,14 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     if rr != nil and rr.len > 0:
       let why = c.profileProblem(rr[0][0].getStr, profile, rr[0][1].getInt > 0)
       if why.len > 0: return fail(why)
+  let askedTimeout = stepTimeoutOf(opts)
+  if askedTimeout > 0:
+    # the longest step this project may ask for (max_step_timeout_seconds of its groups, else the shard's default): a step that asks for more is refused before anything is made
+    let gr = c.query(%*[["SELECT group_id FROM runs WHERE id = ?", req.run_id]])["results"][0]{"values"}
+    let limit = c.maxStepTimeout((if gr != nil and gr.len > 0: gr[0][0].getStr else: ""), stepTimeoutDefault())
+    if askedTimeout > limit:
+      return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",
+        detail: "a step asks for a timeout of " & $askedTimeout & " s, and this project allows " & $limit & " s at most (max_step_timeout_seconds of its groups, permission limits.configure; the shard's default is CINIM_MAX_STEP_TIMEOUT)")))
   if (hasArtifacts(opts) or cacheDecls(opts).len > 0) and not storesReady():
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
       kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error",

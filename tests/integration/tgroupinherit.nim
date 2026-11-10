@@ -50,6 +50,15 @@ suite "settings of a group are inherited down the tree":
       check c.requiredApprovals(p.id) == 2 and c.ownRequiredApprovals(p.id) == 1
       c.setRequiredApprovals(mid, 3)
       check c.requiredApprovals(p.id) == 3 and c.requiredApprovals(q.id) == 2
+    test "the longest step: the nearest group that sets one, else the default of the shard; the own value is what the group wrote":
+      check c.maxStepTimeout(p.id, 86400) == 86400 and c.ownMaxStepTimeout(p.id) == 0
+      c.setMaxStepTimeout(top, 259200)                                                                              # 72 h for everything under top
+      check c.maxStepTimeout(p.id, 86400) == 259200 and c.maxStepTimeout(q.id, 86400) == 259200 and c.maxStepTimeout(other.id, 86400) == 86400
+      c.setMaxStepTimeout(p.id, 3600)                                                                               # a project below can say less (and more: it is a value, the nearest wins)
+      check c.maxStepTimeout(p.id, 86400) == 3600 and c.ownMaxStepTimeout(p.id) == 3600 and c.maxStepTimeout(q.id, 86400) == 259200
+      c.setMaxStepTimeout(p.id, 0)                                                                                  # 0 inherits again
+      check c.maxStepTimeout(p.id, 86400) == 259200 and c.ownMaxStepTimeout(p.id) == 0
+      check c.settingSources(p.id)["max_step_timeout"]["group"].getStr == "top"
     test "default ref and the status target: the nearest one that is set, the project's own first":
       c.setDefaultRef(top, "trunk")
       check c.defaultRef(p.id) == "trunk" and c.defaultRef(q.id) == "trunk" and c.defaultRef(other.id) == "main"

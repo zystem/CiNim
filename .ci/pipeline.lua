@@ -88,6 +88,25 @@ for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(
 exit $rc
 ]]
 
+-- The soak (NFR-013, tools/soak/run72.sh: the release harness continuously and the ASan/LSan harness in hourly runs; parameter SOAK, a schedule trigger makes it weekly): one step in the image built from
+-- tools/soak/Dockerfile, as long as the hours say (72). A step may be as long as a week, and the shard's default is 24 h (the project's max_step_timeout_seconds must allow it: docs/deployment.md, "The 72 h soak"). The step fails when the release
+-- run does not end with `SOAK OK` (RSS growth after the warm-up within 2 %) or an ASan hour does not end well, and its log is the report.
+local SOAK_RUN = [[
+set -eu
+cd /cinim
+OUT=/cicd/workspace/soak-out; mkdir -p "$OUT"
+rc=0
+FOREGROUND=1 tools/soak/run72.sh "$OUT" "$SOAK_HOURS" || rc=$?
+tools/soak/summarize.sh "$OUT" || true
+echo "== the release run, one row an hour"; awk -F, 'NR == 1 || (NR - 1) % 60 == 0' "$OUT/release.csv" || true
+last=$(tail -n 1 "$OUT/release.out" 2>/dev/null || true)
+echo "release run: ${last:-no output}"
+case "$last" in "SOAK OK"*) ;; *) echo "the release run did not end with SOAK OK"; rc=1;; esac
+bad=$(grep '^hour ' "$OUT/san-summary.txt" 2>/dev/null | grep -vc 'exit=0$' || true)
+[ "${bad:-0}" = 0 ] || { echo "$bad ASan hours did not end well"; rc=1; }
+exit $rc
+]]
+
 local TESTS = [[
 set -eu
 cd src
@@ -246,6 +265,8 @@ return ci.pipeline({
     BUILD = ci.bool{default = true},
     TEST = ci.bool{default = true},
     ASAN = ci.bool{default = false},                                                  -- the files of the push channel under AddressSanitizer (a schedule trigger sets it for the nightly run); needs vm.mmap_rnd_bits <= 28 on the nodes
+    SOAK = ci.bool{default = false},                                                  -- the 72 h soak (NFR-013) as one step; a schedule trigger sets it for the weekly run (with BUILD, TEST, LINT false); the project must allow a step this long
+    SOAK_HOURS = ci.number{default = 72, min = 1, max = 72, integer = true},          -- how long the soak runs (the step's timeout is these hours and eight more)
     LINT = ci.bool{default = true},                                                   -- shellcheck, hadolint, helm lint and kubeconform (tools/test/lint.sh), each in the image of its tool, side by side with the tests
     TEST_JOBS = ci.number{default = 2, min = 1, max = 16, integer = true},            -- workers of tools/test/run.sh in the Pod (a compile takes a gigabyte or two)
     BUILD_JOBS = ci.number{default = 2, min = 1, max = 4, integer = true},            -- images built at a time (each is a Kaniko Pod with its own volume; a small cluster cannot take four and a test run)
@@ -358,6 +379,14 @@ return ci.pipeline({
         end
       end
       ci.parallel(branches, {fail_fast = true})
+    end
+    -- the soak: the image of the harness, built for this commit, then the run (one step, 80 h at most here)
+    if p.SOAK then
+      checked_out('q', env, function(j) j:image(image("cinim-soak", "tools/soak/Dockerfile", tag, {})) end)
+      ci.single['s']{ image = pull .. "/cinim-soak:" .. tag, profile = "default", workspace = "isolated", env = { SOAK_HOURS = tostring(p.SOAK_HOURS) },
+                      timeout = tostring(p.SOAK_HOURS + 8) .. "h", body = function(j)
+        j:run(step.sh['1']{ cmd = SOAK_RUN })
+      end }
     end
     -- D-112: built (or tagged from the base) and tested (or nothing changed that a test covers): this commit is a base for the runs that come after, on this ref
     if p.BUILD and p.TEST then ci.verified() end

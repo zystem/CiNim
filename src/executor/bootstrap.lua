@@ -329,7 +329,7 @@ local function norm_mask(m)
   return format_('{"min_length":%d,"runtime":%s,"variants":%s}', min, tostring_(runtime), tostring_(variants))
 end
 
--- The step's timeout: whole seconds or "90s" / "15m" / "2h"; the shim ends the build after it (docs/ci-pitfalls.md)
+-- The step's timeout: whole seconds or "90s" / "15m" / "2h", at most a week; the shim ends the build after it (docs/ci-pitfalls.md)
 -- `lock = "name"` of ci.job (PIP-014, core/joblocks.nim): the jobs of the organisation with the same lock run one at a time, in turn, also when they belong to different runs
 local function norm_lock(v)
   if v == nil or v == false then return nil end
@@ -362,7 +362,7 @@ end
 local function norm_timeout(v)
   if v == nil or v == false then return nil end
   local s = parse_duration(v, "timeout")
-  if s < 1 or s > 86400 then error("timeout: 1s..24h", 3) end
+  if s < 1 or s > 604800 then error("timeout: 1s..168h (a week)", 3) end      -- a week: the 72 h soak (NFR-013) is one step, one process that must not be cut; a project may allow less (max_step_timeout_seconds)
   return s
 end
 

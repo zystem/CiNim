@@ -140,3 +140,9 @@ suite "D-86 secrets, trusted refs and privileged profiles":
       check ok(call(feature, "", """{"secrets":["PLAIN"]}""")) and ok(call(onMain, "", """{"secrets":["PLAIN","PROD"]}"""))
       check "PROD" in why(call(feature, "", """{"secrets":["PROD"]}""")) and "protected" in why(call(feature, "", """{"secrets":["PROD"]}"""))
       check "NOPE" in why(call(onMain, "", """{"secrets":["NOPE"]}"""))
+      # the longest step: 24 h by default, what the nearest group says when it says something, never more than a week
+      check ok(call(feature, "", """{"timeout":86400}""")) and "allows 86400 s at most" in why(call(feature, "", """{"timeout":86401}"""))
+      c.setMaxStepTimeout(p1.id, 259200)
+      check ok(call(feature, "", """{"timeout":259200}""")) and "allows 259200 s at most" in why(call(feature, "", """{"timeout":259201}"""))
+      c.setMaxStepTimeout(p1.id, 600)
+      check ok(call(feature, "", """{"timeout":600}""")) and "allows 600 s at most" in why(call(feature, "", """{"timeout":601}""")) and ok(call(feature, "", ""))      # a step with no timeout is not limited by this

@@ -7,7 +7,7 @@
 <p class="detail">{{ h(s.help) }}</p>
 <p>Effective: <b>{{ h(s.effective) }}</b>{% if s.sources.len > 0 %}<br>From: {{ h(s.sources) }}{% endif %}</p>
 {% if s.canEdit %}<form method="post" action="{{ h(here) }}/settings/{{ h(s.key) }}" class="stack">
-{% if s.isNumber %}<label>Own value <input type="number" name="value" min="1" max="20" value="{{ h(s.ownNumber) }}"></label>
+{% if s.isNumber %}<label>Own value <input type="number" name="value" min="{{ h(s.minValue) }}" max="{{ h(s.maxValue) }}" value="{{ h(s.ownNumber) }}"></label>
 {% else %}<label>Own list (one to a line) <textarea name="value" rows="4" cols="50" maxlength="4000">{{ h(s.ownText) }}</textarea></label>
 {% endif %}{% if s.hint.len > 0 %}<p class="detail">{{ h(s.hint) }}</p>{% endif %}
 <div class="actions"><button type="submit">Save</button></div></form>

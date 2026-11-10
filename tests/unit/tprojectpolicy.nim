@@ -27,3 +27,11 @@ suite "D-86 the refs of a project":
     check not protectedBy(@["main", "release/*"], "feature/x") and not protectedBy(@[], "main") and not protectedBy(@["main"], "")
   test "the profiles that need a grant are build and deploy":
     check privilegedProfiles == ["build", "deploy"]
+
+suite "the longest step of a project (max_step_timeout)":
+  test "the timeout of a step is read from its options; none, or a bad text, is 0":
+    check stepTimeoutOf("""{"mask":{"min_length":4},"timeout":259200}""") == 259200
+    check stepTimeoutOf("") == 0 and stepTimeoutOf("{}") == 0 and stepTimeoutOf("not json") == 0 and stepTimeoutOf("""{"timeout":"3h"}""") == 0
+  test "the limits: a week is the most, a minute the least, 24 hours the default of the shard":
+    check maxStepTimeoutLimit == 7 * 24 * 3600 and minStepTimeoutLimit == 60 and defaultStepTimeoutLimit == 24 * 3600
+    check stepTimeoutDefault() == defaultStepTimeoutLimit            # no CINIM_MAX_STEP_TIMEOUT in the environment of the tests
