@@ -1181,11 +1181,12 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
     if req.key.len == 0: return fail("a host call without its key in the journal")
     let name = bytesToStr(req.payload)
-    let o = c.query(%*[["SELECT tenant_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
+    let o = c.query(%*[["SELECT tenant_id, group_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("a registry by name needs a run that belongs to an organisation")
     let reg = c.registryNamed(ov[0][0].getStr, name)
     if not reg.found: return fail("this organisation has no registry " & name & " (PUT /api/v1/organizations/{slug}/registries/{name})")
+    if not c.effectiveRegistries(ov[0][1].getStr).available(name): return fail(registryRefused(name))
     let told = reg.registry.address & "\n" & (if reg.registry.insecure: "1" else: "0") & "\n" & (if reg.registry.secretEnc.len > 0: "1" else: "0")
     discard c.appendRow(req.run_id, req.key, "registry", name, told)
     return ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
@@ -1328,12 +1329,14 @@ proc handleCall*(c: var RqClient; co: Core; req: HostCall; master: string): Exec
     let fail = proc (detail: string): ExecutorResponse =
       ExecutorResponse(header: Header(protocol: 1), body: ExecutorResponseBody(
         kind: ExecutorResponseBodyKind.failure, failure: Failure(code: "script_error", detail: detail)))
-    let o = c.query(%*[["SELECT tenant_id, trusted FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
+    let o = c.query(%*[["SELECT tenant_id, trusted, group_id FROM runs r WHERE r.id = ? AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = r.tenant_id)", req.run_id]])
     let ov = o["results"][0]{"values"}
     if ov == nil or ov.len == 0: return fail("registries need a run that belongs to an organisation")
+    let allowedHere = c.effectiveRegistries(ov[0][2].getStr)                # D-114: the groups above may have narrowed the registries of the organisation
     for n in wantedRegistries:
       let reg = c.registryNamed(ov[0][0].getStr, n)
       if not reg.found: return fail("this organisation has no registry " & n & " (PUT /api/v1/organizations/{slug}/registries/{name})")
+      if not allowedHere.available(n): return fail(registryRefused(n))
       if reg.registry.secretEnc.len > 0 and ov[0][1].getInt == 0: return fail(loginRefused(n))      # D-114: a login goes to trusted runs only
   if wantedSecrets.len > 0:
     # the step asks for secrets of the organisation (6.7): they must exist now, and the run must belong to an organisation

@@ -2,7 +2,7 @@
 ## wrong with a request told. Needs CINIM_RQLITE_URL; without it the suite is skipped.
 import std/[unittest, json, os, times, strutils, base64]
 import common/[rqlite, scriptsource, bytestr]
-import core/[schema, secretvault, registries, scheduler, groups, loggate, logcircuit, runlease]
+import core/[schema, secretvault, registries, scheduler, groups, projectpolicy, loggate, logcircuit, runlease]
 import ../../build/nimproto/protos
 import ../support/testkek
 
@@ -162,6 +162,18 @@ suite "D-114 registries given to the steps that push":
       check ok(step("""{"registries":["lan"]}"""))                                                                                  # a registry without a login is for everyone
       discard c.execute(%*[["UPDATE runs SET trusted = 1 WHERE id = ?", run]])
       check ok(step("""{"registries":["gh","hub"]}"""))
+      # D-114: the group above the project narrows the registries of the organisation: what it does not list is not available below it, in the step and in the host call, and a project cannot widen it
+      let gGroup = c.groupIdOf(orgId, "g").id
+      check c.setAllowedRegistries(gGroup, @["gh", "lan"]) == ""
+      check "not available" in why(step("""{"registries":["hub"]}""")) and "not available" in why(call("registry", "hub", key = "registry#9"))
+      check ok(step("""{"registries":["gh"]}""")) and ok(step("""{"registries":["lan"]}""")) and said(call("registry", "lan", key = "registry#10")) == "10.0.0.5:5000\n1\n0"
+      check "not allowed by a group above" in c.setAllowedRegistries(p1.id, @["lan", "hub"])               # hub is not allowed above: a project cannot widen
+      check "no registry" in c.setAllowedRegistries(p1.id, @["nowhere"])
+      check c.setAllowedRegistries(p1.id, @["lan"]) == "" and c.effectiveRegistries(p1.id).names == @["lan"]
+      check "not available" in why(step("""{"registries":["gh"]}""")) and ok(step("""{"registries":["lan"]}"""))      # the project narrowed it further
+      check c.setAllowedRegistries(p1.id, @[]) == "" and c.effectiveRegistries(p1.id).names == @["gh", "lan"]           # emptied: it inherits the group's again
+      check c.setAllowedRegistries(gGroup, @[]) == "" and c.effectiveRegistries(p1.id).all
+      check ok(step("""{"registries":["hub"]}"""))
       check "no registry nowhere" in why(step("""{"registries":["gh","nowhere"]}"""))
       check "at most 8" in why(step("""{"registries":["a","b","c","d","e","f","g","h","i"]}"""))
       # the variables the core makes are not stored secrets: a step may ask for them (D-99, D-114) without a secret of that name

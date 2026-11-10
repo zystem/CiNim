@@ -182,14 +182,15 @@ const ddl = [
        upload_id TEXT NOT NULL DEFAULT '',
        store TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS artifacts_run_path ON artifacts (run_id, path)",
-  "CREATE UNIQUE INDEX IF NOT EXISTS triggers_tenant_name ON triggers (tenant_id, name)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS triggers_project_name ON triggers (tenant_id, group_id, name)",       # a name is unique in its project, not in the organisation
+  "CREATE UNIQUE INDEX IF NOT EXISTS webhooks_scope_name ON webhooks (tenant_id, group_id, name)",        # ... and a webhook's in its scope, the organisation or a project
   "CREATE INDEX IF NOT EXISTS runs_trigger ON runs (trigger_id, state)",
   # D-68: a group that has a `repository` (the main one, which holds the Lua files) is a project, named by its whole path; a run and a trigger belong to a project.
   # PRJ-001, D-54, core/groups.nim: the groups of an organisation, nested up to 8 levels (the organisation itself is the root and has no row; a run or a trigger with group_id ''
   # belongs to it). `path` is the slugs from the top joined by '/'; the variables of a group (VAR-001) are inherited by the groups below it and by its runs
   """CREATE TABLE IF NOT EXISTS groups (
        id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', slug TEXT NOT NULL, path TEXT NOT NULL, depth INTEGER NOT NULL,
-       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1, allowed_callers TEXT NOT NULL DEFAULT '', status_target TEXT NOT NULL DEFAULT '', default_ref TEXT NOT NULL DEFAULT '')""",
+       created_at INTEGER NOT NULL, repository TEXT NOT NULL DEFAULT '', protected_refs TEXT NOT NULL DEFAULT '', allowed_profiles TEXT NOT NULL DEFAULT '', required_approvals INTEGER NOT NULL DEFAULT 1, allowed_callers TEXT NOT NULL DEFAULT '', status_target TEXT NOT NULL DEFAULT '', default_ref TEXT NOT NULL DEFAULT '', allowed_registries TEXT NOT NULL DEFAULT '')""",
   "CREATE UNIQUE INDEX IF NOT EXISTS groups_tenant_path ON groups (tenant_id, path)",
   "CREATE INDEX IF NOT EXISTS groups_parent ON groups (parent_id)",
   """CREATE TABLE IF NOT EXISTS group_variables (

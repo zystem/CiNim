@@ -38,6 +38,8 @@ each event that has happened (a row of `webhook_deliveries`, unique by webhook, 
 
 ## The API
 
+**A name is unique within its scope** (2026-11-10): the organisation may have a webhook `ops` and each project too; a second one in the same scope is `409 name_taken`.
+
 All under `/api/v1/organizations/{slug}/webhooks`; the permissions `webhook.read` (every role that reads) and `webhook.write` (an administrator and `rw`), in the project of the webhook.
 
 ```

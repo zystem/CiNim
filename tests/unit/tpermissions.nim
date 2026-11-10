@@ -118,6 +118,12 @@ suite "D-87 the directories of an organisation":
       check not rw.allows(needOf(m, p))
     check grantsOfRoles(["admin"]).allows(needOf("PUT", "/api/v1/organizations/acme/ldap/servers/corp"))
 
+suite "D-114 registry.grant":
+  test "rw and admin choose the registries of a group, dev and ro do not; it is a permission of a group":
+    check levelOf("registry.grant") == lvGroup
+    for r in ["rw", "admin"]: check "registry.grant" in builtinPermissions(r)
+    for r in ["dev", "ro"]: check "registry.grant" notin builtinPermissions(r)
+
 suite "blocking a user":
   test "blocking and letting in are the shard\'s user.manage, nobody else\'s":
     for (m, p) in [("POST", "/api/v1/users/ann:disable"), ("POST", "/api/v1/users/ann:enable")]:
@@ -181,7 +187,7 @@ suite "D-84 groups and projects":
   test "on a group only what is about the tree of groups does anything: not the caches, the locks, the storage or the shard":
     var x: Grants
     x.addRole("org:acme/ci", builtinPermissions("admin"))
-    for p in ["run.start", "run.abort", "trigger.write", "trigger.fire", "variable.write", "group.write", "hold.write", "log.read", "access.write", "access.read", "secret.read", "secret.write", "run.start.protected", "ref.protect", "profile.grant"]: check x.holds(p, "acme", "ci/app")
+    for p in ["run.start", "run.abort", "trigger.write", "trigger.fire", "variable.write", "group.write", "hold.write", "log.read", "access.write", "access.read", "secret.read", "secret.write", "run.start.protected", "ref.protect", "profile.grant", "registry.grant"]: check x.holds(p, "acme", "ci/app")
     for p in ["cache.delete", "lock.write", "storage.read", "user.manage", "shard.write"]:
       check not x.holds(p, "acme", "ci/app") and not x.holdsAnywhere(p)
   test "a role in the organisation holds for every group of it; a role on a group adds to it; the gate lets a list through for whoever holds the permission on some group of it":

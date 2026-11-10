@@ -179,8 +179,9 @@ proc hookCommit*(body: JsonNode; t: TriggerRow): tuple[error, commit: string] =
   if wanted.len > 0 and not validRef(wanted): return ("commit is a SHA, a branch or a tag name", "")
   ("", wanted)
 
-proc nameTaken*(c: var RqClient; tenantId, name: string): bool =
-  c.query(%*[["SELECT count(*) FROM triggers WHERE tenant_id = ? AND name = ?", tenantId, name]])["results"][0]{"values"}[0][0].getInt > 0
+proc nameTaken*(c: var RqClient; tenantId, groupId, name: string): bool =
+  ## a name is unique within its project (`groupId`): two projects may both have a trigger `nightly`
+  c.query(%*[["SELECT count(*) FROM triggers WHERE tenant_id = ? AND group_id = ? AND name = ?", tenantId, groupId, name]])["results"][0]{"values"}[0][0].getInt > 0
 
 proc createTrigger*(c: var RqClient; tenantId: string; s: TriggerSpec; now: int64; groupId = ""): tuple[id, secret: string] =
   ## `secret` is the webhook's secret, shown once ("" for a schedule); `groupId` is the id of the group named by `s.groupPath` ("" = the organisation), which the caller has looked up

@@ -24,7 +24,7 @@ import protobuf_serialization/files/type_generator
 import common/[rqlite, shimstate, states]
 import grpcserve
 import crunchy
-import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, apiauth, registries
+import schema, shimrecord, components, stepmetrics, loggate, secretvault, stepsecrets, apiauth, registries, projectpolicy
 import common/[ctrlauth, bytestr]
 import scheduler   ## for stopServers*, the shared shutdown flag every core REP-server thread polls
 
@@ -212,6 +212,9 @@ proc handleSecretsRequest(c: var RqClient; req: StepReport; master: string): Ste
   result = StepReportAck(header: Header(protocol: 1), accepted: true, may_exit: false, disposition: "secrets")
   for (n, val) in got.values: result.secrets.add StepSecret(name: n, value: val)
   if wantsRegistries:
+    let allowedHere = c.effectiveRegistries(v[0][3].getStr)                  # the groups above may have narrowed the registries since the step was made
+    for n in registryNamesOf(v[0][1].getStr):
+      if not allowedHere.available(n): return refuse("unknown_registry", registryRefused(n))
     let made = c.registriesConfig(vk.kek, vk.ready, v[0][2].getStr, registryNamesOf(v[0][1].getStr), trusted = v[0][4].getInt > 0)
     if not made.ok: return refuse(if made.retry: "secrets_unavailable" else: "unknown_registry", made.error)
     result.secrets.add StepSecret(name: registryConfigName, value: made.config)

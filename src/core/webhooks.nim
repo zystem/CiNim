@@ -209,8 +209,9 @@ proc getWebhook*(c: var RqClient; tenantId, id: string): tuple[found: bool, row:
 proc countWebhooks*(c: var RqClient; tenantId: string): int =
   c.query(%*[["SELECT count(*) FROM webhooks WHERE tenant_id = ?", tenantId]])["results"][0]{"values"}[0][0].getInt
 
-proc webhookNameTaken*(c: var RqClient; tenantId, name: string): bool =
-  c.query(%*[["SELECT count(*) FROM webhooks WHERE tenant_id = ? AND name = ?", tenantId, name]])["results"][0]{"values"}[0][0].getInt > 0
+proc webhookNameTaken*(c: var RqClient; tenantId, groupId, name: string): bool =
+  ## a name is unique within its scope (`groupId`: the project, "" the organisation)
+  c.query(%*[["SELECT count(*) FROM webhooks WHERE tenant_id = ? AND group_id = ? AND name = ?", tenantId, groupId, name]])["results"][0]{"values"}[0][0].getInt > 0
 
 proc createWebhook*(c: var RqClient; tenantId: string; s: WebhookSpec; groupId: string; now: int64): string =
   ## `groupId` is the id of the project named by `s.groupPath` ("" = the whole organisation), which the caller has looked up

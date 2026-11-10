@@ -1906,11 +1906,12 @@ proc onRequest() {.raises: [], gcsafe.} =
           if gmeth == "PUT":
             let sj = try: parseJson(getBody()) except JsonParsingError: nil
             if sj == nil or sj.kind != JObject:
-              problem(Http400, "invalid_request", "a JSON object with cache_quota_bytes, cache_retention_days, protected_refs and/or allowed_profiles is required")
+              problem(Http400, "invalid_request", "a JSON object with cache_quota_bytes, cache_retention_days, protected_refs, allowed_profiles, allowed_registries and/or the other settings is required")
               return
             # D-86: the refs that are protected (a project's) and the privileged profiles its pipelines may use are security settings, each with a permission of its own
             var newRefs, newProfiles: seq[string]
-            for k in ["protected_refs", "allowed_profiles"]:
+            var newRegistries: seq[string]
+            for k in ["protected_refs", "allowed_profiles", "allowed_registries"]:
               if not sj.hasKey(k): continue
               if sj[k].kind != JArray:
                 problem(Http400, "invalid_request", k & " must be a list of strings")
@@ -1920,24 +1921,22 @@ proc onRequest() {.raises: [], gcsafe.} =
                   problem(Http400, "invalid_request", k & " must be a list of strings")
                   return
                 if k == "protected_refs": newRefs.add x.getStr
+                elif k == "allowed_registries": newRegistries.add x.getStr
                 else: newProfiles.add x.getStr
             if sj.hasKey("protected_refs"):
               if not who.mayIn("ref.protect", slugG, sp):
                 problem(Http403, "forbidden", "protected_refs needs ref.protect on " & normalPath(sp))
                 return
-              if gc.resolveProject(orgG.id, sp).code.len > 0:
-                problem(Http409, "not_a_project", "protected refs belong to a project (a group with a repository), and " & normalPath(sp) & " is not one")
-                return
             if sj.hasKey("allowed_profiles") and not who.mayIn("profile.grant", slugG, sp):
               problem(Http403, "forbidden", "allowed_profiles needs profile.grant on " & normalPath(sp))
+              return
+            if sj.hasKey("allowed_registries") and not who.mayIn("registry.grant", slugG, sp):
+              problem(Http403, "forbidden", "allowed_registries needs registry.grant on " & normalPath(sp))
               return
             if sj.hasKey("status"):
               # D-96: where the state of the runs of this project is told
               if not who.mayIn("status.configure", slugG, sp):
                 problem(Http403, "forbidden", "status needs status.configure on " & normalPath(sp))
-                return
-              if gc.resolveProject(orgG.id, sp).code.len > 0:
-                problem(Http409, "not_a_project", "a status belongs to a project (a group with a repository), and " & normalPath(sp) & " is not one")
                 return
               let badStatus = gc.setStatusTarget(sg.id, sj["status"])
               if badStatus.len > 0:
@@ -1958,9 +1957,6 @@ proc onRequest() {.raises: [], gcsafe.} =
               if not who.mayIn("caller.allow", slugG, sp):
                 problem(Http403, "forbidden", "allowed_callers needs caller.allow on " & normalPath(sp))
                 return
-              if gc.resolveProject(orgG.id, sp).code.len > 0:
-                problem(Http409, "not_a_project", "callers belong to a project (a group with a repository), and " & normalPath(sp) & " is not one")
-                return
               let badCallers = gc.setAllowedCallers(sg.id, callers)
               if badCallers.len > 0:
                 problem(Http400, "invalid_request", badCallers)
@@ -1973,9 +1969,6 @@ proc onRequest() {.raises: [], gcsafe.} =
                 return
               if not who.mayIn("approval.configure", slugG, sp):
                 problem(Http403, "forbidden", "required_approvals needs approval.configure on " & normalPath(sp))
-                return
-              if gc.resolveProject(orgG.id, sp).code.len > 0:
-                problem(Http409, "not_a_project", "approvals belong to a project (a group with a repository), and " & normalPath(sp) & " is not one")
                 return
               gc.setRequiredApprovals(sg.id, sj["required_approvals"].getInt)
               gc.record(getTime().toUnix(), actorOf(who), "project.required_approvals", slugG & "/" & normalPath(sp), "ok", $sj["required_approvals"].getInt)
@@ -1998,6 +1991,12 @@ proc onRequest() {.raises: [], gcsafe.} =
                 problem(Http400, "invalid_request", bad)
                 return
               gc.record(getTime().toUnix(), actorOf(who), "project.protected_refs", slugG & "/" & normalPath(sp), "ok", newRefs.join(","))
+            if sj.hasKey("allowed_registries"):
+              let bad = gc.setAllowedRegistries(sg.id, newRegistries)
+              if bad.len > 0:
+                problem(Http400, "invalid_request", bad)
+                return
+              gc.record(getTime().toUnix(), actorOf(who), "project.allowed_registries", slugG & "/" & normalPath(sp), "ok", newRegistries.join(","))
             if sj.hasKey("allowed_profiles"):
               let bad = gc.setAllowedProfiles(sg.id, newProfiles)
               if bad.len > 0:
@@ -2012,7 +2011,9 @@ proc onRequest() {.raises: [], gcsafe.} =
           jsonOk(Http200, %*{"organization": slugG, "group": normalPath(sp), "cache_quota_bytes": lim.quota, "cache_retention_days": lim.retentionDays,
                              "effective_cache_retention_seconds": gc.retentionSeconds(orgG.id, sg.id, cacheRetentionFromEnv()), "required_approvals": gc.ownRequiredApprovals(sg.id), "effective_required_approvals": gc.requiredApprovals(sg.id),
                              "allowed_callers": gc.ownAllowedCallers(sg.id), "effective_allowed_callers": gc.allowedCallers(sg.id), "status": gc.ownStatusTargetOf(sg.id).viewOf, "effective_status": gc.statusTargetOf(sg.id).viewOf,
-                             "protected_refs": gc.ownProtectedPatterns(sg.id), "effective_protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id), "default_ref": gc.defaultRef(sg.id)})
+                             "protected_refs": gc.ownProtectedPatterns(sg.id), "effective_protected_refs": gc.protectedPatterns(sg.id), "effective_allowed_profiles": gc.allowedProfiles(sg.id), "default_ref": gc.defaultRef(sg.id),
+                             "allowed_registries": gc.ownAllowedRegistries(sg.id), "effective_allowed_registries": (let a = gc.effectiveRegistries(sg.id); if a.all: %*{"all": true} else: %*{"all": false, "names": a.names}),
+                             "sources": gc.settingSources(sg.id)})
           return
         let vpos = segs.find("variables")
         let groupPath = if vpos >= 0: segs[0 ..< vpos].join("/") else: gpath
@@ -2155,18 +2156,18 @@ proc onRequest() {.raises: [], gcsafe.} =
             if spec.error.len > 0:
               problem(Http400, "invalid_request", spec.error)
               return
-            if c.nameTaken(org.id, spec.spec.name):
-              problem(Http409, "name_taken", "the organisation has a trigger " & spec.spec.name)
-              return
-            if c.countTriggers(org.id) >= maxTriggersPerOrg:
-              problem(Http409, "too_many_triggers", "at most " & $maxTriggersPerOrg & " triggers per organisation")
-              return
             if not who.mayIn("trigger.write", slug, spec.spec.groupPath):
               problem(Http403, "forbidden", "you may not make triggers for the project " & spec.spec.groupPath & ": it needs trigger.write there")
               return
             let tg = c.resolveProject(org.id, spec.spec.groupPath)
             if tg.code.len > 0:
               problem((if tg.code == "project_not_found": Http404 else: Http409), tg.code, tg.message)
+              return
+            if c.nameTaken(org.id, tg.id, spec.spec.name):
+              problem(Http409, "name_taken", "the project " & spec.spec.groupPath & " has a trigger " & spec.spec.name)
+              return
+            if c.countTriggers(org.id) >= maxTriggersPerOrg:
+              problem(Http409, "too_many_triggers", "at most " & $maxTriggersPerOrg & " triggers per organisation")
               return
             let made = c.createTrigger(org.id, spec.spec, getTime().toUnix(), tg.id)
             let created = c.getTrigger(org.id, made.id)
@@ -2273,9 +2274,6 @@ proc onRequest() {.raises: [], gcsafe.} =
             if spec.error.len > 0:
               problem(Http400, "invalid_request", spec.error)
               return
-            if c.webhookNameTaken(org.id, spec.spec.name):
-              problem(Http409, "name_taken", "the organisation has a webhook " & spec.spec.name)
-              return
             if c.countWebhooks(org.id) >= maxWebhooksPerOrg:
               problem(Http409, "too_many_webhooks", "at most " & $maxWebhooksPerOrg & " webhooks per organisation")
               return
@@ -2289,6 +2287,9 @@ proc onRequest() {.raises: [], gcsafe.} =
                 problem((if tg.code == "project_not_found": Http404 else: Http409), tg.code, tg.message)
                 return
               groupId = tg.id
+            if c.webhookNameTaken(org.id, groupId, spec.spec.name):
+              problem(Http409, "name_taken", "the " & (if spec.spec.groupPath.len > 0: "project " & spec.spec.groupPath else: "organisation") & " has a webhook " & spec.spec.name)
+              return
             let made = c.createWebhook(org.id, spec.spec, groupId, getTime().toUnix())
             jsonOk(Http201, c.getWebhook(org.id, made).row.view)
           else:

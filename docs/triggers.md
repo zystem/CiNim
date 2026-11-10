@@ -58,6 +58,8 @@ POST /api/v1/pipelines:check   {"organization": "acme", "script": "...", "params
 
 All calls are an administrator's: `Authorization: Bearer <admin token>`.
 
+**A name is unique within its project** (2026-11-10): two projects may both have a trigger `nightly`; a second `nightly` in one project is `409 name_taken`. A trigger is addressed by its `id`, never by its name.
+
 ### Schedule
 
 ```

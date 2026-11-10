@@ -53,7 +53,8 @@ const
     ("approval.configure", lvGroup, "choose how many approvals the runs of a project that wait for approval need"),
     ("run.start.protected", lvGroup, "start a run on a protected ref of a project (the secrets marked protected go to such runs only)"),
     ("ref.protect", lvGroup, "choose which refs of a project are protected"),
-    ("profile.grant", lvGroup, "choose which privileged profiles (build, deploy) the pipelines of a project may use"),
+    ("profile.grant", lvGroup, "choose which privileged profiles (build, deploy, the deploy profiles of the organisation) the pipelines of a project may use"),
+    ("registry.grant", lvGroup, "choose which registries of the organisation the pipelines of a group or a project may use (only fewer than the group above allows)"),
     ("access.read", lvGroup, "see who has which role in an organisation, and the roles and permissions"),
     ("access.write", lvGroup, "give and take away roles in an organisation"),
     ("registry.read", lvOrg, "see the image registries of an organisation (the address, whether there is a login; never the password)"),
@@ -83,7 +84,7 @@ const
   devAdds = ["run.start", "run.check", "run.abort", "run.retry", "trigger.fire"]
   rwNot = ["user.manage", "role.manage", "token.manage", "store.manage", "audit.read", "storage.write", "shard.variable.write", "access.read", "access.write", "ldap.read", "ldap.map", "ldap.write", "deploy_profile.write"]
   builtinRoles* = ["admin", "rw", "dev", "ro"]
-  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "approval.configure", "caller.allow", "status.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
+  checkedByHandlers* = ["run.start.protected", "ref.protect", "profile.grant", "registry.grant", "approval.configure", "caller.allow", "status.configure"]       ## permissions that no route needs by itself: a handler asks for them when the request carries the thing they are about
 
 func isPermission*(name: string): bool =
   for p in catalogue:

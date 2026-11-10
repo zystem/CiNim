@@ -59,3 +59,10 @@ suite "settings of a group are inherited down the tree":
       check c.nearestValue(p.id, "status_target") == """{"provider":"github"}""" and c.nearestValue(other.id, "status_target") == ""
       discard c.execute(%*[["UPDATE groups SET status_target = ? WHERE id = ?", """{"provider":"gitlab"}""", p.id]])
       check c.nearestValue(p.id, "status_target") == """{"provider":"gitlab"}""" and c.nearestValue(q.id, "status_target") == """{"provider":"github"}"""
+    test "where a value comes from: the groups that set it, nearest last; the organisation sets none":
+      let src = c.settingSources(p.id)
+      check src["protected_refs"].len == 1 and src["protected_refs"][0]["group"].getStr == "top" and src["protected_refs"][0]["values"][0].getStr == "main"
+      check src["allowed_callers"].len == 2 and src["allowed_callers"][1]["group"].getStr == "top/mid"
+      check src["required_approvals"].len == 2 and src["required_approvals"][^1]["group"].getStr == "top/mid" and src["required_approvals"][^1]["value"].getInt == 3
+      check src["default_ref"]["group"].getStr == "top/mid/p" and src["status_target"]["group"].getStr == "top/mid/p"
+      check c.settingSources(other.id)["protected_refs"].len == 0 and c.settingSources(other.id)["default_ref"].kind == JNull

@@ -2,9 +2,9 @@
 ## (`groups.protected_refs`, `groups.allowed_profiles`, text with one entry to a line). A run on a protected ref is **trusted**: only the people who may start such a run (permission
 ## `run.start.protected`), or a trigger that one of them set up, make it; a secret marked `protected` goes to trusted runs only, and the profile `deploy` is used by them only. The refs are
 ## the names a commit was asked by (a branch or a tag): a run started by a bare SHA has no ref and is not trusted, whatever branch the commit is on.
-import std/[json, strutils, algorithm]
+import std/[json, strutils, algorithm, sequtils]
 import ../common/rqlite
-import groups, refpattern, deployprofiles
+import groups, refpattern, deployprofiles, registries
 export refpattern
 
 const
@@ -35,7 +35,7 @@ func entries(text: string): seq[string] =
     let t = l.strip
     if t.len > 0: result.add t
 
-const inheritedColumns = ["protected_refs", "allowed_callers", "required_approvals", "default_ref", "status_target"]     ## the settings of a group that the groups below it inherit
+const inheritedColumns = ["protected_refs", "allowed_callers", "required_approvals", "default_ref", "status_target", "allowed_registries"]     ## the settings of a group that the groups below it inherit
 
 proc chainValues*(c: var RqClient; groupId, column: string): seq[string] =
   ## the value of a setting of `groups` in every group from the top one down to this one (an empty one too), as it is stored: where the settings are inherited from (the organisation, the root,
@@ -47,6 +47,17 @@ proc chainValues*(c: var RqClient; groupId, column: string): seq[string] =
   for g in c.groupChain(own[0][0].getStr, groupId):
     let v = c.query(%*[["SELECT " & column & " FROM groups WHERE id = ?", g.id]])["results"][0]{"values"}
     result.add (if v == nil or v.len == 0 or v[0][0].kind == JNull: "" elif v[0][0].kind == JString: v[0][0].getStr else: $v[0][0])      # a number column comes back as a number
+
+proc chainEntries*(c: var RqClient; groupId, column: string): seq[tuple[group, value: string]] =
+  ## the same, with the path of each group: where a value comes from ("" is a group that sets none)
+  doAssert column in inheritedColumns
+  if groupId.len == 0: return
+  let own = c.query(%*[["SELECT tenant_id FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
+  if own == nil or own.len == 0: return
+  for g in c.groupChain(own[0][0].getStr, groupId):
+    let v = c.query(%*[["SELECT " & column & " FROM groups WHERE id = ?", g.id]])["results"][0]{"values"}
+    let text = if v == nil or v.len == 0 or v[0][0].kind == JNull: "" elif v[0][0].kind == JString: v[0][0].getStr else: $v[0][0]
+    result.add (g.path, text)
 
 proc nearestValue*(c: var RqClient; groupId, column: string): string =
   ## the value of the nearest group, this one first and then the ones above, that has one: a setting that is one thing (a branch, a target), not a list
@@ -144,6 +155,68 @@ proc allowedProfiles*(c: var RqClient; groupId: string): seq[string] =
     if v != nil and v.len > 0:
       for p in entries(v[0][0].getStr):
         if p notin result: result.add p
+
+type Availability* = object
+  ## the registries a group may use: every one of the organisation (`all`: no group on the way narrowed it) or these `names`
+  all*: bool
+  names*: seq[string]
+
+func narrow*(a: Availability; own: seq[string]): Availability =
+  ## a group's own list over what the group above allows: an empty list changes nothing (it inherits), a list narrows (only names the group above allows stay), and the first list there is
+  ## on the way down makes the set out of `all`. The organisation, the root, is `all`.
+  if own.len == 0: return a
+  if a.all: return Availability(all: false, names: own)
+  Availability(all: false, names: a.names.filterIt(it in own))
+
+func available*(a: Availability; name: string): bool = a.all or name in a.names
+
+proc effectiveRegistries*(c: var RqClient; groupId: string): Availability =
+  ## D-114: the registries the pipelines of this group or project may use: the organisation has them all, each group on the way down may narrow the set and none may widen it
+  result = Availability(all: true)
+  for text in c.chainValues(groupId, "allowed_registries"):
+    result = result.narrow(entries(text))
+
+proc ownAllowedRegistries*(c: var RqClient; groupId: string): seq[string] =
+  let v = c.chainValues(groupId, "allowed_registries")
+  if v.len > 0: return entries(v[^1])
+
+proc setAllowedRegistries*(c: var RqClient; groupId: string; names: seq[string]): string =
+  ## "" when saved, otherwise why not: a name must be a registry the organisation has, and a group can only narrow what the groups above it allow (an empty list takes the group's own limit away)
+  var seen: seq[string]
+  let own = c.query(%*[["SELECT tenant_id FROM groups WHERE id = ?", groupId]])["results"][0]{"values"}
+  if own == nil or own.len == 0: return "no such group"
+  let tenant = own[0][0].getStr
+  var above = Availability(all: true)                                       # what the groups above allow: the chain without this group's own list
+  let chain = c.chainValues(groupId, "allowed_registries")
+  for i in 0 ..< max(chain.len - 1, 0): above = above.narrow(entries(chain[i]))
+  for n in names:
+    if not validRegistryName(n): return "a registry is named by lowercase letters, digits, - and _ (" & n & ")"
+    if not c.registryNamed(tenant, n).found: return "this organisation has no registry " & n & " (PUT /api/v1/organizations/{slug}/registries/" & n & ")"
+    if not above.available(n): return "the registry " & n & " is not allowed by a group above: a group can narrow the list, not widen it"
+    if n notin seen: seen.add n
+  discard c.execute(%*[["UPDATE groups SET allowed_registries = ? WHERE id = ?", seen.join("\n"), groupId]])
+
+proc settingSources*(c: var RqClient; groupId: string): JsonNode =
+  ## Where the inherited settings of a group come from (the path of each group on the way that sets one; the organisation sets none), so that a person who asks why a ref is protected or a
+  ## registry is missing sees the group that did it. A list: the groups that add to it; a value: the nearest group that sets it.
+  result = newJObject()
+  for column in ["protected_refs", "allowed_callers", "allowed_registries"]:
+    var from0 = newJArray()
+    for e in c.chainEntries(groupId, column):
+      if e.value.len > 0: from0.add %*{"group": e.group, "values": entries(e.value)}
+    result[column] = from0
+  var approvals = newJArray()
+  for e in c.chainEntries(groupId, "required_approvals"):
+    if e.value.len > 0 and e.value != "0" and e.value != "1": approvals.add %*{"group": e.group, "value": parseInt(e.value)}
+  result["required_approvals"] = approvals
+  for column in ["default_ref", "status_target"]:
+    var nearest = newJNull()
+    for e in c.chainEntries(groupId, column):
+      if e.value.len > 0: nearest = %*{"group": e.group}                  # the last one on the way down is the nearest
+    result[column] = nearest
+
+func registryRefused*(name: string): string =
+  "the registry " & name & " is not available to this project: a group above it limits the registries (allowed_registries)"
 
 func isDeployKind*(profile: string): bool =
   ## `deploy` and a deploy profile of the organisation (D-115) are the same kind of thing for the gate: privileged, and for trusted runs only

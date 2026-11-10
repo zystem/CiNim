@@ -60,7 +60,7 @@ suite "D-111 webhooks":
       check w.slug == slug and w.events == @["run.finished"] and w.secret == "HOOK_KEY" and w.enabled and w.groupPath == ""
       check c.listWebhooks(org).anyIt(it.id == w.id) and not c.listWebhooks(other).anyIt(it.id == w.id)
       check not c.getWebhook(other, w.id).found
-      check c.webhookNameTaken(org, w.name) and not c.webhookNameTaken(other, w.name) and c.countWebhooks(org) >= 1
+      check c.webhookNameTaken(org, "", w.name) and not c.webhookNameTaken(other, "", w.name) and c.countWebhooks(org) >= 1
       var s2 = spec(@["run.started", "step.failed"], secret = "")
       s2.url = "https://hooks.example.org/x"
       s2.enabled = false
