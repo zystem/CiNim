@@ -1,5 +1,5 @@
 # The image the tests run in (the pipeline of the repository, .ci/pipeline.lua): Nim on glibc like the workstation (the tests that use threads end in a crash on musl, so the Alpine image of the
-# libraries is not used), the system libraries the tests link (libsodium, nghttp2, libpcre, sqlite, OpenSSL), the nimble packages, git, curl and the openssl command (the certificates of the TLS test of the key service), and
+# libraries is not used), the system libraries the tests link (libsodium, nghttp2, libpcre, sqlite, OpenSSL), the nimble packages, git, curl and the openssl command (the certificates of the TLS test of the key service), slapd and ldap-utils (the directory of the LDAP test, tldap, as processes: there is no Docker in the Pod), and
 # `rqlited`, so that the integration tests start their own scratch databases without Docker (tools/test/run.sh with CINIM_RQLITE_BIN). Built with the repository as the context; the hash of the
 # image is that of this file and cinim.nimble. It holds the real key service, hsmgate (github.com/zystem/hsmgate), built from the tag HSMGATE_REF with the Go of the project (the base is pinned
 # as the project pins it): the tests thsmgate.nim, thsmgate_tls.nim and tkeyservice.nim run against it when HSMGATE_BIN is set, which the image does (they are skipped on a machine without it).
@@ -22,9 +22,9 @@ RUN GOBIN=/out CGO_ENABLED=0 go install -trimpath "github.com/bufbuild/buf/cmd/b
 # (tstorehttp, tstorehttprepair, tstorageproc, tshimdirect) test what runs; a static Go binary. Built nowhere here: a Go build of Caddy starved the nodes of the test cluster.
 FROM zystem/cinim-store-dav:h79@sha256:0c739513af98535124e7677f8802679a8a8a5648681adcb2a56b8f61721ee6f4 AS caddy-store
 
-FROM nimlang/nim:2.2.12
+FROM nimlang/nim:2.4.0
 RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git procps openssl \
-      cmake xz-utils zlib1g-dev libsodium-dev libpcre3-dev libsqlite3-dev libssl-dev && rm -rf /var/lib/apt/lists/*
+      cmake xz-utils zlib1g-dev libsodium-dev libpcre3-dev libsqlite3-dev libssl-dev slapd ldap-utils && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.61 or later is required; the distribution's is older)
 # renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$

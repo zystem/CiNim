@@ -34,8 +34,8 @@ type
     cfg: LogCfg
     builder: Builder
     waiting: seq[LogBlock]    ## cut, but the spool is full: held in memory (a few blocks at most, reading stops meanwhile)
-    sender: Thread[SenderArgs]
-    statusSender: Thread[StatusArgs]
+    sender: ptr Thread[SenderArgs]          ## on the heap: a Thread must not move once it runs, and this object is returned by value (Nim 2.4 moves a `result`, 2.2 built it in place)
+    statusSender: ptr Thread[StatusArgs]
     statusStarted: bool
     lastCut: float
     spoolBroken: bool         ## the spool directory cannot be used (created or written): blocks are dropped and counted
@@ -204,10 +204,12 @@ proc newLogPipeline*(cfg: LogCfg): LogPipeline =
                               minLen = (if cfg.maskMinLen > 0: cfg.maskMinLen else: defaultMinLen), maxBytes = cfg.logMaxBytes,
                               step = cfg.step.seq, attempt = cfg.step.attempt)
   result.lastCut = epochTime()
-  createThread(result.sender, sendLoop, (cfg.collectorAddr, cfg.certs, cfg.spoolDir, cfg.step.run_id,
+  result.sender = createShared(Thread[SenderArgs])
+  createThread(result.sender[], sendLoop, (cfg.collectorAddr, cfg.certs, cfg.spoolDir, cfg.step.run_id,
                                           cfg.step.seq, cfg.step.attempt))
   if cfg.statusAddr.len > 0:
-    createThread(result.statusSender, statusLoop, (cfg.statusAddr, cfg.certs, cfg.step.run_id, cfg.step.seq, cfg.step.attempt))
+    result.statusSender = createShared(Thread[StatusArgs])
+    createThread(result.statusSender[], statusLoop, (cfg.statusAddr, cfg.certs, cfg.step.run_id, cfg.step.seq, cfg.step.attempt))
     result.statusStarted = true
 
 proc refreshCounters(lp: LogPipeline) =
@@ -265,10 +267,12 @@ proc finish*(lp: var LogPipeline; limitSeconds = 0): bool =
     sleep 50
   if ok: finished.store(true) else: stopSender.store(true)
   lp.refreshCounters()
-  joinThread(lp.sender)
+  joinThread(lp.sender[])
+  freeShared(lp.sender)
   if lp.statusStarted:
     stopStatus.store(true)
-    joinThread(lp.statusSender)
+    joinThread(lp.statusSender[])
+    freeShared(lp.statusSender)
   ok
 
 proc stats*(): tuple[delivered, dropped: int] = (delivered.load, dropped.load)

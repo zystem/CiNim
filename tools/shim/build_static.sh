@@ -16,7 +16,7 @@ SRC="${2:-src/shim/shim.nim}"
 NIMFLAGS="${3--d:shimLogging}"
 PACK="${4:-1}"
 PREFIX="$PWD/build/static-deps"
-IMAGE="${SHIM_BUILD_IMAGE:-ghcr.io/zystem/nim:2.2.12-alpine}"
+IMAGE="${SHIM_BUILD_IMAGE:-ghcr.io/zystem/nim:2.4.0-alpine}"
 mkdir -p "$PREFIX" "$(dirname "$OUT")"
 tools/proto/nim_flatten.sh build/nimproto > /dev/null
 

@@ -1,6 +1,7 @@
-## D-87, against a real OpenLDAP (in Docker, with a certificate made by tests/support/mkcerts.sh) and a real rqlite: the client (ldaps, StartTLS, a bind, a search, the certificate and the
+## D-87, against a real OpenLDAP (slapd, or in Docker; with a certificate made by tests/support/mkcerts.sh) and a real rqlite: the client (ldaps, StartTLS, a bind, a search, the certificate and the
 ## host name checked), and the core's use of it - the directories of an organisation, the map of groups to roles, the login `<login>@<slug>`, the sync that takes roles away and switches
-## people off. Needs CINIM_RQLITE_URL, Docker and the openssl command; without them it is skipped (the tests of the repository run in a Pod without Docker).
+## people off. Needs CINIM_RQLITE_URL, the openssl command and OpenLDAP: `slapd` with `ldap-utils` as processes (the image of the tests has them, the pipeline runs the test), else Docker
+## (osixia/openldap); without either it is skipped.
 import std/[unittest, json, os, osproc, strutils, times, streams, sequtils]
 import common/[rqlite, ldapclient]
 import core/[schema, apiauth, ldapauth, secretvault, kekprovider, teams]
@@ -71,8 +72,12 @@ member: uid=bob,ou=people,dc=example,dc=org
 """
 
 suite "D-87 LDAP":
-  if url.len == 0 or not have("docker") or not have("openssl"):
-    echo "  skipped: CINIM_RQLITE_URL, docker and openssl are needed"
+  let slapdBin = if fileExists("/usr/sbin/slapd"): "/usr/sbin/slapd" else: findExe("slapd")
+  # the backends of slapd are modules in Debian (back_mdb.so) and built in elsewhere: the directory of the modules, "" when there is none
+  let modDir = ["/usr/lib/ldap", "/usr/lib/openldap", "/usr/lib64/openldap"].filterIt(fileExists(it / "back_mdb.so")).concat(@[""])[0]
+  let native = slapdBin.len > 0 and have("ldapadd") and have("ldapmodify") and have("ldapdelete") and dirExists("/etc/ldap/schema")
+  if url.len == 0 or not (native or have("docker")) or not have("openssl"):
+    echo "  skipped: CINIM_RQLITE_URL, openssl and OpenLDAP (slapd with ldap-utils, or Docker) are needed"
   else:
     let sfx = newId()[^6 .. ^1].toLowerAscii
     let dir = getTempDir() / ("tldap-" & sfx)
@@ -93,6 +98,7 @@ suite "D-87 LDAP":
     let ssName = name & "-ss"
     let ssPort = port + 2
     let ssTlsPort = port + 3
+    requireFreePorts("tldap", [ssPort, ssTlsPort])
     createDir(dir / "mount-ss")
     doAssert execCmd("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj /CN=self-signed-ldap -addext subjectAltName=IP:127.0.0.1 " &
       "-keyout " & quoteShell(dir / "mount-ss/ldap.key") & " -out " & quoteShell(dir / "mount-ss/ldap.crt") & " 2>/dev/null") == 0
@@ -100,20 +106,42 @@ suite "D-87 LDAP":
     copyFile(dir / "mount/dhparam.pem", dir / "mount-ss/dhparam.pem")
     for f in ["ldap.crt", "ldap.key", "ca.crt", "dhparam.pem"]: setFilePermissions(dir / "mount-ss" / f, {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead})
     let ssCert = readFile(dir / "mount-ss/ldap.crt")
-    let ssStarted = execCmd("docker run -d --name " & ssName & " -p 127.0.0.1:" & $ssPort & ":389 -p 127.0.0.1:" & $ssTlsPort & ":636 -v " & quoteShell(dir / "mount-ss") & ":/container/service/slapd/assets/certs " &
-      "-e LDAP_ORGANISATION=Example -e LDAP_DOMAIN=example.org -e LDAP_ADMIN_PASSWORD=" & adminPw & " -e LDAP_TLS_CRT_FILENAME=ldap.crt -e LDAP_TLS_KEY_FILENAME=ldap.key " &
-      "-e LDAP_TLS_CA_CRT_FILENAME=ca.crt -e LDAP_TLS_DH_PARAM_FILENAME=dhparam.pem -e LDAP_TLS_VERIFY_CLIENT=never osixia/openldap:1.5.0 > /dev/null 2>&1")
-    let started = execCmd("docker run -d --name " & name & " -p 127.0.0.1:" & $port & ":389 -p 127.0.0.1:" & $tlsPort & ":636 -v " & quoteShell(dir / "mount") & ":/container/service/slapd/assets/certs " &
-      "-e LDAP_ORGANISATION=Example -e LDAP_DOMAIN=example.org -e LDAP_ADMIN_PASSWORD=" & adminPw & " -e LDAP_TLS_CRT_FILENAME=ldap.crt -e LDAP_TLS_KEY_FILENAME=ldap.key " &
-      "-e LDAP_TLS_CA_CRT_FILENAME=ca.crt -e LDAP_TLS_DH_PARAM_FILENAME=dhparam.pem -e LDAP_TLS_VERIFY_CLIENT=never osixia/openldap:1.5.0 > /dev/null 2>&1")
+    var slapds: seq[Process]            # the processes of the directories (the native way)
+    proc startSlapd(mount, tag: string; ldapPort, ldapsPort: int) =
+      ## a slapd of its own, with an empty database of the suffix and the certificate of `mount`: what the image of osixia makes of its environment
+      let conf = dir / ("slapd-" & tag & ".conf")
+      createDir(dir / ("db-" & tag))
+      writeFile(conf, (if modDir.len > 0: "modulepath " & modDir & "\nmoduleload back_mdb\n" else: "") & "include /etc/ldap/schema/core.schema\ninclude /etc/ldap/schema/cosine.schema\ninclude /etc/ldap/schema/inetorgperson.schema\n" &
+        "pidfile " & (dir / ("slapd-" & tag & ".pid")) & "\nTLSCertificateFile " & (mount / "ldap.crt") & "\nTLSCertificateKeyFile " & (mount / "ldap.key") &
+        "\nTLSCACertificateFile " & (mount / "ca.crt") & "\ndatabase mdb\nmaxsize 104857600\nsuffix \"" & base & "\"\nrootdn \"" & adminDn & "\"\nrootpw " & adminPw &
+        "\ndirectory " & (dir / ("db-" & tag)) & "\nindex objectClass eq\n")
+      # in the foreground (-d 0: no debugging output), the output in a file: a pipe that nobody reads stops a process when it is full
+      slapds.add startProcess("sh", args = ["-c", "exec " & quoteShell(slapdBin) & " -f " & quoteShell(conf) & " -h 'ldap://127.0.0.1:" & $ldapPort & "/ ldaps://127.0.0.1:" & $ldapsPort & "/' -d 0 > " &
+        quoteShell(dir / ("slapd-" & tag & ".log")) & " 2>&1"], options = {poUsePath})
+    proc startContainer(mount, cname: string; ldapPort, ldapsPort: int): bool =
+      execCmd("docker run -d --name " & cname & " -p 127.0.0.1:" & $ldapPort & ":389 -p 127.0.0.1:" & $ldapsPort & ":636 -v " & quoteShell(mount) & ":/container/service/slapd/assets/certs " &
+        "-e LDAP_ORGANISATION=Example -e LDAP_DOMAIN=example.org -e LDAP_ADMIN_PASSWORD=" & adminPw & " -e LDAP_TLS_CRT_FILENAME=ldap.crt -e LDAP_TLS_KEY_FILENAME=ldap.key " &
+        "-e LDAP_TLS_CA_CRT_FILENAME=ca.crt -e LDAP_TLS_DH_PARAM_FILENAME=dhparam.pem -e LDAP_TLS_VERIFY_CLIENT=never osixia/openldap:1.5.0 > /dev/null 2>&1") == 0
+    var started, ssStarted: bool
+    if native:
+      startSlapd(dir / "mount", "a", port, tlsPort)
+      startSlapd(dir / "mount-ss", "b", ssPort, ssTlsPort)
+      started = true
+      ssStarted = true
+    else:
+      ssStarted = startContainer(dir / "mount-ss", ssName, ssPort, ssTlsPort)
+      started = startContainer(dir / "mount", name, port, tlsPort)
     addQuitProc(proc () {.noconv.} =
-      discard execCmd("docker rm -f " & name & " " & ssName & " > /dev/null 2>&1")
+      for p in slapds:
+        p.terminate()
+        discard p.waitForExit(2000)
+      if not native: discard execCmd("docker rm -f " & name & " " & ssName & " > /dev/null 2>&1")
       removeDir(dir))
     var ready = false
-    if started == 0:
+    if started:
       let deadline = epochTime() + 180
       while epochTime() < deadline and not ready:
-        # the container starts a slapd of its own to set itself up and then the one that stays: ready is when the one with the certificate answers, twice in a row
+        # a container starts a slapd of its own to set itself up and then the one that stays: ready is when the one with the certificate answers, twice in a row
         try:
           for _ in 1 .. 2:
             let cn = openLdap(LdapSettings(url: "ldaps://127.0.0.1:" & $tlsPort, caPem: ca, timeoutMs: 2000))
@@ -122,9 +150,9 @@ suite "D-87 LDAP":
             sleep 1500
           ready = true
         except CatchableError: sleep 1000
-    doAssert ready, "the OpenLDAP container did not come up"
+    doAssert ready, "OpenLDAP did not come up"
     var ssReady = false
-    if ssStarted == 0:
+    if ssStarted:
       let deadline = epochTime() + 180
       while epochTime() < deadline and not ssReady:
         try:
@@ -135,16 +163,21 @@ suite "D-87 LDAP":
             sleep 1500
           ssReady = true
         except CatchableError: sleep 1000
-    doAssert ssReady, "the second OpenLDAP container (self-signed) did not come up"
+    doAssert ssReady, "the second OpenLDAP (self-signed) did not come up"
     proc inContainer(cmd, input: string): bool =
-      let p = startProcess("docker", args = ["exec", "-i", name, "sh", "-c", cmd], options = {poStdErrToStdOut, poUsePath})
+      ## an OpenLDAP tool against the directory: in its container, or here against its port
+      let p =
+        if native: startProcess("sh", args = ["-c", cmd.replace("ldap://localhost", "ldap://127.0.0.1:" & $port)], options = {poStdErrToStdOut, poUsePath})
+        else: startProcess("docker", args = ["exec", "-i", name, "sh", "-c", cmd], options = {poStdErrToStdOut, poUsePath})
       p.inputStream.write(input)
       p.inputStream.close()
       let output = p.outputStream.readAll()
       result = p.waitForExit() == 0
       p.close()
       if not result: echo output
-    doAssert inContainer("ldapadd -x -H ldap://localhost -D " & adminDn & " -w " & adminPw, ldif)
+    # a slapd with an empty database has not the entry of the suffix, which the image of osixia makes
+    let rootEntry = "dn: " & base & "\nobjectClass: top\nobjectClass: dcObject\nobjectClass: organization\no: Example\ndc: example\n\n"
+    doAssert inContainer("ldapadd -x -H ldap://localhost -D " & adminDn & " -w " & adminPw, (if native: rootEntry else: "") & ldif)
     let plain = LdapSettings(url: "ldap://127.0.0.1:" & $port)
     let startTls = LdapSettings(url: "ldap://127.0.0.1:" & $port, startTls: true, caPem: ca)
     let tls = LdapSettings(url: "ldaps://127.0.0.1:" & $tlsPort, caPem: ca)

@@ -10,7 +10,9 @@ srcDir        = "src"
 
 requires "nim >= 2.0.0"
 requires "checksums >= 0.2.1"
-requires "protobuf_serialization >= 0.6.2"
+# The unreleased master of protobuf_serialization (17 commits after 0.6.2, 2026-08-24), pinned by commit: with Nim 2.4 the macro `import_proto3` of 0.6.2 leaves out some messages of
+# `all.proto` (LogChunk, LogBatch, ShimStatus; tests/contract/tproto_v0.nim does not compile), and master does not. Back to a release as soon as one has it (a version after 0.6.2).
+requires "https://github.com/status-im/nim-protobuf-serialization#7f0715a033026d20d378161df60c08d78f20306c"
 requires "crunchy >= 0.1.11"  # crc32c (DAT-001/logs.proto's LogChunk.crc32c) - no stdlib/checksums CRC32
 requires "db_connector >= 0.1.0"  # sqlite state of the job-controller (adoption after a restart, D-33)
 requires "zippy >= 0.10.0"  # compression of log blocks (src/shim/logspool.nim)

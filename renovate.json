@@ -31,10 +31,11 @@
   ],
   "packageRules": [
     {
-      "description": "Nim is one version everywhere: the images of the platform, the image of the tests and the workstation must agree (CLAUDE.md; 2.2.6 wrote a wrong request line for HTTPS through a proxy). One pull request for all of them, never merged by the bot.",
+      "description": "Nim is one version everywhere: the images of the platform, the image of the tests and the workstation must agree (CLAUDE.md; 2.2.6 wrote a wrong request line for HTTPS through a proxy). One pull request for all of them, never merged by the bot. Only patches of 2.4 are proposed: a new minor version is moved to by the owner (2.4.0, 2026-11-10).",
       "matchDatasources": ["docker"],
       "matchDepNames": ["nimlang/nim", "ghcr.io/zystem/nim"],
       "groupName": "Nim",
+      "allowedVersions": "/^2\\.4\\./",
       "prBodyNotes": ["Nim is one version in `tools/image/Dockerfile.deps`, `Dockerfile.test`, the soak image and on the workstation (CLAUDE.md). A new version is checked by the whole pipeline before it is merged."]
     },
     {

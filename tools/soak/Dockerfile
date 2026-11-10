@@ -1,7 +1,7 @@
 # The soak harness (NFR-013) as an image, to run the 72 h soak in a cluster next to another host (tools/soak/run72.sh, deploy/examples/soak72).
 # glibc, not musl: the AddressSanitizer variant needs it. Build with tools/image/kaniko-build.sh (DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak).
 # The TLS keys are made at build time and are test keys only (tools/grpc/gen_tls.sh, into build/soak-certs).
-FROM nimlang/nim:2.2.4
+FROM nimlang/nim:2.4.0
 RUN apt-get update && apt-get install -y --no-install-recommends libsodium-dev git ca-certificates procps curl xz-utils cmake build-essential openssl zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
