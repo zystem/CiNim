@@ -55,6 +55,16 @@ if [ $need_db = 1 ] && [ -n "$native" ]; then
   # p is the variable of the loop inside the single-quoted trap
   # shellcheck disable=SC2154
   trap 'for p in "${rqpids[@]}"; do kill "$p" 2>/dev/null; done; wait; rm -rf "$rqdir"' EXIT
+  # a port that something already listens on is another database (an rqlite of an earlier run, a scratch container): the tests would talk to ITS data, which has the schema of another day, and fail
+  # or pass for no reason of their own (a container left on 24601 did, for weeks)
+  for ((i = 0; i < jobs; i++)); do
+    for port in $((24600 + i)) $((24700 + i)); do
+      if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+        echo "port $port is in use: another database (an rqlite of an earlier run, or a scratch container) would be talked to instead of a fresh one; stop it first (docker ps, ss -ltnp)"
+        exit 2
+      fi
+    done
+  done
   for ((i = 0; i < jobs; i++)); do
     "$native" -node-id "n$i" -http-addr "127.0.0.1:$((24600 + i))" -raft-addr "127.0.0.1:$((24700 + i))" -fk -disco-mode= "$rqdir/$i" >"$rqdir/$i.log" 2>&1 &
     rqpids+=($!)

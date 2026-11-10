@@ -2,6 +2,7 @@
 ## the request line it was given, then either tunnels the bytes to the target or refuses. Threads share nothing but fixed arrays and a lock (a string made in one thread and freed in
 ## another crashes), and a connection is served by one thread from start to end.
 import std/[nativesockets, net, locks, strutils, posix]
+import freeport
 
 type ProxyMode* = enum pmTunnel, pmRefuse
 
@@ -99,6 +100,7 @@ proc acceptLoop() {.thread.} =
     createThread(conns[slot], serve, int(c))
 
 proc startProxy*(port: int) =
+  requireFreePort(port, "startProxy")
   stopping = false
   connects = 0
   listenFd = createNativeSocket()

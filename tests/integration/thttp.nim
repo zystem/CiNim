@@ -3,8 +3,10 @@
 ## (see the header of common/httpsrv.nim). No rqlite is needed.
 import std/[unittest, httpclient, strutils, os]
 import common/httpsrv
+import ../support/freeport
 
 const port = 29862
+requireFreePorts("thttp", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 
 proc onRequest() {.gcsafe, nimcall, raises: [].} =
   {.cast(gcsafe).}:

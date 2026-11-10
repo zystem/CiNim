@@ -1,6 +1,7 @@
 ## A stand-in for the query side of VictoriaLogs (`/select/logsql/query`), for the tests of what the core asks of the store and does with the answer (D-77): it answers with the body it was given and
 ## remembers the query it was asked.
 import std/[locks, strutils, uri]
+import freeport
 import ../../src/common/httpsrv
 import guildenstern/guildenserver
 
@@ -28,8 +29,9 @@ proc onRequest() {.raises: [], gcsafe.} =
     reply(Http200, if answer.len > 0: answer else: "\n")
 
 proc startFakeVlogs*(port: int) =
+  requireFreePort(port, "startFakeVlogs")
   let s = newService(onRequest)
-  discard s.start(port, 2)
+  doAssert s.start(port, 2), "the stand-in could not bind port " & $port & " (something holds it)"
 
 proc stopFakeVlogs*() =
   shutdown()

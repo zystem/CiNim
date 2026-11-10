@@ -6,11 +6,13 @@ import common/[rqlite, stream, ctrlauth]
 import core/[schema, scheduler, loggate, logcircuit, streamhub, workkick, retrypolicy, hubmetrics]
 import protobuf_serialization
 import ../support/testcerts
+import ../support/freeport
 
 let url = getEnv("CINIM_RQLITE_URL")
 let certs = testCerts()
 drainGraceSeconds = 0.0      # D-113: a core that has just started drains no conductor for 120 s; these tests start one and want the drain at once (the pause itself: tconductorplan)
 const port = 29847
+requireFreePorts("tconductorhub", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 
 proc runStream(a: tuple[co: Core, port: int]) {.thread.} = serveStream(a.co, a.port, workers = 4)
 

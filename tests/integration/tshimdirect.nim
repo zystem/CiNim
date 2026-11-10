@@ -10,6 +10,7 @@ from core/scheduler import Core, createRun, stopServers, unenrolledControllers
 from core/artifactingest import serveArtifactIngest
 import shim/[logclient, artifacts, directclient]
 import storage/storeauth
+import ../support/freeport
 
 const
   modulePort = 29884
@@ -20,6 +21,7 @@ const
   secret1 = "the-secret-of-shard-001-direct-test"
   adminTok = "an-admin-token-for-the-direct-test"
   nodeToken = "the-token-of-the-two-nodes-direct"
+requireFreePorts("tshimdirect", [modulePort, shimPort, port1, port2, ingestPort])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 let url = getEnv("CINIM_RQLITE_URL")
 unenrolledControllers = true
 

@@ -4,8 +4,10 @@ import std/[unittest, os, strutils]
 import ../../src/core/[transitclient, kekprovider, secretvault]
 import ../../src/common/sodiumaead
 import ../support/[transitemu, connectproxy]
+import ../support/freeport
 
 const port = 18791
+requireFreePorts("ttransitclient", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 let cfg = TransitConfig(url: "http://127.0.0.1:" & $port, keyName: "cinim-shard", timeoutMs: 1500)
 
 proc key(b: byte): seq[byte] =

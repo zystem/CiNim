@@ -4,6 +4,7 @@
 ## it. What makes it worth having is what it can be told to do: not answer, be slow, say the token is locked or the rate exceeded, or change the key as if another card had been put in.
 ## It is not a key service: it holds nothing that matters. The real one is run by tests/unit/thsmgate.nim when the binary is there.
 import std/[json, strutils, os, locks, base64]
+import freeport
 import ../../src/common/httpsrv
 import guildenstern/guildenserver
 import crunchy
@@ -175,10 +176,11 @@ proc onRequest() {.raises: [], gcsafe.} =
       fail(Http400, "invalid request body: " & e.msg, false)
 
 proc startEmulator*(port: int; key: seq[byte] = @[]) =
+  requireFreePort(port, "startEmulator")
   ## returns at once: GuildenStern runs its own threads
   setKey(if key.len == keyBytes: key else: randomBytes(keyBytes))
   let s = newService(onRequest)
-  discard s.start(port, 8)
+  doAssert s.start(port, 8), "the stand-in could not bind port " & $port & " (something holds it)"
 
 proc stopEmulator*() =
   shutdown()

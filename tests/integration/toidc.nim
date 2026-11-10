@@ -4,9 +4,11 @@ import std/[unittest, json, os, strutils, times, tables, sequtils, asynchttpserv
 import common/rqlite
 import core/[schema, apiauth, secretvault, kekprovider, oidc]
 import ../support/testkek
+import ../support/freeport
 
 let url = getEnv("CINIM_RQLITE_URL")
 const port = 24885
+requireFreePorts("toidc", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 let issuer = "http://127.0.0.1:" & $port
 
 var

@@ -5,11 +5,13 @@ import common/[rqlite, stream]
 import core/[schema, scheduler, loggate, logcircuit, streamhub, workkick, retrypolicy, hubmetrics]
 import std/strutils
 import ../support/testcerts
+import ../support/freeport
 
 let url = getEnv("CINIM_RQLITE_URL")
 unenrolledControllers = true       # the controllers of these tests have no identity (T-46: the core refuses such a controller unless it is told to serve it)
 let certs = testCerts()
 const port = 29846
+requireFreePorts("tstream", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 
 proc addStep(c: var RqClient; runId, profileId: string; ordinal: int) =
   let jobId = newId()

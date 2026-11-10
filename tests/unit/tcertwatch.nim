@@ -3,6 +3,7 @@
 import std/[unittest, os, osproc, strutils, atomics]
 import ../../src/core/[grpcserve, certwatch]
 import ../support/testcerts
+import ../support/freeport
 
 proc echoHandler(ctx: var ServerContext; req: seq[byte]): seq[byte] {.nimcall, gcsafe, raises: [CatchableError].} = req
 
@@ -68,6 +69,7 @@ suite "D-105 renewed keys are taken up":
     defer: removeDir live
     copySet(a, live)
     const port = 28795                                            # the port is the same after the restart, as the core's are
+    requireFreePort(port, "tcertwatch")
     var srv = startReloading(port, live, logIngestMethod, echoHandler)
     defer: srv.stop()
     let oldClient = dialCore("127.0.0.1:" & $port, live)

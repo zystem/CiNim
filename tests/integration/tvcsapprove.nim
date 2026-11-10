@@ -4,6 +4,9 @@ import std/[unittest, json, os, strutils, times, tables, sequtils, asynchttpserv
 import crunchy
 import common/[rqlite, scriptsource]
 import core/[schema, scheduler, apiauth, groups, projectpolicy, approvals, prstatus, vcsapprove, loggate, logcircuit, runlease]
+import ../support/freeport
+
+requireFreePort(24884, "tvcsapprove")
 
 let url = getEnv("CINIM_RQLITE_URL")
 

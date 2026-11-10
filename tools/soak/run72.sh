@@ -14,6 +14,8 @@
 # The cure for the crash itself is `sysctl vm.mmap_rnd_bits=28` on the node.
 set -u
 sh "$(dirname "$0")/../test/check-mmap-rnd.sh" || exit 1      # an ASan run that crashes at start (vm.mmap_rnd_bits above 28) is an error here, not an hour lost
+. "$(dirname "$0")/../test/portfree.sh"
+require_free_port 19720 "the release soak"; require_free_port 19721 "the ASan soak"      # a soak of 72 hours that talks to the leftover of the last one is 72 lost hours
 OUT="$(realpath -m "${1:?outdir}")"; HOURS="${2:-72}"; mkdir -p "$OUT"; cd "$(dirname "$0")/../.." || exit 1
 BIN="${SOAK_BIN:-build/soak}"; SAN_BIN="${SOAK_SAN_BIN:-build/soak-san}"
 SAN_OUT_KIB="${SOAK_SAN_OUT_KIB:-1048576}"; SAN_START="${SOAK_SAN_START_SECONDS:-10}"; SAN_ATTEMPTS="${SOAK_SAN_ATTEMPTS:-3}"

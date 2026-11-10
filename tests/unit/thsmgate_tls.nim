@@ -4,8 +4,10 @@
 import std/[unittest, os, osproc, strutils, net, times]
 import ../../src/core/[transitclient, kekprovider]
 import ../support/connectproxy
+import ../support/freeport
 
 const port = 18942
+requireFreePorts("thsmgate_tls", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 let bin = getEnv("HSMGATE_BIN")
 let dir = getTempDir() / "thsmgate-tls"
 var server: Process

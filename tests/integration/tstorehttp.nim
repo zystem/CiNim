@@ -7,6 +7,7 @@ import checksums/sha2
 import common/httpsrv
 import storage/[httpstore, storeauth, curlstream]
 import common/storagebackend
+import ../support/freeport
 
 const
   port1 = 29871
@@ -14,6 +15,7 @@ const
   authPort = 29873
   secret = "a-store-secret-for-the-test-nodes"
 
+requireFreePorts("tstorehttp", [port1, port2, authPort])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 func sha(s: string): string =
   for c in secureHash(Sha_256, s): result.add toHex(ord(c), 2).toLowerAscii
 

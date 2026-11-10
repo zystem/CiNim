@@ -34,6 +34,17 @@ if st == 200:
 st, j = api("POST", "/api/v1/login", {"user": "admin", "password": NEWPW})
 print("login after change:", st)
 
+def require_free_port(port, what):
+    # a port that something holds is another browser (an earlier run): the page and the keys would be those of the old one
+    import socket
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("127.0.0.1", port))
+    except OSError:
+        sys.exit("%s: the port %d is in use (an earlier run?): ss -ltnp | grep %d" % (what, port, port))
+    finally:
+        s.close()
+require_free_port(29333, "webauthn-smoke (the debugging port of Chrome)")
 chrome = subprocess.Popen(["google-chrome", "--headless=new", "--no-sandbox", "--remote-debugging-port=29333", "--user-data-dir=" + S + "/profile", "--window-size=1000,800", "about:blank"],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 time.sleep(3)

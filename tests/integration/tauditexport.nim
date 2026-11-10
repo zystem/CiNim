@@ -4,6 +4,10 @@
 import std/[unittest, json, os, strutils, times, net, asynchttpserver, asyncdispatch, locks, httpcore]
 import common/rqlite
 import core/[schema, audit, auditexport]
+import ../support/freeport
+
+requireFreePort(24881, "tauditexport", udp = true)      # the syslog receivers and the HTTP one (tests/support/freeport.nim)
+requireFreePorts("tauditexport", [24882, 24883])
 
 let url = getEnv("CINIM_RQLITE_URL")
 

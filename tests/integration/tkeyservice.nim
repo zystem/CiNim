@@ -4,10 +4,12 @@
 import std/[unittest, os, osproc, strutils, net, times, json]
 import common/rqlite
 import core/[schema, vaultsetup, secretvault, kekprovider, transitclient]
+import ../support/freeport
 
 let url = getEnv("CINIM_RQLITE_URL")
 let bin = getEnv("HSMGATE_BIN")
 const port = 18943
+requireFreePort(port, "tkeyservice")
 let dir = getTempDir() / "tkeyservice"
 var server: Process
 
@@ -113,6 +115,7 @@ clients:
       # a second service of its own: another port, another directory, another key
       let dir2 = getTempDir() / "tkeyservice2"
       const port2 = 18944
+      requireFreePort(port2, "tkeyservice")
       removeDir dir2
       createDir dir2
       writeFile(dir2 / "m1.key", "77".repeat(32) & "\n")

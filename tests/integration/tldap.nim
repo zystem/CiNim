@@ -5,6 +5,7 @@ import std/[unittest, json, os, osproc, strutils, times, streams, sequtils]
 import common/[rqlite, ldapclient]
 import core/[schema, apiauth, ldapauth, secretvault, kekprovider, teams]
 import ../support/testkek
+import ../support/freeport
 
 let url = getEnv("CINIM_RQLITE_URL")
 
@@ -78,6 +79,7 @@ suite "D-87 LDAP":
     let name = "cinim-ldap-test-" & sfx
     let port = 31000 + (getCurrentProcessId().int mod 1500) * 2
     let tlsPort = port + 1
+    requireFreePorts("tldap", [port, tlsPort])
     createDir(dir / "mount")
     doAssert execCmd("sh " & quoteShell(getCurrentDir() / "tests/support/mkcerts.sh") & " " & quoteShell(dir / "certs")) == 0
     copyFile(dir / "certs/server.crt", dir / "mount/ldap.crt")

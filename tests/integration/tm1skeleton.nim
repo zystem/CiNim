@@ -24,6 +24,7 @@
 import std/[unittest, os, osproc, json, strutils, httpclient, strtabs, sequtils, times, uri]
 import common/rqlite
 import ../support/testcerts
+import ../support/freeport
 
 let
   rqliteUrl = getEnv("CINIM_RQLITE_URL")
@@ -51,6 +52,7 @@ let
   victoriaLogsUrl = getEnv("CINIM_VICTORIALOGS_URL")
   staticShim = getEnv("CINIM_STATIC_SHIM")
 
+if not remoteCore: requireFreePorts("tm1skeleton", [streamPort, stepReportPort, logIngestPort, apiPort])      # the core runs here: its ports must be ours (tests/support/freeport.nim)
 let ready = rqliteUrl.len > 0 and k8sPrefix.len > 0
 let logsReady = vlagentUrl.len > 0 and victoriaLogsUrl.len > 0
 

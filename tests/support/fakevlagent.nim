@@ -1,6 +1,7 @@
 ## A stand-in for vlagent's /insert/jsonline (core/logcollector.nim forwards the blocks of the log there): answers 200 to every POST and counts the bodies it took. For the tests of the
 ## collector's path, which must work with nothing else (D-75).
 import std/locks
+import freeport
 import ../../src/common/httpsrv
 import guildenstern/guildenserver
 
@@ -25,8 +26,9 @@ proc onRequest() {.raises: [], gcsafe.} =
     reply(HttpCode(code), "ok")
 
 proc startFakeVlagent*(port: int) =
+  requireFreePort(port, "startFakeVlagent")
   let s = newService(onRequest)
-  discard s.start(port, 2)
+  doAssert s.start(port, 2), "the stand-in could not bind port " & $port & " (something holds it)"
 
 proc stopFakeVlagent*() =
   shutdown()

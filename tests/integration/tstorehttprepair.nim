@@ -4,12 +4,14 @@ import std/[unittest, json, os, osproc, strutils, strtabs, sequtils, times, lock
 import common/[rqlite, httpsrv]
 import storage/[schema, httpstore, repair, storeauth]
 import common/storagebackend
+import ../support/freeport
 
 const
   port1 = 29874
   port2 = 29875
   authPort = 29876
   secret = "a-secret-for-the-http-repair-test"
+requireFreePorts("tstorehttprepair", [port1, port2, authPort])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 let url = getEnv("CINIM_RQLITE_URL")
 
 proc onAuth() {.gcsafe, nimcall, raises: [].} =

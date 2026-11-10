@@ -4,6 +4,9 @@ import std/[unittest, json, os, strutils, times, tables, asynchttpserver, asyncd
 import common/[rqlite, scriptsource]
 import core/[schema, scheduler, groups, projectpolicy, secretvault, kekprovider, prstatus, loggate, logcircuit, runlease]
 import ../support/testkek
+import ../support/freeport
+
+requireFreePort(24877, "tprstatus")          # the stand-in of the host of the repository (tests/support/freeport.nim)
 
 let url = getEnv("CINIM_RQLITE_URL")
 

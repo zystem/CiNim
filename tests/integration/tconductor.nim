@@ -5,10 +5,12 @@ import std/[unittest, json, os, osproc, atomics, strutils, times, strtabs]
 import common/[rqlite, ctrlauth, scriptsource]
 import core/[schema, scheduler, loggate, logcircuit, streamhub, retrypolicy, preflight]
 import ../support/testcerts
+import ../support/freeport
 
 let url = getEnv("CINIM_RQLITE_URL")
 let certs = testCerts()
 const port = 29848
+requireFreePorts("tconductor", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 
 proc runStream(a: tuple[co: Core, port: int]) {.thread.} = serveStream(a.co, a.port, workers = 2)
 

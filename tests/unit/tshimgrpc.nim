@@ -5,6 +5,7 @@ import unittest2
 import ../../src/core/[logcollector, scheduler]
 import ../../src/shim/logclient
 import ../support/fakevlagent
+import ../support/freeport
 
 const
   logPort = 28743
@@ -12,6 +13,7 @@ const
   reportPort = 28742
   vlPort = 18796
 
+requireFreePorts("tshimgrpc", [logPort, statusPort, reportPort, vlPort])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 proc runLog(a: tuple[co: Collector, certs: string, port: int]) {.thread.} = serveLogIngest(a.co, a.certs, a.port)
 proc runStatus(a: tuple[url, certs: string, port: int]) {.thread.} = serveStatus(a.url, a.certs, a.port)
 proc runReport(a: tuple[url, certs: string, port: int, profile: string]) {.thread.} = serveStepReport(a.url, a.certs, a.port, a.profile)

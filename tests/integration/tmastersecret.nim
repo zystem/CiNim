@@ -6,9 +6,11 @@ import std/[unittest, json, os, strutils, times]
 import common/[rqlite, ctrlauth]
 import core/[schema, secretvault, kekprovider, vaultsetup]
 import ../support/[testkek, transitemu]
+import ../support/freeport
 
 let url = getEnv("CINIM_RQLITE_URL")
 let emuPort = 19400 + getCurrentProcessId() mod 400
+requireFreePorts("tmastersecret", [emuPort])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 
 suite "D-105 the master secret in the database":
   if url.len == 0:

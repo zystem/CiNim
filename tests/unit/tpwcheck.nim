@@ -1,5 +1,6 @@
 ## IAM-001: the checks of a password a person chose - the local rules, and Pwned Passwords with k-anonymity (against a fake of the service).
 import std/[unittest, strutils, net, os]
+import ../support/freeport
 import ../../src/core/pwcheck
 
 suite "IAM-001 the local rules refuse what a list of breached passwords would hold first":
@@ -40,6 +41,7 @@ proc requestFile(port: int): string = getTempDir() / ("pwfake-" & $port & ".req"
 proc fake(arg: tuple[port: int, status: int, body: string, silent: bool]) {.thread.} =
   var s = newSocket()
   s.setSockOpt(OptReuseAddr, true)
+  requireFreePort(arg.port, "tpwcheck")
   s.bindAddr(Port(arg.port), "127.0.0.1")
   s.listen()
   var c: Socket

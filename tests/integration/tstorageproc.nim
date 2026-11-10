@@ -6,6 +6,7 @@ import std/[unittest, json, os, osproc, strutils, strtabs, sequtils, times, net,
 import common/[rqlite, storagebackend]
 import core/[schema, objectstore, storageclient]
 import storage/storeauth
+import ../support/freeport
 
 const
   modulePort = 29880
@@ -15,6 +16,7 @@ const
   secret2 = "the-secret-of-shard-002-end-to-end"
   adminTok = "an-admin-token-for-the-end-to-end"
   nodeToken = "the-token-of-the-two-nodes"
+requireFreePorts("tstorageproc", [modulePort, port1, port2])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 let url = getEnv("CINIM_RQLITE_URL")
 
 proc listening(port: int): bool =

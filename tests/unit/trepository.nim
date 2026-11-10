@@ -103,6 +103,20 @@ proc privateWords*(path, text: string; words: seq[string]): seq[Finding] =
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+proc unguardedPorts*(path, text: string): seq[Finding] =
+  ## A test that starts a server or a process on a port of its own and never asks whether the port is free (tests/support/freeport.nim): what holds the port is answered instead. A port of a test is a
+  ## number of five digits next to the word port; starting is a bind, a serve, a start or a process.
+  if not (path.startsWith("tests/unit/") or path.startsWith("tests/integration/")) or "requireFreePort" in text: return
+  var hasPort, starts = false
+  for raw in text.splitLines:
+    let line = code(raw)
+    if line.contains("Port(") or line.toLowerAscii.contains("port"):
+      for i in 0 .. line.len - 5:
+        if line[i .. i + 4].allIt(it in Digits) and (i == 0 or line[i - 1] notin Digits) and (i + 5 >= line.len or line[i + 5] notin Digits) and
+           (line.toLowerAscii.contains("port") and not line.contains("\"")): hasPort = true
+    if "bindAddr(" in line or ".serve(" in line or ".start(" in line or "startProcess(" in line or "startEmulator(" in line or "startFake" in line or "startProxy(" in line: starts = true
+  if hasPort and starts: result.add (path, 1, "starts something on a port of its own and does not call requireFreePort (tests/support/freeport.nim)")
+
 const
   docRoots = ["src/", "tools/", "deploy/", "tests/", "proto/", "lua/", "docs/", ".ci/"]
   docRefExempt = [".ci/NN.lua", ".ci/lock.json", "docs/how-to/talos.md"]     ## names the specification plans (the pipeline files of a project, D-68), and a file of another repository
@@ -122,6 +136,12 @@ proc missingDocPaths*(path, text: string; exists: proc (p: string): bool): seq[F
       if not exists(p): result.add (path, n + 1, "names a file that is not in the repository: " & p)
 
 suite "CLAUDE.md rules: each rule sees a violation":
+  test "a test that starts a server on a port of its own and does not ask whether it is free is seen":
+    check unguardedPorts("tests/unit/tx.nim", "const port = 18941\nlet s = newService(h)\ndiscard s.start(port, 2)\n").len == 1
+    check unguardedPorts("tests/unit/tx.nim", "const port = 18941\nrequireFreePort(port, \"tx\")\ndiscard s.start(port, 2)\n").len == 0
+    check unguardedPorts("tests/unit/tx.nim", "check cfg.collectorAddr == \"tcp://core:19743\"\n").len == 0          # a port in a string that nothing binds
+    check unguardedPorts("tests/unit/tx.nim", "s.bindAddr(Port(0), \"127.0.0.1\")\n").len == 0                     # port 0: the system chooses a free one
+    check unguardedPorts("src/core/x.nim", "const port = 18941\ndiscard s.start(port, 2)\n").len == 0
   test "a path in quotes that names no file is seen, a pattern, an exempt name and a path that is there are not":
     let there = proc (p: string): bool = p == "src/core/api.nim"
     check missingDocPaths("a.md", "see `src/core/gone.nim` for it\n", there).len == 1
@@ -206,6 +226,8 @@ suite "CLAUDE.md rules: the repository keeps them":
     check scan(declaredName, files) == newSeq[string]()
   test "no file holds the shape of a token or a private key outside the places for test keys":
     check scan(tokenShapes, files) == newSeq[string]()
+  test "every test that starts something on a port of its own asks whether the port is free (tests/support/freeport.nim)":
+    check scan(unguardedPorts, files) == newSeq[string]()
   test "the documents name files that are in the repository (what was deleted is in git, not in the text)":
     let there = proc (p: string): bool = fileExists(root() / p) or dirExists(root() / p)
     check scan(proc (path, text: string): seq[Finding] = missingDocPaths(path, text, there), files) == newSeq[string]()

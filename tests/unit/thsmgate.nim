@@ -3,8 +3,10 @@
 ## there: HSMGATE_BIN=<path> (`go build -o ... ./cmd/hsmgate` in the hsmgate repository).
 import std/[unittest, os, osproc, strutils, net, times]
 import ../../src/core/[transitclient, kekprovider, secretvault]
+import ../support/freeport
 
 const port = 18941
+requireFreePorts("thsmgate", [port])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 let bin = getEnv("HSMGATE_BIN")
 let dir = getTempDir() / "thsmgate"
 var server: Process
