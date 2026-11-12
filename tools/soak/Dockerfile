@@ -2,7 +2,7 @@
 # glibc, not musl: the AddressSanitizer variant needs it. Build with tools/image/kaniko-build.sh (DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak).
 # The TLS keys are made at build time and are test keys only (tools/grpc/gen_tls.sh, into build/soak-certs).
 FROM nimlang/nim:2.4.0
-RUN apt-get update && apt-get install -y --no-install-recommends libsodium-dev git ca-certificates procps curl xz-utils cmake build-essential openssl zlib1g-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends libsodium-dev git ca-certificates procps curl xz-utils cmake build-essential openssl zlib1g-dev iproute2 \
     && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.61 or later)
@@ -16,7 +16,8 @@ WORKDIR /cinim
 COPY cinim.nimble /cinim/cinim.nimble
 RUN nimble install -y --depsOnly
 COPY . /cinim
-RUN mkdir -p build && sh tools/grpc/gen_tls.sh build/soak-certs 30 \
+# the keys are test keys made here, and the step Pod of the pipeline runs as a user that is not root (the ordinary profile): they must be readable by anyone
+RUN mkdir -p build && sh tools/grpc/gen_tls.sh build/soak-certs 30 && chmod -R a+rX build/soak-certs \
     && nim c -d:release --hints:off --warnings:off -o:build/soak tools/soak/soak.nim \
     && nim c -d:sanitize --passC:-fsanitize=address --passL:-fsanitize=address --passC:-fno-omit-frame-pointer --hints:off --warnings:off \
          -o:build/soak-san tools/soak/soak.nim
