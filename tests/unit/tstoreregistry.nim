@@ -1,5 +1,6 @@
 ## D-60 (docs/storage-module.md): the settings of a store are checked before they are kept, the pieces of the S3 backend, and the names of stores. The module's own rules, without a database.
 import std/[unittest, strutils]
+import common/storagebackend
 import storage/[registry, s3backend]
 
 suite "DAT-003 the storage module's rules":
@@ -13,6 +14,36 @@ suite "DAT-003 the storage module's rules":
     check checkConfig(StoreConfig(kind: "s3", endpoint: "http://g:1", region: "r", bucket: "ab", keyId: "k"), "s").contains("bucket")
     check checkConfig(ok, "").contains("secret")
     check checkConfig(ok, "with space").contains("secret")
+
+  test "the room of a Garage volume is read from its metrics: the data volume, the tightest node, nothing known from text that has no such lines":
+    let text = "# HELP garage_local_disk_avail Garage available disk space on each node\n# TYPE garage_local_disk_avail gauge\n" &
+               "garage_local_disk_avail{volume=\"data\"} 8214327296\ngarage_local_disk_avail{volume=\"metadata\"} 100\n" &
+               "garage_local_disk_total{volume=\"data\"} 12884901888\ngarage_local_disk_total{volume=\"metadata\"} 200\ngarage_block_bytes_read 5\n"
+    let info = parseGarageSpace(text)
+    check info.known and info.free == 8214327296'i64 and info.total == 12884901888'i64
+    let two = parseGarageSpace("garage_local_disk_avail{volume=\"data\"} 5e9\ngarage_local_disk_total{volume=\"data\"} 10e9\ngarage_local_disk_avail{volume=\"data\"} 2e9\ngarage_local_disk_total{volume=\"data\"} 8e9\n")
+    check two.known and two.free == 2_000_000_000'i64 and two.total == 8_000_000_000'i64            # the node with the least room says how much there is
+    check not parseGarageSpace("").known and not parseGarageSpace("garage_block_bytes_read 5\n").known and not parseGarageSpace("garage_local_disk_avail{volume=\"data\"} x\n").known
+
+  test "a size is said for a person, and the refusal of a full store says what is wrong and what to do":
+    check humanBytes(512 * 1024) == "512.0 KiB" and humanBytes(0) == "0 B" and humanBytes(12884901888'i64) == "12.0 GiB" and humanBytes(1536) == "1.5 KiB"
+    let full = SpaceInfo(known: true, free: 512 * 1024, total: 12884901888'i64)
+    let why = spaceProblem(full, 87395216'i64, defaultReserveBytes, "garage-main")
+    check "garage-main is nearly full" in why and "512.0 KiB free of 12.0 GiB" in why and "83.3 MiB" in why and "256.0 MiB are kept free" in why and "delete caches" in why
+    check spaceProblem(SpaceInfo(), 1'i64 shl 40, defaultReserveBytes, "g") == ""                    # a store that does not say how much room it has refuses nothing
+    check spaceProblem(SpaceInfo(known: true, free: 10'i64 shl 30, total: 12'i64 shl 30), 100'i64 shl 20, defaultReserveBytes, "g") == ""
+    check spaceProblem(SpaceInfo(known: true, free: 300'i64 shl 20, total: 1'i64 shl 40), 44'i64 shl 20, defaultReserveBytes, "g") == ""        # exactly the reserve is left: it fits
+    check spaceProblem(SpaceInfo(known: true, free: 300'i64 shl 20, total: 1'i64 shl 40), 45'i64 shl 20, defaultReserveBytes, "g") != ""
+
+  test "space_url is an http(s) address or empty":
+    let ok = StoreConfig(kind: "s3", endpoint: "http://garage:3900", region: "garage", bucket: "cinim-artifacts", keyId: "GK123")
+    var withUrl = ok
+    withUrl.spaceUrl = "http://cinim-storage-garage:3903/metrics"
+    check checkConfig(withUrl, "secret") == ""
+    withUrl.spaceUrl = "garage:3903/metrics"
+    check checkConfig(withUrl, "secret").contains("space_url")
+    withUrl.spaceUrl = "http://a b/metrics"
+    check checkConfig(withUrl, "secret").contains("space_url")
 
   test "DAT-003 the body of CompleteMultipartUpload lists the parts in order with quoted ETags":
     let x = completeXml(@[(1, "\"aa\""), (2, "bb")])

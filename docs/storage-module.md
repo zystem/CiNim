@@ -107,6 +107,23 @@ A read of a range used to be one string in the module (the store's answer, a cop
 * **The reply** is `Transfer-Encoding: chunked` (`Reply.stream` in `storage/service.nim`; `std/httpclient` of the core and of the shim decodes it). It begins with the first piece, so that an error before it (no such object, the store away) is still an answer with a status; an error after it closes the connection, and the reader, who gets no end of the stream, knows. The limit of a read is 256 MiB (a guard, not a size in memory); the shim reads blocks of 8 MiB (`directReadSize`).
 * **Measured:** `tstorageproc` (six blocks of 8 MiB written and read back whole, in parallel) peaked at 35 MiB in the module; on the TESTING cluster six runs of 20 MB up and down, to Garage and to Caddy, with reads of 8 MiB, left the module at 31 MiB and the core at 37 MiB. `tstorehttp` reads across the border of two chunks, past the end, with a node away and with a reader that goes away.
 
+## Room in the store (2026-11-12)
+
+A full store does not say so: on 2026-11-11 the volume of Garage (4 GiB, 4.3 GB held) had 512 KiB left, uploads stalled with no error, and three self-builds hung before anyone looked at the volume. So the module
+**asks the store how much room it has before it takes an upload** and refuses one that would not fit, with a message that says what is wrong.
+
+* **Where the room comes from.** `ObjectBackend.freeSpace` (`common/storagebackend.nim`); S3 has no call for it, so a store of `kind: s3` has an optional `space_url` (an address that answers the Prometheus text
+  of Garage: `http://cinim-storage-garage:3903/metrics`, the admin port, which answers `/metrics` with no token when `metrics_token` is not set). The module reads `garage_local_disk_avail` and `garage_local_disk_total`
+  of the `data` volume (the node with the least room when there are several), asks at most every 5 s per thread, and **a store that does not say, or does not answer in 3 s, refuses nothing**. The chart's Garage
+  sidecar registers it (`space_url` in the registration, the port 3903 in the Service and the NetworkPolicy of Garage); a mirror of Caddy nodes (`dav`) says nothing yet.
+* **What is refused, and when.** A PUT (an object, a part: also on the port for shims, D-61) and the begin of a multipart upload (`POST ...?uploads`, the optional `&size=<bytes>` of the whole object counts) are
+  answered **507** `store_full` when `free - need < reserve`; the reserve is `CINIM_STORAGE_RESERVE_BYTES` (256 MiB). Nothing is written. The words: "the store garage-main is nearly full: 512.0 KiB free of
+  12.0 GiB, this upload needs 83.3 MiB and 256.0 MiB are kept free; delete caches or artifacts, shorten their retention (cache.retention, artifacts.retention), or give the store a bigger volume".
+* **What the person sees.** The core passes it on as the refusal `store_full` with those words (`storageclient.nim`: 507 is final, not retried; `artifactingest.nim: fromOutcome`), so a cache step says
+  `not saved (store_full: the store garage-main is nearly full: ...)` and an artifact step fails with them; the direct client of the shim does not wait on a 507 either.
+* **What it does not do.** It does not look at a store that does not say (a `dav` mirror, an S3 without `space_url`), it does not count what an organisation holds (the quota of the cache, `cache.quota`, is that),
+  and it does not free anything. Keep the quota below the volume: the Garage volume of the TESTING cluster is 12 GiB and `cache.quota` 5 GiB.
+
 ## Phase 1 as built (D-59)
 
 In the core, before the module exists: tables `object_stores` (name, kind, config, default flag) and `org_storage` (organisation, purpose, store), a column `store` in `artifacts`, `caches` and `held_logs` (the row remembers where the object was written; switching an organisation's store never moves or loses objects), `core/objectstore.nim` (`saveStore`, `forgetStore`, `loadStore(name)`, `storeFor(tenant, purpose)`, `StoreSet`). API: `GET /api/v1/stores`, `PUT|DELETE /api/v1/stores/{name}`, `POST /api/v1/stores/{name}:check`, `POST /api/v1/stores/{name}:default`, `GET|PUT /api/v1/organizations/{slug}/storage` (`{"artifacts": "<store>", "caches": "<store>", ...}`, an empty name is the default; audit event `storage.select`). Purposes: `artifacts`, `caches`, `held_logs`, `audit`; the core uses the first two so far (held logs are not switched on, DAT-006; the audit stays in the database). **The org-level administrator does not exist yet** (RBAC is shard-level, IAM-001): the organisation's choice is for a shard administrator until organisation roles are built. The old single store (`vault_meta` `objectstore`) is not read any more: there is no migration (owner's decision), the stores are set up again.

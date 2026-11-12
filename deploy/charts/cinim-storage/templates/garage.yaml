@@ -62,7 +62,7 @@ data:
     bid=$(get "/v2/GetBucketInfo?globalAlias=$BUCKET" | tr -d ' \n' | sed -n 's/^{"id":"\([0-9a-f]*\)".*/\1/p')
     post /v2/AllowBucketKey "{\"bucketId\":\"$bid\",\"accessKeyId\":\"$kid\",\"permissions\":{\"read\":true,\"write\":true,\"owner\":true}}" >/dev/null
     echo "garage: ready, bucket $BUCKET, key $kid"
-    register "$STORE_NAME" "{\"endpoint\":\"http://cinim-storage-garage:3900\",\"region\":\"garage\",\"bucket\":\"$BUCKET\",\"access_key_id\":\"$kid\",\"secret_access_key\":\"$sec\",\"default\":$STORE_DEFAULT}"
+    register "$STORE_NAME" "{\"endpoint\":\"http://cinim-storage-garage:3900\",\"region\":\"garage\",\"bucket\":\"$BUCKET\",\"access_key_id\":\"$kid\",\"secret_access_key\":\"$sec\",\"space_url\":\"http://cinim-storage-garage:3903/metrics\",\"default\":$STORE_DEFAULT}"
     exec sleep 2147483647
 ---
 apiVersion: apps/v1
@@ -148,5 +148,5 @@ metadata:
   labels: {{- include "cinim-storage.labels" . | nindent 4 }}
 spec:
   selector: {app.kubernetes.io/name: cinim-storage-garage}
-  ports: [{name: s3, port: 3900, targetPort: 3900}]
+  ports: [{name: s3, port: 3900, targetPort: 3900}, {name: metrics, port: 3903, targetPort: 3903}]       # 3903: the admin port, of which the module reads /metrics (the room of the volume, `space_url`); the rest of it wants Garage's own token
 {{- end }}

@@ -11,6 +11,7 @@ type
     endpoint*, region*, bucket*, keyId*: string       ## s3
     nodes*: seq[string]          ## dav: http://host:port or https://host:port of each node
     minAcks*: int                ## dav: 0 means every node must confirm a write
+    spaceUrl*: string            ## s3: where the store says how much room it has (Garage's /metrics); "" = the room is not checked
 
   StoreEntry* = object
     name*: string
@@ -47,18 +48,20 @@ func checkConfig*(cfg: StoreConfig; secret: string): string =
   if cfg.region.len == 0 or cfg.region.len > 64 or cfg.region.anyIt(it notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}): return "region is letters, digits, - and _"
   if cfg.bucket.len < 3 or cfg.bucket.len > 63 or cfg.bucket.anyIt(it notin {'a' .. 'z', '0' .. '9', '-', '.'}): return "bucket is 3..63 lowercase letters, digits, - and ."
   if cfg.keyId.len == 0 or cfg.keyId.len > 128 or cfg.keyId.anyIt(it < '!' or it > '~'): return "access_key_id is 1..128 printable characters"
+  if cfg.spaceUrl.len > 0 and (not (cfg.spaceUrl.startsWith("http://") or cfg.spaceUrl.startsWith("https://")) or cfg.spaceUrl.len > 200 or cfg.spaceUrl.anyIt(it < '!' or it > '~')):
+    return "space_url is an http(s) address that says how much room the store has (Garage: http://host:3903/metrics), or empty"
   if secret.len == 0 or secret.len > 256 or secret.anyIt(it < '!' or it > '~'): return "secret_access_key is 1..256 printable characters"
   ""
 
 func isMirror*(cfg: StoreConfig): bool = cfg.kind == "dav"
 
 proc configJson(cfg: StoreConfig): string =
-  $(%*{"endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "key_id": cfg.keyId, "nodes": cfg.nodes, "min_acks": cfg.minAcks})
+  $(%*{"endpoint": cfg.endpoint, "region": cfg.region, "bucket": cfg.bucket, "key_id": cfg.keyId, "nodes": cfg.nodes, "min_acks": cfg.minAcks, "space_url": cfg.spaceUrl})
 
 proc configOf(kind, config: string): StoreConfig =
   try:
     let j = parseJson(config)
-    result = StoreConfig(kind: kind, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr, bucket: j{"bucket"}.getStr, keyId: j{"key_id"}.getStr, minAcks: j{"min_acks"}.getInt(0))
+    result = StoreConfig(kind: kind, endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr, bucket: j{"bucket"}.getStr, keyId: j{"key_id"}.getStr, minAcks: j{"min_acks"}.getInt(0), spaceUrl: j{"space_url"}.getStr)
     if j{"nodes"} != nil and j["nodes"].kind == JArray:
       for a in j["nodes"].elems: result.nodes.add a.getStr
   except CatchableError: result = StoreConfig()
@@ -133,4 +136,4 @@ proc backend*(l: Loaded; onMissed: MissedProc = nil): ObjectBackend =
   ## the store as the module talks to it; the one place that says which backend it is
   if l.cfg.kind == "dav":
     return newHttpMirror(l.cfg.nodes.mapIt(newHttpNode(it, l.secret)), l.cfg.minAcks, onMissed)
-  S3Backend(endpoint: l.cfg.endpoint, region: l.cfg.region, bucket: l.cfg.bucket, keyId: l.cfg.keyId, secret: l.secret)
+  S3Backend(endpoint: l.cfg.endpoint, region: l.cfg.region, bucket: l.cfg.bucket, keyId: l.cfg.keyId, secret: l.secret, spaceUrl: l.cfg.spaceUrl)

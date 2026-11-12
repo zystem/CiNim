@@ -42,7 +42,7 @@ proc request(d: DirectClient; meth: HttpMethod; path, grant: string; headers: op
       let code = r.code.int
       if code in 200 .. 299: return DirectReply(ok: true, code: code, etag: (try: parseJson(r.body){"etag"}.getStr except CatchableError: ""), data: r.body)
       let why = errorText(r.body)
-      if code in [401, 403, 404, 409]: return DirectReply(code: code, detail: "the storage module answered " & $code & " " & why)       # the grant is not good: no use to wait
+      if code in [401, 403, 404, 409, 507]: return DirectReply(code: code, detail: "the storage module answered " & $code & " " & why)       # the grant is not good, or the store is full (507: its words are in `why`): no use to wait
       if code >= 500 and ("answered 422" in why or "another content" in why):
         # a node of the mirror refused the part because its bytes are not the digest it was told: not a reason to wait, the part is sent again (putPart) and then given up
         return DirectReply(code: code, detail: "sha256_mismatch: the storage module answered " & $code & " " & why)

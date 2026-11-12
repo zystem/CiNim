@@ -42,6 +42,34 @@ method objectSize*(b: ObjectBackend; key: string): tuple[res: Outcome, size: int
   ## `res.ok` and a size, or `res.ok` false and `res.error` "no such object" when it is not there
 method deleteObject*(b: ObjectBackend; key: string): Outcome {.base.} = fail("not implemented")
 
+type SpaceInfo* = object
+  known*: bool             ## false: the store does not say how much room it has (S3 has no call for it, a mirror of nodes none)
+  free*, total*: int64     ## bytes; of the volume that holds the data (the tightest node when there are several)
+
+const defaultReserveBytes* = 256'i64 * 1024 * 1024      ## what the module keeps free in a store: an upload that would leave less is refused (CINIM_STORAGE_RESERVE_BYTES)
+
+method freeSpace*(b: ObjectBackend): SpaceInfo {.base.} = SpaceInfo()
+  ## how much room the store has now; `known` is false when it cannot say, and nothing is refused then
+
+func humanBytes*(n: int64): string =
+  ## "7.6 GiB", "512 KiB": a size for a person
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"]
+  var v = float(max(n, 0'i64))
+  var u = 0
+  while v >= 1024.0 and u < units.high:
+    v /= 1024.0
+    inc u
+  if u == 0: $int(v) & " B"
+  else:
+    let r = int(v * 10.0 + 0.5)
+    $(r div 10) & "." & $(r mod 10) & " " & units[u]
+
+func spaceProblem*(info: SpaceInfo; need, reserve: int64; store: string): string =
+  ## "" when `need` more bytes fit (or the store does not say how much room it has), else the sentence that tells a person what is wrong and what to do
+  if not info.known or info.free - need >= reserve: return ""
+  "the store " & store & " is nearly full: " & humanBytes(max(info.free, 0'i64)) & " free of " & humanBytes(info.total) & ", this upload needs " & humanBytes(need) &
+    " and " & humanBytes(reserve) & " are kept free; delete caches or artifacts, shorten their retention (cache.retention, artifacts.retention), or give the store a bigger volume"
+
 proc bodyOf*(data: string; piece = 65536): BodySource =
   ## a body that is already in memory, as a source (the tests, and the backends that have no streaming of their own)
   result = proc (sink: proc (chunk: string): bool {.closure.}): bool {.closure.} =

@@ -44,6 +44,7 @@ proc refuse(code, detail: string): ArtifactAck =
   ArtifactAck(header: Header(protocol: 1), accepted: false, failure: Failure(code: code, detail: detail))
 
 proc fromOutcome(o: Outcome): ArtifactAck =
+  if not o.retry and o.error.startsWith("store_full: "): return refuse("store_full", o.error["store_full: ".len .. ^1])      # the store has no room: the words of the module, for the person who reads the log
   refuse(if o.retry: "store_unavailable" else: "store_error", o.error)
 
 proc backendFor(ss: StoreSet; name: string): tuple[be: ObjectBackend, refusal: ArtifactAck] =

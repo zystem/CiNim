@@ -102,6 +102,7 @@ proc outcomeOf(a: Answer): Outcome =
     let j = parseJson(a.body)
     detail = j{"error"}.getStr & (if j{"detail"}.getStr.len > 0: ": " & j{"detail"}.getStr else: "")
   except CatchableError: detail = a.body[0 ..< min(200, a.body.len)]
+  if a.code == 507: return fail(detail)                                  # "store_full: the store ... is nearly full ...": final, and the words are for a person
   if a.code == 404 and detail.startsWith("no_such_object"): return fail("no such object")
   if a.code == 404 and detail.startsWith("no_such_store"): return fail("no such store")
   fail("the storage module answered " & $a.code & " " & detail, retry = a.code >= 500 or a.code == 429)

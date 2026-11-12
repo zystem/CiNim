@@ -7,6 +7,7 @@ import curlstream
 
 type S3Backend* = ref object of ObjectBackend
   endpoint*, region*, bucket*, keyId*, secret*: string
+  spaceUrl*: string        ## where the store tells how much room it has (Garage: http://host:3903/metrics, the admin port, which answers without a token when no metrics_token is set); "" = not asked
 
 const callExpires = 300
 
@@ -53,6 +54,44 @@ proc call(b: S3Backend; meth: HttpMethod; key: string; extra: openArray[(string,
     result.res = fail("the store did not answer: " & e.msg, retry = true)
 
 method putObject*(b: S3Backend; key, data: string): Outcome = b.call(HttpPut, key, body = data).res
+
+func parseGarageSpace*(text: string): SpaceInfo =
+  ## the room of the data volume from the Prometheus text of Garage (`garage_local_disk_avail{volume="data"} 8.2e9` and `garage_local_disk_total`): the tightest node when there are several;
+  ## not `known` when the text has no such lines
+  var avail, total: seq[float]
+  for line in text.splitLines:
+    if not (line.startsWith("garage_local_disk_avail{") or line.startsWith("garage_local_disk_total{")) or "volume=\"data\"" notin line: continue
+    let sp = line.rfind(' ')
+    if sp < 0: continue
+    let v = try: parseFloat(line[sp + 1 .. ^1]) except ValueError: continue
+    if line.startsWith("garage_local_disk_avail{"): avail.add v else: total.add v
+  if avail.len == 0 or total.len == 0: return
+  var low = avail[0]
+  var at = 0
+  for i, a in avail:
+    if a < low: (low = a; at = i)
+  SpaceInfo(known: true, free: int64(low), total: int64(total[min(at, total.high)]))
+
+var spaceCache {.threadvar.}: seq[(string, float, SpaceInfo)]      ## per thread: what a URL said and when (a few seconds are good enough, and the answer costs a request)
+
+method freeSpace*(b: S3Backend): SpaceInfo =
+  if b.spaceUrl.len == 0: return
+  let now = epochTime()
+  for e in spaceCache:
+    if e[0] == b.spaceUrl and now - e[1] < 5.0: return e[2]
+  var info: SpaceInfo
+  let cl = newHttpClient(timeout = 3000)
+  defer: cl.close()
+  try:
+    let r = cl.request(b.spaceUrl)
+    if r.code.int == 200: info = parseGarageSpace(r.body)
+  except CatchableError: discard                                    # it does not say: nothing is refused for that
+  var kept: seq[(string, float, SpaceInfo)]
+  for e in spaceCache:
+    if e[0] != b.spaceUrl: kept.add e
+  kept.add (b.spaceUrl, now, info)
+  spaceCache = kept
+  info
 
 proc streamTo(b: S3Backend; key: string; extra: openArray[(string, string)]; size: int64; src: BodySource): tuple[res: Outcome, etag: string] =
   ## one PUT of `size` bytes read from `src` as it comes, through libcurl, to a presigned URL (the payload is not signed, so the caller checks the digest, see storage/service.nim)

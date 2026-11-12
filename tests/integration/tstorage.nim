@@ -19,6 +19,7 @@ var nodeObjects: array[2, Table[string, string]]              # the two nodes of
 var nodeDown: array[2, bool]
 var missedLog: seq[(string, string, string)]
 var nextUpload = 0
+var roomOf: SpaceInfo                                          # what the memory store says about its room (known false: it says nothing)
 
 type
   MemStore = ref object of ObjectBackend
@@ -29,6 +30,7 @@ type
 
 func slot(store, key: string): string = store & "|" & key
 
+method freeSpace(b: MemStore): SpaceInfo = withLock memLock: result = roomOf
 method putObject(b: MemStore; key, data: string): Outcome =
   withLock memLock: memObjects[slot(b.store, key)] = data
   done()
@@ -240,6 +242,31 @@ suite "D-60 the storage module's API":
       check c.query(%*[["SELECT count(*) FROM storage_objects WHERE store = ? AND key = ?", garage, "001/acme/s1_run/dist/app one.txt"]])["results"][0]{"values"}[0][0].getInt == 0
       check coreCall("DELETE", u).code == 200                                                    # deleting what is not there is fine
       discard coreCall("DELETE", u, shard = "002", secret = secret2)
+
+    test "a store that is nearly full refuses an upload before it starts, with a 507 whose words say what to do; a store that says nothing, or has room, takes it":
+      let u = objUri(garage, "acme/s1_run/full/a.bin")
+      let body = "x".repeat(1000)
+      withLock memLock: roomOf = SpaceInfo(known: true, free: 10 * 1024 * 1024 * 1024, total: 12 * 1024 * 1024 * 1024)
+      check coreCall("PUT", u, body).code == 200                                                  # room: taken
+      withLock memLock: roomOf = SpaceInfo()
+      check coreCall("PUT", u, body).code == 200                                                  # the store does not say: nothing is refused
+      withLock memLock: roomOf = SpaceInfo(known: true, free: 512 * 1024, total: 12 * 1024 * 1024 * 1024)       # what Garage showed when it had stalled: 512 KiB
+      let refused = coreCall("PUT", u & "x", body)
+      check refused.code == 507 and refused.js["error"].getStr == "store_full"
+      check "nearly full" in refused.js["detail"].getStr and "512.0 KiB free of 12.0 GiB" in refused.js["detail"].getStr and "delete caches" in refused.js["detail"].getStr
+      check not memObjects.hasKey(slot(garage, "001/acme/s1_run/full/a.binx"))                    # nothing was written
+      # a multipart upload is refused when it is begun (the size of the whole object, when the caller says it, counts), and each part is checked again
+      check coreCall("POST", objUri(garage, "acme/s1_run/full/big.bin", "uploads")).code == 507
+      withLock memLock: roomOf = SpaceInfo(known: true, free: 300 * 1024 * 1024, total: 12 * 1024 * 1024 * 1024)       # 300 MiB free, 256 MiB kept: 44 MiB can be taken
+      check coreCall("POST", objUri(garage, "acme/s1_run/full/big.bin", "uploads&size=" & $(100 * 1024 * 1024))).code == 507
+      let begun = coreCall("POST", objUri(garage, "acme/s1_run/full/big.bin", "uploads&size=" & $(20 * 1024 * 1024)))
+      check begun.code == 200
+      withLock memLock: roomOf = SpaceInfo(known: true, free: 262 * 1024 * 1024, total: 12 * 1024 * 1024 * 1024)
+      let part = coreCall("PUT", objUri(garage, "acme/s1_run/full/big.bin", "upload=" & encodeUrl(begun.js["upload_id"].getStr, usePlus = false) & "&part=1"), "y".repeat(8 * 1024 * 1024))
+      check part.code == 507 and part.js["error"].getStr == "store_full"                          # 6 MiB are left above the reserve, a part is 8
+      check coreCall("DELETE", objUri(garage, "acme/s1_run/full/big.bin", "upload=" & encodeUrl(begun.js["upload_id"].getStr, usePlus = false))).code == 200
+      withLock memLock: roomOf = SpaceInfo()
+      discard coreCall("DELETE", u)
 
     test "D-60 a PUT is a stream: it needs the digest first, takes a body in small pieces, and a sender that breaks off leaves nothing":
       let u = objUri(garage, "acme/s1_run/streamed.bin")

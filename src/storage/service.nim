@@ -137,6 +137,15 @@ proc hashing(src: BodySource; d: Digest): BodySource =
       d.n += chunk.len
       sink(chunk))
 
+proc reserveBytes(): int64 =
+  ## what is kept free in a store: an upload that would leave less is refused (CINIM_STORAGE_RESERVE_BYTES, 256 MiB)
+  try: max(0'i64, parseBiggestInt(getEnv("CINIM_STORAGE_RESERVE_BYTES", $defaultReserveBytes))) except ValueError: defaultReserveBytes
+
+proc noRoom(be: ObjectBackend; store: string; need: int64): Reply =
+  ## 507 with the words for a person when `need` more bytes would not leave the reserve free in the store; a Reply with code 0 when they fit or the store does not say
+  let why = spaceProblem(be.freeSpace(), need, reserveBytes(), store)
+  if why.len == 0: Reply() else: problem(507, "store_full", why)
+
 proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[string, string]; raw: string; src: BodySource; bodyLen: int64; now: int64): Reply =
   let name = if storeArg == defaultName: "" else: storeArg
   let l = c.loadStore(cfg.key, name)
@@ -156,6 +165,8 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
     if given.len != 64 or not given.allCharsInSet({'0' .. '9', 'a' .. 'f'}): return problem(400, "sha256_required", "X-Content-SHA256 is the hex digest of the body, sent with the request")
     if bodyLen > partSize: return problem(413, "too_large", "an object in one call, or a part, is at most " & $partSize & " bytes; use a multipart upload")
     if bodyLen <= 0: return problem(400, "empty_body", "an object is at least one byte")
+    let full507 = be.noRoom(l.name, bodyLen)                    # before a byte is sent on: a full store stalls or fails late, with no word of why
+    if full507.code != 0: return full507
     let dg = Digest(h: initSha256())
     let body = src.hashing(dg)
     if "upload" in q:
@@ -176,6 +187,9 @@ proc objectCall(c: var RqClient; shard, storeArg, key, meth: string; q: Table[st
     return jsonReply(200, %*{"size": bodyLen})
   of "POST":
     if "uploads" in q:
+      let expected = try: parseBiggestInt(q.getOrDefault("size", "0")) except ValueError: 0'i64     # the size of the whole object, when the caller says it
+      let full507 = be.noRoom(l.name, max(expected, 0'i64))
+      if full507.code != 0: return full507
       let r = be.createMultipart(full)
       if not r.res.ok: return outcomeReply(r.res)
       return jsonReply(200, %*{"upload_id": r.uploadId})
@@ -249,7 +263,7 @@ proc admin(c: var RqClient; meth, rest, rawQuery: string; src: BodySource; bodyL
     var items = newJArray()
     for e in c.listStores():
       var j = %*{"name": e.name, "kind": e.cfg.kind, "default": e.isDefault, "endpoint": e.cfg.endpoint, "region": e.cfg.region, "bucket": e.cfg.bucket, "access_key_id": e.cfg.keyId,
-                 "nodes": e.cfg.nodes, "min_acks": (if e.cfg.isMirror and e.cfg.minAcks <= 0: e.cfg.nodes.len else: e.cfg.minAcks), "objects": c.objectCount(e.name)}
+                 "nodes": e.cfg.nodes, "min_acks": (if e.cfg.isMirror and e.cfg.minAcks <= 0: e.cfg.nodes.len else: e.cfg.minAcks), "objects": c.objectCount(e.name), "space_url": e.cfg.spaceUrl}
       if e.cfg.isMirror: j["repair_pending"] = %c.pendingRepairs(e.name)
       items.add j
     return jsonReply(200, %*{"stores": items})
@@ -276,7 +290,7 @@ proc admin(c: var RqClient; meth, rest, rawQuery: string; src: BodySource; bodyL
   try: j = (if small.ok: parseJson(small.data) else: nil)
   except JsonParsingError: j = nil
   if j == nil or j.kind != JObject: return problem(400, "invalid_request", "the body is {kind, endpoint, region, bucket, access_key_id, secret_access_key} or {kind: dav, nodes, token, min_acks}")
-  var sc = StoreConfig(kind: j{"kind"}.getStr("s3"), endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr)
+  var sc = StoreConfig(kind: j{"kind"}.getStr("s3"), endpoint: j{"endpoint"}.getStr, region: j{"region"}.getStr("garage"), bucket: j{"bucket"}.getStr, keyId: j{"access_key_id"}.getStr, spaceUrl: j{"space_url"}.getStr)
   var secret = j{"secret_access_key"}.getStr
   if sc.kind == "dav":
     sc.minAcks = j{"min_acks"}.getInt(0)
@@ -394,6 +408,8 @@ proc shimDispatch*(meth, uri, raw: string; src: BodySource; bodyLen: int64; now:
       let l = c.loadStore(cfg.key, store)
       if not l.ok: return problem(if l.error == "no_such_store": 404 else: 409, l.error, "the store is not ready: " & l.error)
       let be = maker()(l, nil)
+      let full507 = be.noRoom(l.name, bodyLen)                  # the direct transfer of a shim: the same check, so that a part is refused with the reason and not sent into a full store
+      if full507.code != 0: return full507
       let full = shard & "/" & key
       let dg = Digest(h: initSha256())
       let r = be.uploadPartStream(full, upload, n, bodyLen, given, src.hashing(dg))

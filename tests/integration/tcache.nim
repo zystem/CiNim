@@ -13,12 +13,14 @@ type MemStore = ref object of ObjectBackend
   objects: Table[string, string]
   uploads: Table[string, tuple[key: string, parts: Table[int, string]]]
   next: int
+  refuse: Outcome                               ## when `error` is set, the upload cannot be started: this is what the store says
 
 method uploadedParts(b: MemStore; key, uploadId: string): tuple[res: Outcome, known: bool, parts: seq[PartRecord]] = (done(), true, b.direct)
 method putObject(b: MemStore; key, data: string): Outcome =
   b.objects[key] = data
   done()
 method createMultipart(b: MemStore; key: string): tuple[res: Outcome, uploadId: string] =
+  if b.refuse.error.len > 0: return (b.refuse, "")
   inc b.next
   let id = "up" & $b.next
   b.uploads[id] = (key, initTable[int, string]())
@@ -405,3 +407,19 @@ suite "DAT-004 the requests of the cache on the channel":
       check checkCacheDecl("""{"cache":[{"key":"a","mode":"save","paths":[],"restore_keys":[]}]}""").len > 0
       check checkCacheDecl("""{"cache":[{"key":"a","mode":"both","paths":["x"],"restore_keys":[]}]}""").len > 0
       check cacheDecls("""{"cache":[{"key":"a","mode":"restore","paths":[],"restore_keys":[]}]}""")[0].mode == "restore"
+
+    test "a store that is full refuses the save with the code store_full and the words of the module; a store that did not answer is store_unavailable":
+      withDirect(proc () =
+        let t = tenant()
+        let be = store()
+        var r = direct("put_begin", "deps-1")
+        let data = "archive bytes"
+        r.size = uint64(data.len)
+        r.sha256 = shaOf(data)
+        be.refuse = fail("store_full: the store garage-main is nearly full: 512.0 KiB free of 12.0 GiB, this upload needs 13 B and 256.0 MiB are kept free; delete caches or artifacts")
+        let full = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
+        check not full.accepted and full.failure.code == "store_full" and full.failure.detail.startsWith("the store garage-main is nearly full: 512.0 KiB free of 12.0 GiB")
+        check not c.uploadingEntry(t, "", "deps-1").found                    # nothing is left half made
+        be.refuse = fail("the storage module did not answer: timed out", retry = true)
+        let away = handleCache(c, r, t, "", decls, fixedStoreSet(be), now)
+        check not away.accepted and away.failure.code == "store_unavailable")

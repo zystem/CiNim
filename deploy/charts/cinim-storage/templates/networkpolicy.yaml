@@ -58,5 +58,6 @@ spec:
         - podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage}}
       ports:
         - {protocol: TCP, port: 3900}
+        - {protocol: TCP, port: 3903}        # /metrics: how much room the volume has (the module refuses an upload that would fill it)
 {{- end }}
 {{- end }}
