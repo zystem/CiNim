@@ -4,25 +4,20 @@
 # image is that of this file and cinim.nimble. It holds the real key service, hsmgate (github.com/zystem/hsmgate), built from the tag HSMGATE_REF with the Go of the project (the base is pinned
 # as the project pins it): the tests thsmgate.nim, thsmgate_tls.nim and tkeyservice.nim run against it when HSMGATE_BIN is set, which the image does (they are skipped on a machine without it).
 # A new version of hsmgate is a change of this ARG: the image is made again, and the tests say whether the core still speaks with it. The same for `buf` (BUF_VERSION).
-FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS hsmgate
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS hsmgate
 # renovate: datasource=github-tags depName=zystem/hsmgate
 ARG HSMGATE_REF=v0.3.0
 RUN git clone -q --depth 1 --branch "${HSMGATE_REF}" https://github.com/zystem/hsmgate.git /src
 WORKDIR /src
 RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=${HSMGATE_REF}" -o /out/hsmgate ./cmd/hsmgate
 
-# blobgate, the storage service (github.com/zystem/blobgate), built from the tag BLOBGATE_REF with the same Go: the process tests of the storage (tests/integration/tstorageproc.nim, tshimdirect.nim)
-# run against it when BLOBGATE_BIN is set, which the image does. The image that the chart deploys is the one that project publishes (ghcr.io/zystem/blobgate:<version>); keep the two at one version.
-FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS blobgate
-# renovate: datasource=github-tags depName=zystem/blobgate
-ARG BLOBGATE_REF=v0.3.0
-RUN git clone -q --depth 1 --branch "${BLOBGATE_REF}" https://github.com/zystem/blobgate.git /src
-WORKDIR /src
-RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=${BLOBGATE_REF}" -o /out/blobgate ./cmd/blobgate
+# blobgate, the storage service (github.com/zystem/blobgate): the program of the image that its project publishes and the chart deploys (deploy/charts/cinim-storage), so that the process tests of the storage
+# (tests/integration/tstorageproc.nim, tshimdirect.nim) run what runs in the cluster; BLOBGATE_BIN names it. Keep this tag and the version of the dependency in the chart at one version.
+FROM ghcr.io/zystem/blobgate:0.3.0 AS blobgate
 
 # buf, for the protocol contract tests (tests/contract/tproto_compat.nim: `buf breaking` against proto/compat/baseline.binpb): built from the source of the pinned version with the same Go, so that the
 # module proxy's checksums vouch for it and no binary is fetched by hand
-FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS buf
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS buf
 # renovate: datasource=github-releases depName=bufbuild/buf
 ARG BUF_VERSION=v1.75.0
 RUN GOBIN=/out CGO_ENABLED=0 go install -trimpath "github.com/bufbuild/buf/cmd/buf@${BUF_VERSION}"
@@ -55,5 +50,5 @@ RUN nimble install -y --depsOnly
 WORKDIR /usr/src/app
 COPY --from=hsmgate /out/hsmgate /usr/local/bin/hsmgate
 COPY --from=buf /out/buf /usr/local/bin/buf
-COPY --from=blobgate /out/blobgate /usr/local/bin/blobgate
+COPY --from=blobgate /blobgate /usr/local/bin/blobgate
 ENV HSMGATE_BIN=/usr/local/bin/hsmgate BLOBGATE_BIN=/usr/local/bin/blobgate
