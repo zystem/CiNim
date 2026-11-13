@@ -9,7 +9,7 @@
 --      image of the last good commit under the new tag) and the tests (`tools/test/run.sh` in a Pod of the test image: the integration tests start their own `rqlited` processes, no Docker; `TEST_JOBS`
 --      workers, `TEST` false leaves them out; the compiled C of the tests is a cache of the organisation (`nim-<hash>-<commit>`), so that only a first run compiles everything),
 --   4. a deploy step (profile = DEPLOY_PROFILE, "platform": a deploy profile of the organisation (D-115), an ordinary, non-root Pod that may reach the Kubernetes API server with the token of its account, the rights of deployer.yaml) when DEPLOY is true: `helm upgrade --atomic --wait`
---      of the storage module and of the shard with the new tag of the images (the controllers and the conductors follow the core by themselves, D-62), a rollback of both releases to the
+--      of the storage service (the chart of this commit) and of the shard with the new tag of the images (the controllers and the conductors follow the core by themselves, D-62), a rollback of both releases to the
 --      revisions they had if either fails, and a look at what runs afterwards.
 -- D-82: what a commit changes decides what is done. The platform tells the script `run.source.base`, the commit of the last run of this pipeline on the same ref that ended OK and called `ci.verified()` (a new branch: on the default branch); the first job reduces the files that differ
 -- between it and the commit to the areas of the tree and the changed test files, and this script decides (`plan` below): the images that must be built, and the tests that must run (those that import a
@@ -32,7 +32,7 @@ local KUBECONFORM = "ghcr.io/yannh/kubeconform:v0.8.0-alpine"       -- the binar
 
 -- the component (tools/image/Dockerfile.<component>) and the image it is pushed as
 local COMPONENTS = { { target = "core", image = "cinim" }, { target = "controller", image = "cinim-controller" },
-                     { target = "conductor", image = "cinim-conductor" }, { target = "storage", image = "cinim-storage" },
+                     { target = "conductor", image = "cinim-conductor" },
                      { target = "ui", image = "cinim-ui" } }
 
 -- What the checked-out commit says, returned to the script as outputs: DEPS (the hash of what the image of the libraries is made of: cinim.nimble, the script of the Kubernetes client and the Dockerfile), TESTDEPS
@@ -168,13 +168,14 @@ back() {
   exit 1
 }
 # the repository is set too: the values a release was made with can name a registry that is gone (the storage release did), and `--reset-then-reuse-values` keeps them
-helm upgrade "$STORAGE_RELEASE" deploy/charts/cinim-storage -n "$NAMESPACE" --reset-then-reuse-values --set image.repository="$pull/cinim-storage" --set image.tag="$IMAGE_TAG" --atomic --wait --timeout 10m || back
+# the storage service is blobgate (the image ghcr.io/zystem/blobgate and the chart kept in deploy/charts/cinim-storage/charts, both at the version the chart names): it is not built here, the release is only brought to the chart of this commit
+helm upgrade "$STORAGE_RELEASE" deploy/charts/cinim-storage -n "$NAMESPACE" --reset-then-reuse-values --atomic --wait --timeout 10m || back
 helm upgrade "$RELEASE" deploy/charts/cinim-shard -n "$NAMESPACE" --reset-then-reuse-values --set image.repository="$pull/cinim" --set image.tag="$IMAGE_TAG" --atomic --wait --timeout 10m || back
-# what runs now: the core and the module are at the tag, and ready
+# what runs now: the core is at the tag, and the core and the storage service are ready
+img=$(kubectl get deploy cinim-core -o jsonpath='{.spec.template.spec.containers[0].image}')
+case "$img" in *":$IMAGE_TAG") ;; *) echo "cinim-core runs $img, not $IMAGE_TAG" >&2; back;; esac
 for d in cinim-core cinim-storage; do
-  img=$(kubectl get deploy "$d" -o jsonpath='{.spec.template.spec.containers[0].image}')
   ready=$(kubectl get deploy "$d" -o jsonpath='{.status.readyReplicas}')
-  case "$img" in *":$IMAGE_TAG") ;; *) echo "$d runs $img, not $IMAGE_TAG" >&2; back;; esac
   [ "${ready:-0}" -ge 1 ] || { echo "$d has no ready replica" >&2; back; }
 done
 echo "rolled out $IMAGE_TAG: shard revision $(revision "$RELEASE"), storage revision $(revision "$STORAGE_RELEASE")"
@@ -183,8 +184,8 @@ echo "rolled out $IMAGE_TAG: shard revision $(revision "$RELEASE"), storage revi
 -- D-82: what a commit changes, and so what is done. The components are the directories of src/ and each is made of itself and what it imports (tests/unit/tboundaries.nim keeps this table equal to the
 -- imports). `areas` are what the first job found changed: `src/<component>`, `proto`, `lua`, `docs`, `tools/image/Dockerfile.<x>`, a file of the top directory, ... A path that is not known is "everything":
 -- a wrong guess toward more work is safe, toward less is not.
-local DEPENDS = { common = {}, shim = {"common"}, jobcontroller = {"common"}, conductor = {"common", "executor"}, executor = {"common"}, core = {"common", "executor"}, storage = {"common"}, ui = {"common"}, router = {"common", "ui"} }
-local IMAGE_PARTS = { core = {"core"}, controller = {"jobcontroller", "shim"}, conductor = {"conductor"}, storage = {"storage"}, ui = {"ui"} }   -- the components of src/ that an image is made of
+local DEPENDS = { common = {}, shim = {"common"}, jobcontroller = {"common"}, conductor = {"common", "executor"}, executor = {"common"}, core = {"common", "executor"}, ui = {"common"}, router = {"common", "ui"} }
+local IMAGE_PARTS = { core = {"core"}, controller = {"jobcontroller", "shim"}, conductor = {"conductor"}, ui = {"ui"} }   -- the components of src/ that an image is made of
 local SPEAK_PROTO = { core = true, controller = true, conductor = true }     -- the images that have the types of the messages
 local RUN_LUA = { core = true, conductor = true }                            -- the images that run Lua and have its stubs
 local BUILD_ALL = { ["cinim.nimble"] = true, ["config.nims"] = true, ["nim.cfg"] = true, ["tools/image/build-static.sh"] = true, ["tools/image/Dockerfile.deps"] = true,
@@ -204,7 +205,7 @@ end
 local function plan(areas_text, changed_tests_text)
   local areas = list_of(areas_text)
   local out = { images = {}, tests = "none", components = "", changed_tests = (changed_tests_text and changed_tests_text ~= "none") and changed_tests_text or "" }
-  local all_images = { core = true, controller = true, conductor = true, storage = true, ui = true }
+  local all_images = { core = true, controller = true, conductor = true, ui = true }
   local changed, everything, tests_all, test_files = {}, false, false, false
   local dockerfile, proto, lua = {}, false, false
   for _, a in ipairs(areas) do
@@ -309,7 +310,7 @@ return ci.pipeline({
     local base = (info.BASE and info.BASE ~= "none") and info.BASE or ""
     local decided
     if base == "" then   -- nothing is known of the last good commit: everything is built and tested
-      decided = { images = { core = true, controller = true, conductor = true, storage = true, ui = true }, tests = "all", components = "", changed_tests = "" }
+      decided = { images = { core = true, controller = true, conductor = true, ui = true }, tests = "all", components = "", changed_tests = "" }
     else
       decided = plan(info.AREAS, info.CHANGED_TESTS)
     end

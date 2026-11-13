@@ -1,12 +1,11 @@
-## D-60 (docs/storage-module.md, phase 2), end to end: the module as a process (`build/storage`), two real Caddy nodes (`build/caddy-store`) whose `forward_auth` asks the module, the core's own client
-## (`RemoteBackend`, core/storageclient.nim) with its signed calls, and the organisation's choice of store. An object goes core -> module -> both nodes with the shard in front of its key; another
-## shard does not see it; a node that is away misses a write, and the module's repair pass gives it back; the module is killed and started again and holds nothing but what is in rqlite.
-## Needs CINIM_RQLITE_URL, build/caddy-store (made by tools/store/build-caddy.sh when Docker is there) and makes build/storage.
+## D-60 (docs/storage-module.md), end to end: the storage service as a process (blobgate, `BLOBGATE_BIN`), a mirror of two directories (rclone `local` nodes), the core's own client
+## (`RemoteBackend`, core/storageclient.nim) with its signed calls, and the organisation's choice of store. An object goes core -> service -> both nodes with the shard in front of its key; another
+## shard does not see it; a node that is away misses a write, and the service's repair pass gives it back; the service is killed and started again and holds nothing but what is in rqlite.
+## Needs CINIM_RQLITE_URL and BLOBGATE_BIN (the test image has both; elsewhere the test is skipped).
 import std/[unittest, json, os, osproc, strutils, strtabs, sequtils, times, net, httpclient]
 import common/[rqlite, storagebackend]
 import core/[schema, objectstore, storageclient]
-import storage/storeauth
-import ../support/freeport
+import ../support/[freeport, storagebin]
 
 const
   modulePort = 29880
@@ -42,13 +41,9 @@ proc admin(meth: HttpMethod; path: string; body = ""): tuple[code: int, body: st
 suite "D-60 the storage module as a process":
   if url.len == 0:
     echo "  skipped: CINIM_RQLITE_URL is not set"
-  elif not fileExists("build/caddy-store") and execCmd("tools/store/build-caddy.sh") != 0:
-    echo "  skipped: no build/caddy-store and it could not be made (it needs Docker and the network)"
-  elif execCmd("nim c --hints:off --warnings:off -d:ssl -p:src --outdir:build -o:build/storage src/storage/main.nim") != 0:
-    echo "  FAILED to build build/storage"
-    check false
+  elif blobgateBin().len == 0:
+    echo "  skipped: BLOBGATE_BIN is not set (the test image has it; elsewhere build github.com/zystem/blobgate and name the program)"
   else:
-    let caddy = getCurrentDir() / "build" / "caddy-store"
     let base = getTempDir() / ("tstorageproc-" & $getCurrentProcessId())
     removeDir(base)
     createDir(base)
@@ -68,45 +63,42 @@ suite "D-60 the storage module as a process":
       env["CINIM_STORAGE_SEAL_KEY"] = "a-seal-key-for-the-end-to-end-test"
       env["CINIM_STORAGE_REPAIR_SECONDS"] = "1"
       env["CINIM_STORAGE_REPAIR_RETRY_SECONDS"] = "1"          # a repair tried while a node is still down is tried again in a second, not in half a minute: the test does not depend on which side of its restart the tick falls
-      result = startProcess("/bin/sh", args = ["-c", "exec " & getCurrentDir() / "build" / "storage" & " > " & base / "storage.log" & " 2>&1"], env = env)
+      result = startProcess("/bin/sh", args = ["-c", "exec " & quoteShell(blobgateBin()) & " > " & base / "storage.log" & " 2>&1"], env = env)
       for _ in 0 ..< 100:
         if listening(modulePort): return
         sleep 100
       quit "the module did not start; see " & base / "storage.log"
 
-    proc startNode(root: string; port: int): Process =
-      createDir(root)
-      let file = base / ("Caddyfile-" & $port)
-      writeFile(file, "{\n\torder webdav before file_server\n\tauto_https off\n\tadmin off\n}\n:" & $port & " {\n\tforward_auth 127.0.0.1:" & $modulePort & " {\n\t\turi " & authPath &
-        "?node=127.0.0.1:" & $port & "\n\t}\n\twebdav {\n\t\troot " & root & "\n\t\tatomic_put\n\t\tcreate_dirs\n\t}\n}\n")
-      let env = newStringTable()
-      for k, v in envPairs(): env[k] = v
-      env["XDG_DATA_HOME"] = base / "xdg"
-      env["XDG_CONFIG_HOME"] = base / "xdgc"
-      result = startProcess("/bin/sh", args = ["-c", "exec " & caddy & " run --config " & file & " --adapter caddyfile > " & base / ("caddy-" & $port & ".log") & " 2>&1"], env = env)
-      for _ in 0 ..< 100:
-        if listening(port): return
-        sleep 100
-      quit "the node on " & $port & " did not start"
+    # a node is a directory (rclone `local`); a node that is away is a file where the directory was (a chmod does not keep root out, and the test image runs as root)
+    proc nodeAway(root: string) =
+      moveDir(root, root & ".away")
+      writeFile(root, "")
+    proc nodeBack(root: string) =
+      if dirExists(root & ".away"):
+        removeFile(root)
+        moveDir(root & ".away", root)
+    proc nodeHolds(root, name: string): bool =
+      for f in walkDirRec(root):
+        if name in f: return true
 
     var module = startModule()
-    var n1 = startNode(base / "n1", port1)
-    var n2 = startNode(base / "n2", port2)
-    let nodes = $ %*["http://127.0.0.1:" & $port1, "http://127.0.0.1:" & $port2]
+    createDir(base / "n1")
+    createDir(base / "n2")
+    let nodes = $ %*[{"remote": ":local:" & base / "n1"}, {"remote": ":local:" & base / "n2"}]
     configureStorage("http://127.0.0.1:" & $modulePort, secret1, "001")
 
     test "D-60 no store yet: the core is told so, and a store is made with the admin token only":
       check moduleStores().ok and moduleStores().stores.len == 0
       check RemoteBackend(store: "").putObject("a/b", "x").retry == false
       check RemoteBackend(store: "").putObject("a/b", "x").ok == false
-      check admin(HttpPut, "/v1/admin/stores/caddy-main", """{"kind":"dav","nodes":""" & nodes & ""","token":"short"}""").code == 400
-      let made = admin(HttpPut, "/v1/admin/stores/caddy-main", """{"kind":"dav","nodes":""" & nodes & ""","token":"""" & nodeToken & """"}""")
+      check admin(HttpPut, "/v1/admin/stores/caddy-main", """{"kind":"mirror","nodes":""" & nodes & ""","min_acks":5}""").code == 400
+      let made = admin(HttpPut, "/v1/admin/stores/caddy-main", """{"kind":"mirror","nodes":""" & nodes & """}""")
       check made.code == 200
       forgetStoreList()
       let list = moduleStores()
-      check list.ok and list.stores.len == 1 and list.defaultName == "caddy-main" and list.stores[0].kind == "dav"
+      check list.ok and list.stores.len == 1 and list.defaultName == "caddy-main" and list.stores[0].kind == "mirror"
       forgetStoreList()
-      check admin(HttpPut, "/v1/admin/stores/caddy-degraded", """{"kind":"dav","nodes":""" & nodes & ""","token":"""" & nodeToken & """","min_acks":1}""").code == 200
+      check admin(HttpPut, "/v1/admin/stores/caddy-degraded", """{"kind":"mirror","nodes":""" & nodes & ""","min_acks":1}""").code == 200
 
     test "D-60 an object goes through the module to both nodes, with the shard in front of its key, and comes back":
       let be = RemoteBackend(store: "caddy-main")
@@ -114,7 +106,7 @@ suite "D-60 the storage module as a process":
       check be.putObject("acme/s1_run/dist/app one.txt", "hello through the module").ok
       check be.objectSize("acme/s1_run/dist/app one.txt").size == 24
       check be.readRange("acme/s1_run/dist/app one.txt", 6, 7).data == "through"
-      check dirExists(base / "n1" / "001/acme/s1_run/dist/app one.txt~obj") and dirExists(base / "n2" / "001/acme/s1_run/dist/app one.txt~obj")
+      check nodeHolds(base / "n1", "app%20one.txt~") and nodeHolds(base / "n2", "app%20one.txt~")
       check RemoteBackend(store: "").objectSize("acme/s1_run/dist/app one.txt").size == 24          # "" is the default store
       # a multipart upload of two parts, the first of the size the nodes want
       var big = newString(partSize + 100)
@@ -191,13 +183,13 @@ suite "D-60 the storage module as a process":
 
     test "D-60 a write that a node missed is repaired by the module, and the module's restart loses nothing":
       let be = RemoteBackend(store: "caddy-degraded")                                          # min_acks 1: one node is enough
-      n2.stop()
+      nodeAway(base / "n2")
       check be.putObject("acme/s1_run/degraded.txt", "written while node two was away").ok
-      check not fileExists(base / "n2" / "001/acme/s1_run/degraded.txt~obj/.c0000000")
-      n2 = startNode(base / "n2", port2)
+      check not nodeHolds(base / "n2", "degraded.txt~")
+      nodeBack(base / "n2")
       var repaired = false
       for _ in 0 ..< 60:
-        if fileExists(base / "n2" / "001/acme/s1_run/degraded.txt~obj/.c0000000"):
+        if nodeHolds(base / "n2", "degraded.txt~"):
           repaired = true
           break
         sleep 500
@@ -206,13 +198,13 @@ suite "D-60 the storage module as a process":
       module.stop()
       module = startModule()
       check moduleStores().ok and moduleStores().stores.len == 2 and moduleStores().defaultName == "caddy-main"
-      n1.stop()                                                                                  # now only node two can answer
+      nodeAway(base / "n1")                                                                      # now only node two can answer
       check RemoteBackend(store: "caddy-degraded").readRange("acme/s1_run/degraded.txt", 0, 100).data == "written while node two was away"
-      n1 = startNode(base / "n1", port1)
+      nodeBack(base / "n1")
       check admin(HttpGet, "/v1/admin/stores").body.contains("caddy-degraded")
       check "token" notin admin(HttpGet, "/v1/admin/stores").body.replace("access_key_id", "")
 
-    n1.stop()
-    n2.stop()
+    nodeBack(base / "n1")
+    nodeBack(base / "n2")
     module.stop()
     removeDir(base)

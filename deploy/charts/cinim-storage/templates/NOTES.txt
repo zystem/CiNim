@@ -1,10 +1,12 @@
-The storage module is installed as cinim-storage:18090 in {{ .Release.Namespace }}.
+The storage service (blobgate) is installed as {{ .Values.blobgate.fullnameOverride }}:{{ .Values.blobgate.config.port }} in {{ .Release.Namespace }}.
 
 Point the core of the shard at it (chart cinim-shard):
   storage.url: {{ include "cinim-storage.moduleUrl" . }}
+  storage.directUrl: http://{{ .Values.blobgate.fullnameOverride }}.{{ .Release.Namespace }}.svc:{{ .Values.blobgate.config.shimPort }}
   storage.tokenSecret: {name: {{ include "cinim-storage.secret" . }}, key: shard-{{ .Values.shard }}}
 
-Stores: {{ if .Values.stores.garage.enabled }}{{ .Values.stores.garage.name }} (Garage) {{ end }}{{ if .Values.stores.caddy.enabled }}{{ .Values.stores.caddy.name }} ({{ .Values.stores.caddy.nodes }} Caddy nodes) {{ end }}{{ range .Values.stores.external }}{{ .name }} (external) {{ end }}
-They are registered with the module by the sidecar of Garage and by the Job cinim-storage-register. See them:
-  kubectl -n {{ .Release.Namespace }} exec deploy/cinim-storage -- ... (no shell in the image; use a port-forward and curl -H "Authorization: Bearer <admin token>" http://127.0.0.1:18090/v1/admin/stores)
+Stores: {{ if .Values.stores.garage.enabled }}{{ .Values.stores.garage.name }} (Garage) {{ end }}{{ range .Values.stores.external }}{{ .name }} (S3) {{ end }}{{ range .Values.stores.mirrors }}{{ .name }} (mirror) {{ end }}
+They are registered with the service by the sidecar of Garage and by the Job cinim-storage-register. See them (the image has no shell: use a port-forward and curl):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ .Values.blobgate.fullnameOverride }} {{ .Values.blobgate.config.port }}
+  curl -H "Authorization: Bearer <admin token>" http://127.0.0.1:{{ .Values.blobgate.config.port }}/v1/admin/stores
 An organisation chooses its store with PUT /api/v1/organizations/<slug>/storage on the core (docs/artifacts.md).

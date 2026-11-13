@@ -2,7 +2,7 @@
 # Builds the images of the platform in the cluster with Kaniko, as a build Pod under the admission policy of D-42 (no Docker daemon needed).
 #   REGISTRY=<registry host:port as the Pods reach it, plain HTTP>  TAG=<tag>  [NS=cinim-build] [KUBECONFIG=...]  tools/image/kaniko-build.sh
 # The components are built each from its own Dockerfile (tools/image/Dockerfile.<component>) from the image of the libraries `cinim-deps:<hash>` (tools/image/Dockerfile.deps), which is made
-# first unless the registry has it: TARGETS="<component>:<image> ..." (by default core:cinim controller:cinim-controller conductor:cinim-conductor storage:cinim-storage).
+# first unless the registry has it: TARGETS="<component>:<image> ..." (by default core:cinim controller:cinim-controller conductor:cinim-conductor).
 # Other images: DOCKERFILE=<path in the tree> TARGETS="<stage>:<image> ..." (a `-` stage means no --target), for example the soak harness:
 #   DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak REGISTRY=... TAG=... tools/image/kaniko-build.sh
 # It makes the namespace (Pod Security baseline, the build-pod policy of deploy/examples/build-pods), sends the working tree as the build
@@ -10,9 +10,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 REG="${REGISTRY:?registry host:port as the Pods reach it}"; TAG="${TAG:?tag}"; NS="${NS:-cinim-build}"
-DOCKERFILE="${DOCKERFILE:-}"; DEPS_HASH=$(cat cinim.nimble tools/k8s/build_client.sh tools/image/Dockerfile.deps | sha256sum | cut -c1-16); TARGETS="${TARGETS:-core:cinim controller:cinim-controller conductor:cinim-conductor storage:cinim-storage}"
+DOCKERFILE="${DOCKERFILE:-}"; DEPS_HASH=$(cat cinim.nimble tools/k8s/build_client.sh tools/image/Dockerfile.deps | sha256sum | cut -c1-16); TARGETS="${TARGETS:-core:cinim controller:cinim-controller conductor:cinim-conductor}"
 K="${KUBECTL:-kubectl}"
-NEED_DEPS=0; for pair in $TARGETS; do [ "${pair%%:*}" = caddy-store ] || NEED_DEPS=1; done
+NEED_DEPS=1
 EX=deploy/examples/build-pods
 # the namespace and the policy of the example, with the namespace renamed; the policy needs the controller's account name in that namespace
 sed "s/org-example/$NS/g" $EX/namespace.yaml | $K apply -f - >/dev/null
@@ -52,8 +52,6 @@ spec:
             if [ -n "$DOCKERFILE" ]; then
               tgt=""; [ "\$t" != "-" ] && tgt="--target=\$t"
               /kaniko/executor --dockerfile=/workspace/$DOCKERFILE \$tgt --destination=$REG/\$n:$TAG \$flags --skip-unused-stages=true
-            elif [ "\$t" = caddy-store ]; then
-              /kaniko/executor --dockerfile=/workspace/tools/image/Dockerfile.caddy-store --destination=$REG/\$n:$TAG \$flags
             else
               /kaniko/executor --dockerfile=/workspace/tools/image/Dockerfile.\$t --build-arg DEPS_IMAGE=$REG/cinim-deps:$DEPS_HASH --destination=$REG/\$n:$TAG \$flags
             fi

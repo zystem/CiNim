@@ -1,6 +1,12 @@
 apiVersion: v2
 name: cinim-storage
-description: The storage module of CiNim (D-60, docs/storage-module.md) - the service that keeps the object stores of a shard (artifacts, caches) - and, as the operator chooses, Garage (S3), Caddy nodes with WebDAV (a mirror), or both, or a store that is already there.
+description: "The object stores of a shard (D-60, docs/storage-module.md): the storage service blobgate (a dependency) and, as the operator chooses, Garage (S3) installed here, a store that is already there, or a mirror of any servers that rclone speaks to."
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
+dependencies:
+  # The storage service is blobgate (https://github.com/zystem/blobgate), a project of its own, the way hsmgate is. Its archive is kept in charts/ (the deploy profile of the pipeline reaches
+  # nothing but the API server, so it cannot fetch it); make it again with `helm dependency update deploy/charts/cinim-storage` after a change of the version here.
+  - name: blobgate
+    version: 0.3.0
+    repository: oci://ghcr.io/zystem/charts

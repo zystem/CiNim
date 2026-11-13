@@ -1,10 +1,6 @@
-{{- define "cinim-storage.image" -}}
-{{- printf "%s:%s" (required "image.repository is required" .Values.image.repository) .Values.image.tag -}}
-{{- end -}}
-
-{{/* the Secret that holds the module's secrets */}}
+{{/* the Secret that holds the service's secrets */}}
 {{- define "cinim-storage.secret" -}}
-{{- default "cinim-storage" .Values.secrets.existingSecret -}}
+{{- .Values.blobgate.existingSecret -}}
 {{- end -}}
 
 {{/* <shard>=<secret>;<shard>=<secret>, in the order of the shards' names */}}
@@ -17,7 +13,7 @@
 {{- end -}}
 
 {{- define "cinim-storage.moduleUrl" -}}
-http://cinim-storage:18090
+http://{{ .Values.blobgate.fullnameOverride }}:{{ .Values.blobgate.config.port }}
 {{- end -}}
 
 {{- define "cinim-storage.labels" -}}

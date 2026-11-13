@@ -36,7 +36,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
     if "REGISTRY_DOCKER_CONFIG" in meta: (if talks: inc res.withLogin else: inc res.strayLogin)
     let opts = parts[3]
     proc nameOf(): string =                                      # the image a step of `j:image` is about
-      for c in ["cinim-controller", "cinim-conductor", "cinim-storage", "cinim-ui", "cinim-deps", "cinim-test", "cinim"]:
+      for c in ["cinim-controller", "cinim-conductor", "cinim-ui", "cinim-deps", "cinim-test", "cinim"]:
         if "\"NAME\":\"" & c & "\"" in opts: return c
     proc componentOf(c: string): string = (if c == "cinim": "core" else: c.replace("cinim-", ""))
     if "git init -q --bare mirror.git" in cmd:                   # `j:checkout()`: the commit it checked out
@@ -62,7 +62,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
       if d >= 0:
         let ref0 = cmd[d + 14 ..< cmd.find(' ', d)]
         res.tags.add ref0[ref0.rfind(':') + 1 .. ^1]
-      for comp in ["core", "controller", "conductor", "storage", "ui"]:
+      for comp in ["core", "controller", "conductor", "ui"]:
         if "Dockerfile." & comp & " " in cmd: res.builds.add comp
       if "Dockerfile.deps " in cmd: res.depsImage = true
       if "Dockerfile.test " in cmd: res.testImage = true
@@ -97,34 +97,33 @@ func noSelection(env: string): bool =
 
 const common = "SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nTAG=20261023-aaaaaaa\nDEPS=d1\nTESTDEPS=t1\nHELMDEPS=h1\n"
 const goodBase = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-let allFive = @["conductor", "controller", "core", "storage", "ui"]
+let allFour = @["conductor", "controller", "core", "ui"]
 
 proc changed(areas: string; tests = "none"; extra: seq[(string, bool)] = @[]): Flow =
   ## the first job says that `areas` (and the changed test files `tests`) differ between the base and the commit
   flow(common & "BASE=" & goodBase & "\nAREAS=" & areas & "\nCHANGED_TESTS=" & tests & "\n", base = goodBase, retagged = extra)
 
 suite "D-82 what the pipeline builds, tags and runs":
-  test "no base (a run by hand, the first run, a script that came in the request): the five images are built, none is tagged, all the tests run":
+  test "no base (a run by hand, the first run, a script that came in the request): the four images are built, none is tagged, all the tests run":
     let f = flow(common)
     check f.status.startsWith("esDone")
-    check f.builds.sorted == allFive and f.retags.len == 0 and f.tests and f.depsImage and f.testImage and f.testEnv.noSelection
+    check f.builds.sorted == allFour and f.retags.len == 0 and f.tests and f.depsImage and f.testImage and f.testEnv.noSelection
   test "a base that the first job could not use (BASE=none, the base commit is not in the repository) is no base":
     let f = flow(common & "BASE=none\nAREAS=none\nCHANGED_TESTS=none\n", base = goodBase)
-    check f.builds.sorted == allFive and f.retags.len == 0 and f.tests
-  test "a change in the ui only: the ui is built, the other four are tagged from the images of the base, and the tests that import the ui and the router (which imports it) run":
+    check f.builds.sorted == allFour and f.retags.len == 0 and f.tests
+  test "a change in the ui only: the ui is built, the other three are tagged from the images of the base, and the tests that import the ui and the router (which imports it) run":
     let f = changed("src/ui")
     check f.status.startsWith("esDone")
-    check f.builds == @["ui"] and f.retags.sorted == @["conductor", "controller", "core", "storage"] and f.tests
+    check f.builds == @["ui"] and f.retags.sorted == @["conductor", "controller", "core"] and f.tests
     check f.testEnv == "COMPONENTS=router,ui;CHANGED_TESTS=;"
   test "a component's own source builds its image and the images made of it, and only those":
     check changed("src/shim").builds == @["controller"]
     check changed("src/jobcontroller").builds == @["controller"]
     check changed("src/core").builds == @["core"]
     check changed("src/conductor").builds == @["conductor"]
-    check changed("src/storage").builds == @["storage"]
-  test "what a component imports builds it too: the executor is in the core and the conductor; common is in all five":
+  test "what a component imports builds it too: the executor is in the core and the conductor; common is in all four":
     check changed("src/executor").builds.sorted == @["conductor", "core"]
-    check changed("src/common").builds.sorted == allFive
+    check changed("src/common").builds.sorted == allFour
     check changed("src/executor").testEnv.contains("COMPONENTS=conductor,core,executor")
   test "the proto builds the three that speak it, the Lua stubs the two that run Lua":
     check changed("proto").builds.sorted == @["conductor", "controller", "core"]
@@ -132,7 +131,7 @@ suite "D-82 what the pipeline builds, tags and runs":
   test "the build files of everything build and test everything; common, the proto and the Lua stubs test everything":
     for a in ["cinim.nimble", "config.nims", "tools/image/build-static.sh", "tools/image/Dockerfile.deps", "tools/k8s", "tools/proto", "tools/shim"]:
       let f = changed(a)
-      check f.builds.sorted == allFive and f.tests and f.testEnv.noSelection
+      check f.builds.sorted == allFour and f.tests and f.testEnv.noSelection
     for a in ["src/common", "proto", "lua"]:
       check changed(a).tests and changed(a).testEnv.noSelection
   test "the Dockerfile of an image builds that image; the Dockerfile of the tests, the test support and the chart build none and run everything":
@@ -140,20 +139,20 @@ suite "D-82 what the pipeline builds, tags and runs":
     check changed("tools/image/Dockerfile.ui").tests == false
     for a in ["tools/image/Dockerfile.test", "tests/support", "tools/test", ".ci", "deploy"]:
       let f = changed(a)
-      check f.builds.len == 0 and f.retags.sorted == allFive and f.tests and f.testEnv.noSelection
-  test "docs and the like build nothing and run nothing: the five are tagged":
+      check f.builds.len == 0 and f.retags.sorted == allFour and f.tests and f.testEnv.noSelection
+  test "docs and the like build nothing and run nothing: the four are tagged":
     for a in ["docs", "docs-tr", "README.md", "CLAUDE.md", ".gitignore", "docs,docs-tr,README.md"]:
       let f = changed(a)
-      check f.status.startsWith("esDone") and f.builds.len == 0 and f.retags.sorted == allFive and not f.tests and not f.testImage
-  test "nothing changed (the base is the commit itself): nothing is built, the five are tagged, no test runs":
+      check f.status.startsWith("esDone") and f.builds.len == 0 and f.retags.sorted == allFour and not f.tests and not f.testImage
+  test "nothing changed (the base is the commit itself): nothing is built, the four are tagged, no test runs":
     let f = changed("none")
-    check f.builds.len == 0 and f.retags.sorted == allFive and not f.tests
+    check f.builds.len == 0 and f.retags.sorted == allFour and not f.tests
   test "several areas make the union":
     let f = changed("docs,src/ui,src/core,src/shim")
-    check f.builds.sorted == @["controller", "core", "ui"] and f.retags.sorted == @["conductor", "controller", "core", "storage", "ui"].filterIt(it in ["conductor", "storage"])
+    check f.builds.sorted == @["controller", "core", "ui"] and f.retags == @["conductor"]
   test "a path that is not known builds and tests everything":
     let f = changed("something")
-    check f.builds.sorted == allFive and f.tests and f.testEnv.noSelection
+    check f.builds.sorted == allFour and f.tests and f.testEnv.noSelection
   test "a changed test file runs even when nothing it imports changed, and nothing is built for it":
     let f = changed("tests/unit", tests = "tests/unit/tx.nim,tests/integration/ty.nim")
     check f.builds.len == 0 and f.tests and f.testEnv == "COMPONENTS=;CHANGED_TESTS=tests/unit/tx.nim,tests/integration/ty.nim;"
@@ -161,8 +160,8 @@ suite "D-82 what the pipeline builds, tags and runs":
     let f = changed("tests/unit", tests = "all")
     check f.tests and f.testEnv.noSelection
   test "an image that the base has none of is built after all":
-    let f = changed("src/ui", extra = @[("core", true), ("controller", true), ("conductor", true), ("storage", false)])
-    check f.builds.sorted == @["storage", "ui"]
+    let f = changed("src/ui", extra = @[("core", true), ("controller", true), ("conductor", false)])
+    check f.builds.sorted == @["conductor", "ui"]
   test "the deploy follows whatever was built or tagged":
     let f = flow(common & "BASE=" & goodBase & "\nAREAS=docs\nCHANGED_TESTS=none\n", base = goodBase, deploy = true)
     check f.status.startsWith("esDone") and f.deploy
@@ -198,7 +197,7 @@ suite "the registry: any one, with a login or without (Docker config, crane and 
     check f.checks.sorted == @["cinim-deps", "cinim-test"] and f.depsImage and f.testImage
   test "images that the registry has already are not built again (the libraries and the tests are made once)":
     let f = flow(common, present = @["cinim-deps", "cinim-test"])
-    check f.checks.len == 2 and not f.depsImage and not f.testImage and f.builds.sorted == allFive
+    check f.checks.len == 2 and not f.depsImage and not f.testImage and f.builds.sorted == allFour
   test "only one of them is there: the other is built":
     let f = flow(common, present = @["cinim-deps"])
     check not f.depsImage and f.testImage
@@ -206,20 +205,20 @@ suite "the registry: any one, with a login or without (Docker config, crane and 
 suite "several registries for one project: the images are copied to the others":
   test "no other registry: nothing is copied":
     check flow(common).copies.len == 0
-  test "other registries: each of the five images is copied to them by its own job, which is given the login (the Docker config holds them all)":
+  test "other registries: each of the four images is copied to them by its own job, which is given the login (the Docker config holds them all)":
     let f = flow(common, login = true, pushAlso = "ghcr.io/acme, quay.io/acme")
-    check f.copies.sorted == @["cinim", "cinim-conductor", "cinim-controller", "cinim-storage", "cinim-ui"]
+    check f.copies.sorted == @["cinim", "cinim-conductor", "cinim-controller", "cinim-ui"]
     check f.withLogin == f.registrySteps and f.strayLogin == 0
   test "when nothing is built (BUILD is off) there is nothing new to copy":
     check flow(common, pushAlso = "ghcr.io/acme", build = false).copies.len == 0
-  test "an image tagged from the base is copied as well: the other registries get the five tags of every run":
+  test "an image tagged from the base is copied as well: the other registries get the four tags of every run":
     let f = flow(common & "BASE=" & goodBase & "\nAREAS=src/ui\nCHANGED_TESTS=none\n", base = goodBase, pushAlso = "ghcr.io/acme")
-    check f.retags.len == 4 and f.copies.len == 5
+    check f.retags.len == 3 and f.copies.len == 4
 
 suite "the tag of the images is the platform's run.tag unless the pipeline is told one":
   test "by default the date of the day and the short commit (the commit the checkout says it checked out, when the run has none of its own)":
     let f = flow(common)
-    check f.tags.len == 7 and f.tags.deduplicate.len == 3          # the libraries and the tests by their hashes, the five components by the tag of the run
+    check f.tags.len == 6 and f.tags.deduplicate.len == 3          # the libraries and the tests by their hashes, the four components by the tag of the run
     check "20261105-aaaaaaa" in f.tags
   test "a run from a repository has the short commit of its own":
     let f = flow(common & "BASE=" & goodBase & "\nAREAS=src/ui\nCHANGED_TESTS=none\n", base = goodBase)

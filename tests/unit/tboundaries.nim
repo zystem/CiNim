@@ -1,14 +1,14 @@
-## D-81: the components of src/ are directories, and what each may import is written down and checked here: the shim, the job controller, the storage module, the UI and the executor import
+## D-81: the components of src/ are directories, and what each may import is written down and checked here: the shim, the job controller, the UI and the executor import
 ## `common` and nothing else of ours; the conductor and the core import `common` and `executor`; the router imports `common` and `ui`; `common` imports none. Nobody imports `core` but the core.
 ## The picture came out of the code on 2026-10-23 and this test keeps it from being lost by an `import` that is easy to write: a shim that reads a module of the core would pull the core into every
 ## step Pod, and the pipeline (`plan` in .ci/pipeline.lua, D-82) builds and tests by this graph: its table is checked against this one.
 import std/[unittest, os, strutils, sequtils, algorithm, sets, tables]
 
-const components = ["common", "shim", "jobcontroller", "conductor", "executor", "core", "storage", "ui", "router"]
+const components = ["common", "shim", "jobcontroller", "conductor", "executor", "core", "ui", "router"]
 
 let allowed = {
   "common": @[],
-  "shim": @["common"], "jobcontroller": @["common"], "storage": @["common"], "ui": @["common"], "executor": @["common"],
+  "shim": @["common"], "jobcontroller": @["common"], "ui": @["common"], "executor": @["common"],
   "conductor": @["common", "executor"], "core": @["common", "executor"], "router": @["common", "ui"]}.toTable
 
 proc importedComponents*(text: string): HashSet[string] =
@@ -46,7 +46,7 @@ suite "D-81 what a statement of import names":
     check importedComponents("import common/[rqlite, ids]\nimport std/[os]") == ["common"].toHashSet
     check importedComponents("import std/[json, os]\nimport protobuf_serialization/files/type_generator") == initHashSet[string]()
     check importedComponents("from ../core/api import x\nexport ../ui/app") == ["core", "ui"].toHashSet
-    check importedComponents("import a/[b,\n  common/c,\n  storage/d]\nlet x = 1") == ["common", "storage"].toHashSet
+    check importedComponents("import a/[b,\n  common/c,\n  shim/d]\nlet x = 1") == ["common", "shim"].toHashSet
     check importedComponents("import schema, scheduler # core/scheduler is meant\nlet y = \"core/x\"") == initHashSet[string]()
     check importedComponents("when defined(x):\n  import ../shim/logclient") == ["shim"].toHashSet
     check importedComponents("import ../../build/nimproto/protos") == initHashSet[string]()

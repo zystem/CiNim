@@ -1,38 +1,43 @@
-# The storage module `cinim-storage` and the stores behind it (docs/storage-module.md). One release per shard, into the namespace of the shard
-# (helm install cinim-storage ./cinim-storage -n cinim-001), so that it finds the shard's rqlite; the core is pointed at it by `storage.url` of the chart cinim-shard.
-# Required: image.repository, and either secrets.existingSecret or the four secrets below.
+# The object stores of a shard (docs/storage-module.md). One release per shard, into the namespace of the shard (helm install cinim-storage ./cinim-storage -n cinim-001),
+# so that it finds the shard's rqlite; the core is pointed at it by `storage.url` of the chart cinim-shard.
+# What it installs: the storage service blobgate (the dependency; its own values are under `blobgate:`), Garage if you ask for it, and the registration of the stores with the service.
+# Required: either `secrets` below (the chart makes the Secret) or a Secret of your own named in `blobgate.existingSecret`.
 
-# The image of the module (tools/image/Dockerfile.storage).
-image:
-  repository: ""
-  tag: latest
-  pullPolicy: IfNotPresent
-
-# The shards this module serves. The module's state lives in rqlite (tables storage_*), so it has no volume and a replica can be killed at any time.
-# Normally it is the one shard whose namespace it is installed into, and `rqliteUrl` is that shard's rqlite. A module that serves several shards
-# needs an rqlite of its own (that you run) in `rqliteUrl`, and more than one entry in `secrets.shards`.
 shard: "001"
-rqliteUrl: http://rqlite
-replicas: 1                           # more than one is fine: the repair pass is done by the one that holds the lease
-repairSeconds: 60                     # how often the repair queue of a Caddy mirror is worked
-checkSeconds: 600                     # how often a slice of the inventory is compared with the nodes
 
-# The secrets. Give an existing Secret, or give the values and the chart makes the Secret `cinim-storage` of them. Nothing is generated at render time.
-#   shards       <shard>=<secret>;<shard>=<secret>   the secret each core signs its calls with (the key `shard-<shard>` is also made, for the core's `storage.tokenSecret`)
+# The values of the blobgate chart (https://github.com/zystem/blobgate, charts/blobgate; every key of it can be set here). What this chart fixes: the Service and the Pods are called
+# cinim-storage (the core's address, the network policies the core makes for the namespaces of the organisations, and the sidecar of Garage rely on it).
+blobgate:
+  nameOverride: cinim-storage
+  fullnameOverride: cinim-storage
+  existingSecret: cinim-storage       # made by this chart from `secrets` when those are given; else a Secret of yours with the keys shards, adminToken, sealKey and shard-<shard>
+  rqliteUrl: http://rqlite            # the shard's own rqlite; a service of several shards needs one of its own
+  replicas: 1                         # more than one is fine: the pass of repair and check is done by the one that holds the lease
+  image:
+    repository: ghcr.io/zystem/blobgate
+    tag: ""                           # the appVersion of the blobgate chart when empty
+  config:
+    port: 18090
+    shimPort: 18091                   # D-61, docs/storage-module.md "Direct transfer from the shim": a step's shim sends the bytes straight here, with a grant that the core made. 0 turns it off
+  networkPolicy:
+    enabled: false                    # this chart makes the policies below (the port for shims is open to the organisations' namespaces, the other port to the core only)
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+# The secrets, when the chart is to make the Secret named in `blobgate.existingSecret`. Nothing is generated at render time.
+#   shards       the secret each core signs its calls with (the key `shard-<shard>` is also made, for the core's `storage.tokenSecret`)
 #   adminToken   the operator's token for /v1/admin/stores... (at least 16 characters); the core does not hold it
 #   sealKey      the key the stores' secrets are sealed under in the database (at least 16 characters); keep it apart from the database and its backups
-#   nodeToken    the token the requests to the Caddy nodes are signed with (8..256 characters; only for the Caddy store)
 secrets:
-  existingSecret: ""                  # keys: shards, adminToken, sealKey, nodeToken, shard-<shard>
   shards: {}                          # {"001": "<at least 16 characters>"}
   adminToken: ""
   sealKey: ""
-  nodeToken: ""
 
 # The stores. Any of them can be on; an organisation chooses among those that are (docs/artifacts.md). `default: true` makes a store the default one at every install
 # and upgrade; with none marked, the first one registered is the default (and an operator's change with `:default` stays).
 stores:
-  # Garage, installed by this chart: one node (a StatefulSet) on one volume, S3 on 3900. A sidecar makes its layout, the bucket and an access key once and tells the module.
+  # Garage, installed by this chart: one node (a StatefulSet) on one volume, S3 on 3900. A sidecar makes its layout, the bucket and an access key once and tells the service.
   garage:
     enabled: true
     name: garage-main
@@ -44,44 +49,21 @@ stores:
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {memory: 512Mi}
-  # Caddy nodes with the WebDAV module of the CiNim fork (docs/store.md): a StatefulSet of nodes, each on a volume of its own, that the module mirrors.
-  caddy:
-    enabled: false
-    name: caddy-main
-    default: false
-    nodes: 2                          # 1 to 4
-    minAcks: 0                        # 0: every node must confirm a write; 1 keeps writing with a node away (the repair gives it back)
-    image:                            # tools/image/Dockerfile.caddy-store (TARGETS=caddy-store:cinim-store-dav)
-      repository: ""
-      tag: latest
-    persistence: {size: 100Gi, storageClass: ""}
-    spreadAcrossNodes: true           # one node of the mirror per machine, so that the copies are not on one disk
-    resources:
-      requests: {cpu: 100m, memory: 64Mi}
-      limits: {memory: 512Mi}
-  # Buckets that are already there (Garage somewhere else, or any S3-compatible store): the module is told once, with the key from your Secret.
+  # Buckets that are already there (Garage somewhere else, or any S3-compatible store): the service is told once, with the key from your Secret.
   external: []
   #  - {name: archive, default: false, endpoint: "http://garage.other:3900", region: garage, bucket: cinim-artifacts,
   #     secretName: archive-s3, accessKeyIdKey: accessKeyId, secretAccessKeyKey: secretAccessKey}
+  # Mirrors of any servers that rclone can talk to (WebDAV, FTP, SFTP, S3, a local disk, ...): a block is written to every node, and a node that was away is given what it missed.
+  # `bodySecret` names a Secret that holds the whole body of the admin call, because it carries the passwords of the nodes (the blobgate docs, docs/configuration.md):
+  # {"kind":"mirror","min_acks":0,"default":false,"nodes":[{"remote":":webdav,url=https://dav.example,vendor=other:/blobs","secrets":{"user":"u","pass":"p"}}, {"remote":":ftp,host=ftp.example,user=u:/blobs","secrets":{"pass":"p"}}]}
+  mirrors: []
+  #  - {name: archive-mirror, bodySecret: {name: archive-mirror, key: body}}
 
 # The bookkeeping image of the sidecar and the registration Job: busybox (wget, sed), by digest.
 tools:
   image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
 
-# The port of the module for shims (D-61, docs/storage-module.md "Direct transfer from the shim"): a step's shim sends the bytes of an artifact or a cache entry straight here, with a grant that the
-# core made, and only their digests go through the core. It has a thread pool of its own so that step code cannot take the threads of the core's calls. 0 turns the port off. The shard's chart
-# turns the feature on with `storage.directUrl`; the network policy of the organisations' namespaces (made by the core) lets a step Pod reach this port and no other of the module.
-shim:
-  port: 18091
-  threads: 8
-
-module:
-  threads: 16                         # of the HTTP server; a body is streamed (64 KiB buffers), so a thread costs little: 6 blocks of 8 MiB at once peaked at 34 MiB in tstorageproc
-  resources:
-    requests: {cpu: 50m, memory: 128Mi}
-    limits: {memory: 512Mi}             # 256Mi was OOM-killed on the first 20 MB upload before the body was streamed (phase 4)
-
-# Ingress to the module only from the core of the shard and from what this chart installs; the Caddy nodes and Garage only from the module.
+# Ingress to the service only from the core of the shard and from what this chart installs; Garage only from the service.
 networkPolicy:
   enabled: true
   coreLabels: {app.kubernetes.io/name: cinim-core}

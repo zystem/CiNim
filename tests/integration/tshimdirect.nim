@@ -1,7 +1,7 @@
-## D-61, end to end: a shim's client (shim/logclient.nim `putFile`, `fetchTo`) against the core's real ArtifactIngest (gRPC with mutual TLS, on a thread), the storage module as a process (build/storage)
-## and two real Caddy nodes. The bytes of a file go from the client to the module and never to the core, and the core completes the upload because the digests the client reported over
-## ZeroMQ are those the module made; there is no other way: a module that cannot be reached fails the upload, and a shard without the port for shims refuses it; a part changed on its way is refused. Needs CINIM_RQLITE_URL,
-## build/caddy-store (made by tools/store/build-caddy.sh when Docker is there), and makes build/storage.
+## D-61, end to end: a shim's client (shim/logclient.nim `putFile`, `fetchTo`) against the core's real ArtifactIngest (gRPC with mutual TLS, on a thread), the storage service as a process
+## (blobgate, `BLOBGATE_BIN`) and a mirror of two directories. The bytes of a file go from the client to the service and never to the core, and the core completes the upload because the digests the client
+## reported over the channel are those the service made; there is no other way: a service that cannot be reached fails the upload, and a shard without the port for shims refuses it; a part changed on its way
+## is refused. Needs CINIM_RQLITE_URL and BLOBGATE_BIN (the test image has both; elsewhere the test is skipped).
 import std/[unittest, json, os, osproc, strutils, strtabs, times, net, httpclient, tables, sequtils, atomics]
 import checksums/sha2
 import common/[rqlite, ctrlauth]
@@ -9,8 +9,7 @@ import core/[schema, loggate, logcircuit, objectstore, storageclient]
 from core/scheduler import Core, createRun, stopServers, unenrolledControllers
 from core/artifactingest import serveArtifactIngest
 import shim/[logclient, artifacts, directclient]
-import storage/storeauth
-import ../support/freeport
+import ../support/[freeport, storagebin]
 
 const
   modulePort = 29884
@@ -51,13 +50,9 @@ proc runIngest(a: tuple[url, certs: string, port: int]) {.thread.} = serveArtifa
 suite "D-61 the shim sends its bytes straight to the storage module":
   if url.len == 0:
     echo "  skipped: CINIM_RQLITE_URL is not set"
-  elif not fileExists("build/caddy-store") and execCmd("tools/store/build-caddy.sh") != 0:
-    echo "  skipped: no build/caddy-store and it could not be made (it needs Docker and the network)"
-  elif execCmd("nim c --hints:off --warnings:off -d:ssl -p:src --outdir:build -o:build/storage src/storage/main.nim") != 0:
-    echo "  FAILED to build build/storage"
-    check false
+  elif blobgateBin().len == 0:
+    echo "  skipped: BLOBGATE_BIN is not set (the test image has it; elsewhere build github.com/zystem/blobgate and name the program)"
   else:
-    let caddy = getCurrentDir() / "build" / "caddy-store"
     let base = getTempDir() / ("tshimdirect-" & $getCurrentProcessId())
     removeDir(base)
     createDir(base)
@@ -79,31 +74,16 @@ suite "D-61 the shim sends its bytes straight to the storage module":
       env["CINIM_STORAGE_SHARDS"] = "001=" & secret1
       env["CINIM_STORAGE_ADMIN_TOKEN"] = adminTok
       env["CINIM_STORAGE_SEAL_KEY"] = "a-seal-key-for-the-direct-test"
-      result = startProcess("/bin/sh", args = ["-c", "exec " & getCurrentDir() / "build" / "storage" & " > " & base / "storage.log" & " 2>&1"], env = env)
+      result = startProcess("/bin/sh", args = ["-c", "exec " & quoteShell(blobgateBin()) & " > " & base / "storage.log" & " 2>&1"], env = env)
       for _ in 0 ..< 100:
         if listening(modulePort) and listening(shimPort): return
         sleep 100
       quit "the module did not start; see " & base / "storage.log"
-    proc startNode(root: string; port: int): Process =
-      createDir(root)
-      let file = base / ("Caddyfile-" & $port)
-      writeFile(file, "{\n\torder webdav before file_server\n\tauto_https off\n\tadmin off\n}\n:" & $port & " {\n\tforward_auth 127.0.0.1:" & $modulePort & " {\n\t\turi " & authPath &
-        "?node=127.0.0.1:" & $port & "\n\t}\n\twebdav {\n\t\troot " & root & "\n\t\tatomic_put\n\t\tcreate_dirs\n\t}\n}\n")
-      let env = newStringTable()
-      for k, v in envPairs(): env[k] = v
-      env["XDG_DATA_HOME"] = base / "xdg"
-      env["XDG_CONFIG_HOME"] = base / "xdgc"
-      result = startProcess("/bin/sh", args = ["-c", "exec " & caddy & " run --config " & file & " --adapter caddyfile > " & base / ("caddy-" & $port & ".log") & " 2>&1"], env = env)
-      for _ in 0 ..< 100:
-        if listening(port): return
-        sleep 100
-      quit "the node on " & $port & " did not start"
-
     let module = startModule()
-    let n1 = startNode(base / "n1", port1)
-    let n2 = startNode(base / "n2", port2)
-    let nodes = $ %*["http://127.0.0.1:" & $port1, "http://127.0.0.1:" & $port2]
-    check admin(HttpPut, "/v1/admin/stores/caddy-main", """{"kind":"dav","nodes":""" & nodes & ""","token":"""" & nodeToken & """"}""") == 200
+    createDir(base / "n1")
+    createDir(base / "n2")
+    let nodes = $ %*[{"remote": ":local:" & base / "n1"}, {"remote": ":local:" & base / "n2"}]
+    check admin(HttpPut, "/v1/admin/stores/caddy-main", """{"kind":"mirror","default":true,"nodes":""" & nodes & """}""") == 200
 
     # the core's side: rows for a run with a step that declared artifacts and a cache, the choice of store, the module's address
     initGate(Watch(disabled: true, cfg: defaultConfig()))
@@ -160,7 +140,11 @@ suite "D-61 the shim sends its bytes straight to the storage module":
       check r.ok and r.viaDirect
       check c.query(%*[["SELECT count(*) FROM artifacts WHERE run_id = ? AND path = 'big/a.bin' AND state = 'stored'", runId]])["results"][0]{"values"}[0][0].getInt == 1
       for root in ["n1", "n2"]:
-        check dirExists(base / root / "001" / org / runId / "big" / "a.bin~obj")
+        # blobgate: the blocks of one generation lie in `<path>~<generation>/<n>` on every node (docs/rclone-probe.md of blobgate), three blocks of the file of three parts
+        var blocks = 0
+        for f in walkDirRec(base / root / "001" / org / runId / "big"):
+          if "a.bin~" in f: inc blocks
+        check blocks == 3
       let got = fetch("big/a.bin", data.len)
       check got.err == "" and got.sha == shaOf(data)
     test "D-61 a small file and a cache entry go the same way":
@@ -221,7 +205,5 @@ suite "D-61 the shim sends its bytes straight to the storage module":
 
     stopServers.store(true)
     joinThread(ingest)
-    n1.stop()
-    n2.stop()
     module.stop()
     removeDir(base)

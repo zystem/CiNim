@@ -7,4 +7,6 @@ tests/certs/curve/*.key
 /docs-tr/
 /state/
 deploy/charts/*/charts/*.tgz
+# blobgate is a dependency that the deploy profile cannot fetch (no egress): its archive is kept, made by `helm dependency update deploy/charts/cinim-storage`
+!/deploy/charts/cinim-storage/charts/blobgate-*.tgz
 !/tests/**/*.nim.cfg

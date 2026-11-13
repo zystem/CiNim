@@ -1,6 +1,5 @@
 {{- if .Values.networkPolicy.enabled }}
-# Who may reach what: the module is reached by the core of the shard and by what this chart installs (the Caddy nodes ask it who may call them; Garage's sidecar and the Job
-# register stores); the Caddy nodes and Garage are reached by the module only.
+# Who may reach what: the service is reached by the core of the shard and by what this chart installs (Garage's sidecar and the Job register stores); Garage is reached by the service only.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -8,7 +7,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels: {{- include "cinim-storage.labels" . | nindent 4 }}
 spec:
-  podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage}}
+  podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage, app.kubernetes.io/instance: {{ .Release.Name }}}}
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -16,31 +15,14 @@ spec:
             matchLabels: {{- toYaml .Values.networkPolicy.coreLabels | nindent 14 }}
         - podSelector: {matchLabels: {app.kubernetes.io/part-of: cinim-storage}}
       ports:
-        - {protocol: TCP, port: 18090}
-{{- if .Values.shim.port }}
-    # D-61: the shims of the shard's organisations reach the port for shims and no other port of the module
+        - {protocol: TCP, port: {{ .Values.blobgate.config.port }}}
+{{- if .Values.blobgate.config.shimPort }}
+    # D-61: the shims of the shard's organisations reach the port for shims and no other port of the service
     - from:
         - namespaceSelector:
             matchLabels: {cinim.io/shard: {{ .Values.shard | quote }}}
       ports:
-        - {protocol: TCP, port: {{ .Values.shim.port }}}
-{{- end }}
-{{- if .Values.stores.caddy.enabled }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: cinim-storage-caddy
-  namespace: {{ .Release.Namespace }}
-  labels: {{- include "cinim-storage.labels" . | nindent 4 }}
-spec:
-  podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage-caddy}}
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage}}
-      ports:
-        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: {{ .Values.blobgate.config.shimPort }}}
 {{- end }}
 {{- if .Values.stores.garage.enabled }}
 ---
@@ -55,9 +37,9 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
-        - podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage}}
+        - podSelector: {matchLabels: {app.kubernetes.io/name: cinim-storage, app.kubernetes.io/instance: {{ .Release.Name }}}}
       ports:
         - {protocol: TCP, port: 3900}
-        - {protocol: TCP, port: 3903}        # /metrics: how much room the volume has (the module refuses an upload that would fill it)
+        - {protocol: TCP, port: 3903}        # /metrics: how much room the volume has (the service refuses an upload that would fill it)
 {{- end }}
 {{- end }}

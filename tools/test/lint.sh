@@ -52,7 +52,7 @@ chart_args() {
   case "$1" in
     cinim-shard)   echo "-n cinim-001 --set domain=example.test --set image.repository=registry.example.test/cinim" ;;
     cinim-router)  echo "--set domain=example.test --set routerKey=0123456789abcdef0123 --set image.repository=registry.example.test/router" ;;
-    cinim-storage) echo "--set image.repository=registry.example.test/storage --set secrets.existingSecret=lint --set secrets.sealKey=0123456789abcdef0123" ;;
+    cinim-storage) echo "--set secrets.shards.001=0123456789abcdef0123 --set secrets.adminToken=0123456789abcdef --set secrets.sealKey=0123456789abcdef0123" ;;
     *)             echo "" ;;
   esac
 }

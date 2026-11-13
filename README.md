@@ -8,7 +8,7 @@ the log pipeline (shim in the Pod, spool, core, vlagent, VictoriaLogs), the laun
 (reason, message, events, node), organisations with a namespace and a job controller each (SHD-001 to SHD-009: create, switch off, delete, the reconciliation with
 their Kubernetes objects and the retention of a switched-off one, the router in the `multi` mode), API tokens with scopes (IAM-003), users with the roles admin, rw, dev, ro (basic RBAC, IAM-001), step secrets sealed in the
 database under a master key that can live in a hardware token (D-45, `docs/hardware-key.md`), triggers (schedule, webhook, manual), artifacts that go through the core
-to the storage module (D-60), a service of its own with Garage and/or Caddy nodes behind it (D-46, D-58) and a choice of store per organisation (D-59), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
+to the storage service (blobgate, D-116: a project of its own, a dependency of the chart `cinim-storage`) with Garage or a mirror of any servers that rclone can talk to behind it (D-46) and a choice of store per organisation (D-59), image builds as build Pods under an admission policy (D-42, Kaniko, rootless BuildKit and Buildah) and the simple network modes
 (SHD-009). CiNim builds, tests and rolls itself out that way (`.ci/pipeline.lua`, read from the repository by a conductor at the commit a webhook names, D-63; its deploy step runs with the token of its own Pod, and the rights of that account are `deploy/examples/self-build/deployer.yaml`). The steps of a run share a volume (STO-001: a claim per run, `/cicd/workspace` and `/cicd/state`). Steps run in parallel: `ci.parallel` (with `max_parallel`, `fail_fast`, nesting) and `ci.matrix` (`docs/parallel.md`). Not built yet: the UI (apart from the router page), `j.checkout`,
 caches, `ci.input`, `ci.spawn`, the cleanup of a cancelled run, plugins, plain variables of the four levels, OIDC/RBAC, the audit log and backups. The delivery plan is
 section 17 of the specification; the sections of the specification describe the target, and the status above is the one that holds.
@@ -18,7 +18,7 @@ section 17 of the specification; the sections of the specification describe the 
 | Component | Directory | Role |
 |---|---|---|
 | core | `src/core` | scheduler, log collector (a proxy to vlagent), launch gate, REST API, `/metrics`; state in rqlite |
-| storage module | `src/storage`, `deploy/charts/cinim-storage` | the object stores of a shard behind one HTTP API (D-60): Garage (S3) and/or Caddy nodes with WebDAV, the inventory, the repair; state in rqlite, no volume |
+| storage service | `deploy/charts/cinim-storage` (blobgate, github.com/zystem/blobgate, as a dependency) | the object stores of a shard behind one HTTP API (D-116): Garage (S3), or a mirror of WebDAV, FTP, SFTP, S3 and other servers through rclone, the inventory, the repair; state in rqlite, no volume |
 | job controller | `src/jobcontroller` | creates and tracks step Pods (logic is separate from Kubernetes: `logic.nim` and `backend.nim`), state in sqlite |
 | conductor | `src/conductor`, `src/executor` | Supervisor and run processes; Lua sandbox, journal, replay |
 | shim | `src/shim` | runs the step's command in the Pod: secret masking, log spool, metrics, timeout, events in the Pod log |
@@ -38,8 +38,7 @@ Transport between services: gRPC with mutual TLS (D-104; nimgrpc). HTTP layer: G
 - `docs/hardware-key.md` — the master key of the step secrets in a hardware token (SmartCard-HSM), the key service and its emulator;
 - `docs/triggers.md` — launch parameters and triggers;
 - `docs/artifacts.md` — artifacts, the object store, the spool fallback;
-- `docs/storage-module.md` — the storage module (`cinim-storage`): its API, the stores, the choice per organisation, the phases;
-- `docs/store.md` — the Caddy nodes of the store, the mirror and the measurements that chose them;
+- `docs/storage-module.md` — the storage service (`cinim-storage`, blobgate): what the core relies on, the chart, the stores, the choice per organisation, the direct transfer from the shim, the room in the store;
 - `docs/ci-pitfalls.md` — known pitfalls of other CI systems and how this platform handles them;
 - `docs/state-machines.md` — state machines (generated: `nim c -r tools/gen_state_docs.nim`);
 - `docs/threat-model.md` — the threat model;

@@ -45,11 +45,6 @@
       "pinDigests": true
     },
     {
-      "description": "The Caddy node of the store is an image of the project with its own tags (h79): moved by hand with the chart (deploy/charts/cinim-storage)",
-      "matchDepNames": ["zystem/cinim-store-dav"],
-      "enabled": false
-    },
-    {
       "description": "nghttp2 1.61 or later is required (nimgrpc); the four places that build it are moved together",
       "matchDepNames": ["nghttp2/nghttp2"],
       "groupName": "nghttp2"
