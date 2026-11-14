@@ -1,0 +1,44 @@
+# The 72 h soak (NFR-013) run by Woodpecker, apart from CiNim: a cron of the repository (name `soak72`, Monday) or a manual start builds the image of
+# tools/soak/Dockerfile from the commit that was checked out, and runs tools/soak/job.sh in it. The step ends with the verdict of tools/soak/verdict.sh
+# as its exit code: a failed pipeline is a soak that went bad; the log holds the summary and one row an hour of the release run (docs/deployment.md,
+# "The 72 h soak").
+# Needs, in the namespace of the agents: the Secret `soak-registry` (key `docker-config`: a Docker config with the login of the registry that holds the image; the registry is the forge's own host, plain HTTP),
+# the agents' WOODPECKER_BACKEND_K8S_ALLOW_NATIVE_SECRETS=true, and the repository's timeout of 80 h (the project's settings; the default is 60 minutes).
+# SOAK_HOURS (a variable of a manual start, default 72) shortens the run for a try: `SOAK_HOURS=1`.
+# A node must have `vm.mmap_rnd_bits` of 28 or less (tools/test/check-mmap-rnd.sh) and about two CPUs for the three days.
+when:
+  - event: cron
+    cron: soak72
+  - event: manual
+
+variables:
+  # the registry is the forge's own (Gitea serves images at its host): ${CI_FORGE_URL#http://} is the host and port of the forge, without the scheme
+  - &repo cinim/cinim-soak
+
+steps:
+  - name: image
+    image: woodpeckerci/plugin-kaniko
+    settings:
+      registry: ${CI_FORGE_URL#http://}
+      repo: *repo
+      tags: wp-${CI_COMMIT_SHA:0:12}
+      dockerfile: tools/soak/Dockerfile
+      insecure: true                  # the registry speaks plain HTTP
+    backend_options:
+      kubernetes:
+        secrets:
+          - name: soak-registry
+            key: docker-config
+            target:
+              env: PLUGIN_DOCKER_CONFIG_JSON
+
+  - name: soak
+    image: ${CI_FORGE_URL#http://}/cinim/cinim-soak:wp-${CI_COMMIT_SHA:0:12}
+    pull: false
+    commands:
+      - /cinim/tools/soak/job.sh /woodpecker/soak-out ${SOAK_HOURS:-72}
+    backend_options:
+      kubernetes:
+        resources:
+          requests: {cpu: "2", memory: 512Mi}
+          limits: {cpu: "4", memory: 2Gi}
