@@ -141,20 +141,26 @@ which cannot be put there through the API.
 
 ### The 72 h soak in a cluster
 
-`deploy/examples/soak72/soak72.yaml` runs the soak (NFR-013, `tools/soak/run72.sh`: the release harness continuously and the ASan/LSan harness in hourly runs) as a Job with
-a volume for the results, from the image of `tools/soak/Dockerfile` (`DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak tools/image/kaniko-build.sh`). It can run
-next to the soak host. `backoffLimit: 0`: a Pod that dies (a node restart, an OOM kill) ends the run, because a soak that starts again from zero is not a 72 h soak, and the
-volume keeps what was written. Read the result with `tools/soak/summarize.sh`:
+`deploy/examples/soak72/soak72.yaml` runs the soak (NFR-013, `tools/soak/run72.sh`: the release harness continuously and the ASan/LSan harness in hourly runs) as a **weekly CronJob that
+does not depend on CiNim** (Fridays 18:00 UTC, `concurrencyPolicy: Forbid`), from the image of `tools/soak/Dockerfile` (`DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak tools/image/kaniko-build.sh`;
+put its name in `IMAGE`, and name a newer one when the soak or its scripts change). Nothing in it needs the platform, so a rollout of CiNim does not end a run. One Pod a week runs `tools/soak/job.sh`:
+it makes a directory of its own on the volume for the run (named by the start time, `20261114T180000Z`, so that the weeks do not mix), runs `run72.sh` in it, prints the summary and one row an hour of the
+release run, and **ends with the verdict of `tools/soak/verdict.sh` as its exit code**: the release run ended with `SOAK OK`, every ASan hour ended with exit 0, all the 72 hours were run and the launcher
+said `finished`. A Job that failed is a soak that went bad, and its log says why. The newest 8 runs stay on the volume (`SOAK_KEEP_RUNS`), the older ones are removed. `backoffLimit: 0`: a Pod that dies
+(a node restart, an OOM kill) ends the run, because a soak that starts again from zero is not a 72 h soak, and the volume keeps what was written.
 
 ```bash
-kubectl -n cinim-soak exec job/soak72 -- /cinim/tools/soak/summarize.sh /out        # while it runs, or after: kubectl cp from a Pod that mounts the claim
+kubectl -n cinim-soak create job --from=cronjob/soak72 soak72-now      # one run now, by hand
+kubectl -n cinim-soak get jobs                                         # the runs; Failed is a soak that did not pass
+kubectl -n cinim-soak logs job/soak72-now                              # the summary, the rows of the release run, the verdict
+kubectl -n cinim-soak exec job/soak72-now -- sh -c '/cinim/tools/soak/summarize.sh /out/$(ls /out | sort | tail -n 1)'      # while it runs; or after, kubectl cp from a Pod that mounts the claim
 ```
 
-The CPU and memory that other work on the same node takes do not change the RSS growth that is measured, but a restart of the node does end the run.
+The CPU and memory that other work on the same node takes do not change the RSS growth that is measured, but a restart of the node does end the run. The node needs `vm.mmap_rnd_bits` at 28 or less
+(the ASan hours) and the Pod about two CPUs. Not run: this CronJob itself (the manifest is checked with `kubeconform`, the two scripts by `tests/unit/tsoakjob.nim` and `shellcheck`; no week has run it yet).
 
-**Weekly, in CI.** The pipeline of the repository (`.ci/pipeline.lua`) runs the same soak as one step with the parameter `SOAK=true`: it builds the image of `tools/soak/Dockerfile` for the commit, then runs
-`tools/soak/run72.sh` in it for `SOAK_HOURS` (72) hours; the log of the step is the report (the summary of `summarize.sh`, one row of the release CSV an hour), and the step fails when the release run does not end
-with `SOAK OK` or an ASan hour does not end well. A step may be a week long at most, and the shard's default is 24 hours (the soak needs 80): the project must allow it first (the settings page of the UI, "Longest step", or
+**Weekly, in CI (the other way; a soak that a rollout of CiNim can end).** The pipeline of the repository (`.ci/pipeline.lua`) runs the same soak as one step with the parameter `SOAK=true`: it builds the image of `tools/soak/Dockerfile` for the commit, then runs
+`tools/soak/run72.sh` in it for `SOAK_HOURS` (72) hours; the log of the step is the report (the summary of `summarize.sh`, one row of the release CSV an hour), and the step fails on the same verdict (`tools/soak/verdict.sh`). A step may be a week long at most, and the shard's default is 24 hours (the soak needs 80): the project must allow it first (the settings page of the UI, "Longest step", or
 `PUT /api/v1/organizations/<org>/projects/<path>/settings {"max_step_timeout_seconds": 288000}`; permission `limits.configure`). A schedule trigger makes it weekly (`0 18 * * 5`: from Friday evening, over the weekend), and
 `skip` keeps a second one from starting while the first still runs:
 

@@ -1,10 +1,15 @@
-# The 72 h soak (NFR-013, A.12) as a Job: next to, or instead of, the soak host. One Pod runs tools/soak/run72.sh, which runs the release
-# harness continuously (RSS growth after a 1 h warm-up must stay within 2 %) and the ASan/LSan harness in hourly runs, side by side.
-# Everything is written to the volume `soak-out`: release.csv and release.out (its last line is SOAK OK or SOAK FAIL), san-<hour>.csv and .out, san-summary.txt.
-#   kubectl apply -f deploy/examples/soak72/soak72.yaml      (replace IMAGE: the image built from tools/soak/Dockerfile)
-#   kubectl -n cinim-soak logs job/soak72                    the launcher's own output; the result is in the volume (see README.md)
-# backoffLimit 0: a Pod that dies (node restart, OOM kill) ends the run and says so. A soak that silently starts again from zero is not a
-# 72 h soak, and the volume keeps what the run had written until then.
+# The 72 h soak (NFR-013, A.12) as a weekly CronJob, apart from CiNim: nothing in it needs the platform, so a rollout of CiNim does not end it. One Pod a week runs
+# tools/soak/job.sh, which makes a directory of its own on the volume for the run, runs tools/soak/run72.sh in it (the release harness continuously, RSS growth after a
+# 1 h warm-up within 2 %, and the ASan/LSan harness in hourly runs, side by side), prints the summary and ends with the verdict of tools/soak/verdict.sh as its exit
+# code: a Job that failed is a soak that went bad. The volume `soak-out` keeps the newest 8 runs (SOAK_KEEP_RUNS), one directory each, named by the start time:
+# release.csv and release.out (its last line is SOAK OK or SOAK FAIL), san-<hour>.csv and .out, san-summary.txt.
+#   kubectl apply -f deploy/examples/soak72/soak72.yaml          (replace IMAGE: the image built from tools/soak/Dockerfile, which carries the scripts of the same commit)
+#   kubectl -n cinim-soak create job --from=cronjob/soak72 soak72-now      one run now, by hand
+#   kubectl -n cinim-soak get jobs                                the runs; a Failed one is a soak that did not pass (its log says why)
+#   kubectl -n cinim-soak logs job/<name>                         the summary, one row an hour of the release run, the verdict
+# concurrencyPolicy Forbid: a week that finds the last run still going starts no second one. backoffLimit 0: a Pod that dies (node restart, OOM kill) ends the run and
+# says so. A soak that silently starts again from zero is not a 72 h soak, and the volume keeps what the run had written until then. The node needs
+# `vm.mmap_rnd_bits` at 28 or less (the ASan hours: tools/test/check-mmap-rnd.sh) and about two CPUs, and it must stay up for the three days.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -17,30 +22,37 @@ kind: PersistentVolumeClaim
 metadata: {name: soak-out, namespace: cinim-soak}
 spec:
   accessModes: [ReadWriteOnce]
-  resources: {requests: {storage: 2Gi}}
+  resources: {requests: {storage: 5Gi}}
 ---
 apiVersion: batch/v1
-kind: Job
+kind: CronJob
 metadata: {name: soak72, namespace: cinim-soak}
 spec:
-  backoffLimit: 0
-  activeDeadlineSeconds: 295200            # 82 h: the 72 h of the run and a margin for the last ASan hour and the evaluation
-  template:
-    metadata: {labels: {app: soak72}}
+  schedule: "0 18 * * 5"                   # Friday 18:00 UTC: from Friday evening, over the weekend
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600            # a run that could not start within the hour (the controller was down) is skipped, not started days late
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 4
+  jobTemplate:
     spec:
-      restartPolicy: Never
-      securityContext: {seccompProfile: {type: RuntimeDefault}}
-      containers:
-        - name: soak
-          image: IMAGE
-          imagePullPolicy: IfNotPresent
-          args: ["/out", "72"]
-          env:
-            - {name: SOAK_CERTS, value: /cinim/tests/certs}
-          resources:
-            requests: {cpu: "2", memory: 512Mi, ephemeral-storage: 64Mi}      # a request, so that the kubelet does not choose this Pod first when the node runs short of disk
-            limits: {cpu: "4", memory: 2Gi}
-          volumeMounts: [{name: out, mountPath: /out}]
-      volumes:
-        - name: out
-          persistentVolumeClaim: {claimName: soak-out}
+      backoffLimit: 0
+      activeDeadlineSeconds: 295200        # 82 h: the 72 h of the run and a margin for the last ASan hour and the evaluation
+      template:
+        metadata: {labels: {app: soak72}}
+        spec:
+          restartPolicy: Never
+          securityContext: {seccompProfile: {type: RuntimeDefault}}
+          containers:
+            - name: soak
+              image: IMAGE
+              imagePullPolicy: IfNotPresent
+              command: ["/cinim/tools/soak/job.sh"]
+              args: ["/out", "72"]
+              resources:
+                requests: {cpu: "2", memory: 512Mi, ephemeral-storage: 64Mi}      # a request, so that the kubelet does not choose this Pod first when the node runs short of disk
+                limits: {cpu: "4", memory: 2Gi}
+              volumeMounts: [{name: out, mountPath: /out}]
+          volumes:
+            - name: out
+              persistentVolumeClaim: {claimName: soak-out}

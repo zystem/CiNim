@@ -99,11 +99,7 @@ rc=0
 FOREGROUND=1 tools/soak/run72.sh "$OUT" "$SOAK_HOURS" || rc=$?
 tools/soak/summarize.sh "$OUT" || true
 echo "== the release run, one row an hour"; awk -F, 'NR == 1 || (NR - 1) % 60 == 0' "$OUT/release.csv" || true
-last=$(tail -n 1 "$OUT/release.out" 2>/dev/null || true)
-echo "release run: ${last:-no output}"
-case "$last" in "SOAK OK"*) ;; *) echo "the release run did not end with SOAK OK"; rc=1;; esac
-bad=$(grep '^hour ' "$OUT/san-summary.txt" 2>/dev/null | grep -vc 'exit=0$' || true)
-[ "${bad:-0}" = 0 ] || { echo "$bad ASan hours did not end well"; rc=1; }
+tools/soak/verdict.sh "$OUT" "$SOAK_HOURS" || rc=1      # the same verdict as the CronJob of deploy/examples/soak72
 exit $rc
 ]]
 
