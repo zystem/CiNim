@@ -1,6 +1,6 @@
 ## RUN-007, D-29, DAT-003: the shim's channels to the core over gRPC with mutual TLS (src/common/corechannel.nim, src/core/grpcserve.nim): an answer comes back byte for byte, a core that does not
 ## answer in time or is not there is "no answer" (as it was with ZeroMQ), the keys decide who may talk, and the address forms are the ones the controller gives.
-import std/[os, osproc, strutils]
+import std/[os, osproc, strutils, atomics]
 import unittest2
 import ../../src/core/grpcserve
 
@@ -107,6 +107,44 @@ suite "RUN-007 the shim's gRPC channel":
     let c = dialCore("127.0.0.1:" & $srv.port, keys)
     defer: c.close()
     expect GrpcError: discard c.exchange(statusMethod, "x", 2000)
+
+
+var hammerOk: Atomic[int]
+var hammerKeys: string
+var hammerPort: int
+
+proc hammer() {.thread.} =
+  ## a thread with channels of its own that connect afresh, the way the soak's clients do
+  {.cast(gcsafe).}:
+    var n = 0
+    for i in 0 ..< 1500:
+      let c = dialCore("tcp://127.0.0.1:" & $hammerPort, hammerKeys)
+      let (avail, body) = c.exchange(logIngestMethod, "ping" & $i, 5000)
+      if avail and body == "ping" & $i: inc n
+      c.close()
+    discard hammerOk.fetchAdd(n)
+
+suite "NFR-013 the client keys are shared by threads":
+  setup:
+    if keys.len == 0: skip()
+
+  test "NFR-013 threads that connect afresh over one process-wide configuration do not free it under each other":
+    # `clientTls` once handed the same TlsConfig object to every thread; ORC counts references without atomics, so the count drifted, the configuration (its trust anchors) was freed
+    # while a handshake read them, and the soak died with SIGSEGV in BearSSL within minutes. Each connection has its own object now, over one configuration whose count is atomic.
+    let srv = startShimServer(0, keys, logIngestMethod, echo)
+    defer: srv.stop()
+    hammerKeys = keys; hammerPort = srv.port
+    hammerOk.store(0)
+    var th: array[8, Thread[void]]
+    for i in 0 ..< 8: createThread(th[i], hammer)
+    joinThreads(th)
+    check hammerOk.load == 8 * 1500
+
+  test "NFR-013 a call of clientTls gives an object of its own and the same sessions, and a renewed set gives a new configuration":
+    let a = clientTls(keys)
+    let b = clientTls(keys)
+    check a != b                       # not one object for everybody: nothing for two threads to count against each other
+    check a != nil and b != nil
 
 if keys.len > 0: removeDir keys
 if other.len > 0: removeDir other

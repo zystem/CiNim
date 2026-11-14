@@ -23,7 +23,6 @@ type
     host: string
     port: int
     certs: string
-    tls: TlsConfig
     ch: GrpcChannel
     open: bool
 
@@ -68,9 +67,12 @@ proc clientKeysStamp*(certs: string): string =
     except OSError: result.add "-;"
 
 proc clientTls*(certs: string): TlsConfig =
-  ## One TlsConfig per directory of keys for the whole process, not one per channel: nim-grpc keeps the TLS session of the last connection in the config and resumes it (for ten minutes) on the
-  ## next connection with the same config and server name, which skips the public-key work of the handshake. A channel made for each report or secrets request would otherwise start from scratch.
+  ## One TLS configuration per directory of keys for the whole process, not one per channel: nim-grpc keeps the TLS session of the last connection in the configuration and resumes it (for ten minutes) on
+  ## the next connection with the same configuration and server name, which skips the public-key work of the handshake. A channel made for each report or secrets request would otherwise start from scratch.
   ## The keys are `<certs>/tls/{ca.pem,client.pem,client.key}`; an unreadable one is an IOError.
+  ## **What is returned is an object of its own (`share`) over that one configuration, never the object that is kept here.** A Nim `ref` must not be copied between threads (ORC counts references without
+  ## atomics): the one object that every thread copied had its count drift, was freed while a handshake still read its trust anchors, and the soak (NFR-013) died with SIGSEGV in BearSSL within minutes. The
+  ## configuration itself is counted by nim-grpc with atomic operations and a connection holds a count of its own; the object returned here is used by the caller's connection alone.
   ## Made again when the files have changed since it was made (`clientKeysStamp`): a process that lives for months and connects again now and then (a controller, a conductor) takes up a renewed pair at
   ## its next connection. A connection that is up keeps what it was made with, which is good until the old certificate ends.
   {.cast(gcsafe).}:
@@ -78,17 +80,14 @@ proc clientTls*(certs: string): TlsConfig =
       let stamp = clientKeysStamp(certs)
       if certs notin configs or configs[certs].stamp != stamp:
         configs[certs] = (stamp, tlsClientConfig(readFile(certs / "tls" / "ca.pem"), readFile(certs / "tls" / "client.pem"), readFile(certs / "tls" / "client.key")))
-      result = configs[certs].tls
+      result = configs[certs].tls.share
 
 proc serverTls*(certs: string): TlsConfig =
   ## the core's side of the mutual TLS: its certificate, and the CA the clients' certificates must chain to (`<certs>/tls/{core.pem,core.key,ca.pem}`)
   tlsServerConfig(readFile(certs / "tls" / "core.pem"), readFile(certs / "tls" / "core.key"), clientCaPem = readFile(certs / "tls" / "ca.pem"))
 
-proc loadKeys(c: CoreChannel) =
-  c.tls = clientTls(c.certs)           # at every connection: the files may have been renewed since the channel was made
-
-proc connectNow(c: CoreChannel) =
-  c.ch = dial(c.host, c.port, c.tls, serverName = coreServerName, connectTimeoutMs = connectTimeoutMs)
+proc connectNow(c: CoreChannel; tls: TlsConfig) =
+  c.ch = dial(c.host, c.port, tls, serverName = coreServerName, connectTimeoutMs = connectTimeoutMs)
   c.open = true
 
 proc toBytes(s: string): seq[byte] =
@@ -102,8 +101,8 @@ proc toStr(b: seq[byte]): string =
 proc exchange*(c: CoreChannel; meth, request: string; timeoutMs: int): tuple[avail: bool, body: string] =
   ## One request and its answer. `avail` false: the core did not answer within `timeoutMs` or could not be reached; the channel is dropped and made again by the next call. A key that cannot be read is raised, as it was by `connectReq`.
   if not c.open:
-    c.loadKeys()
-    try: c.connectNow()
+    let tls = clientTls(c.certs)         # at every connection: the files may have been renewed since the channel was made; the object is this connection's own (see `clientTls`); outside the `try`, so that a key that cannot be read is raised
+    try: c.connectNow(tls)
     except CatchableError: return (false, "")
   try:
     let r = c.ch.unaryCall(meth, toBytes(request), timeoutMs = timeoutMs)
