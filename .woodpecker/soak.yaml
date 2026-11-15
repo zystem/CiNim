@@ -5,6 +5,7 @@
 # Needs, in the namespace of the agents: the Secret `soak-registry` (key `docker-config`: a Docker config with the login of the registry that holds the image; the registry is the forge's own host, plain HTTP),
 # the agents' WOODPECKER_BACKEND_K8S_ALLOW_NATIVE_SECRETS=true, and the repository's timeout of 80 h (the project's settings; the default is 60 minutes).
 # SOAK_HOURS (a variable of a manual start, default 72) shortens the run for a try: `SOAK_HOURS=1`.
+# The step `soak` is privileged (see there): the namespace of the agents must allow it (label pod-security.kubernetes.io/enforce=privileged) and the repository must be trusted for `security` in Woodpecker.
 # A node must have `vm.mmap_rnd_bits` of 28 or less (tools/test/check-mmap-rnd.sh) and about two CPUs for the three days.
 when:
   - event: cron
@@ -39,6 +40,10 @@ steps:
       - /cinim/tools/soak/job.sh /woodpecker/soak-out ${SOAK_HOURS:-72}
     backend_options:
       kubernetes:
+        # LeakSanitizer stops the threads of its own process with ptrace, which needs CAP_SYS_PTRACE where kernel.yama.ptrace_scope is 2 (the Talos nodes); without it
+        # the ASan hours end with "LeakSanitizer has encountered a fatal error" and no leak. Woodpecker 3.7 has no `capabilities` field: `privileged` is the only way.
+        securityContext:
+          privileged: true
         resources:
           requests: {cpu: "2", memory: 512Mi}
           limits: {cpu: "4", memory: 2Gi}
