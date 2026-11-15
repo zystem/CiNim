@@ -36,14 +36,14 @@ steps:
   - name: soak
     image: ${CI_FORGE_URL#http://}/cinim/cinim-soak:wp-${CI_COMMIT_SHA:0:12}
     pull: false
+    # LeakSanitizer stops the threads of its own process with ptrace, which needs CAP_SYS_PTRACE where kernel.yama.ptrace_scope is 2 (the Talos nodes); without it
+    # the ASan hours end with "LeakSanitizer has encountered a fatal error" and no leak. Woodpecker 3.7 has no `capabilities` field: `privileged` is the only way, and
+    # it is the key of the step (the same key in backend_options.kubernetes.securityContext is ignored unless the step has this one).
+    privileged: true
     commands:
       - /cinim/tools/soak/job.sh /woodpecker/soak-out ${SOAK_HOURS:-72}
     backend_options:
       kubernetes:
-        # LeakSanitizer stops the threads of its own process with ptrace, which needs CAP_SYS_PTRACE where kernel.yama.ptrace_scope is 2 (the Talos nodes); without it
-        # the ASan hours end with "LeakSanitizer has encountered a fatal error" and no leak. Woodpecker 3.7 has no `capabilities` field: `privileged` is the only way.
-        securityContext:
-          privileged: true
         resources:
           requests: {cpu: "2", memory: 512Mi}
           limits: {cpu: "4", memory: 2Gi}
