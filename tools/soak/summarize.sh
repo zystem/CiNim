@@ -17,4 +17,14 @@ else echo "no san-summary.txt yet"; fi
 leaks=$(grep -l "LeakSanitizer\|ERROR: AddressSanitizer" "$D"/san-*.out 2>/dev/null | wc -l)
 echo "hours whose output reports LeakSanitizer or AddressSanitizer errors: $leaks"
 grep -h "SOAK " "$D"/san-*.out 2>/dev/null | tail -2 | sed 's/^/  /'
+# the log of the job is the only report that outlives the volume: for an hour that ended badly show the report itself (the first 30 lines of it) and the end of the output
+for f in "$D"/san-*.out; do
+  [ -f "$f" ] || continue
+  n=${f##*/san-}; n=${n%.out}
+  if grep -q "^hour $n exit=[^0]" "$D/san-summary.txt" 2>/dev/null || grep -q "LeakSanitizer\|ERROR: AddressSanitizer" "$f"; then
+    echo "-- hour $n: $(grep "^hour $n " "$D/san-summary.txt" 2>/dev/null | tail -1)"
+    grep -m1 -A30 "ERROR: \(Leak\|Address\)Sanitizer" "$f" | cut -c1-200 | sed 's/^/  | /'
+    echo "  (the end of the output)"; tail -8 "$f" | cut -c1-200 | sed 's/^/  | /'
+  fi
+done
 [ -f "$D/finished" ] && echo "finished: $(cat "$D/finished")"
