@@ -33,7 +33,7 @@ RUN apt-get update && { apt-get install -y --no-install-recommends bash build-es
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.61 or later is required; the distribution's is older)
 # renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$
-ARG NGHTTP2_VERSION=1.68.0
+ARG NGHTTP2_VERSION=1.68.1
 RUN set -eu; W=$(mktemp -d); \
     curl -fsSL "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz" | tar xJ -C "$W"; \
     cmake -S "$W/nghttp2-${NGHTTP2_VERSION}" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
