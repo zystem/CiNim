@@ -128,12 +128,8 @@ proc rqWorker(url: string) {.thread.} =
         c = newRq(url, 5000)
     sleep 50
 
-when defined(sanitize):
-  proc lsanCheck(): cint {.importc: "__lsan_do_recoverable_leak_check".}
-  ## Only catches leaks in code ASan's allocator takeover covers process-wide (our Nim/C code, and any
-  ## heap traffic the C libraries (nghttp2, BearSSL) do through the same malloc/free, even though they are not compiled
-  ## with -fsanitize=address) - it cannot find memory corruption *inside* their own uninstrumented
-  ## code. The same caveat applies to any uninstrumented native library.
+# The ASan build is checked for leaks once, when the process exits (LeakSanitizer ends it with a code other than 0): a check in the middle of the run
+# (__lsan_do_recoverable_leak_check) lists the connections that are alive at that moment as leaks, about 170 KB each time and not growing (2026-11-15).
 
 proc exitProc(code: cint) {.importc: "_exit", header: "<unistd.h>".}
   ## Bypasses Nim's normal teardown (which would itself wait on threads); only for the watchdog.
@@ -187,9 +183,6 @@ proc main() =
     sleep sampleEvery * 1000
     let t = int(epochTime() - t0)
     lastRss = rssBytes()
-    when defined(sanitize):
-      if t mod 3600 < sampleEvery and t > 0:   # hourly leak check without stopping the run
-        if lsanCheck() != 0: echo "SOAK LEAK reported at t=", t
     if t >= warmup:
       if warmRss == 0: warmRss = lastRss
       maxRss = max(maxRss, lastRss)
