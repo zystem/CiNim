@@ -124,6 +124,36 @@ proc hammer() {.thread.} =
       c.close()
     discard hammerOk.fetchAdd(n)
 
+proc boom(ctx: var ServerContext; req: seq[byte]): seq[byte] {.nimcall, gcsafe, raises: [CatchableError].} =
+  raise newException(ValueError, "the query was SELECT * FROM secrets\nsecond line")
+
+suite "RUN-007 a failure of a handler is told to the operator and not to the client":
+  setup:
+    if keys.len == 0: skip()
+
+  test "RUN-007 the line has the method, the kind of the exception and its text on one line, and is not longer than a line should be":
+    let line = handlerErrorLine("/cicd.LogIngest/Send", newException(ValueError, "a\r\nb" & 'x'.repeat(1000)))
+    check line.startsWith("grpc: handler /cicd.LogIngest/Send failed: ValueError: a  b")
+    check '\n' notin line and '\r' notin line
+    check line.len < 400
+
+  test "RUN-007 an exception that is not a GrpcError reaches the hook of the server, the client is told internal error and nothing of the exception, and the server goes on":
+    let srv = startShimServer(0, keys, logIngestMethod, boom)
+    defer: srv.stop()
+    let c = dialCore("tcp://127.0.0.1:" & $srv.port, keys)
+    defer: c.close()
+    let before = handlerErrors.load
+    var told = ""
+    try: discard c.exchange(logIngestMethod, "x", 5000)
+    except GrpcError as e: told = e.msg
+    check told == "internal error"          # not the text of the exception: "SELECT * FROM secrets" stays in the log of the core
+    check handlerErrors.load == before + 1
+    let srv2 = startShimServer(0, keys, stepReportMethod, echo)
+    defer: srv2.stop()
+    let c2 = dialCore("tcp://127.0.0.1:" & $srv2.port, keys)
+    defer: c2.close()
+    check c2.exchange(stepReportMethod, "still", 5000) == (true, "still")
+
 suite "NFR-013 the client keys are shared by threads":
   setup:
     if keys.len == 0: skip()

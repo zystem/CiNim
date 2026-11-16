@@ -7,7 +7,7 @@
 ##
 ## nim-grpc's `dial` connects at once; its `connectTimeoutMs` bounds the TCP connect (a core behind a rule that drops packets would otherwise hold the shim for the system's timeout, minutes).
 ## Resolving the name is not covered by it.
-import std/[os, locks, tables, times]
+import std/[os, locks, tables, times, atomics]
 import nimgrpc
 
 const
@@ -17,6 +17,27 @@ const
   statusMethod* = "/cicd.Status/Report"
   artifactMethod* = "/cicd.ArtifactIngest/Call"
   connectTimeoutMs = 5000
+
+var handlerErrors*: Atomic[int]
+  ## how many handlers of the servers of this process failed with an exception that is not a GrpcError (counted by `logHandlerError`)
+
+proc handlerErrorLine*(path: string; e: ref CatchableError): string =
+  ## the line for the log of the process: the method, the kind of the exception and its text, on one line and not longer than 300 characters of the text (the text may hold what the handler was working with:
+  ## a query, a path; it belongs in the log of the operator and nowhere else: the client is told only "internal error", nimgrpc 0.5.0)
+  var msg = if e.isNil: "" else: e.msg
+  for i in 0 ..< msg.len:
+    if msg[i] in {'\n', '\r'}: msg[i] = ' '
+  if msg.len > 300: msg = msg[0 ..< 300] & "..."
+  "grpc: handler " & path & " failed: " & (if e.isNil: "nil" else: $e.name) & ": " & msg
+
+proc logHandlerError*(path: string; e: ref CatchableError) {.nimcall, gcsafe, raises: [].} =
+  ## the `setErrorHook` of every gRPC server of the platform (the channels of the shims, the push channel): without a hook nimgrpc 0.5.0 writes nothing anywhere about an exception of a handler. It runs on the worker thread of the call.
+  handlerErrors.atomicInc
+  {.cast(gcsafe).}:
+    try:
+      stderr.writeLine handlerErrorLine(path, e)
+      stderr.flushFile()
+    except CatchableError: discard
 
 type
   CoreChannel* = ref object

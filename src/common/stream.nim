@@ -226,6 +226,7 @@ proc listenStream*(port: int; certs: string; maxPeers = 2048): StreamServer =
   let srv = newGrpcServer(port = port, address = "0.0.0.0", maxWorkers = maxPeers * 2 + 8, maxMessage = maxMessageBytes, tls = serverTls(certs), keepalive = keepalive)
   srv.addStreamingRaw(downMethod, downHandler, st)
   srv.addStreamingRaw(upMethod, upHandler, st)
+  srv.setErrorHook(logHandlerError)
   srv.start()
   StreamServer(st: st, srv: srv)
 

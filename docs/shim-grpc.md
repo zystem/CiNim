@@ -26,6 +26,10 @@ reconnect, as a ZeroMQ routing id did. The `Down` call is opened first and the c
 each is then used by one thread on each side (a call of nimgrpc is not meant to be read and written by two). Frames cross threads in `ShmQueue` (`common/shmq.nim`), never as Nim strings. A peer takes two workers of the gRPC server for as long as it is
 connected (`maxWorkers` is twice the number of peers plus a few).
 
+A handler that fails with an exception that is not a `GrpcError` is told to the operator and not to the client: nimgrpc 0.5.0 answers such a call with `internal error` only (the text of an exception may hold a query or a path), and writes nothing
+anywhere unless the server has a hook. Every server of the platform (the four channels of the shims and the push channel) has `logHandlerError` of `common/corechannel.nim`, which writes one line to the log of the process, `grpc: handler <method> failed: <kind of the exception>: <text, one line, up to 300 characters>`, and counts it
+(`handlerErrors`). Test: `tests/unit/tcorechannel.nim`.
+
 Build: nimgrpc is a nimble package (`requires "nimgrpc >= 0.5.0"` in `cinim.nimble`; the repository is `zystem/nimgrpc`, the modules are `nimgrpc`: `import nimgrpc`; version 0.5.0 was used). It needs a
 static nghttp2 1.61 or later, which it looks for in `/opt/nghttp2` (`include/` and `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>`, or `NGHTTP2_PREFIX` for `config.nims`, names another place), zlib, and the Nim
 package `bearssl` that nimble brings. `tools/image/Dockerfile.deps` (and `Dockerfile.test`, `tools/soak/Dockerfile`, `tools/shim/build_static.sh`) build nghttp2 1.68.1. The shim, the conductor and the controller no longer need libzmq, libsodium or a C++ toolchain;

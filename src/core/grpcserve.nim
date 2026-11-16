@@ -22,6 +22,7 @@ proc startShimServer*(port: int; certs, meth: string; handler: UnaryHandler): Gr
   ## listening on all addresses; the caller stops it with `stop` when the core ends
   result = newGrpcServer(port = port, address = "0.0.0.0", maxWorkers = 4, tls = serverTls(certs))
   result.addUnary(meth, handler)
+  result.setErrorHook(logHandlerError)
   result.start()
 
 var certGeneration*: Atomic[int]
