@@ -16,6 +16,8 @@
 # a use after free or an overflow is a FAIL with the report in the log (the leaks are not looked for: ASAN_OPTIONS detect_leaks=0). It first runs tools/test/check-mmap-rnd.sh and stops with its error
 # when an ASan binary would crash at start (vm.mmap_rnd_bits above 28); a start that crashed all the same (`DEADLYSIGNAL`, nothing else) is repeated, up to 3 times, and the output of a test is cut at
 # 20 MB (that crash prints for ever). Meant for the files that start threads: .ci/pipeline.lua passes those (parameter ASAN, a schedule trigger makes the nightly run).
+# CINIM_TEST_TSAN=1 does the same with ThreadSanitizer (build/nimcache-tsan, build/tests-tsan): a data race is a FAIL with the report in the log. With ORC a `ref` that two threads copy shows as a race in
+# nimIncRef/nimDecRef (the count is not atomic), which is the error it is for.
 # The log of a file that failed is build/test-logs/<name>.log. Exit code: the number of failed files (capped at 100).
 cd "$(dirname "$0")/../.." || exit 2
 jobs=8; unit=1; integ=1; files=()
@@ -39,10 +41,13 @@ if [ ${#files[@]} -eq 0 ]; then
 fi
 mkdir -p build/tests build/test-logs
 asan=${CINIM_TEST_ASAN:-0}
+san=address; sandir=asan
+if [ "${CINIM_TEST_TSAN:-0}" = 1 ]; then asan=1; san=thread; sandir=tsan; fi      # the same way of building and running, with the other sanitizer
 if [ "$asan" = 1 ]; then
   sh tools/test/check-mmap-rnd.sh || exit 2
   export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}
-  mkdir -p build/tests-asan build/nimcache-asan
+  export TSAN_OPTIONS=${TSAN_OPTIONS:-halt_on_error=0:exitcode=66:history_size=4:second_deadlock_stack=1}
+  mkdir -p build/tests-$sandir build/nimcache-$sandir
 fi
 need_db=0; for f in "${files[@]}"; do case $f in tests/integration/*) need_db=1;; esac; done
 native=${CINIM_RQLITE_BIN:-}
@@ -86,7 +91,7 @@ elif [ $need_db = 1 ]; then
     until curl -sf "127.0.0.1:$((24600 + i))/readyz" >/dev/null; do sleep 0.5; done
   done
 fi
-export jobs asan
+export jobs asan san sandir
 probe_pid=""
 if [ $need_db = 1 ] && [ "${CINIM_TEST_DBPROBE:-0}" = 1 ]; then
   : > build/test-logs/dbprobe.txt
@@ -114,11 +119,11 @@ one() {   # file slot
   start=$(date +%s)
   limit=${CINIM_TEST_FILE_TIMEOUT:-900}
   if [ "$asan" = 1 ]; then
-    mkdir -p build/tests-asan/$kind
-    bin=build/tests-asan/$kind/$name
+    mkdir -p build/tests-$sandir/$kind
+    bin=build/tests-$sandir/$kind/$name
     attempt=0
-    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c --hints:off --warnings:off -p:src -d:useMalloc --debugger:native --passC:-fsanitize=address \
-      --passC:-fno-omit-frame-pointer --passL:-fsanitize=address --nimcache:build/nimcache-asan/$kind-$name --outdir:build/tests-asan/$kind "$f" >"$log" 2>&1
+    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c --hints:off --warnings:off -p:src -d:useMalloc --debugger:native --passC:-fsanitize=$san \
+      --passC:-fno-omit-frame-pointer --passL:-fsanitize=$san --nimcache:build/nimcache-$sandir/$kind-$name --outdir:build/tests-$sandir/$kind "$f" >"$log" 2>&1
     rc=$?
     while [ $rc -eq 0 ]; do
       ( ulimit -f 20000; timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} "$bin" >"$log" 2>&1 )
@@ -130,7 +135,7 @@ one() {   # file slot
     timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
     rc=$?
   fi
-  grep -q "ERROR: AddressSanitizer" "$log" && [ $rc -eq 0 ] && rc=1
+  grep -q "ERROR: AddressSanitizer\|WARNING: ThreadSanitizer" "$log" && [ $rc -eq 0 ] && rc=1
   ok=$(grep -c '\[OK\]' "$log"); bad=$(grep -c '\[FAILED\]' "$log")
   # a file that reports with the summary line of another framework (`[Summary] 4 tests run`) has no [OK] lines: its count is that of the summary, so that "0 tests" means a file that skipped itself
   if [ "$ok" = 0 ]; then n=$(sed -n 's/.*\[Summary\] \([0-9]*\) tests run.*/\1/p' "$log" | tail -1); [ -z "$n" ] || ok=$n; fi

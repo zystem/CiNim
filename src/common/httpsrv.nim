@@ -8,6 +8,10 @@
 ## One thing the fix leaves: the default reading finds only the spellings `content-length: ` and `Content-Length: ` (not CONTENT-LENGTH, and not a header with no space after the colon);
 ## every client of ours sends one of the two.
 ##
+## The queue of the dispatcher (found 2026-11-16, 9.0.2): the events go to the workers through `QueueSize` places, 200 unless told, filled again from the start; a worker reads its place once
+## more when the handler returns, and when the queue has come round meanwhile the place is another connection's: the connection of the slow request is never read again. `config.nims`
+## sets `-d:QueueSize=20000` (a mitigation), `tests/integration/thttp.nim` fails without it.
+##
 ## Every service that serves HTTP makes its server here.
 import guildenstern/[dispatcher, httpserver]
 export dispatcher, httpserver

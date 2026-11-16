@@ -10,6 +10,7 @@ proc serveOnce(reply: string): Port =
   s.listen()
   let port = s.getLocalAddr()[1]
   var th {.global.}: Thread[tuple[s: Socket, reply: string]]
+  if th.running: joinThread th            # the one object serves every call: the thread of the call before must be over before it is used again
   createThread(th, proc (a: tuple[s: Socket, reply: string]) {.thread.} =
     var c: Socket
     a.s.accept(c)
@@ -83,3 +84,4 @@ suite "a request that timed out leaves no answer behind for the next one":
     check timedOut
     let r = c.query(%*[["SELECT 2"]])
     check r["results"][0]["values"][0][0].getInt == 2
+    joinThread th                           # its object is on the stack of this test: the thread must be over before the test returns

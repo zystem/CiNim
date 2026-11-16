@@ -3,6 +3,7 @@
 ## people off. Needs CINIM_RQLITE_URL, the openssl command and OpenLDAP: `slapd` with `ldap-utils` as processes (the image of the tests has them, the pipeline runs the test), else Docker
 ## (osixia/openldap); without either it is skipped.
 import std/[unittest, json, os, osproc, strutils, times, streams, sequtils]
+from std/posix import getuid, getgid
 import common/[rqlite, ldapclient]
 import core/[schema, apiauth, ldapauth, secretvault, kekprovider, teams]
 import ../support/testkek
@@ -133,12 +134,19 @@ suite "D-87 LDAP":
     else:
       ssStarted = startContainer(dir / "mount-ss", ssName, ssPort, ssTlsPort)
       started = startContainer(dir / "mount", name, port, tlsPort)
-    addQuitProc(proc () {.noconv.} =
-      for p in slapds:
-        p.terminate()
-        discard p.waitForExit(2000)
-      if not native: discard execCmd("docker rm -f " & name & " " & ssName & " > /dev/null 2>&1")
-      removeDir(dir))
+    # What the exit of the program must stop and remove, as one shell command in memory that is never freed: an exit procedure runs after the variables of the module are destroyed, so it
+    # must not read them (it did: the names, the directory and the list of processes; ThreadSanitizer showed the use after free, `removeDir` of a freed string among it, 2026-11-16).
+    var cleanup = ""
+    for p in slapds: cleanup.add "kill " & $p.processID & " 2>/dev/null; "
+    if not native:
+      # the image makes the mounted directories its own (uid 911): give them back before the containers go, or the directory of the test stays in the temporary directory for ever
+      for n in [name, ssName]: cleanup.add "docker exec " & quoteShell(n) & " chown -R " & $getuid() & ":" & $getgid() & " /container/service/slapd/assets/certs > /dev/null 2>&1; "
+      cleanup.add "docker rm -f " & quoteShell(name) & " " & quoteShell(ssName) & " > /dev/null 2>&1; "
+    cleanup.add "rm -rf -- " & quoteShell(dir)
+    let cleanupC = cast[cstring](allocShared0(cleanup.len + 1))
+    copyMem(cleanupC, cleanup.cstring, cleanup.len)
+    proc csystem(cmd: cstring): cint {.importc: "system", header: "<stdlib.h>".}
+    addQuitProc(proc () {.noconv.} = discard csystem(cleanupC))
     var ready = false
     if started:
       let deadline = epochTime() + 180

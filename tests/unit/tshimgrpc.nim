@@ -11,12 +11,18 @@ const
   logPort = 28743
   statusPort = 28746
   reportPort = 28742
-  vlPort = 18796
+  vlPort = 18896
 
 requireFreePorts("tshimgrpc", [logPort, statusPort, reportPort, vlPort])      # a port that something holds is another process: stop, do not talk to it (tests/support/freeport.nim)
 proc runLog(a: tuple[co: Collector, certs: string, port: int]) {.thread.} = serveLogIngest(a.co, a.certs, a.port)
 proc runStatus(a: tuple[url, certs: string, port: int]) {.thread.} = serveStatus(a.url, a.certs, a.port)
 proc runReport(a: tuple[url, certs: string, port: int, profile: string]) {.thread.} = serveStepReport(a.url, a.certs, a.port, a.profile)
+
+# the threads of the servers outlive the test that starts them: their objects are globals (a Thread on the stack of a test that has returned is read by its thread when it ends;
+# ThreadSanitizer showed it as a crash in the teardown, 2026-11-16)
+var t1: Thread[tuple[co: Collector, certs: string, port: int]]
+var t2: Thread[tuple[url, certs: string, port: int]]
+var t3: Thread[tuple[url, certs: string, port: int, profile: string]]
 
 let base = getTempDir() / ("tshimgrpc-" & $getCurrentProcessId())
 let certs = base / "certs"
@@ -31,9 +37,6 @@ suite "RUN-007 the shim talks to the core's servers over gRPC":
     startFakeVlagent(vlPort)
     stopServers.store(false)
     let dead = "http://127.0.0.1:1"
-    var t1: Thread[tuple[co: Collector, certs: string, port: int]]
-    var t2: Thread[tuple[url, certs: string, port: int]]
-    var t3: Thread[tuple[url, certs: string, port: int, profile: string]]
     createThread(t1, runLog, (Collector(rqliteUrl: dead, vlagentUrl: "http://127.0.0.1:" & $vlPort & "/insert/jsonline"), certs, logPort))
     createThread(t2, runStatus, (dead, certs, statusPort))
     createThread(t3, runReport, (dead, certs, reportPort, "p"))
@@ -59,6 +62,6 @@ suite "RUN-007 the shim talks to the core's servers over gRPC":
 
   test "teardown":
     stopServers.store(true)
-    sleep 1500
+    if haveKeys: (joinThread t1; joinThread t2; joinThread t3)          # each loop looks at `stopServers` once a second: the threads are over before their arguments are destroyed at the exit
     stopFakeVlagent()
     if base.len > 0: removeDir base
