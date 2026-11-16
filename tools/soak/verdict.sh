@@ -2,7 +2,7 @@
 # Did the soak (tools/soak/run72.sh) that wrote a directory pass? Usage: verdict.sh OUTDIR [HOURS]
 # It passes (exit 0) when the release run ended with `SOAK OK` (RSS growth after the warm-up within 2 %, NFR-013), every ASan/LSan hour ended with
 # exit 0, and the launcher said `finished`; with HOURS also when that many ASan hours were run. 1: it did not pass (the reasons are printed). 2: nothing to judge.
-# The Job of deploy/examples/soak72 ends with this verdict as its exit code, so that a soak that went bad is a Job that failed.
+# The step of .woodpecker/soak.yaml ends with this verdict as its exit code, so that a soak that went bad is a pipeline that failed.
 set -u
 D="${1:?output directory of run72.sh}"; HOURS="${2:-}"
 [ -f "$D/release.out" ] || { echo "verdict: no release.out in $D"; exit 2; }

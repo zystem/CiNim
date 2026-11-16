@@ -1,4 +1,4 @@
-# The soak harness (NFR-013) as an image, to run the 72 h soak in a cluster next to another host (tools/soak/run72.sh, deploy/examples/soak72).
+# The soak harness (NFR-013) as an image, to run the 72 h soak in a cluster next to another host (tools/soak/run72.sh, .woodpecker/soak.yaml).
 # glibc, not musl: the AddressSanitizer variant needs it. Build with tools/image/kaniko-build.sh (DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak).
 # The TLS keys are made at build time and are test keys only (tools/grpc/gen_tls.sh, into build/soak-certs).
 FROM nimlang/nim:2.4.0

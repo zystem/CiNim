@@ -1,8 +1,8 @@
 #!/bin/sh
-# The soak as one run of a Kubernetes CronJob (deploy/examples/soak72). Usage: job.sh ROOT [HOURS=72]
+# The soak as one run of a step of a pipeline (.woodpecker/soak.yaml). Usage: job.sh ROOT [HOURS=72]
 # A directory of its own is made for the run in ROOT, named by the start time (20261114T180000Z), so that the runs of the weeks do not mix on the one volume;
 # tools/soak/run72.sh runs in it for HOURS (both harnesses, in the foreground); the summary and one row an hour of the release run are printed (the log of the Pod
-# is the report); and the exit code is the verdict of tools/soak/verdict.sh, so a soak that went bad is a Job that failed. After the run only the newest
+# is the report); and the exit code is the verdict of tools/soak/verdict.sh, so a soak that went bad is a pipeline that failed. After the run only the newest
 # SOAK_KEEP_RUNS (8) directories named like that stay in ROOT. SOAK_RUN72 names another launcher (the test of this script has one that waits for nothing).
 set -u
 ROOT="${1:?directory of the volume}"; HOURS="${2:-72}"; KEEP="${SOAK_KEEP_RUNS:-8}"

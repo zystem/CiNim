@@ -99,7 +99,7 @@ rc=0
 FOREGROUND=1 tools/soak/run72.sh "$OUT" "$SOAK_HOURS" || rc=$?
 tools/soak/summarize.sh "$OUT" || true
 echo "== the release run, one row an hour"; awk -F, 'NR == 1 || (NR - 1) % 60 == 0' "$OUT/release.csv" || true
-tools/soak/verdict.sh "$OUT" "$SOAK_HOURS" || rc=1      # the same verdict as the CronJob of deploy/examples/soak72
+tools/soak/verdict.sh "$OUT" "$SOAK_HOURS" || rc=1      # the same verdict as the Woodpecker pipeline of .woodpecker/soak.yaml
 exit $rc
 ]]
 

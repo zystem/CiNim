@@ -141,23 +141,24 @@ which cannot be put there through the API.
 
 ### The 72 h soak in a cluster
 
-`deploy/examples/soak72/soak72.yaml` runs the soak (NFR-013, `tools/soak/run72.sh`: the release harness continuously and the ASan/LSan harness in hourly runs) as a **weekly CronJob that
-does not depend on CiNim** (Fridays 18:00 UTC, `concurrencyPolicy: Forbid`), from the image of `tools/soak/Dockerfile` (`DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak tools/image/kaniko-build.sh`;
-put its name in `IMAGE`, and name a newer one when the soak or its scripts change). Nothing in it needs the platform, so a rollout of CiNim does not end a run. One Pod a week runs `tools/soak/job.sh`:
-it makes a directory of its own on the volume for the run (named by the start time, `20261114T180000Z`, so that the weeks do not mix), runs `run72.sh` in it, prints the summary and one row an hour of the
-release run, and **ends with the verdict of `tools/soak/verdict.sh` as its exit code**: the release run ended with `SOAK OK`, every ASan hour ended with exit 0, all the 72 hours were run and the launcher
-said `finished`. A Job that failed is a soak that went bad, and its log says why. The newest 8 runs stay on the volume (`SOAK_KEEP_RUNS`), the older ones are removed. `backoffLimit: 0`: a Pod that dies
-(a node restart, an OOM kill) ends the run, because a soak that starts again from zero is not a 72 h soak, and the volume keeps what was written.
+`.woodpecker/soak.yaml` runs the soak (NFR-013, `tools/soak/run72.sh`: the release harness continuously and the ASan/LSan harness in hourly runs) in **Woodpecker, apart from CiNim**, so that a rollout of CiNim does not end a run. The pipeline
+starts on the cron `soak72` of the repository (Mondays 06:00 UTC, `0 6 * * 1`) or by hand; the variable `SOAK_HOURS` of a manual start shortens it (`SOAK_HOURS=1` is the one hour try). It has two steps: `image` builds `tools/soak/Dockerfile` for the
+commit that was checked out (Kaniko) and pushes it to the registry of the forge (`cinim/cinim-soak:wp-<12 digits of the commit>`), and `soak` runs `tools/soak/job.sh` in that image: it runs `run72.sh` in a directory of its own, prints the summary and one row an hour of the
+release run (and, for an ASan hour that ended badly, its report), and **ends with the verdict of `tools/soak/verdict.sh` as its exit code**: the release run ended with `SOAK OK`, every ASan hour ended with exit 0, all the hours were run and the launcher
+said `finished`. A pipeline that failed is a soak that went bad, and its log says why. The release run is what NFR-013 measures (RSS growth within 2 % after the warm-up); the ASan hours are checked for leaks once, at their exit (a check in the middle of the run lists the live
+connections as leaks: 110-195 KB each time, not growing, 2026-11-15).
 
-```bash
-kubectl -n cinim-soak create job --from=cronjob/soak72 soak72-now      # one run now, by hand
-kubectl -n cinim-soak get jobs                                         # the runs; Failed is a soak that did not pass
-kubectl -n cinim-soak logs job/soak72-now                              # the summary, the rows of the release run, the verdict
-kubectl -n cinim-soak exec job/soak72-now -- sh -c '/cinim/tools/soak/summarize.sh /out/$(ls /out | sort | tail -n 1)'      # while it runs; or after, kubectl cp from a Pod that mounts the claim
-```
+What it needs:
 
-The CPU and memory that other work on the same node takes do not change the RSS growth that is measured, but a restart of the node does end the run. The node needs `vm.mmap_rnd_bits` at 28 or less
-(the ASan hours) and the Pod about two CPUs. Not run: this CronJob itself (the manifest is checked with `kubeconform`, the two scripts by `tests/unit/tsoakjob.nim` and `shellcheck`; no week has run it yet).
+- Woodpecker with the Kubernetes backend, the agents with `WOODPECKER_BACKEND_K8S_ALLOW_NATIVE_SECRETS=true`, and the timeout of the repository at 80 hours (the default is 60 minutes).
+- The Secret `soak-registry` (key `docker-config`) in the namespace of the agents: a Docker config with the login of the registry that holds the image (the forge's own host, plain HTTP; a token with `write:package`).
+- `soak` is **privileged**: LeakSanitizer stops the threads of its own process with ptrace, which needs `CAP_SYS_PTRACE` where `kernel.yama.ptrace_scope` is 2 (the Talos nodes); without it every ASan hour ends with `LeakSanitizer has encountered a fatal error` and no leak
+  report. Woodpecker 3.7 has no field for one capability, and the `privileged` of `backend_options.kubernetes.securityContext` is ignored unless the step itself has `privileged: true`. So the repository must be trusted for `security` in Woodpecker and the namespace of the agents must allow
+  it (`kubectl label ns woodpecker pod-security.kubernetes.io/enforce=privileged`).
+- A node with `vm.mmap_rnd_bits` at 28 or less (the ASan hours) and about two CPUs for the three days; a restart of the node ends the run (a soak that starts again from zero is not a 72 h soak). The workspace volume is read-write-once, so both steps run on the node that built the image,
+  and its system disk must hold the image (a build once left a worker with `disk-pressure` for a few minutes).
+
+Run: a one hour try on 2026-11-15 (pipeline 10, commit `436e94b`) passed: the release run 2 466 484 transport requests and 38 799 Lua calls with no failure, RSS growth 0.00 %, the ASan hour exit 0. Not run: the 72 hours (the first cron is 2026-11-16 06:00 UTC).
 
 **Weekly, in CI (the other way; a soak that a rollout of CiNim can end).** The pipeline of the repository (`.ci/pipeline.lua`) runs the same soak as one step with the parameter `SOAK=true`: it builds the image of `tools/soak/Dockerfile` for the commit, then runs
 `tools/soak/run72.sh` in it for `SOAK_HOURS` (72) hours; the log of the step is the report (the summary of `summarize.sh`, one row of the release CSV an hour), and the step fails on the same verdict (`tools/soak/verdict.sh`). A step may be a week long at most, and the shard's default is 24 hours (the soak needs 80): the project must allow it first (the settings page of the UI, "Longest step", or
@@ -169,8 +170,8 @@ The CPU and memory that other work on the same node takes do not change the RSS 
  "params": {"REGISTRY": "<host:port>", "SOAK": "true", "BUILD": "false", "TEST": "false", "LINT": "false", "ASAN": "false"}}
 ```
 
-The node needs `vm.mmap_rnd_bits` at 28 or less (the ASan hours), the Pod about two CPUs, and the node must stay up for the three days (a restart ends the run, as it does for the Job above). Not checked yet: that the
-ordinary profile of the organisation lets LeakSanitizer work in the Pod (it needs `ptrace`).
+The node needs `vm.mmap_rnd_bits` at 28 or less (the ASan hours), the Pod about two CPUs, and the node must stay up for the three days (a restart ends the run, as it does for the Woodpecker one). Not checked yet: that the
+ordinary profile of the organisation lets LeakSanitizer work in the Pod (it needs `ptrace`, see `CAP_SYS_PTRACE` above).
 
 ## The registry of the MVP stand
 

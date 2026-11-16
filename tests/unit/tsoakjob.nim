@@ -1,7 +1,7 @@
-## NFR-013: the 72 h soak as a CronJob (`deploy/examples/soak72/soak72.yaml`): `tools/soak/verdict.sh` says whether the soak that wrote a directory passed
+## NFR-013: the 72 h soak as one step of a pipeline (`.woodpecker/soak.yaml`): `tools/soak/verdict.sh` says whether the soak that wrote a directory passed
 ## (the release run ended with `SOAK OK`, every ASan hour ended with exit 0 and the hours were all run), and `tools/soak/job.sh` runs the soak into a new
 ## directory of its own (so that the runs of the weeks do not mix on the volume), prints the summary, keeps the newest runs only, and ends with the verdict
-## as its exit code (a Job that failed is what shows a bad soak). Run with a stand-in for `run72.sh`: no hour is waited for.
+## as its exit code (a pipeline that failed is what shows a bad soak). Run with a stand-in for `run72.sh`: no hour is waited for.
 import std/[unittest, os, osproc, strutils, algorithm, sequtils]
 
 let root = currentSourcePath().parentDir.parentDir.parentDir

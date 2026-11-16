@@ -75,7 +75,9 @@ suite "D-87 LDAP":
   let slapdBin = if fileExists("/usr/sbin/slapd"): "/usr/sbin/slapd" else: findExe("slapd")
   # the backends of slapd are modules in Debian (back_mdb.so) and built in elsewhere: the directory of the modules, "" when there is none
   let modDir = ["/usr/lib/ldap", "/usr/lib/openldap", "/usr/lib64/openldap"].filterIt(fileExists(it / "back_mdb.so")).concat(@[""])[0]
-  let native = slapdBin.len > 0 and have("ldapadd") and have("ldapmodify") and have("ldapdelete") and dirExists("/etc/ldap/schema")
+  # Docker first where there is Docker, the slapd of the machine where there is none (the Pod of the pipeline): the AppArmor profile of Ubuntu's slapd refuses the configuration in /tmp,
+  # so on a workstation that has both the test waited 180 s and failed with "OpenLDAP did not come up" (2026-11-15). CINIM_LDAP_NATIVE=1 takes slapd even where Docker is.
+  let native = slapdBin.len > 0 and have("ldapadd") and have("ldapmodify") and have("ldapdelete") and dirExists("/etc/ldap/schema") and (not have("docker") or getEnv("CINIM_LDAP_NATIVE").len > 0)
   if url.len == 0 or not (native or have("docker")) or not have("openssl"):
     echo "  skipped: CINIM_RQLITE_URL, openssl and OpenLDAP (slapd with ldap-utils, or Docker) are needed"
   else:
