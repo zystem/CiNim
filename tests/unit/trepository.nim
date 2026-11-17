@@ -325,6 +325,10 @@ suite "CLAUDE.md rules: the repository keeps them":
         if lock.hasKey(name): check atLeast(lock[name]["version"].getStr, want)
       else: check false              # a form of `requires` that this test does not read: teach it
     check asked > 5
+  test "the files that a visitor of the repository looks for are there (the community profile of GitHub)":
+    for f in ["README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "GOVERNANCE.md", "DCO.md", "CHANGELOG.md", ".github/PULL_REQUEST_TEMPLATE.md", ".github/workflows/dco.yml"]:
+      check fileExists(root() / f)
+    check dirExists(root() / ".github/ISSUE_TEMPLATE")
   test "no tracked file holds a word of the owner's private list":
     let listed = getEnv("CINIM_PRIVATE_WORDS_FILE", getHomeDir() / ".config" / "cinim" / "private-words")
     if not fileExists(listed):

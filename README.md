@@ -44,6 +44,12 @@ Transport between services: gRPC with mutual TLS (D-104; nimgrpc). HTTP layer: G
 - `docs/threat-model.md` — the threat model;
 - `docs/evidence/` — raw outputs of the log-store comparison (A.7).
 
+To contribute or report a problem:
+
+- `CONTRIBUTING.md` — how to build, test and send a change; `DCO.md` — the sign-off every commit carries; `CODE_OF_CONDUCT.md`; `GOVERNANCE.md` — who runs the project and what is not met;
+- `SECURITY.md` — how to report a vulnerability (privately, through GitHub), the times, the supported versions;
+- `CHANGELOG.md` — what changed (no release has been made yet).
+
 ## Build and tests
 
 Working rules: tests first; the name of a test contains the ID of the requirement it verifies.

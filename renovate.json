@@ -8,7 +8,7 @@
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
   "automerge": false,
-  "enabledManagers": ["dockerfile", "helmv3", "helm-values", "custom.regex"],
+  "enabledManagers": ["dockerfile", "helmv3", "helm-values", "custom.regex", "github-actions"],
   "ignorePaths": ["docs-tr/**", "build/**", "third_party/**", "deploy/examples/**", "tests/certs/**"],
   "postUpdateOptions": ["helmUpdateSubChartArchives"],
   "pinDigests": false,
