@@ -23,24 +23,24 @@
 -- The organisation needs the build profile (build.enabled) with a build.egress rule for every registry, and a store for caches (the storage module); for the deploy step the deploy
 -- profile (deploy.enabled, deploy.kubeApiServer, deploy.serviceAccount: the token of the Pod is the credential, its rights are deployer.yaml). A step that exits non-zero fails the job and so the run (6.7).
 -- Parameters are plain environment variables of every step (VAR-002); the secrets are fetched by the shim and are never in the script.
-local GIT = "alpine/git:v2.47.2"
-local KUBECTL = "alpine/k8s:1.34.1"             -- kubectl, helm, git, jq
+local GIT = "alpine/git:v2.47.2@sha256:062a01ad7a0eb17cff382bc5e26086b4d710e56dfdfdf001109a49b6d9bd378c"
+local KUBECTL = "alpine/k8s:1.34.1@sha256:ec714df3813b5405292860f8a1c55c5727bf8c33c88992f1e981efad8065547f"             -- kubectl, helm, git, jq
 -- the images of the checks of tools/test/lint.sh, one tool each (none has bash: the script is POSIX sh); the pins are those of the tools run on the workstation
-local SHELLCHECK = "koalaman/shellcheck-alpine:v0.11.0"
-local HADOLINT = "hadolint/hadolint:v2.14.0-alpine"
-local KUBECONFORM = "ghcr.io/yannh/kubeconform:v0.8.0-alpine"       -- the binary is /kubeconform and the image has no PATH to it
+local SHELLCHECK = "koalaman/shellcheck-alpine:v0.11.0@sha256:9955be09ea7f0dbf7ae942ac1f2094355bb30d96fffba0ec09f5432207544002"
+local HADOLINT = "hadolint/hadolint:v2.14.0-alpine@sha256:7aba693c1442eb31c0b015c129697cb3b6cb7da589d85c7562f9deb435a6657c"
+local KUBECONFORM = "ghcr.io/yannh/kubeconform:v0.8.0-alpine@sha256:6b90a5f23d846140ce0194fe050b1995e546eba938f3a6bf10c039dd5e24588f"       -- the binary is /kubeconform and the image has no PATH to it
 
 -- the component (tools/image/Dockerfile.<component>) and the image it is pushed as
 local COMPONENTS = { { target = "core", image = "cinim" }, { target = "controller", image = "cinim-controller" },
                      { target = "conductor", image = "cinim-conductor" },
                      { target = "ui", image = "cinim-ui" } }
 
--- What the checked-out commit says, returned to the script as outputs: DEPS (the hash of what the image of the libraries is made of: cinim.nimble, the script of the Kubernetes client and the Dockerfile), TESTDEPS
--- (cinim.nimble and the Dockerfile of the tests), HELMDEPS (Chart.lock), and what changed since BASE (D-82). The commit is in `src`, its history in `mirror.git` (`j:checkout()`).
+-- What the checked-out commit says, returned to the script as outputs: DEPS (the hash of what the image of the libraries is made of: cinim.nimble, cinim.lock, the script of the Kubernetes client and the Dockerfile), TESTDEPS
+-- (cinim.nimble, cinim.lock and the Dockerfile of the tests), HELMDEPS (Chart.lock), and what changed since BASE (D-82). The commit is in `src`, its history in `mirror.git` (`j:checkout()`).
 local FACTS = [[
 set -eu
-deps=$(cat src/cinim.nimble src/tools/k8s/build_client.sh src/tools/image/Dockerfile.deps | sha256sum | cut -c1-16)
-tests=$(cat src/cinim.nimble src/tools/image/Dockerfile.test | sha256sum | cut -c1-16)
+deps=$(cat src/cinim.nimble src/cinim.lock src/tools/k8s/build_client.sh src/tools/image/Dockerfile.deps | sha256sum | cut -c1-16)
+tests=$(cat src/cinim.nimble src/cinim.lock src/tools/image/Dockerfile.test | sha256sum | cut -c1-16)
 helm=$(sha256sum < src/deploy/charts/cinim-shard/Chart.lock | cut -c1-16)
 # D-82: the files that differ between BASE (the last good commit, told by the platform) and the commit, reduced to the areas of the tree (`src/core`, `docs`, ...) and the changed test files: what the
 # script decides by. Without a usable BASE nothing is said and the script builds and tests everything.
@@ -199,7 +199,7 @@ local DEPENDS = { common = {}, shim = {"common"}, jobcontroller = {"common"}, co
 local IMAGE_PARTS = { core = {"core"}, controller = {"jobcontroller", "shim"}, conductor = {"conductor"}, ui = {"ui"} }   -- the components of src/ that an image is made of
 local SPEAK_PROTO = { core = true, controller = true, conductor = true }     -- the images that have the types of the messages
 local RUN_LUA = { core = true, conductor = true }                            -- the images that run Lua and have its stubs
-local BUILD_ALL = { ["cinim.nimble"] = true, ["config.nims"] = true, ["nim.cfg"] = true, ["tools/image/build-static.sh"] = true, ["tools/image/Dockerfile.deps"] = true,
+local BUILD_ALL = { ["cinim.nimble"] = true, ["cinim.lock"] = true, ["config.nims"] = true, ["nim.cfg"] = true, ["tools/image/build-static.sh"] = true, ["tools/image/Dockerfile.deps"] = true,
                     ["tools/k8s"] = true, ["tools/proto"] = true, ["tools/shim"] = true, ["tools/grpc"] = true }        -- the build of everything
 local TESTS_ALL = { ["tests/support"] = true, ["tests/certs"] = true, ["tests/vectors"] = true, ["tests/contract"] = true, ["tools/test"] = true, [".ci"] = true, ["deploy"] = true,
                     ["tools/image/Dockerfile.test"] = true }                     -- what every test may depend on, and not an image

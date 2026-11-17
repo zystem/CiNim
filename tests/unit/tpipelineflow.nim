@@ -132,7 +132,7 @@ suite "D-82 what the pipeline builds, tags and runs":
     check changed("proto").builds.sorted == @["conductor", "controller", "core"]
     check changed("lua").builds.sorted == @["conductor", "core"]
   test "the build files of everything build and test everything; common, the proto and the Lua stubs test everything":
-    for a in ["cinim.nimble", "config.nims", "tools/image/build-static.sh", "tools/image/Dockerfile.deps", "tools/k8s", "tools/proto", "tools/shim"]:
+    for a in ["cinim.nimble", "cinim.lock", "config.nims", "tools/image/build-static.sh", "tools/image/Dockerfile.deps", "tools/k8s", "tools/proto", "tools/shim"]:
       let f = changed(a)
       check f.builds.sorted == allFour and f.tests and f.testEnv.noSelection
     for a in ["src/common", "proto", "lua"]:

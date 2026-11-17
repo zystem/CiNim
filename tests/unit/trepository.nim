@@ -128,6 +128,24 @@ proc uncheckedDownload*(path, text: string): seq[Finding] =
       if "| tar" in line or "|tar" in line: result.add (path, i + 1, "an archive goes from curl into tar with no check of its SHA-256 (save it, `sha256sum -c`, then unpack)")
       elif not checked: result.add (path, i + 1, "an archive is fetched and the file has no `sha256sum -c`")
 
+proc unpinnedSource*(path, text: string): seq[Finding] =
+  ## What a build takes from outside is named by something that does not move: a base image by its digest (`FROM image:tag@sha256:...`; `scratch` and an `ARG`'s value are not looked at), an image of the pipeline
+  ## the same, and a source tree by its commit (`git clone` follows a tag or a branch, which can be moved: fetch the commit, tools/k8s/build_client.sh `fetch_commit`). The exception is the tag of our own
+  ## hsmgate (`HSMGATE_REF`, which Renovate moves).
+  if path.startsWith("tests/") or path.startsWith("docs") or path.startsWith("deploy/examples/"): return       # the examples are the reader's to pin (Renovate leaves them too)
+  for i, raw in toSeq(text.splitLines):
+    let line = code(raw).strip
+    if path.contains("Dockerfile") and line.startsWith("FROM "):
+      let image = line.splitWhitespace[1]
+      if image != "scratch" and not image.startsWith("$") and "@sha256:" notin image:
+        result.add (path, i + 1, "the base image " & image & " has no digest (`image:tag@sha256:...`)")
+    if path == ".ci/pipeline.lua" and line.startsWith("local ") and line.contains(" = \"") and line.count(':') >= 1 and not line.contains("\\n"):
+      let q = line.split('"')
+      if q.len >= 3 and q[1].contains('/') and q[1].contains(':') and not q[1].contains(" ") and "@sha256:" notin q[1]:
+        result.add (path, i + 1, "the image " & q[1] & " has no digest")
+    if (path.contains("Dockerfile") or path.endsWith(".sh")) and "git clone" in line and "HSMGATE_REF" notin line:
+      result.add (path, i + 1, "`git clone` follows a tag or a branch: fetch the commit (fetch_commit in tools/k8s/build_client.sh)")
+
 const
   docRoots = ["src/", "tools/", "deploy/", "tests/", "proto/", "lua/", "docs/", ".ci/"]
   docRefExempt = [".ci/NN.lua", ".ci/lock.json", "docs/how-to/talos.md"]     ## names the specification plans (the pipeline files of a project, D-68), and a file of another repository
@@ -153,6 +171,13 @@ suite "CLAUDE.md rules: each rule sees a violation":
     check unguardedPorts("tests/unit/tx.nim", "check cfg.collectorAddr == \"tcp://core:19743\"\n").len == 0          # a port in a string that nothing binds
     check unguardedPorts("tests/unit/tx.nim", "s.bindAddr(Port(0), \"127.0.0.1\")\n").len == 0                     # port 0: the system chooses a free one
     check unguardedPorts("src/core/x.nim", "const port = 18941\ndiscard s.start(port, 2)\n").len == 0
+  test "a base image with no digest and a clone of a tag or a branch are refused":
+    check unpinnedSource("tools/image/Dockerfile.x", "FROM nimlang/nim:2.4.0\n").len == 1
+    check unpinnedSource("tools/image/Dockerfile.x", "FROM nimlang/nim:2.4.0@sha256:e35e49da9bb8a5d4562f9c4f8afc1945c9cdeb525b2a9b3e76431d0556ac0c8f AS b\nFROM scratch\nFROM ${DEPS_IMAGE} AS x\n").len == 0
+    check unpinnedSource(".ci/pipeline.lua", "local GIT = \"alpine/git:v2.47.2\"\n").len == 1
+    check unpinnedSource(".ci/pipeline.lua", "local GIT = \"alpine/git:v2.47.2@sha256:062a01ad7a0eb17cff382bc5e26086b4d710e56dfdfdf001109a49b6d9bd378c\"\nlocal X = \"set -eu\\nsh\"\n").len == 0
+    check unpinnedSource("tools/k8s/x.sh", "git clone -q --depth 1 --branch v1 https://github.com/a/b b\n").len == 1
+    check unpinnedSource("tools/image/Dockerfile.test", "RUN git clone -q --depth 1 --branch \"${HSMGATE_REF}\" https://github.com/zystem/hsmgate.git /src\n").len == 0
   test "an archive that is downloaded and unpacked without a check of its SHA-256 is refused":
     check uncheckedDownload("tools/image/Dockerfile.x", "RUN curl -fsSL \"https://h/releases/download/v1/a.tar.xz\" | tar xJ -C /tmp\n").len == 1
     check uncheckedDownload("tools/image/Dockerfile.x", "RUN curl -fsSL -o /tmp/a.tar.xz \"https://h/releases/download/v1/a.tar.xz\"\n").len == 1
@@ -264,6 +289,7 @@ suite "CLAUDE.md rules: the repository keeps them":
     check annotated > 0 and matched == annotated
   test "no archive is unpacked unchecked, and the sums of one archive are the same in every file that names it":
     check scan(uncheckedDownload, files) == newSeq[string]()
+    check scan(unpinnedSource, files) == newSeq[string]()
     var sums: seq[string]
     for f in files:
       if not (f.contains("Dockerfile") or f == "tools/shim/build_static.sh") or f.startsWith("tests/"): continue
@@ -273,6 +299,32 @@ suite "CLAUDE.md rules: the repository keeps them":
           sums.add l["NGHTTP2_SHA256=".len .. ^1]
     check sums.len == 4                                    # Dockerfile.deps, Dockerfile.test, tools/soak/Dockerfile, tools/shim/build_static.sh
     check sums.deduplicate.len == 1 and sums[0].len == 64 and sums[0].allIt(it in HexDigits and it notin {'A' .. 'F'})
+  test "cinim.lock holds every package that cinim.nimble asks for, in a version that satisfies the ask (tools/deps/lock.sh makes it again)":
+    let lock = parseJson(readFile(root() / "cinim.lock"))["packages"]
+    proc atLeast(have, want: string): bool =
+      let h = have.split('.').mapIt(parseInt(it))
+      let w = want.split('.').mapIt(parseInt(it))
+      for i in 0 ..< max(h.len, w.len):
+        let a = if i < h.len: h[i] else: 0
+        let b = if i < w.len: w[i] else: 0
+        if a != b: return a > b
+      true
+    var asked = 0
+    for line in readFile(root() / "cinim.nimble").splitLines:
+      let t = line.strip
+      if not t.startsWith("requires \""): continue
+      let ask = t["requires \"".len ..< t.find('"', "requires \"".len)]
+      inc asked
+      if ask.startsWith("https://"):
+        let commit = ask.split('#')[^1]
+        check toSeq(lock.pairs).anyIt(it[1]["vcsRevision"].getStr == commit)        # a package pinned by its commit
+      elif " >= " in ask:
+        let name = ask.split(" >= ")[0].strip
+        let want = ask.split(" >= ")[1].strip
+        check lock.hasKey(name)
+        if lock.hasKey(name): check atLeast(lock[name]["version"].getStr, want)
+      else: check false              # a form of `requires` that this test does not read: teach it
+    check asked > 5
   test "no tracked file holds a word of the owner's private list":
     let listed = getEnv("CINIM_PRIVATE_WORDS_FILE", getHomeDir() / ".config" / "cinim" / "private-words")
     if not fileExists(listed):

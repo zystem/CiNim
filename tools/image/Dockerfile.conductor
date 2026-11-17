@@ -7,7 +7,7 @@ WORKDIR /src
 RUN set -eu; mkdir -p /out; tools/image/build-static.sh /out/conductor-static src/conductor/main.nim -d:zlibStatic -d:zlibLib=/usr/lib/libz.a --passL:"-lm"; strip /out/*
 
 # git and the certificates of the authorities (D-63: the conductor reads the script of a run from a repository, `scriptsource.nim`); the conductor is a static program that needs nothing else
-FROM alpine/git:v2.47.2
+FROM alpine/git:v2.47.2@sha256:062a01ad7a0eb17cff382bc5e26086b4d710e56dfdfdf001109a49b6d9bd378c
 COPY --from=build /out/conductor-static /conductor
 USER 65532:65532
 ENTRYPOINT ["/conductor"]

@@ -1,7 +1,7 @@
 # The soak harness (NFR-013) as an image, to run the 72 h soak in a cluster next to another host (tools/soak/run72.sh, .woodpecker/soak.yaml).
 # glibc, not musl: the AddressSanitizer variant needs it. Build with tools/image/kaniko-build.sh (DOCKERFILE=tools/soak/Dockerfile TARGETS=-:cinim-soak).
 # The TLS keys are made at build time and are test keys only (tools/grpc/gen_tls.sh, into build/soak-certs).
-FROM nimlang/nim:2.4.0
+FROM nimlang/nim:2.4.0@sha256:e35e49da9bb8a5d4562f9c4f8afc1945c9cdeb525b2a9b3e76431d0556ac0c8f
 RUN apt-get update && apt-get install -y --no-install-recommends libsodium-dev git ca-certificates procps curl xz-utils cmake build-essential openssl zlib1g-dev iproute2 \
     && rm -rf /var/lib/apt/lists/*
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -17,8 +17,8 @@ RUN set -eu; W=$(mktemp -d); \
     cmake -S "$W/nghttp2-${NGHTTP2_VERSION}" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
     cmake --build "$W/b" -j"$(nproc)" --target install >/dev/null; rm -rf "$W"
 WORKDIR /cinim
-COPY cinim.nimble /cinim/cinim.nimble
-RUN nimble install -y --depsOnly
+COPY cinim.nimble cinim.lock /cinim/
+RUN nimble install -y --depsOnly --lockFile=cinim.lock
 COPY . /cinim
 # the keys are test keys made here, and the step Pod of the pipeline runs as a user that is not root (the ordinary profile): they must be readable by anyone
 RUN mkdir -p build && sh tools/grpc/gen_tls.sh build/soak-certs 30 && chmod -R a+rX build/soak-certs \

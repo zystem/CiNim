@@ -17,11 +17,11 @@ declare -A BINS=([core]="core" [conductor]="conductor" [controller]="controller-
 declare -A STAGE=([core]="Dockerfile.core build" [conductor]="Dockerfile.conductor build" [controller-static]="Dockerfile.controller build-controller" [shim]="Dockerfile.controller build-shim" [ui]="Dockerfile.ui build")
 
 # 1. the dependencies image
-want=$(cat cinim.nimble tools/k8s/build_client.sh "$DEPSFILE" | sha256sum | cut -c1-16)
+want=$(cat cinim.nimble cinim.lock tools/k8s/build_client.sh "$DEPSFILE" | sha256sum | cut -c1-16)
 have=$(docker image inspect cinim-deps:local --format '{{index .Config.Labels "cinim.deps"}}' 2>/dev/null || true)
 if [ "${FORCE_DEPS:-}" = 1 ] || [ "$want" != "$have" ]; then
   echo "== cinim-deps:local (libzmq, libsodium, the Kubernetes client, nimble packages: a few minutes the first time)"
-  CTX=$(mktemp -d); mkdir -p "$CTX/tools/k8s"; cp cinim.nimble "$CTX/"; cp tools/k8s/build_client.sh "$CTX/tools/k8s/"
+  CTX=$(mktemp -d); mkdir -p "$CTX/tools/k8s"; cp cinim.nimble cinim.lock "$CTX/"; cp tools/k8s/build_client.sh "$CTX/tools/k8s/"
   docker build -q -f "$DEPSFILE" --label "cinim.deps=$want" -t cinim-deps:local "$CTX" >/dev/null
   rm -rf "$CTX"
 fi

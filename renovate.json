@@ -25,7 +25,7 @@
       "description": "The images the pipeline runs its steps in (.ci/pipeline.lua: `local NAME = \"image:tag\"`)",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.ci\\/pipeline\\.lua$/"],
-      "matchStrings": ["local [A-Z][A-Z0-9_]* = \"(?<depName>[a-z0-9][a-z0-9./_-]*):(?<currentValue>[^\"@\\s]+)\""],
+      "matchStrings": ["local [A-Z][A-Z0-9_]* = \"(?<depName>[a-z0-9][a-z0-9./_-]*):(?<currentValue>[^\"@\\s]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?\""],
       "datasourceTemplate": "docker"
     }
   ],

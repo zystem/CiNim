@@ -1,7 +1,7 @@
 # The image the tests run in (the pipeline of the repository, .ci/pipeline.lua): Nim on glibc like the workstation (the tests that use threads end in a crash on musl, so the Alpine image of the
 # libraries is not used), the system libraries the tests link (libsodium, nghttp2, libpcre, sqlite, OpenSSL), the nimble packages, git, curl and the openssl command (the certificates of the TLS test of the key service), slapd and ldap-utils (the directory of the LDAP test, tldap, as processes: there is no Docker in the Pod), and
 # `rqlited`, so that the integration tests start their own scratch databases without Docker (tools/test/run.sh with CINIM_RQLITE_BIN). Built with the repository as the context; the hash of the
-# image is that of this file and cinim.nimble. It holds the real key service, hsmgate (github.com/zystem/hsmgate), built from the tag HSMGATE_REF with the Go of the project (the base is pinned
+# image is that of this file, cinim.nimble and cinim.lock. It holds the real key service, hsmgate (github.com/zystem/hsmgate), built from the tag HSMGATE_REF with the Go of the project (the base is pinned
 # as the project pins it): the tests thsmgate.nim, thsmgate_tls.nim and tkeyservice.nim run against it when HSMGATE_BIN is set, which the image does (they are skipped on a machine without it).
 # A new version of hsmgate is a change of this ARG: the image is made again, and the tests say whether the core still speaks with it. The same for `buf` (BUF_VERSION).
 FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS hsmgate
@@ -13,7 +13,7 @@ RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-s -w -X main.ver
 
 # blobgate, the storage service (github.com/zystem/blobgate): the program of the image that its project publishes and the chart deploys (deploy/charts/cinim-storage), so that the process tests of the storage
 # (tests/integration/tstorageproc.nim, tshimdirect.nim) run what runs in the cluster; BLOBGATE_BIN names it. Keep this tag and the version of the dependency in the chart at one version.
-FROM ghcr.io/zystem/blobgate:0.7.0 AS blobgate
+FROM ghcr.io/zystem/blobgate:0.7.0@sha256:662ff8bb804ad7336ea0bc19530b30dc6e964861ece2289dcb69763612fe846c AS blobgate
 
 # buf, for the protocol contract tests (tests/contract/tproto_compat.nim: `buf breaking` against proto/compat/baseline.binpb): built from the source of the pinned version with the same Go, so that the
 # module proxy's checksums vouch for it and no binary is fetched by hand
@@ -22,7 +22,7 @@ FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c35
 ARG BUF_VERSION=v1.75.0
 RUN GOBIN=/out CGO_ENABLED=0 go install -trimpath "github.com/bufbuild/buf/cmd/buf@${BUF_VERSION}"
 
-FROM nimlang/nim:2.4.0
+FROM nimlang/nim:2.4.0@sha256:e35e49da9bb8a5d4562f9c4f8afc1945c9cdeb525b2a9b3e76431d0556ac0c8f
 # slapd and ldap-utils (the directory of the LDAP test, tldap, as processes). The post-installation script of slapd makes /var/run/slapd and fails in a build by Kaniko (in the pipeline: "cannot create
 # directory", whatever is made before it in the same RUN), which leaves the package unconfigured but unpacked: tldap starts slapd with a configuration of its own, so that is enough, and the build says
 # what it needs is there instead of stopping on the script.
@@ -51,10 +51,10 @@ RUN curl -fsSL -o /tmp/rqlite.tar.gz "https://github.com/rqlite/rqlite/releases/
  && echo "${RQLITE_SHA256}  /tmp/rqlite.tar.gz" | sha256sum -c - \
  && tar xzf /tmp/rqlite.tar.gz -C /tmp && rm /tmp/rqlite.tar.gz \
  && install -m 0755 "/tmp/rqlite-v${RQLITE_VERSION}-linux-amd64/rqlited" /usr/local/bin/rqlited && rm -rf "/tmp/rqlite-v${RQLITE_VERSION}-linux-amd64"
-# the nimble packages, from the package file alone so that this layer is cached
+# the nimble packages, in the versions of cinim.lock (named by --lockFile), from the two files alone so that this layer is cached
 WORKDIR /src
-COPY cinim.nimble ./
-RUN nimble install -y --depsOnly
+COPY cinim.nimble cinim.lock ./
+RUN nimble install -y --depsOnly --lockFile=cinim.lock
 WORKDIR /usr/src/app
 COPY --from=hsmgate /out/hsmgate /usr/local/bin/hsmgate
 COPY --from=buf /out/buf /usr/local/bin/buf

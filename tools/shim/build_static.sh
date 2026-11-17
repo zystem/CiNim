@@ -36,7 +36,8 @@ docker run --rm -v "$PWD:/src" -v "$HOME/.nimble/pkgs2:/root/.nimble/pkgs2:ro" -
   NGHTTP2_SHA256=c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
   if [ ! -f "$PREFIX/lib/libnghttp2.a" ] || [ ! -f "$PREFIX/lib/libsodium.a" ]; then
     W=$(mktemp -d); cd "$W"
-    git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium
+    # libsodium 1.0.20-RELEASE by its commit (a tag can be moved; the same as in tools/image/Dockerfile.deps)
+    git init -q sodium; git -C sodium fetch -q --depth 1 https://github.com/jedisct1/libsodium 9511c982fb1d046470a8b42aa36556cdb7da15de; git -C sodium checkout -q FETCH_HEAD; test "$(git -C sodium rev-parse HEAD)" = 9511c982fb1d046470a8b42aa36556cdb7da15de
     (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix="$PREFIX" --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null)
     curl -fsSL -o nghttp2.tar.xz "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz"
     echo "${NGHTTP2_SHA256}  nghttp2.tar.xz" | sha256sum -c -

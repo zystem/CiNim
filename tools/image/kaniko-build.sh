@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 REG="${REGISTRY:?registry host:port as the Pods reach it}"; TAG="${TAG:?tag}"; NS="${NS:-cinim-build}"
-DOCKERFILE="${DOCKERFILE:-}"; DEPS_HASH=$(cat cinim.nimble tools/k8s/build_client.sh tools/image/Dockerfile.deps | sha256sum | cut -c1-16); TARGETS="${TARGETS:-core:cinim controller:cinim-controller conductor:cinim-conductor}"
+DOCKERFILE="${DOCKERFILE:-}"; DEPS_HASH=$(cat cinim.nimble cinim.lock tools/k8s/build_client.sh tools/image/Dockerfile.deps | sha256sum | cut -c1-16); TARGETS="${TARGETS:-core:cinim controller:cinim-controller conductor:cinim-conductor}"
 K="${KUBECTL:-kubectl}"
 NEED_DEPS=1
 EX=deploy/examples/build-pods
