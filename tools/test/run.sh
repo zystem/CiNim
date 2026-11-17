@@ -117,7 +117,7 @@ if [ $need_db = 1 ] && [ "${CINIM_TEST_DBPROBE:-0}" = 1 ]; then
 fi
 one() {   # file slot
   f=$1; slot=$2; kind=$(basename "$(dirname "$f")"); name=$(basename "$f" .nim); log=build/test-logs/$kind-$name.log
-  mkdir -p build/tests/$kind     # unit and integration files may share a name: their binaries and logs must not
+  mkdir -p build/tests/$kind     # unit and integration files may share a name (tstream): their binaries, their logs and their caches of the compiler must not meet (two compiles into one cache failed at the link, now and then)
   case $f in tests/integration/*) export CINIM_RQLITE_URL=http://127.0.0.1:$((24600 + slot));; *) unset CINIM_RQLITE_URL;; esac
   start=$(date +%s); tsan_note=""
   # ThreadSanitizer of gcc 13 dies now and then with SIGSEGV, in the middle of a test, when the kernel randomizes the addresses with many bits (vm.mmap_rnd_bits 32 here): 6 runs of 24 with the
@@ -143,7 +143,7 @@ one() {   # file slot
       rm -f "$log.reports"
     fi
   else
-    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
+    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --nimcache:"${XDG_CACHE_HOME:-$HOME/.cache}/nim/${kind}_${name}_d" --outdir:build/tests/$kind "$f" >"$log" 2>&1
     rc=$?
   fi
   grep -q "ERROR: AddressSanitizer" "$log" && [ $rc -eq 0 ] && rc=1

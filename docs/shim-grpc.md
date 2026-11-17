@@ -30,7 +30,7 @@ A handler that fails with an exception that is not a `GrpcError` is told to the 
 anywhere unless the server has a hook. Every server of the platform (the four channels of the shims and the push channel) has `logHandlerError` of `common/corechannel.nim`, which writes one line to the log of the process, `grpc: handler <method> failed: <kind of the exception>: <text, one line, up to 300 characters>`, and counts it
 (`handlerErrors`). Test: `tests/unit/tcorechannel.nim`.
 
-Build: nimgrpc is a nimble package (`requires "nimgrpc >= 0.5.0"` in `cinim.nimble`; the repository is `zystem/nimgrpc`, the modules are `nimgrpc`: `import nimgrpc`; version 0.5.0 was used). It needs a
+Build: nimgrpc is a nimble package (`requires "nimgrpc >= 0.6.0"` in `cinim.nimble`; the repository is `zystem/nimgrpc`, the modules are `nimgrpc`: `import nimgrpc`; version 0.6.0 was used). It needs a
 static nghttp2 1.61 or later, which it looks for in `/opt/nghttp2` (`include/` and `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>`, or `NGHTTP2_PREFIX` for `config.nims`, names another place), zlib, and the Nim
 package `bearssl` that nimble brings. `tools/image/Dockerfile.deps` (and `Dockerfile.test`, `tools/soak/Dockerfile`, `tools/shim/build_static.sh`) build nghttp2 1.68.1. The shim, the conductor and the controller no longer need libzmq, libsodium or a C++ toolchain;
 libsodium stays in the core and the storage module (the sealing of the secrets), at `/opt/sodium`.

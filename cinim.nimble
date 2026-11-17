@@ -21,8 +21,8 @@ requires "nimja >= 0.10.0"  # server-side HTML templates of the UI (src/ui/rende
 # count under backpressure, #36), which were a local patch on 9.0.0.
 requires "guildenstern >= 9.0.2"
 # gRPC (nghttp2 + BearSSL) for every channel of the platform: shim, controllers, conductors (docs/shim-grpc.md). It links a static nghttp2 1.61 or later from /opt/nghttp2 (Dockerfile.deps; `-d:nghttp2Prefix=<dir>` for another place).
-# 0.5.0 or later; 0.3.1 and later have `TlsConfig.share` and the atomic count on the configuration, which `clientTls` (src/common/corechannel.nim) needs: without them the soak died with SIGSEGV in BearSSL within minutes.
-requires "nimgrpc >= 0.5.0"
+# 0.6.0 or later; 0.3.1 and later have `TlsConfig.share` and the atomic count on the configuration, which `clientTls` (src/common/corechannel.nim) needs: without them the soak died with SIGSEGV in BearSSL within minutes.
+requires "nimgrpc >= 0.6.0"
 
 import std/os
 
