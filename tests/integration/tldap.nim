@@ -85,7 +85,10 @@ suite "D-87 LDAP":
     let sfx = newId()[^6 .. ^1].toLowerAscii
     let dir = getTempDir() / ("tldap-" & sfx)
     let name = "cinim-ldap-test-" & sfx
-    let port = 31000 + (getCurrentProcessId().int mod 1500) * 2
+    # four ports from `port`, all below 32768 where the kernel's own ports begin (ip_local_port_range): a port of the system range is the source port of some connection of another test of the
+    # Pod now and then, and requireFreePorts then stopped the test (the run of the pipeline of 7333ed2, port 33850)
+    let port = 31000 + (getCurrentProcessId().int mod 880) * 2
+    doAssert port + 3 < 32768
     let tlsPort = port + 1
     requireFreePorts("tldap", [port, tlsPort])
     createDir(dir / "mount")
