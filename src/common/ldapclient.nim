@@ -139,26 +139,29 @@ proc unescapeValue(s: string): string =
       result.add s[i]
       inc i
 
-proc encodeFilter(f: string; pos: var int): string
+const maxFilterDepth = 32       ## a real filter nests a few levels; the encoder is recursive, and a filter of a hundred thousand brackets must be a refusal and not the end of the stack (found by tests/unit/tfuzz.nim)
 
-proc encodeFilterList(f: string; pos: var int): string =
-  while pos < f.len and f[pos] == '(': result.add encodeFilter(f, pos)
+proc encodeFilter(f: string; pos: var int; depth: int): string
+
+proc encodeFilterList(f: string; pos: var int; depth: int): string =
+  while pos < f.len and f[pos] == '(': result.add encodeFilter(f, pos, depth)
   if result.len == 0: raise newException(LdapError, "an empty list in the filter")
 
-proc encodeFilter(f: string; pos: var int): string =
+proc encodeFilter(f: string; pos: var int; depth: int): string =
+  if depth > maxFilterDepth: raise newException(LdapError, "the filter is nested more than " & $maxFilterDepth & " levels")
   if pos >= f.len or f[pos] != '(': raise newException(LdapError, "the filter does not start with (")
   inc pos
   if pos >= f.len: raise newException(LdapError, "the filter ends too soon")
   case f[pos]
   of '&':
     inc pos
-    result = tlv(0xa0, encodeFilterList(f, pos))
+    result = tlv(0xa0, encodeFilterList(f, pos, depth + 1))
   of '|':
     inc pos
-    result = tlv(0xa1, encodeFilterList(f, pos))
+    result = tlv(0xa1, encodeFilterList(f, pos, depth + 1))
   of '!':
     inc pos
-    result = tlv(0xa2, encodeFilter(f, pos))
+    result = tlv(0xa2, encodeFilter(f, pos, depth + 1))
   else:
     let eq = f.find('=', pos)
     let close = f.find(')', pos)
@@ -187,7 +190,7 @@ proc encodeFilter(f: string; pos: var int): string =
 proc encodeFilter*(f: string): string =
   ## the BER of a filter in the string form of RFC 4515: (&...), (|...), (!...), (attr=value), (attr=*), (attr=a*b*c)
   var pos = 0
-  result = encodeFilter(f, pos)
+  result = encodeFilter(f, pos, 0)
   if pos != f.len: raise newException(LdapError, "something follows the filter")
 
 # ------------------------------------------------------------------ the messages

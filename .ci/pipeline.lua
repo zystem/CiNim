@@ -76,6 +76,7 @@ local LINT_KUBECONFORM = "set -eu\nPATH=/:$PATH LINT_REQUIRE=1 LINT_RENDER=\"$PW
 -- The ASan run (parameter ASAN; a schedule trigger with ASAN=true makes it nightly): the files that start threads and talk over the push channel, built with AddressSanitizer on the system allocator
 -- (tools/test/run.sh, CINIM_TEST_ASAN). A use after free there (the client closed its channel under its reader) showed as a hang now and then, and as the whole corrupted heap, not as a report; with ASan it is
 -- a report at once. The conductor test starts a binary of the conductor that is not built with ASan and is left out.
+-- tests/unit/tfuzz.nim (the mutation fuzzer of the parsers, 50 000 inputs each here, SEC-009) runs in it too: a memory error in a parser is a report and not a wrong answer.
 local ASAN_TESTS = [[
 set -eu
 cd src
@@ -83,7 +84,7 @@ export XDG_CACHE_HOME=/cicd/workspace/nimcache TMPDIR=/cicd/workspace/tmp; mkdir
 tools/proto/nim_flatten.sh build/nimproto
 for v in $(env | grep -o '^CICD_[A-Z_]*'); do unset "$v"; done
 rc=0
-CINIM_TEST_ASAN=1 CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" tests/unit/tstream.nim tests/integration/tstream.nim tests/integration/tconductorhub.nim || rc=$?
+CINIM_FUZZ_ITERATIONS=50000 CINIM_TEST_ASAN=1 CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" tests/unit/tstream.nim tests/integration/tstream.nim tests/integration/tconductorhub.nim tests/unit/tfuzz.nim || rc=$?
 for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(.*\))$/\1/'); do echo "=== $log"; tail -n 40 "$log"; done
 exit $rc
 ]]
