@@ -32,7 +32,7 @@ anywhere unless the server has a hook. Every server of the platform (the four ch
 
 Build: nimgrpc is a nimble package (`requires "nimgrpc >= 0.6.0"` in `cinim.nimble`; the repository is `zystem/nimgrpc`, the modules are `nimgrpc`: `import nimgrpc`; version 0.6.0 was used). It needs a
 static nghttp2 1.61 or later, which it looks for in `/opt/nghttp2` (`include/` and `lib/libnghttp2.a`; `-d:nghttp2Prefix=<dir>`, or `NGHTTP2_PREFIX` for `config.nims`, names another place), zlib, and the Nim
-package `bearssl` that nimble brings. `tools/image/Dockerfile.deps` (and `Dockerfile.test`, `tools/soak/Dockerfile`, `tools/shim/build_static.sh`) build nghttp2 1.68.1. The shim, the conductor and the controller no longer need libzmq, libsodium or a C++ toolchain;
+package `bearssl` that nimble brings. `tools/image/Dockerfile.deps` (and `Dockerfile.test`, `tools/soak/Dockerfile`, `tools/shim/build_static.sh`) build nghttp2 1.71.0. The shim, the conductor and the controller no longer need libzmq, libsodium or a C++ toolchain;
 libsodium stays in the core and the storage module (the sealing of the secrets), at `/opt/sodium`.
 
 ## Tests
@@ -116,7 +116,7 @@ call its blocking database client from a worker, which is another piece of work.
    puts the new shim into new Pods, and the conductors are replaced with it. A **step that runs through the rollout** has an old shim, which cannot reach the new core: it loses its report and its log until it ends (the spool on the run's volume keeps the log, and the
    drain Pod delivers it, DAT-003). Roll out when few steps run, or drain the runs first. The Secrets change at the same time: with cert-manager (D-105) you make nothing: the core keeps its own secret in the database, sealed by the key of the secrets (nothing is brought in from the old `curve/core.key`: the identities are made again); without cert-manager put the five files in the Secret named by `tls.secretName`.
 6. **The Secrets and the chart are changed:** `tls.certManager` / `tls.secretName` (the chart), `cinim-controller-tls` and `cicd-tls-certs` (the Secrets the core and the controller make); the old `cinim-controller-curve` and `cicd-curve-certs` stay in the cluster until someone deletes them.
-7. **The images:** `tools/image/Dockerfile.deps` builds a static nghttp2 1.68.1 into `/opt/nghttp2` and libsodium into `/opt/sodium`, and `nimble install --depsOnly` takes nimgrpc from the package list; `Dockerfile.test`, `tools/soak/Dockerfile` and
+7. **The images:** `tools/image/Dockerfile.deps` builds a static nghttp2 1.71.0 into `/opt/nghttp2` and libsodium into `/opt/sodium`, and `nimble install --depsOnly` takes nimgrpc from the package list; `Dockerfile.test`, `tools/soak/Dockerfile` and
    `tools/shim/build_static.sh` do the same for their own base. The binaries built in the deps image: core 9.45 MB (9.98 before), controller 8.5 MB, conductor 1.07 MB, shim 392 KB packed (639 KB before).
 8. **The host environment:** `import protobuf_serialization` does not compile with the Nim packages in the host's `~/.nimble/pkgs2` now (`serialization` 0.5.4 with `stew` 0.5.2 and 0.6.5:
    `readPragma` is undeclared), also on `main`; every build and test here ran in the deps image.

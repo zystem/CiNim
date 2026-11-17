@@ -31,7 +31,7 @@ docker run --rm -v "$PWD:/src" -v "$HOME/.nimble/pkgs2:/root/.nimble/pkgs2:ro" -
     SSL_LIBS="-lssl -lcrypto"; SSL_NIM="-d:useOpenssl3 --dynlibOverride:ssl --dynlibOverride:crypto";;
   esac
   # renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$
-  NGHTTP2_VERSION=1.68.1
+  NGHTTP2_VERSION=1.71.0
   if [ ! -f "$PREFIX/lib/libnghttp2.a" ] || [ ! -f "$PREFIX/lib/libsodium.a" ]; then
     W=$(mktemp -d); cd "$W"
     git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium
