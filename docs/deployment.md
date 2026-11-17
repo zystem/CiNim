@@ -311,6 +311,10 @@ The pipeline pushes the images of the platform to `$REGISTRY/<image>` with **`j:
 there and tags it; both read the **Docker config** (`config.json`) of the registry, and both answer the registry's own challenge, so a registry that hands out a token against the login (Docker Hub, GitHub, GitLab, Quay,
 Harbor and Gitea do) works as well as one that takes a password, which a password put in a header by hand could not do. The images are `$REGISTRY/<image>`, so a registry that wants an owner or a project in the path has it in `REGISTRY`.
 
+`j:image` returns the table `{ action, ref, tag, name, registry, digest, ref_digest }`. **`digest`** (`sha256:` and 64 hexadecimal digits) is that of the image the tag names when the call returns: what Kaniko pushed (it writes it with `--digest-file`, and the step says it to the job), or what `crane digest` says of
+the image that was there (`skip_if_present`) or was tagged from an earlier commit (`reuse`); **`ref_digest`** is `<registry>/<name>@<digest>`. A tag can move and a digest cannot: a signature, a deployment and a record of what was built should name the image by `ref_digest`. A step that cannot say the digest fails the job; it is never guessed.
+The copies of `also` keep it (`crane copy` copies the manifest as it is). Checked by `tests/unit/timage.nim`, which runs the steps' shell with stand-ins for Kaniko and crane (Kaniko writes the digest with no line end, which `read` takes as a failure under `set -e`: the first version of the step would have failed every build); not run: a real Kaniko, in a cluster.
+
 | the registry | `REGISTRY` | `REGISTRY_INSECURE` | `REGISTRY_LOGIN` |
 |:--|:--|:--|:--|
 | the one of the cluster (`deploy/registry`), the default | `registry-docker-registry.registry.svc:5000` | `true` (plain HTTP) | `false` |

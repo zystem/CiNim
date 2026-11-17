@@ -24,6 +24,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
   for (c, found) in retagged: (if found: answer.incl c)
   let inRegistry = present.toHashSet
   var res = Flow()
+  const aDigest = "\nDIGEST=sha256:" & "a".repeat(64) & "\n"                 # what Kaniko and crane say of an image since `j:image` returns its digest
   proc host(seq: int; kind, payload: string): Option[string] =
     if kind == "verify": res.verified = true; return some("ok")
     if kind == "now": return some("1793921212")                  # run.tag: the date of the day (2026-11-05)
@@ -53,9 +54,10 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
       if "\"REUSE_SUFFIX\"" in opts:
         let comp = componentOf(name)
         res.retags.add comp
-        return some("0\nACTION=" & (if (retagged.len == 0) or comp in answer: "retagged" else: "build") & "\n")
+        let act = if (retagged.len == 0) or comp in answer: "retagged" else: "build"
+        return some("0\nACTION=" & act & (if act == "build": "\n" else: aDigest))
       res.checks.add name
-      return some("0\nACTION=" & (if name in inRegistry: "present" else: "build") & "\n")
+      return some("0\nACTION=" & (if name in inRegistry: "present" & aDigest else: "build\n"))
     if "crane copy" in cmd: res.copies.add nameOf()
     if "/kaniko/executor" in cmd:
       let d = cmd.find("--destination=")
@@ -66,6 +68,7 @@ proc flow(prepOutputs: string; base = ""; retagged: seq[(string, bool)] = @[]; d
         if "Dockerfile." & comp & " " in cmd: res.builds.add comp
       if "Dockerfile.deps " in cmd: res.depsImage = true
       if "Dockerfile.test " in cmd: res.testImage = true
+      return some("0" & aDigest)
     if "tools/test/run.sh" in cmd:
       res.tests = true
       for k in ["COMPONENTS", "CHANGED_TESTS"]:

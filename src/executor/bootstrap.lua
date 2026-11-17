@@ -871,7 +871,9 @@ end
 --   insecure (the registry speaks plain HTTP or has no certificate to check; default false), login (true: the secret REGISTRY_DOCKER_CONFIG; a name: that secret),
 --   skip_if_present (an image with this tag in the registry is not built), reuse = { suffix = "-<short commit>" } (when the registry has a tag of this image with that ending, the image of it is tagged with `tag`
 --   and nothing is built: the image of the commit that was last good, D-82), also = { "ghcr.io/acme", ... } (other registries: every tag is copied to each, after the image is there), kaniko_image, crane_image.
--- Returns `{ action = "build" | "retagged" | "present", ref = "<registry>/<name>:<tag>", tag, name, registry }`.
+-- Returns `{ action = "build" | "retagged" | "present", ref = "<registry>/<name>:<tag>", tag, name, registry, digest = "sha256:<64 hex>", ref_digest = "<registry>/<name>@<digest>" }`. The digest is of the image
+-- that the tag names when `j:image` returns: what Kaniko pushed (it writes it with `--digest-file`), or what `crane digest` says of the image that was there or was tagged. A step that cannot say it fails the job:
+-- a digest is never guessed. A tag can move, a digest cannot: sign and deploy `ref_digest`.
 local KANIKO_IMAGE = "ghcr.io/osscontainertools/kaniko:v1.28.5-debug@sha256:d6d74217dc077acfd3094992e917c357080a2d3fdd1042a49e34e29a7e57c572"
 local CRANE_IMAGE = "gcr.io/go-containerregistry/crane:debug@sha256:e78770b31258a3846f878036d9c1f63fbe4c871f9f56990bf77fd95c013e3c1b"
 local IMAGE_FIELDS = { name = true, tag = true, tags = true, registry = true, dockerfile = true, context = true, target = true, build_args = true, cache = true, cache_repo = true,
@@ -916,6 +918,14 @@ local function image_list(v, what, check)
   local out = {}
   for i = 1, rawlen(v) do out[i] = check(v[i], what) end
   return out
+end
+
+-- the digest that a step says: `sha256:` and 64 hexadecimal digits, nothing else (it goes into a name that a signature is made for)
+local function image_digest(v, what)
+  if type(v) ~= "string" or #v ~= 71 or not v:match("^sha256:%x+$") or v:find("%u") then
+    error("Job:image: " .. what .. " did not say the digest of the image (got " .. (type(v) == "string" and ("'" .. v:sub(1, 80) .. "'") or type(v)) .. ")", 3)
+  end
+  return v
 end
 
 local function shell_quote(text)
@@ -1024,6 +1034,11 @@ elif [ -n "${REUSE_SUFFIX:-}" ]; then
 fi
 echo "$ref:$TAG: $action"
 echo "ACTION=$action" >> "$CICD_OUTPUT"
+if [ "$action" != build ]; then
+  # the digest is what a signature is made over: of the image under the tag that is there now
+  digest=$(crane digest @FLAGS "$ref:$TAG")      # an assignment: a crane that fails ends the step (`set -e` does not look inside an `echo`)
+  echo "DIGEST=$digest" >> "$CICD_OUTPUT"
+fi
 ]]
 
 local IMAGE_COPY_SH = [[
@@ -1082,7 +1097,7 @@ local Job_mt = { __index = {
       for k, v in pairs(extra) do e[k] = v end
       return e
     end
-    local action = "build"
+    local action, digest = "build", nil
     -- 1. is it there, or is there an image to tag (only when asked)
     if o.skip or o.suffix then
       local e = {}
@@ -1092,24 +1107,33 @@ local Job_mt = { __index = {
       local checked = self:run(step.sh[id(1)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_CHECK_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets, registries = registries })
       action = checked.outputs.ACTION
       if action ~= "build" and action ~= "present" and action ~= "retagged" then error("Job:image: the check step did not say what to do (got '" .. tostring_(action) .. "')", 2) end
+      if action ~= "build" then digest = image_digest(checked.outputs.DIGEST, "the check step") end
     end
     -- 2. the build and the push
     if action == "build" then
-      local k = { image_login_sh("/kaniko/.docker", o.secret), "/kaniko/executor --dockerfile=/cicd/workspace/", o.context, "/", o.dockerfile, " --context=dir:///cicd/workspace/", o.context }
+      -- `set -e`: the step ends with the code of the build, not of the line that reads the digest. The digest file is on the volume of the run, which Kaniko leaves alone (it wipes the rest of the
+      -- file system of the image it runs in), and it is read with `read`, a part of the shell: the programs of the image are not there any more after the build.
+      local dfile = "$CICD_RUN_DIR/digest-" .. tostring_(self.__images)
+      local k = { "set -e\n", image_login_sh("/kaniko/.docker", o.secret), "/kaniko/executor --dockerfile=/cicd/workspace/", o.context, "/", o.dockerfile, " --context=dir:///cicd/workspace/", o.context,
+                  " --digest-file=", dfile }
       if o.target then k[#k + 1] = " --target=" .. o.target end
       for _, a in ipairs(o.args) do k[#k + 1] = " --build-arg " .. shell_quote(a) end
       for _, t in ipairs(alltags) do k[#k + 1] = " --destination=" .. o.registry .. "/" .. o.name .. ":" .. t end
       if o.cache then k[#k + 1] = " --cache=true --cache-repo=" .. (o.cache_repo or (o.registry .. "/cinim-cache")) else k[#k + 1] = " --cache=false" end
       k[#k + 1] = " --log-format=text"
       if o.insecure then k[#k + 1] = " --insecure --insecure-pull --skip-tls-verify --skip-tls-verify-pull" end
-      self:run(step.sh[id(2)]{ cmd = table.concat(k), image = o.kaniko, secrets = secrets, registries = registries })
+      -- Kaniko writes the digest with no line end, and `read` then returns 1 with the text read: that is not a failure, an empty text is
+      k[#k + 1] = '\nbuilt=\nread -r built < "' .. dfile .. '" || [ -n "$built" ]\necho "DIGEST=$built" >> "$CICD_OUTPUT"\n'
+      local built = self:run(step.sh[id(2)]{ cmd = table.concat(k), image = o.kaniko, secrets = secrets, registries = registries })
+      digest = image_digest(built.outputs.DIGEST, "the build step")
     end
     -- 3. the other registries
     if #o.also > 0 then
       local e = { ALSO = table.concat(o.also, " "), TAGS = table.concat(alltags, " ") }
       self:run(step.sh[id(3)]{ cmd = image_login_sh("$CICD_RUN_DIR/docker", o.secret) .. IMAGE_COPY_SH:gsub("@FLAGS", flags), image = o.crane, env = env_with(e), secrets = secrets, registries = registries })
     end
-    return { action = action, ref = o.registry .. "/" .. o.name .. ":" .. o.tag, tag = o.tag, name = o.name, registry = o.registry }
+    return { action = action, ref = o.registry .. "/" .. o.name .. ":" .. o.tag, tag = o.tag, name = o.name, registry = o.registry,
+             digest = digest, ref_digest = o.registry .. "/" .. o.name .. "@" .. digest }
   end,
   sh = function() error("Job:sh is gone (D-67): a step is described by step.sh[\"ab\"]{ cmd = \"make\" }, in the list `steps` of the job or run by j:run(...)", 2) end,
 } }
