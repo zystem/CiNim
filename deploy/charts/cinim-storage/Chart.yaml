@@ -8,5 +8,5 @@ dependencies:
   # The storage service is blobgate (https://github.com/zystem/blobgate), a project of its own, the way hsmgate is. Its archive is kept in charts/ (the deploy profile of the pipeline reaches
   # nothing but the API server, so it cannot fetch it); make it again with `helm dependency update deploy/charts/cinim-storage` after a change of the version here.
   - name: blobgate
-    version: 0.3.0
+    version: 0.7.0
     repository: oci://ghcr.io/zystem/charts
