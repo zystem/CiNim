@@ -88,6 +88,21 @@ for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(
 exit $rc
 ]]
 
+-- The ThreadSanitizer run (parameter TSAN; a schedule trigger with TSAN=true makes it nightly): the files that start threads or servers, built with ThreadSanitizer on the system allocator (tools/test/run.sh,
+-- CINIM_TEST_TSAN). A file fails when a report is of ours, of a test or of nimgrpc; the races of the HTTP library are counted on its line (tools/test/tsanreport.nim, CLAUDE.md). With ORC a `ref` that two threads
+-- copy is a race in nimIncRef: it is a hang or a use after free at some later time, and a report here at once. The same machine rule as for ASan (vm.mmap_rnd_bits <= 28).
+local TSAN_TESTS = [[
+set -eu
+cd src
+export XDG_CACHE_HOME=/cicd/workspace/nimcache TMPDIR=/cicd/workspace/tmp; mkdir -p "$XDG_CACHE_HOME" "$TMPDIR"
+tools/proto/nim_flatten.sh build/nimproto
+for v in $(env | grep -o '^CICD_[A-Z_]*'); do unset "$v"; done
+rc=0
+CINIM_TEST_TSAN=1 CINIM_TEST_NICE=10 CINIM_RQLITE_BIN="$(command -v rqlited)" tools/test/run.sh -j "${TEST_JOBS:-2}" tests/unit/thttpguard.nim tests/unit/tids.nim tests/unit/thubmetrics.nim tests/unit/tshimgrpc.nim tests/unit/trepository.nim tests/integration/tconductorhub.nim tests/unit/tcorechannel.nim tests/unit/tworkkick.nim tests/integration/thttp.nim tests/unit/ttransitclient.nim tests/integration/toidc.nim tests/unit/tshmq.nim tests/integration/tstream.nim tests/unit/tpwcheck.nim tests/integration/trunlog.nim tests/integration/trqlite.nim tests/integration/tconductor.nim tests/unit/thsmgate_tls.nim tests/unit/tlogcollector.nim tests/integration/tvcsapprove.nim tests/integration/tauditexport.nim tests/integration/tprstatus.nim tests/integration/tmastersecret.nim tests/integration/tshimdirect.nim tests/integration/tstorageproc.nim || rc=$?
+for log in $(grep '^FAIL' build/test-logs/summary.txt 2>/dev/null | sed 's/.*(\(.*\))$/\1/'); do echo "=== $log"; tail -n 40 "$log"; done
+exit $rc
+]]
+
 -- The soak (NFR-013, tools/soak/run72.sh: the release harness continuously and the ASan/LSan harness in hourly runs; parameter SOAK, a schedule trigger makes it weekly): one step in the image built from
 -- tools/soak/Dockerfile, as long as the hours say (72). A step may be as long as a week, and the shard's default is 24 h (the project's max_step_timeout_seconds must allow it: docs/deployment.md, "The 72 h soak"). The step fails when the release
 -- run does not end with `SOAK OK` (RSS growth after the warm-up within 2 %) or an ASan hour does not end well, and its log is the report.
@@ -262,6 +277,7 @@ return ci.pipeline({
     BUILD = ci.bool{default = true},
     TEST = ci.bool{default = true},
     ASAN = ci.bool{default = false},                                                  -- the files of the push channel under AddressSanitizer (a schedule trigger sets it for the nightly run); needs vm.mmap_rnd_bits <= 28 on the nodes
+    TSAN = ci.bool{default = false},                                                  -- the files that start threads or servers under ThreadSanitizer (a schedule trigger sets it for a nightly run); needs vm.mmap_rnd_bits <= 28 on the nodes
     SOAK = ci.bool{default = false},                                                  -- the 72 h soak (NFR-013) as one step; a schedule trigger sets it for the weekly run (with BUILD, TEST, LINT false); the project must allow a step this long
     SOAK_HOURS = ci.number{default = 72, min = 1, max = 72, integer = true},          -- how long the soak runs (the step's timeout is these hours and eight more)
     LINT = ci.bool{default = true},                                                   -- shellcheck, hadolint, helm lint and kubeconform (tools/test/lint.sh), each in the image of its tool, side by side with the tests
@@ -314,12 +330,12 @@ return ci.pipeline({
     local run_tests = p.TEST and decided.tests ~= "none"
     local env = { SHA = info.SHA, IMAGE_TAG = tag, DEPS = info.DEPS, TESTDEPS = info.TESTDEPS, TEST_JOBS = tostring(p.TEST_JOBS), BASE = base,
                   COMPONENTS = (decided.tests == "some") and decided.components or "", CHANGED_TESTS = (decided.tests == "some") and decided.changed_tests or "" }
-    if p.BUILD or run_tests or p.LINT or p.ASAN then
+    if p.BUILD or run_tests or p.LINT or p.ASAN or p.TSAN then
       -- 2. the libraries, and the tests' image, once for as long as what they are made of stays the same
       if p.BUILD then
         checked_out('d', env, function(j) j:image(image("cinim-deps", "tools/image/Dockerfile.deps", info.DEPS, { skip_if_present = true })) end)
       end
-      if run_tests or p.ASAN then
+      if run_tests or p.ASAN or p.TSAN then
         checked_out('t', env, function(j) j:image(image("cinim-test", "tools/image/Dockerfile.test", info.TESTDEPS, { skip_if_present = true })) end)
       end
       -- 3. the images of the components, and the tests, side by side: the first that fails stops the others
@@ -355,6 +371,12 @@ return ci.pipeline({
         branches.asan = function()
           checked_out('z', env, function(j) j:run(step.sh['4']{ cmd = ASAN_TESTS }) end,
                       {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "60m", shm = "1Gi"})
+        end
+      end
+      if p.TSAN then
+        branches.tsan = function()
+          checked_out('m', env, function(j) j:run(step.sh['4']{ cmd = TSAN_TESTS }) end,
+                      {image = pull .. "/cinim-test:" .. info.TESTDEPS, timeout = "120m", shm = "1Gi"})
         end
       end
       if p.LINT then

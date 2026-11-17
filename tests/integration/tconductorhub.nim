@@ -244,8 +244,8 @@ suite "RUN-016 conductors on the push channel":
       second.close()
     test "RUN-009 an idle conductor above the number wanted is told to drain, one within it is not, and a draining one gets no run":
       let o = newOrg()                                     # nothing to do: one conductor is wanted (conductor_min 1)
-      conductorIdleSeconds = 1.0
-      drainPassSeconds = 1.0
+      setConductorIdleSeconds(1.0)
+      setDrainPassSeconds(1.0)
       var keep = connectStream(serverAddr, certs)
       var extra = connectStream(serverAddr, certs)
       check keep.sendFrame(hello("cd-k1-" & sfx, "cond-1", o.ns, 0))
@@ -255,16 +255,16 @@ suite "RUN-016 conductors on the push channel":
       let r = co.createRun("return 1", "t1", o.profile)
       check extra.nextKind("conductor.lease", 1500).isNone          # draining: no more runs
       check runState(r) == "QUEUED"
-      conductorIdleSeconds = 300.0
-      drainPassSeconds = 10.0
+      setConductorIdleSeconds(300.0)
+      setDrainPassSeconds(10.0)
       keep.close()
       extra.close()
     test "RUN-009 a conductor of another image than the core hands out is told to drain, one at a time, while an up-to-date one is left alone":
       let o = newOrg()
       let was = conductorImage
       conductorImage = "reg/cinim-conductor:new"
-      conductorIdleSeconds = 300.0
-      drainPassSeconds = 10.0                                       # no pass until all three are known: their frames come over three connections, in no set order
+      setConductorIdleSeconds(300.0)
+      setDrainPassSeconds(10.0)                                       # no pass until all three are known: their frames come over three connections, in no set order
       var old1 = connectStream(serverAddr, certs)
       var old2 = connectStream(serverAddr, certs)
       var fresh = connectStream(serverAddr, certs)
@@ -272,13 +272,13 @@ suite "RUN-016 conductors on the push channel":
       check old2.sendFrame(hello("cd-i2-" & sfx, "cond-2", o.ns, 5, image = "reg/cinim-conductor:old"))
       check fresh.sendFrame(hello("cd-i3-" & sfx, "cond-3", o.ns, 5, image = "reg/cinim-conductor:new"))
       sleep 800
-      drainPassSeconds = 1.0
+      setDrainPassSeconds(1.0)
       check old1.nextKind("conductor.drain", 8000).isSome           # the first by name
       check old2.nextKind("conductor.drain", 2500).isNone           # one at a time
       check fresh.nextKind("conductor.drain", 100).isNone
       old1.close()
       conductorImage = was
-      drainPassSeconds = 10.0
+      setDrainPassSeconds(10.0)
       old2.close()
       fresh.close()
     test "a hello from a session the core does not know, with an acknowledgement above 0, is told to start again, and is welcomed when it does":

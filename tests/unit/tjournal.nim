@@ -140,11 +140,14 @@ suite "PIP-004 replay":
 
 suite "NFR-014 replay speed":
   test "NFR-014 replay of 10000 journal entries takes at most 2 s":
-    let src = "local s = 0 for i = 1, 10000 do s = s + ci.now() end return s"
+    # a build under a sanitizer (tools/test/run.sh, -d:cinimSanitized) is ten to a hundred times slower and its time says nothing of the requirement: it replays a smaller journal and checks no time,
+    # only that the replay of what it made is the same (ThreadSanitizer took minutes for 10 000 entries, and the process died now and then in the middle of it)
+    const entries = when defined(cinimSanitized): 300 else: 10000
+    let src = "local s = 0 for i = 1, " & $entries & " do s = s + ci.now() end return s"
     var sb = newSandbox()
     var j = Journal()
     check sb.execute(j, src, fakeHost).code == "ok"
-    check j.entries.len == 10000
+    check j.entries.len == entries
     var sb2 = newSandbox()
     # the requirement is about the work of a replay, so the CPU time of this process is what is measured: the wall clock of a Pod that is niced, throttled by its CPU limit and shares the node with
     # other workers of the tests took 2.8 s for what takes 0.4 s on a free machine (the self-CI run of 2026-10-20). The wall clock keeps only a coarse bound, against a hang.
@@ -154,8 +157,9 @@ suite "NFR-014 replay speed":
     let cpu = cpuTime() - c0
     let dt = epochTime() - t0
     check r.code == "ok"
-    check cpu <= 2.0
-    check dt <= 30.0
+    when not defined(cinimSanitized):
+      check cpu <= 2.0
+      check dt <= 30.0
 
 suite "PIP-003/PIP-004 the journal is found by the key of a call, not by place":
   test "every entry has a key: steps s<number>, the others <kind>#<n> in the order of that kind":

@@ -16,8 +16,9 @@
 # a use after free or an overflow is a FAIL with the report in the log (the leaks are not looked for: ASAN_OPTIONS detect_leaks=0). It first runs tools/test/check-mmap-rnd.sh and stops with its error
 # when an ASan binary would crash at start (vm.mmap_rnd_bits above 28); a start that crashed all the same (`DEADLYSIGNAL`, nothing else) is repeated, up to 3 times, and the output of a test is cut at
 # 20 MB (that crash prints for ever). Meant for the files that start threads: .ci/pipeline.lua passes those (parameter ASAN, a schedule trigger makes the nightly run).
-# CINIM_TEST_TSAN=1 does the same with ThreadSanitizer (build/nimcache-tsan, build/tests-tsan): a data race is a FAIL with the report in the log. With ORC a `ref` that two threads copy shows as a race in
-# nimIncRef/nimDecRef (the count is not atomic), which is the error it is for.
+# CINIM_TEST_TSAN=1 does the same with ThreadSanitizer (build/nimcache-tsan, build/tests-tsan): a data race with a frame of ours (src/, a test, nimgrpc) is a FAIL with the report in the log; the races
+# of the HTTP library (GuildenStern, a known error, CLAUDE.md) and of the runtime are counted on the line of the file and do not fail it (tools/test/tsanreport.nim, tested by tests/unit/ttsanreport.nim).
+# With ORC a `ref` that two threads copy shows as a race in nimIncRef/nimDecRef (the count is not atomic), which is the error it is for.
 # The log of a file that failed is build/test-logs/<name>.log. Exit code: the number of failed files (capped at 100).
 cd "$(dirname "$0")/../.." || exit 2
 jobs=8; unit=1; integ=1; files=()
@@ -48,6 +49,8 @@ if [ "$asan" = 1 ]; then
   export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0:halt_on_error=1}
   export TSAN_OPTIONS=${TSAN_OPTIONS:-halt_on_error=0:exitcode=66:history_size=4:second_deadlock_stack=1}
   mkdir -p build/tests-$sandir build/nimcache-$sandir
+  # the classifier of the reports of ThreadSanitizer (tools/test/tsanreport.nim): a race of an HTTP library is told and does not fail a file, one with a frame of ours does
+  [ "$san" = thread ] && { nim c --hints:off --warnings:off -d:release --nimcache:build/nimcache-tsanreport -o:build/tsanreport tools/test/tsanreport.nim >/dev/null 2>&1 || { echo "run.sh: tools/test/tsanreport.nim does not compile" >&2; exit 2; }; }
 fi
 need_db=0; for f in "${files[@]}"; do case $f in tests/integration/*) need_db=1;; esac; done
 native=${CINIM_RQLITE_BIN:-}
@@ -116,30 +119,38 @@ one() {   # file slot
   f=$1; slot=$2; kind=$(basename "$(dirname "$f")"); name=$(basename "$f" .nim); log=build/test-logs/$kind-$name.log
   mkdir -p build/tests/$kind     # unit and integration files may share a name: their binaries and logs must not
   case $f in tests/integration/*) export CINIM_RQLITE_URL=http://127.0.0.1:$((24600 + slot));; *) unset CINIM_RQLITE_URL;; esac
-  start=$(date +%s)
+  start=$(date +%s); tsan_note=""
+  # ThreadSanitizer of gcc 13 dies now and then with SIGSEGV, in the middle of a test, when the kernel randomizes the addresses with many bits (vm.mmap_rnd_bits 32 here): 6 runs of 24 with the
+  # randomization and none of 24 without it (2026-11-17, tests/unit/tjournal). `setarch -R` switches it off for the test when the machine lets it (a container's seccomp profile may not).
+  noaslr=""; [ "$san" = thread ] && setarch -R true 2>/dev/null && noaslr="setarch -R"
   limit=${CINIM_TEST_FILE_TIMEOUT:-900}
   if [ "$asan" = 1 ]; then
     mkdir -p build/tests-$sandir/$kind
     bin=build/tests-$sandir/$kind/$name
     attempt=0
-    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c --hints:off --warnings:off -p:src -d:useMalloc --debugger:native --passC:-fsanitize=$san \
+    timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c --hints:off --warnings:off -p:src -d:useMalloc -d:cinimSanitized --debugger:native --passC:-fsanitize=$san \
       --passC:-fno-omit-frame-pointer --passL:-fsanitize=$san --nimcache:build/nimcache-$sandir/$kind-$name --outdir:build/tests-$sandir/$kind "$f" >"$log" 2>&1
     rc=$?
     while [ $rc -eq 0 ]; do
-      ( ulimit -f 20000; timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} "$bin" >"$log" 2>&1 )
+      ( ulimit -f 20000; timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} ${noaslr} "$bin" >"$log" 2>&1 )
       rc=$?
       if grep -q DEADLYSIGNAL "$log" && ! grep -q "ERROR: AddressSanitizer" "$log" && [ $attempt -lt 3 ]; then attempt=$((attempt + 1)); : >"$log"; rc=0; continue; fi
       break
     done
+    # ThreadSanitizer ends a file with exitcode 66 when it reported anything: the file fails only when a report is of ours, of nimgrpc or of a test (tsanreport exits 1); the rest is said on the line
+    if [ "$san" = thread ] && [ $rc -eq 66 ]; then
+      if build/tsanreport "$log" >"$log.reports" 2>&1; then rc=0; tsan_note=$(sed -n 's/^TOTAL //p' "$log.reports"); else cat "$log.reports" >>"$log"; fi
+      rm -f "$log.reports"
+    fi
   else
     timeout -k 10 "$limit" ${CINIM_TEST_NICE:+nice -n $CINIM_TEST_NICE} nim c -r --hints:off --warnings:off -p:src --outdir:build/tests/$kind "$f" >"$log" 2>&1
     rc=$?
   fi
-  grep -q "ERROR: AddressSanitizer\|WARNING: ThreadSanitizer" "$log" && [ $rc -eq 0 ] && rc=1
+  grep -q "ERROR: AddressSanitizer" "$log" && [ $rc -eq 0 ] && rc=1
   ok=$(grep -c '\[OK\]' "$log"); bad=$(grep -c '\[FAILED\]' "$log")
   # a file that reports with the summary line of another framework (`[Summary] 4 tests run`) has no [OK] lines: its count is that of the summary, so that "0 tests" means a file that skipped itself
   if [ "$ok" = 0 ]; then n=$(sed -n 's/.*\[Summary\] \([0-9]*\) tests run.*/\1/p' "$log" | tail -1); [ -z "$n" ] || ok=$n; fi
-  if [ $rc -eq 0 ] && [ "$bad" = 0 ]; then printf 'ok    %-34s %3d tests %4ds\n' "$kind/$name" "$ok" $(( $(date +%s) - start )); rm -f "$log"
+  if [ $rc -eq 0 ] && [ "$bad" = 0 ]; then printf 'ok    %-34s %3d tests %4ds%s\n' "$kind/$name" "$ok" $(( $(date +%s) - start )) "${tsan_note:+  (reports, none of ours: $tsan_note)}"; rm -f "$log"
   else
     [ $rc -ne 124 ] || { echo "TIMED OUT: no answer within ${limit} s, killed" >>"$log"; echo "$name: TIMED OUT after ${limit} s" >&2; }
     printf 'FAIL  %-34s %3d ok, %d failed, exit %d%s [%s-%s]  (%s)\n' "$kind/$name" "$ok" "$bad" $rc "$([ $rc -ne 124 ] || echo ' TIMED OUT')" "$(date -d "@$start" +%T 2>/dev/null)" "$(date +%T)" "$log"

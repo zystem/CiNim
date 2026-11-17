@@ -26,9 +26,15 @@ const
   silentAfterSeconds = 60.0
   maxPeers = 5000
 
-var drainPassSeconds* = 10.0         ## how often the conductors above the number wanted are looked at: idle times are minutes, so it is not urgent
+var drainPassCell: Atomic[float]     ## how often the conductors above the number wanted are looked at: idle times are minutes, so it is not urgent. Atomic: a test sets it while the hub's thread reads it
+drainPassCell.store(10.0)
+proc drainPassSeconds*(): float = drainPassCell.load
+proc setDrainPassSeconds*(v: float) = drainPassCell.store(v)
 var drainGraceSeconds* = (try: parseFloat(getEnv("CINIM_CONDUCTOR_DRAIN_GRACE_SECONDS", "120")) except ValueError: 120.0)   ## D-113: a core that has just started drains no conductor for this long (`drainSettled`)
-var conductorIdleSeconds* = (try: parseFloat(getEnv("CINIM_CONDUCTOR_IDLE_SECONDS", "300")) except ValueError: 300.0)   ## a conductor above the number wanted that has had no run for this long is told to drain (docs/conductors.md section 5)
+var conductorIdleCell: Atomic[float]    ## a conductor above the number wanted that has had no run for this long is told to drain (docs/conductors.md section 5)
+conductorIdleCell.store(try: parseFloat(getEnv("CINIM_CONDUCTOR_IDLE_SECONDS", "300")) except ValueError: 300.0)
+proc conductorIdleSeconds*(): float = conductorIdleCell.load
+proc setConductorIdleSeconds*(v: float) = conductorIdleCell.store(v)
 var safetyPassSeconds* = 3.0   ## the safety net under the kicks: a controller whose organisation has a step waiting is looked at this often (a pause that ended, a step the watchdog put back)
 
 type
@@ -462,7 +468,7 @@ proc housekeeping(h: var Hub) =
   var wanted: Table[string, int]
   var states: seq[CondState]
   var sessions: seq[string]
-  let drainPass = h.conds.len > 0 and now - h.lastDrainPass >= drainPassSeconds and drainSettled(now, h.startedAt, drainGraceSeconds)       # not urgent: idle time is minutes; not in the first minutes of a core
+  let drainPass = h.conds.len > 0 and now - h.lastDrainPass >= drainPassSeconds() and drainSettled(now, h.startedAt, drainGraceSeconds)       # not urgent: idle time is minutes; not in the first minutes of a core
   if drainPass: h.lastDrainPass = now
   for session, c in h.conds:
     if drainPass and c.profileId notin wanted:
@@ -475,7 +481,7 @@ proc housekeeping(h: var Hub) =
         states.add CondState(id: c.id, idleSince: c.idleSince, draining: c.draining,
                              outdated: c.image.len > 0 and conductorImage.len > 0 and c.image != conductorImage)
         sessions.add session
-    for id in drainTargets(states, desired, now, conductorIdleSeconds):
+    for id in drainTargets(states, desired, now, conductorIdleSeconds()):
       for session in sessions:
         if h.conds[session].id == id:
           h.conds[session].draining = true

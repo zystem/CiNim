@@ -1,25 +1,32 @@
 ## A server that answers with a status line cut short must not end the core (std/httpclient raises an IndexDefect for it, which no `except CatchableError` catches): the clients turn it into an error.
-import std/[unittest, net, httpclient, json, os, strutils]
+import std/[unittest, net, httpclient, json, os, strutils, atomics]
 import common/[rqlite, httpguard]
 
+var servedPort: Atomic[int]
+
 proc serveOnce(reply: string): Port =
-  ## a one-shot server on a thread of its own: reads the request, sends `reply`, closes
-  var s = newSocket()
-  s.setSockOpt(OptReuseAddr, true)
-  s.bindAddr(Port(0), "127.0.0.1")
-  s.listen()
-  let port = s.getLocalAddr()[1]
-  var th {.global.}: Thread[tuple[s: Socket, reply: string]]
-  if th.running: joinThread th            # the one object serves every call: the thread of the call before must be over before it is used again
-  createThread(th, proc (a: tuple[s: Socket, reply: string]) {.thread.} =
+  ## a one-shot server on a thread of its own: reads the request, sends `reply`, closes. The sockets are made, used and closed on that thread only (a `Socket` is a `ref`, and a `ref` that two
+  ## threads hold is counted without atomics: ThreadSanitizer showed it); the port comes back in an atomic.
+  var th {.global.}: Thread[string]
+  var started {.global.} = false
+  if started: joinThread th               # the one object serves every call: the thread of the call before is joined (finished or not) before the object is made again
+  started = true
+  servedPort.store(0)
+  createThread(th, proc (reply: string) {.thread.} =
+    var s = newSocket()
+    s.setSockOpt(OptReuseAddr, true)
+    s.bindAddr(Port(0), "127.0.0.1")
+    s.listen()
+    servedPort.store(int(s.getLocalAddr()[1]))
     var c: Socket
-    a.s.accept(c)
+    s.accept(c)
     discard c.recv(1, 2000)
     sleep 100
-    c.send(a.reply)
+    c.send(reply)
     c.close()
-    a.s.close(), (s, reply))
-  port
+    s.close(), reply)
+  while servedPort.load == 0: sleep 5
+  Port(servedPort.load)
 
 suite "an answer cut short does not end the program":
   test "a status line with one part: the library raises an IndexDefect, the guard turns it into an IOError":
