@@ -117,6 +117,17 @@ proc unguardedPorts*(path, text: string): seq[Finding] =
     if "bindAddr(" in line or ".serve(" in line or ".start(" in line or "startProcess(" in line or "startEmulator(" in line or "startFake" in line or "startProxy(" in line: starts = true
   if hasPort and starts: result.add (path, 1, "starts something on a port of its own and does not call requireFreePort (tests/support/freeport.nim)")
 
+proc uncheckedDownload*(path, text: string): seq[Finding] =
+  ## An archive that a Dockerfile or a script fetches with `curl` and unpacks without comparing its SHA-256 (`curl ... | tar x` checks nothing: the build takes whatever the address serves that day).
+  ## The archive is saved to a file, `sha256sum -c` checks it, and then it is unpacked. Only a download of a release or of a tar file is looked at.
+  if not (path.contains("Dockerfile") or path.endsWith(".sh")) or path.startsWith("tests/") : return
+  let checked = "sha256sum -c" in text
+  for i, raw in toSeq(text.splitLines):
+    let line = code(raw)
+    if "curl " in line and "http" in line and ("releases/download" in line or ".tar" in line):
+      if "| tar" in line or "|tar" in line: result.add (path, i + 1, "an archive goes from curl into tar with no check of its SHA-256 (save it, `sha256sum -c`, then unpack)")
+      elif not checked: result.add (path, i + 1, "an archive is fetched and the file has no `sha256sum -c`")
+
 const
   docRoots = ["src/", "tools/", "deploy/", "tests/", "proto/", "lua/", "docs/", ".ci/"]
   docRefExempt = [".ci/NN.lua", ".ci/lock.json", "docs/how-to/talos.md"]     ## names the specification plans (the pipeline files of a project, D-68), and a file of another repository
@@ -142,6 +153,11 @@ suite "CLAUDE.md rules: each rule sees a violation":
     check unguardedPorts("tests/unit/tx.nim", "check cfg.collectorAddr == \"tcp://core:19743\"\n").len == 0          # a port in a string that nothing binds
     check unguardedPorts("tests/unit/tx.nim", "s.bindAddr(Port(0), \"127.0.0.1\")\n").len == 0                     # port 0: the system chooses a free one
     check unguardedPorts("src/core/x.nim", "const port = 18941\ndiscard s.start(port, 2)\n").len == 0
+  test "an archive that is downloaded and unpacked without a check of its SHA-256 is refused":
+    check uncheckedDownload("tools/image/Dockerfile.x", "RUN curl -fsSL \"https://h/releases/download/v1/a.tar.xz\" | tar xJ -C /tmp\n").len == 1
+    check uncheckedDownload("tools/image/Dockerfile.x", "RUN curl -fsSL -o /tmp/a.tar.xz \"https://h/releases/download/v1/a.tar.xz\"\n").len == 1
+    check uncheckedDownload("tools/image/Dockerfile.x", "RUN curl -fsSL -o /tmp/a.tar.xz \"https://h/releases/download/v1/a.tar.xz\" \\\n && echo \"$SUM  /tmp/a.tar.xz\" | sha256sum -c -\n").len == 0
+    check uncheckedDownload("tools/x.sh", "curl -fsS https://h/api/v1/x\n").len == 0                          # not an archive
   test "a path in quotes that names no file is seen, a pattern, an exempt name and a path that is there are not":
     let there = proc (p: string): bool = p == "src/core/api.nim"
     check missingDocPaths("a.md", "see `src/core/gone.nim` for it\n", there).len == 1
@@ -246,6 +262,17 @@ suite "CLAUDE.md rules: the repository keeps them":
       check found > 0
       if m["matchStrings"][0].getStr.contains("renovate:"): matched = found
     check annotated > 0 and matched == annotated
+  test "no archive is unpacked unchecked, and the sums of one archive are the same in every file that names it":
+    check scan(uncheckedDownload, files) == newSeq[string]()
+    var sums: seq[string]
+    for f in files:
+      if not (f.contains("Dockerfile") or f == "tools/shim/build_static.sh") or f.startsWith("tests/"): continue
+      for line in readFile(root() / f).splitLines:
+        let l = line.strip(chars = {' ', '\t'}).replace("ARG ", "")
+        if l.startsWith("NGHTTP2_SHA256="):
+          sums.add l["NGHTTP2_SHA256=".len .. ^1]
+    check sums.len == 4                                    # Dockerfile.deps, Dockerfile.test, tools/soak/Dockerfile, tools/shim/build_static.sh
+    check sums.deduplicate.len == 1 and sums[0].len == 64 and sums[0].allIt(it in HexDigits and it notin {'A' .. 'F'})
   test "no tracked file holds a word of the owner's private list":
     let listed = getEnv("CINIM_PRIVATE_WORDS_FILE", getHomeDir() / ".config" / "cinim" / "private-words")
     if not fileExists(listed):

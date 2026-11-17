@@ -32,11 +32,15 @@ docker run --rm -v "$PWD:/src" -v "$HOME/.nimble/pkgs2:/root/.nimble/pkgs2:ro" -
   esac
   # renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$
   NGHTTP2_VERSION=1.71.0
+  # the SHA-256 of that tarball (GitHub shows it for the release asset): a new version needs a new sum, and a build that has the old one stops at the check
+  NGHTTP2_SHA256=c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
   if [ ! -f "$PREFIX/lib/libnghttp2.a" ] || [ ! -f "$PREFIX/lib/libsodium.a" ]; then
     W=$(mktemp -d); cd "$W"
     git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium sodium
     (cd sodium && ./autogen.sh >/dev/null 2>&1 && ./configure --prefix="$PREFIX" --disable-shared --enable-static --enable-minimal >/dev/null && make -j"$(nproc)" install >/dev/null)
-    curl -fsSL "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz" | tar xJ
+    curl -fsSL -o nghttp2.tar.xz "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz"
+    echo "${NGHTTP2_SHA256}  nghttp2.tar.xz" | sha256sum -c -
+    tar xJf nghttp2.tar.xz
     cmake -S "nghttp2-${NGHTTP2_VERSION}" -B ng -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel \
       -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections" >/dev/null
     cmake --build ng -j"$(nproc)" --target install >/dev/null

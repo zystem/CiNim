@@ -34,14 +34,22 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # nghttp2 as a static archive where nimgrpc looks for it (1.61 or later is required; the distribution's is older)
 # renovate: datasource=github-releases depName=nghttp2/nghttp2 extractVersion=^v(?<version>.+)$
 ARG NGHTTP2_VERSION=1.71.0
+# the SHA-256 of that tarball (GitHub shows it for the release asset): a new version needs a new sum, and a build that has the old one stops at the check
+ARG NGHTTP2_SHA256=c0f55121d88650e4b9227aec28cebaf664d2417ca60fe70be0f8d38829f52116
 RUN set -eu; W=$(mktemp -d); \
-    curl -fsSL "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz" | tar xJ -C "$W"; \
+    curl -fsSL -o "$W/nghttp2.tar.xz" "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_VERSION}/nghttp2-${NGHTTP2_VERSION}.tar.xz"; \
+    echo "${NGHTTP2_SHA256}  $W/nghttp2.tar.xz" | sha256sum -c -; \
+    tar xJf "$W/nghttp2.tar.xz" -C "$W"; \
     cmake -S "$W/nghttp2-${NGHTTP2_VERSION}" -B "$W/b" -DENABLE_LIB_ONLY=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_STATIC_LIBS=ON -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX=/opt/nghttp2 >/dev/null; \
     cmake --build "$W/b" -j"$(nproc)" --target install >/dev/null; rm -rf "$W"; test -f /opt/nghttp2/lib/libnghttp2.a
 # rqlited for glibc: the release of the project (the one in its image is built for musl)
 # renovate: datasource=github-releases depName=rqlite/rqlite extractVersion=^v(?<version>.+)$
 ARG RQLITE_VERSION=10.5.1
-RUN curl -fsSL "https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VERSION}/rqlite-v${RQLITE_VERSION}-linux-amd64.tar.gz" | tar xz -C /tmp \
+# the SHA-256 of that tarball (GitHub shows it for the release asset): a new version needs a new sum, and a build that has the old one stops at the check
+ARG RQLITE_SHA256=f0ebf593b573595022947add67cd22e6cbb02c1d2a1ed8c7da45c94093a49b0d
+RUN curl -fsSL -o /tmp/rqlite.tar.gz "https://github.com/rqlite/rqlite/releases/download/v${RQLITE_VERSION}/rqlite-v${RQLITE_VERSION}-linux-amd64.tar.gz" \
+ && echo "${RQLITE_SHA256}  /tmp/rqlite.tar.gz" | sha256sum -c - \
+ && tar xzf /tmp/rqlite.tar.gz -C /tmp && rm /tmp/rqlite.tar.gz \
  && install -m 0755 "/tmp/rqlite-v${RQLITE_VERSION}-linux-amd64/rqlited" /usr/local/bin/rqlited && rm -rf "/tmp/rqlite-v${RQLITE_VERSION}-linux-amd64"
 # the nimble packages, from the package file alone so that this layer is cached
 WORKDIR /src
