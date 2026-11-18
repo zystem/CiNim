@@ -24,20 +24,26 @@ suite "the HTTP server keeps serving after requests with a body":
   let base = "http://127.0.0.1:" & $port
 
 
+  var lastError = ""                 ## what the last failed request said: a timeout and a reset connection are not the same fault
   proc request(m: HttpMethod; path, body: string): int =
     let c = newHttpClient(timeout = 3000)
     defer: c.close()
     try: c.request(base & path, httpMethod = m, body = body).code.int
-    except CatchableError: -1
+    except CatchableError as e:
+      lastError = $e.name & ": " & e.msg
+      -1
 
   test "a thousand GETs after two hundred POSTs and PUTs with bodies of different sizes all get an answer":
-    var dropped = 0
+    # one request in 1200 was dropped once in the pipeline's Pod (2026-11-18, run of cd3518a, three test jobs at once): 0 of 37 runs on a quiet workstation and under full load. The failures are
+    # told with their number and what the client said, so that a second one says whether it was a timeout (a slow node) or a closed connection (the library).
+    var dropped: seq[string]
     for round in 1 .. 200:
       let m = if round mod 2 == 0: HttpPost else: HttpPut
-      if request(m, "/some/long/path/that/makes/the/request/longer/" & $round, "x".repeat(10 + round mod 7 * 40)) != 200: inc dropped
+      if request(m, "/some/long/path/that/makes/the/request/longer/" & $round, "x".repeat(10 + round mod 7 * 40)) != 200: dropped.add "body request " & $round & ": " & lastError
     for i in 1 .. 1000:
-      if request(HttpGet, "/h", "") != 200: inc dropped
-    check dropped == 0
+      if request(HttpGet, "/h", "") != 200: dropped.add "GET " & $i & ": " & lastError
+    if dropped.len > 0: echo "  dropped: ", dropped
+    check dropped.len == 0
   test "the length of the body is the one the request says, also when an earlier request had a longer one":
     check request(HttpPost, "/a", "y".repeat(5000)) == 200
     let c = newHttpClient(timeout = 3000)

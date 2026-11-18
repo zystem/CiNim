@@ -42,7 +42,9 @@ func fromHex(s: string): tuple[ok: bool, bytes: seq[byte]] =
   result.ok = true
 
 proc fingerprint(): string =
-  toHex(sha256("cinim-transit-emulator|" & toHex(masterKey)))[0 ..< 32]
+  var key: seq[byte]
+  withLock lock: key = masterKey               # a handler thread reads it while the test thread may set it: ThreadSanitizer, the first nightly-tsan run (2026-11-18)
+  toHex(sha256("cinim-transit-emulator|" & toHex(key)))[0 ..< 32]
 
 proc setKey*(key: seq[byte]) =
   withLock lock: masterKey = key
