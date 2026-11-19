@@ -9,6 +9,7 @@
 ## link and a symbolic link that points outside the workspace are refused (the entry is skipped and counted), and nothing is made outside the root.
 import std/[os, strutils, algorithm, times, posix, sequtils]
 import zippy
+import nimgrpc/compress/gzip           # gzipDecompress with a limit: zippy grows its output with no limit, and a chunk of 400 KiB that holds 400 MiB of zeros ended the process
 
 const
   magic = "CICDCCH1"
@@ -268,7 +269,7 @@ proc beginEntry(u: var Unpacker; h: string) =
       if size == 0:
         u.cur.close()
         u.curOpen = false
-        discard chmod(u.curPath.cstring, Mode(mode and 0o7777))
+        discard chmod(u.curPath.cstring, Mode(mode and 0o777))      # not the setuid, setgid and sticky bits: a poisoned cache must not make a file that runs as its owner (found by tests/unit/tfuzz.nim)
       return
     inc u.stats.skipped
     u.skipLeft = size
@@ -282,7 +283,7 @@ proc closeCurrent(u: var Unpacker) =
   u.cur.close()
   u.curOpen = false
   try:
-    discard chmod(u.curPath.cstring, Mode(u.curMode and 0o7777))
+    discard chmod(u.curPath.cstring, Mode(u.curMode and 0o777))
     if u.curMtime > 0: setLastModificationTime(u.curPath, fromUnix(u.curMtime))
   except CatchableError: discard
 
@@ -358,9 +359,13 @@ proc unpackCache*(inFile, root: string): PackStats =
       u.stats.error = "the archive is cut short"
       break
     var chunk = ""
-    try: chunk = uncompress(z)
+    try:
+      # a chunk of a cache that we made is chunkSize bytes at most; zlib stops at the limit (found by hand and by tests/fuzz: a poisoned cache must not take the memory of the step)
+      let raw = gzipDecompress(z.toOpenArrayByte(0, z.high), chunkSize)
+      chunk = newString(raw.len)
+      if raw.len > 0: copyMem(addr chunk[0], unsafeAddr raw[0], raw.len)
     except CatchableError:
-      u.stats.error = "the archive is damaged (a chunk does not decompress)"
+      u.stats.error = "the archive is damaged (a chunk does not decompress, or holds more than " & $chunkSize & " bytes)"
       break
     u.feed(chunk)
     if u.stats.error.len > 0: break

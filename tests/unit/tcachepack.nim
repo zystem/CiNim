@@ -119,6 +119,37 @@ suite "DAT-004 a poisoned archive cannot write outside the workspace":
     check not fileExists(d / "outside" / "evil.txt") and not fileExists(d / "outside" / "evil2.txt") and not fileExists("/tmp/abs-evil.txt")
     check not symlinkExists(d / "ws" / "escape") and not symlinkExists(d / "ws" / "abs-link")
     check st.skipped == 6 and st.files == 1 and st.links == 1
+  test "a chunk that is small and holds a lot (a gzip bomb) is refused at the size of a chunk, and not unpacked into memory":
+    let d = createTempDir("cp", "")
+    defer: removeDir(d)
+    createDir(d / "ws")
+    # 40 MiB of zeros are a few tens of KiB of gzip; a chunk of ours is 4 MiB at most (found 2026-11-19: 400 KiB of gzip held 400 MiB and the unpacker ran out of memory)
+    let z = compress(newString(40 * 1024 * 1024), 1, dfGzip)
+    check z.len < 200 * 1024
+    let n = z.len
+    writeFile(d / "bomb.bin", "CICDCCH1" & $char((n shr 24) and 255) & $char((n shr 16) and 255) & $char((n shr 8) and 255) & $char(n and 255) & z & "\0\0\0\0")
+    let st = unpackCache(d / "bomb.bin", d / "ws")
+    check "more than" in st.error and st.files == 0
+  test "the mode of a file keeps the permission bits and drops setuid, setgid and sticky (found by tests/unit/tfuzz.nim)":
+    let d = createTempDir("cp", "")
+    defer: removeDir(d)
+    createDir(d / "ws")
+    let tar = raw(@[("plain", "0", "", "x")])
+    # the same archive with the mode field of the header set to 4755 by hand, and its checksum made again
+    var t = tar
+    let mode = "0004755\0"
+    for i in 0 ..< 8: t[100 + i] = mode[i]
+    for k in 148 ..< 156: t[k] = ' '
+    var sum = 0
+    for i in 0 ..< 512: sum += ord(t[i])
+    let ck = toOct(sum, 6) & "\0 "
+    for k in 0 ..< 8: t[148 + k] = ck[k]
+    writeFile(d / "c.bin", container(t))
+    let st = unpackCache(d / "c.bin", d / "ws")
+    check st.error == "" and st.files == 1
+    var info: Stat
+    check lstat((d / "ws" / "plain").cstring, info) == 0
+    check (info.st_mode.uint32 and 0o7777'u32) == 0o755'u32
   test "a header whose checksum is wrong ends the unpacking with an error":
     let d = createTempDir("cp", "")
     defer: removeDir(d)
