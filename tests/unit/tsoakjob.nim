@@ -2,7 +2,7 @@
 ## (the release run ended with `SOAK OK`, every ASan hour ended with exit 0 and the hours were all run), and `tools/soak/job.sh` runs the soak into a new
 ## directory of its own (so that the runs of the weeks do not mix on the volume), prints the summary, keeps the newest runs only, and ends with the verdict
 ## as its exit code (a pipeline that failed is what shows a bad soak). Run with a stand-in for `run72.sh`: no hour is waited for.
-import std/[unittest, os, osproc, strutils, algorithm, sequtils]
+import std/[unittest, os, osproc, strutils, algorithm, sequtils, times]
 
 let root = currentSourcePath().parentDir.parentDir.parentDir
 
@@ -96,6 +96,25 @@ echo finished >> "$OUT/san-summary.txt"
     check "release run" in o
     check "SOAK OK" in o
 
+  test "NFR-013 a line an hour goes to the log while the soak runs, and the heartbeat ends with the job (the first soak of 72 hours lost the end of its log)":
+    # a stand-in that takes 3 s, a heartbeat every second
+    writeFile(base / "slow72.sh", """#!/bin/sh
+OUT="$1"; HOURS="$2"
+echo "starting" > "$OUT/release.out"
+printf 't,rss\n1,13400\n2,13410\n' > "$OUT/release.csv"
+printf 'hour 1 exit=0\nhour 2 exit=1\n' > "$OUT/san-summary.txt"
+sleep 3
+echo "SOAK OK" >> "$OUT/release.out"
+echo finished >> "$OUT/san-summary.txt"
+""")
+    setFilePermissions(base / "slow72.sh", {fpUserRead, fpUserWrite, fpUserExec})
+    let started = epochTime()
+    let (o, _) = sh("tools/soak/job.sh " & base / "out 2", "SOAK_HEARTBEAT_SECONDS=1 SOAK_RUN72=" & base / "slow72.sh")
+    check o.count("== heartbeat ") >= 2
+    check "release: 2,13410" in o
+    check "asan hours: 2 finished, 1 with exit 0; hour 2 exit=1" in o
+    check epochTime() - started < 15            # the heartbeat did not keep the job alive after the soak ended
+    check "release run" in o and "verdict:" in o
   test "NFR-013 the exit code is the verdict: a bad release run makes the Job fail":
     let (o, c) = sh("tools/soak/job.sh " & base / "out 2", "FAKE_RELEASE='SOAK FAIL' SOAK_RUN72=" & base / "fake72.sh")
     check c != 0

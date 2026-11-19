@@ -22,7 +22,7 @@ var
   delayMs = 0
   keyNames: seq[string] = @["cinim-shard"]
   retryHeader = true                 ## answer failures with X-Hsmgate-Retryable (hsmgate does; Vault and OpenBao do not)
-  tokenSeen*: string                 ## the X-Vault-Token of the last request
+  tokenSeenValue: string             ## the X-Vault-Token of the last request, written by a handler thread under the lock: read it with tokenSeen()
   calls*: array[3, int]              ## keys, encrypt, decrypt: how many times the core asked (read by the tests)
 initLock(lock)
 
@@ -40,6 +40,10 @@ func fromHex(s: string): tuple[ok: bool, bytes: seq[byte]] =
     result.bytes.add byte(v)
     i += 2
   result.ok = true
+
+proc tokenSeen*(): string =
+  ## the X-Vault-Token of the last request (the test thread reads what a handler thread wrote: under the lock; ThreadSanitizer, the second nightly-tsan run, 2026-11-19)
+  withLock lock: result = tokenSeenValue
 
 proc fingerprint(): string =
   var key: seq[byte]
@@ -94,7 +98,7 @@ proc onRequest() {.raises: [], gcsafe.} =
         d = delayMs
         key = masterKey
         names = keyNames
-        tokenSeen = headerOf(getRequest(), "X-Vault-Token")
+        tokenSeenValue = headerOf(getRequest(), "X-Vault-Token")
       if path == "/emu/fault" and meth == "POST":
         let j = parseJson(getBody())
         setFault(parseEnum[Fault](j{"mode"}.getStr("fNone")), j{"delay_ms"}.getInt(0))

@@ -107,10 +107,10 @@ suite "a key on another machine (Transit)":
     let f = getTempDir() / "ttransitclient.token"
     writeFile(f, "s.the-token\n")
     let k = httpKek(TransitConfig(url: cfg.url, keyName: "cinim-shard", tokenFile: f, timeoutMs: 1500))
-    check k.ok and tokenSeen == "s.the-token"
+    check k.ok and tokenSeen() == "s.the-token"
     removeFile f
     discard httpKek(cfg)
-    check tokenSeen == ""
+    check tokenSeen() == ""
 
   test "the mount and the name are in the path":
     setKeyNames(@["other-key"])
