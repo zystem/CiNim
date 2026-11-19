@@ -13,7 +13,7 @@ RUN CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-s -w -X main.ver
 
 # blobgate, the storage service (github.com/zystem/blobgate): the program of the image that its project publishes and the chart deploys (deploy/charts/cinim-storage), so that the process tests of the storage
 # (tests/integration/tstorageproc.nim, tshimdirect.nim) run what runs in the cluster; BLOBGATE_BIN names it. Keep this tag and the version of the dependency in the chart at one version.
-FROM ghcr.io/zystem/blobgate:0.7.0@sha256:662ff8bb804ad7336ea0bc19530b30dc6e964861ece2289dcb69763612fe846c AS blobgate
+FROM ghcr.io/zystem/blobgate:0.11.0@sha256:31f2f98f92b66a087beb8c488c4b8e70bd6698f3959afae8f5422b354a75d0a7 AS blobgate
 
 # buf, for the protocol contract tests (tests/contract/tproto_compat.nim: `buf breaking` against proto/compat/baseline.binpb): built from the source of the pinned version with the same Go, so that the
 # module proxy's checksums vouch for it and no binary is fetched by hand

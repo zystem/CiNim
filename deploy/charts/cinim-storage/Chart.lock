@@ -1,6 +1,6 @@
 dependencies:
 - name: blobgate
   repository: oci://ghcr.io/zystem/charts
-  version: 0.7.0
-digest: sha256:17951bf33c5d17e485d38c0433581d63fa94b5fc21a7779a75bdd70a582a2098
-generated: "2026-11-18T00:15:50.182314661+02:00"
+  version: 0.11.0
+digest: sha256:3795f36e073fac1d930a633c4e6509e3aa305e4162830a6c8dfe4a5e8f1779db
+generated: "2026-11-19T20:07:59.047408478+02:00"

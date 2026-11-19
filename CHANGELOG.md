@@ -14,7 +14,7 @@ The format is that of [Keep a Changelog](https://keepachangelog.com). The projec
 - **Fuzzing of the parsers of bytes that another program wrote** (`tests/fuzz/targets.nim`, 21 targets, the archive of a cache among them; `tests/unit/tfuzz.nim` in the suite and in the nightly ASan run, `tools/test/fuzz.sh` with libFuzzer and AddressSanitizer). It found that a filter in the LDAP settings nested a hundred thousand levels deep ended the process (see Fixed).
 
 ### Changed
-- **nimgrpc 0.6.0** (`>= 0.6.0`), **nghttp2 1.71.0**, **blobgate 0.7.0** (the chart dependency and the image of the tests; it adds columns to its tables at its start, a downgrade is not supported).
+- **nimgrpc 0.6.0** (`>= 0.6.0`), **nghttp2 1.71.0**, **blobgate 0.11.0** (the chart dependency and the image of the tests; it adds columns to its tables at its start, a downgrade is not supported; the ETag of an object made of parts is the one S3 makes).
 - **What a build takes from outside is pinned**: the base images by digest, the sources that scripts cloned by a tag or a head by commit, the archives of nghttp2 and rqlite by SHA-256, the nimble packages by `cinim.lock`; `tests/unit/trepository.nim` refuses what is not.
 - `onRequest` of the core, one procedure of 2550 lines, is the dispatch of 50 procedures, one for each group of routes; the text of the bodies is unchanged.
 - `-d:QueueSize=20000` for every build: a slow request kept its connection only while fewer than 200 others were handled (GuildenStern 9.0.2; the cure is in the library, the issue is olliNiinivaara/GuildenStern#39).
