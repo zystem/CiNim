@@ -1171,7 +1171,7 @@ proc notFound(cfg: UiConfig; loggedIn: bool): UiResponse =
 
 proc whenText(t: int64): string = (if t <= 0: "never" else: fromUnix(t).utc.format("yyyy-MM-dd HH:mm") & " UTC")
 
-proc mfaPage(cfg: UiConfig; api: CoreApi; token: string; status = 200; message, secret, uri = ""; codes: seq[string] = @[]): UiResponse =
+proc mfaPage(cfg: UiConfig; api: CoreApi; token: string; status = 200; message = ""; secret = ""; uri = ""; codes: seq[string] = @[]): UiResponse =
   let r = api.get(token, "/api/v1/me/mfa")
   if r.status != asOk: return failed(cfg, r, "two-step login")
   var keys: seq[KeyRow]

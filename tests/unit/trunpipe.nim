@@ -1,5 +1,5 @@
 ## docs/conductors.md section 5: the pipe between the supervisor of a conductor and a run process. Pure framing: a kind, a length, the bytes.
-import std/[unittest, options, os]
+import std/[unittest, options, os, posix]
 import common/runpipe
 
 suite "RUN-009 the pipe between a conductor's supervisor and a run process":
@@ -32,6 +32,25 @@ suite "RUN-009 the pipe between a conductor's supervisor and a run process":
     var r2 = PipeReader()
     r2.feed "Z\0\0\0\0"
     check r2.next.isNone and r2.broken
+  test "RUN-009 of the 256 bytes that can start a frame exactly the 8 letters of the kinds are taken, with the reader and with the blocking read":
+    var taken = 0
+    for b in 0 .. 255:
+      let frame = $char(b) & "\0\0\0\0"
+      var r = PipeReader()
+      r.feed frame
+      let got = r.next
+      if got.isSome:
+        inc taken
+        check char(got.get.kind) == char(b)        # the kind is the letter that named it, not some other value of the enum
+      else:
+        check r.broken
+      var fds: array[2, cint]
+      check openPipe(fds)
+      check write(fds[1], unsafeAddr frame[0], frame.len) == frame.len
+      closeFd fds[1]
+      check readPipeFd(fds[0]).isSome == got.isSome
+      closeFd fds[0]
+    check taken == 8
   test "a frame goes through a real pipe, blocking on both sides":
     var fds: array[2, cint]
     check openPipe(fds)

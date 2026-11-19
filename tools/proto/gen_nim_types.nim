@@ -14,7 +14,7 @@ macro generate(): untyped =
   doAssert protoFile.len > 0 and outFile.len > 0, "give -d:protoFile=... and -d:outFile=..."
   let types = protoToTypesImpl(protoFile)
   writeFile(outFile, "## Made by tools/proto/gen_nim_types.nim from build/nimproto/all.proto; do not edit (tools/proto/nim_flatten.sh makes it again when the proto files change).\n" &
-                     "import protobuf_serialization\nimport protobuf_serialization/files/type_generator\n\n" & types.repr & "\n")
+                     "import protobuf_serialization\n\n" & types.repr & "\n")
   result = newStmtList()
 
 generate()

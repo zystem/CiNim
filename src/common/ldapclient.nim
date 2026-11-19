@@ -8,8 +8,6 @@
 ## An LDAP bind with a name and an EMPTY password is, by the protocol, an anonymous bind that succeeds (RFC 4513 5.1.2): `bindSimple` refuses an empty password, so that "the password is
 ## right" can never mean "the server let anyone in".
 import std/[net, strutils, os, hashes, nativesockets]
-when defined(ssl):
-  import std/openssl
 
 type
   LdapError* = object of CatchableError

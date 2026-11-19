@@ -287,8 +287,8 @@ proc fire*(co: Core; t: TriggerRow; extra: seq[(string, string)]; now: int64; by
     discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_result = ? WHERE id = ?", clock, "not started: the organisation has " & $maxUnfinishedRuns & " runs that have not ended", t.id]])
     return Fired(reason: "queue_full")
   let id = co.createRun(script, t.tenantId, profile, pairs, t.id, t.groupId, source, actor = (if actor.len > 0: actor else: "trigger:" & t.id))
-  let result = if aborted.len == 0: "started" else: "started; aborted the earlier run" & (if aborted.len > 1: "s " else: " ") & aborted.join(", ")
-  discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_run_id = ?, last_result = ? WHERE id = ?", clock, id, result, t.id]])
+  let outcome = if aborted.len == 0: "started" else: "started; aborted the earlier run" & (if aborted.len > 1: "s " else: " ") & aborted.join(", ")
+  discard c.execute(%*[["UPDATE triggers SET last_fired_at = ?, last_run_id = ?, last_result = ? WHERE id = ?", clock, id, outcome, t.id]])
   Fired(started: true, runId: id)
 
 proc fireSchedules*(co: Core; now: int64): int =

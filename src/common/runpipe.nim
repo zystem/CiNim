@@ -31,14 +31,26 @@ func encodePipe*(kind: PipeKind; payload: string): string =
   result.add char(n and 255)
   result.add payload
 
-func isKind(c: char): bool = c in {'L', 'C', 'R', 'F', 'S', 'X', 'K', 'Y'}
+func kindOf(c: char): Option[PipeKind] =
+  ## the kind a byte names, or none: written out (not `PipeKind(c)`, which makes a value that is none of the kinds of an enum with holes out of any other byte)
+  case c
+  of 'L': some(pkLease)
+  of 'C': some(pkCall)
+  of 'R': some(pkReply)
+  of 'F': some(pkFinish)
+  of 'S': some(pkSuspended)
+  of 'X': some(pkLost)
+  of 'K': some(pkCheck)
+  of 'Y': some(pkChecked)
+  else: none(PipeKind)
 
 proc feed*(r: var PipeReader; data: string) = r.buf.add data
 
 proc next*(r: var PipeReader): Option[PipeFrame] =
   ## the next whole frame; none if there is not one yet, or if the stream is broken (`broken`)
   if r.broken or r.buf.len < 5: return none(PipeFrame)
-  if not isKind(r.buf[0]):
+  let kind = kindOf(r.buf[0])
+  if kind.isNone:
     r.broken = true
     return none(PipeFrame)
   let n = (ord(r.buf[1]) shl 24) or (ord(r.buf[2]) shl 16) or (ord(r.buf[3]) shl 8) or ord(r.buf[4])
@@ -46,7 +58,7 @@ proc next*(r: var PipeReader): Option[PipeFrame] =
     r.broken = true
     return none(PipeFrame)
   if r.buf.len < 5 + n: return none(PipeFrame)
-  let frame: PipeFrame = (PipeKind(r.buf[0]), r.buf[5 ..< 5 + n])
+  let frame: PipeFrame = (kind.get, r.buf[5 ..< 5 + n])
   r.buf = r.buf[5 + n .. ^1]
   some(frame)
 
@@ -86,9 +98,10 @@ proc readPipeFd*(fd: cint): Option[PipeFrame] =
   if not readExactly(fd, 5, head): return none(PipeFrame)
   var r = PipeReader()
   r.feed head
-  if not isKind(head[0]): return none(PipeFrame)
+  let kind = kindOf(head[0])
+  if kind.isNone: return none(PipeFrame)
   let n = (ord(head[1]) shl 24) or (ord(head[2]) shl 16) or (ord(head[3]) shl 8) or ord(head[4])
   if n < 0 or n > maxPipePayload: return none(PipeFrame)
   var body: string
   if n > 0 and not readExactly(fd, n, body): return none(PipeFrame)
-  some((PipeKind(head[0]), body))
+  some((kind.get, body))
