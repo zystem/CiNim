@@ -11,7 +11,7 @@ awk -F, 'NR>1 {n++; last=$0} END {printf "samples: %d (one a minute: %.1f h), la
 tail -3 "$D/release.out" 2>/dev/null | sed 's/^/  /'
 echo "== AddressSanitizer / LeakSanitizer hours"
 if [ -f "$D/san-summary.txt" ]; then
-  total=$(grep -c '^hour ' "$D/san-summary.txt"); ok=$(grep -c 'exit=0$' "$D/san-summary.txt")
+  total=$(grep -c '^hour ' "$D/san-summary.txt"); ok=$(grep -c '^hour .* exit=0$' "$D/san-summary.txt")
   echo "hours finished: $total, with exit 0: $ok"; grep -v 'exit=0$' "$D/san-summary.txt" | head -5
 else echo "no san-summary.txt yet"; fi
 leaks=$(grep -l "LeakSanitizer\|ERROR: AddressSanitizer" "$D"/san-*.out 2>/dev/null | wc -l)
