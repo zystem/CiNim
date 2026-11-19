@@ -4,7 +4,7 @@
 ## It applies to the password and to the directory (LDAP) alike; a token already made is not asked again.
 ## D-103: security keys (WebAuthn, `webauthn.nim`) are a second factor of their own or beside the app: `POST /me/mfa/webauthn:begin` gives the options for the browser, `:finish` keeps the key (and, for a
 ## person who has no recovery codes yet, makes them); a login that is asked for the second factor is given the options for a key (`webauthn` in the answer), and the browser's answer goes in `assertion`.
-import std/[json, strutils, sets]
+import std/[json, strutils]
 import ../common/rqlite
 import secretvault, apiauth, totp, webauthn
 

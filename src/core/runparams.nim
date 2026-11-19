@@ -5,7 +5,7 @@
 ## The executor then reports the complete set, defaults included, as the host call `params`; core keeps that as the run's parameters, and gives it
 ## to every step of the run as ordinary environment variables (the job controller puts them into the Pod's `env`). Secrets are not parameters:
 ## a step asks for those by name (`secrets = {...}`, 6.7).
-import std/[json, strutils, algorithm]
+import std/[json, algorithm]
 import ../common/[rqlite, envname]
 
 const

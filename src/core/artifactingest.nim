@@ -11,10 +11,9 @@
 ## no bytes is one request, `put_object`, without data. Nothing is kept in the core between the requests but the row of the artifact (state `uploading`, the upload id), so a core that restarts
 ## in the middle loses nothing; the shim sends the part again. An artifact is `stored` only when the store itself says that the object is there with the size announced. A shard without the
 ## module's port for shims (`storage.directUrl`) stores no artifact and no cache: the request is refused (`direct_required`).
-import std/[json, strutils, times, tables, sequtils, atomics, locks, os]
+import std/[json, strutils, times, sequtils, atomics, locks, os]
 import health
 import protobuf_serialization
-import protobuf_serialization/files/type_generator
 import crunchy
 import ../common/[rqlite, states, ctrlauth]
 import grpcserve

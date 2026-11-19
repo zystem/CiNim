@@ -4,7 +4,6 @@
 ## acknowledgement). What is not acknowledged is sent again after a reconnect or after a while, and the receiver applies a frame only if it
 ## is the next number: once and in order, whatever the network does. The actions behind the frames are idempotent anyway (deterministic Pod
 ## names, step keys, run attempts), so a duplicate that gets through would be harmless; this keeps it from getting through.
-import std/algorithm
 
 type
   Sent* = object

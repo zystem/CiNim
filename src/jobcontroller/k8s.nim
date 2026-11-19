@@ -1,8 +1,8 @@
 ## The real Backend: the official Kubernetes C client (A.6, D-26). The only module of the controller that knows
 ## Kubernetes; it turns the platform's PodRequest into a Pod spec and answers the questions logic.nim asks of the cluster.
 ## SEC-010 per-job projected tokens are deferred: the shim gets the shared TLS "client" identity through a Secret.
-import std/[os, json, strutils, times, base64, atomics, sequtils, options]
-import ../common/[k8sbind, envname, quantity]
+import std/[os, json, strutils, times, base64, options]
+import ../common/[k8sbind, quantity]
 import backend, podsec, runvolume, shardsettings
 
 type K8s* = object

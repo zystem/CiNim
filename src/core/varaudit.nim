@@ -3,7 +3,7 @@
 ## header of a step that used it, VAR-005). A secret variable is never written, in either mode: the audit has the fact of the change (who, when, the new version) and a digest.
 ## The digest is the first 12 hex digits of an HMAC-SHA256 under a key of the tenant (made of the core's secret key and the tenant), not a plain hash, so that a short or guessable
 ## secret cannot be found by trying values against the audit. The variables of the shard belong to no organisation and are always written in full (the operator makes them; they are plain).
-import std/[options, strutils, json]
+import std/[options, json]
 import crunchy
 import ../common/rqlite
 import audit, apiauth

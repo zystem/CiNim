@@ -6,7 +6,7 @@
 ## Secrets (DAT-002, second half) are masked here, before compression - core never sees the plain text. Only values
 ## known when the step starts (`--secrets-file`) and at least `defaultMinLen` (secretmask.nim) characters long are masked (shorter ones
 ## would mangle ordinary output); a value split across two lines is not recognised.
-import std/[os, strutils, json, algorithm, atomics, unicode]
+import std/[os, strutils, json, algorithm, atomics]
 import zippy
 import secretmask, ../common/crockford
 

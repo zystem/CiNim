@@ -10,9 +10,9 @@
 ## (every few seconds, and after each release) gives back what a finished, cancelled or lost run held, takes the finished off the waiting lists, hands a free lock to the
 ## first waiter, and completes a hand-over that a crash cut short (the lock is the waiter's but its record and its place on the list are still there).
 ## A queue is not limited: it is rows in the database, and a long one is worked off when the environment has time.
-import std/[json, times]
+import std/json
 import ../common/[rqlite, states]
-import schema, journaldb, workkick
+import journaldb, workkick
 
 const
   lockKind* = "lock"

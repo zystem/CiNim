@@ -2,7 +2,7 @@
 ## `env` of one step (`step_env`, above what the steps write to $CICD_ENV). The script says it in the options of the step (bootstrap.lua: `norm_env`); the core checks the
 ## names against the deny-list of STO-004 when it takes the step, puts the job's into the environment of the Pod, and the shim applies the step's after the env file.
 ## Pure, shared by the core and the shim.
-import std/[json, strutils, algorithm, sets]
+import std/[json, strutils, algorithm]
 import envname
 
 const

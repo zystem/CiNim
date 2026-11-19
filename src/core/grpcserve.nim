@@ -5,7 +5,7 @@
 ## A lock does what a REP socket would: one request at a time on a channel, so the state a handler uses (the database connection of the thread, the collector) is
 ## still touched by one request at a time. nim-grpc runs every call on a worker thread of its own; `maxWorkers` is small because the rest would only wait on the lock.
 ## The files: `<certs>/tls/core.pem`, `core.key` (the certificate must carry the DNS name `cinim-core`, which the shims check) and `ca.pem` (what the shims' certificate must chain to).
-import std/[os, atomics]
+import std/atomics
 import nimgrpc
 import ../common/corechannel
 export nimgrpc, corechannel

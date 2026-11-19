@@ -10,8 +10,7 @@
 ## in memory (tests/support/testkek.nim).
 import std/[strutils, json, atomics, locks, tables]
 import std/times
-import crunchy
-import ../common/[rqlite, ctrlauth, sodiumaead]
+import ../common/[rqlite, sodiumaead]
 import kekprovider, dekcache, stepsecrets
 export kekprovider
 

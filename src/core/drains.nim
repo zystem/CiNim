@@ -3,7 +3,7 @@
 ## fetches them through a reader Pod of its own, when the core orders it. The core's part is here: it remembers which steps have something to fetch (`step_drains`), names them to the
 ## controller in every answer until the controller says they are done, tries again later after a failure that may pass, gives up after a day, and lets the ArtifactIngest
 ## accept the files of a step that has already ended while its drain is under way.
-import std/[json, times]
+import std/json
 import std/options
 import ../common/[rqlite, shimstate, stepenv]
 import objectstore

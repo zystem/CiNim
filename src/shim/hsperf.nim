@@ -3,7 +3,7 @@
 ## spaces, threads, classes). The format is stable and documented in the HotSpot sources (perfMemory / PerfData); it needs no
 ## attach, no JMX, no library in the image - only that PerfData is on (the default; -XX:-UsePerfData turns it off) and that the
 ## shim can read the file (same user, same /tmp). Pure parsing here; finding the file is `findFile`.
-import std/[os, strutils, tables, algorithm, options, times]
+import std/[os, strutils, tables, options, times]
 
 type PerfValue* = object
   isString*: bool

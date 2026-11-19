@@ -2,7 +2,7 @@
 ## from a group of a directory (LDAP, D-87), and its roles are bindings of the organisation or of a group or project in it (`role_bindings` whose user is `team:<slug>/<name>`; core/apiauth.nim
 ## adds them to the rights of every member). A member is added by hand (`source` '') or given by the directory (`ldap:<server id>`): the login and the sync of a directory add and take away
 ## only the second kind, as they do for roles.
-import std/[json, strutils, times]
+import std/json
 import ../common/rqlite
 import schema, apiauth, ldapauth
 

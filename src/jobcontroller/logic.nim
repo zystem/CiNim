@@ -3,7 +3,7 @@
 ## cluster. What lives here: creating Pods (state first, then the Pod), the poll round (read each tracked Pod, classify it, read
 ## the shim's state from its log), cancelling Pods core no longer wants, keeping finished Pods for a while and then removing them,
 ## and sweeping orphans out of the (dedicated) step namespace.
-import std/[json, options, strutils, tables, times, sequtils]
+import std/[json, options, strutils, tables]
 import ../common/[shimstate, stepenv, ids]
 import backend, ctrlstate, podverdict
 

@@ -8,7 +8,6 @@
 import std/[os, times, atomics, strutils, json]
 import ../common/corechannel
 import protobuf_serialization
-import protobuf_serialization/files/type_generator
 import crunchy
 import logspool, shimlog, secretmask, artifacts, directclient
 

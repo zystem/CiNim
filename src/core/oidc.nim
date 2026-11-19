@@ -4,7 +4,7 @@
 ## the claim `user_claim` (`preferred_username`), their account is `<login>@<organisation>` (made at the first login only if the provider has `auto_create`), and the roles come from the values of the claim
 ## `groups_claim` through the map of the organisation (`oidc_group_map`), put on the account the way a directory\'s are (`source` = `oidc:<provider id>`). The client secret is sealed in the vault. OIDC
 ## says who the person is; the second factor of the provider is trusted, CiNim\'s own is not asked.
-import std/[json, strutils, httpclient, uri, times, base64, tables, sets, sysrand, os]
+import std/[json, strutils, httpclient, uri, base64, sysrand, os]
 import crunchy
 import ../common/rqlite
 import secretvault, ldapauth, apiauth

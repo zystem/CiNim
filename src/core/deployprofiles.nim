@@ -9,7 +9,7 @@
 ## Only a name is told as `CINIM_DEPLOY_NAMESPACE`. Each profile has an account of its own unless it is told
 ## otherwise (`deploy-<name>`), so that the token of `test1` is not the token of `test2`.
 ## What is built here: the objects and their rules. The egress of a profile of its own is not: every deploy Pod follows the shard's `deploy.egress`.
-import std/[json, strutils, algorithm]
+import std/[json, algorithm]
 import ../common/rqlite
 import schema
 

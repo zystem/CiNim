@@ -20,7 +20,6 @@
 import std/[json, tables, strutils, httpclient, locks, atomics, times, options, sequtils, os]
 import health
 import protobuf_serialization
-import protobuf_serialization/files/type_generator
 import common/[rqlite, shimstate, states]
 import grpcserve
 import crunchy

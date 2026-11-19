@@ -2,7 +2,6 @@
 ## The tables are the single source of truth; docs/state-machines.md is generated from them (tools/gen_state_docs.nim)
 ## and the names are checked against proto/cicd/internal/v1/common.proto in the tests.
 
-import std/[strutils]
 
 type
   RunState* = enum

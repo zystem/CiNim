@@ -3,7 +3,7 @@
 ## the ones that exist (adoption: it keeps no list of its own), and removes a Pod only after it has ended. It never stops a conductor that runs: the core drains a
 ## conductor that is idle and above the number wanted (`conductor.drain` on the push channel), the conductor exits with 0, and the Pod is then removed here.
 ## Pure but for the `Backend`: the Pod and its Secret are plain JSON, the decisions are tested against a fake cluster.
-import std/[json, tables, strutils, options, sequtils]
+import std/[json, tables, strutils, options]
 import backend
 
 const

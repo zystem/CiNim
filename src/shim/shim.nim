@@ -17,7 +17,7 @@
 ## The default build has no gRPC client (it runs in any image); the production build is -d:shimLogging, linked statically
 ## (tools/shim/build_static.sh).
 
-import std/[os, osproc, json, strutils, strtabs, posix, times, atomics, options, base64, sequtils]
+import std/[os, json, strutils, strtabs, posix, times, atomics, options]
 import checksums/sha2
 import dotenv, shimlog, secretmask, appmetrics, resmetrics, appscrape, artifacts, varsheader, cachepack
 import ../common/[stepenv, cachedecl]

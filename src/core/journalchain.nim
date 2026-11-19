@@ -5,7 +5,6 @@
 ## The core writes the rows and checks the chain at every lease; the executor, which may run in a tenant's namespace, writes nothing. The tip
 ## catches the removal of the newest rows (a step would be done again). An attacker who can write the database *and* knows the function can
 ## rebuild a whole chain: the chain is evidence of tampering by anyone who cannot, not a defence against the owner of the database.
-import std/strutils
 import ../executor/journal as jr
 
 type

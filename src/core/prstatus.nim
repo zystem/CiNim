@@ -3,7 +3,7 @@
 ## (`groups.status_target`: provider, repository, the name of the secret of the organisation that holds the token, optionally the address of the API) and the core tells it each beat: a run whose
 ## state is not the one it last told (`runs.status_sent`) is told again, and a refusal of the host is tried again a minute later. The address must be one the shard allows
 ## (`CINIM_STATUS_API_URLS`, by default the two public hosts), because the core sends a token there: a project must not be able to point it anywhere.
-import std/[json, strutils, httpclient, times, os, tables, uri]
+import std/[json, strutils, httpclient, os, tables, uri]
 import ../common/rqlite
 import secretvault, projectpolicy
 

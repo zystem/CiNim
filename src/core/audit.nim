@@ -3,7 +3,7 @@
 ## a role (`access.denied`), and the cancel and retry of a run. It is also what the throttle of the login counts (wrong passwords of a name in a few minutes), so no table of its
 ## own is needed. A row never holds a password, a token or a hash. Rows older than the retention (90 days) are deleted by the watchdog's pass.
 ## Recording never fails a request: an audit that cannot be written is said once to stderr.
-import std/[json, strutils, times]
+import std/[json, strutils]
 import ../common/rqlite
 import apiauth
 

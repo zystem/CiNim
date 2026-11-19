@@ -19,7 +19,7 @@ import health
 import std/strutils
 import common/[stream, streamstate, rqlite, states, shmq, podcpu, ctrlauth, conductorplan]
 import grpcserve
-import scheduler, schema, workkick, hubmetrics, components, retrypolicy, checkmail
+import scheduler, schema, workkick, hubmetrics, components, checkmail
 
 const
   resendAfterSeconds = 5.0

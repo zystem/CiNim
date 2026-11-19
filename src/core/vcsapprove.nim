@@ -2,7 +2,7 @@
 ## approves or asks for changes (GitHub), a comment or the approval of the merge request (GitLab). The host calls `POST /api/v1/vcs/{organization}/{project}` with a secret of its own
 ## (the project\'s `status.webhook_secret`: an HMAC-SHA256 of the body for GitHub, the token itself for GitLab); the login of the host is turned into an account by the table of identities that
 ## an administrator of the organisation keeps, and then it is the same as pressing the button: the account must hold `run.approve` for the run, must not be the one who started it, and answers once.
-import std/[json, strutils, httpclient, uri]
+import std/[json, strutils, httpclient]
 import crunchy
 import ../common/[rqlite, ctrlauth]
 import apiauth, audit, prstatus, scheduler

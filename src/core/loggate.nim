@@ -2,7 +2,7 @@
 ## `/health` and vlagent `/health` + `/metrics` (per-destination queue size), feeds logcircuit.update and publishes the
 ## result; scheduler.nim reads it with `currentGate()` on every ControllerAttach poll. Poll results are not written to
 ## rqlite (DAT-010): the gate lives in memory and is fail-closed after a restart until the first round has finished.
-import std/[atomics, httpclient, locks, tables, times, strutils, os]
+import std/[atomics, httpclient, locks, tables, times, os]
 import health
 import logcircuit
 

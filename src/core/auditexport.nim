@@ -3,7 +3,7 @@
 ## `application/x-ndjson`, with a bearer token read from an environment variable of the core whose name begins `CINIM_AUDIT_TOKEN_`). Each sink has a cursor, the id of the last event it was
 ## given: the core sends what is newer each beat and moves the cursor when the receiver took it, so an event is delivered at least once and in order; a receiver that does not answer is tried again.
 ## `GET /api/v1/audit/export?after=<id>&limit=` gives the same lines to a system that fetches. The old and the new value of a variable (`before`, `after`) are not sent: a flag `changed` says there were any.
-import std/[json, strutils, times, os, net, httpclient, uri, tables]
+import std/[json, strutils, times, os, net, httpclient]
 import ../common/rqlite
 
 const

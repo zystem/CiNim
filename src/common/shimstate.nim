@@ -8,7 +8,7 @@
 ## can arrive in any order, through any path, repeated, and still converge. This module is std-only: the event table, the
 ## allowed order of events, the mapping to step states and the merge rule are data + pure functions, unit-tested, and
 ## shared by the shim, the job-controller and core.
-import std/[json, strutils, options, tables]
+import std/[json, strutils, options]
 import states
 
 type

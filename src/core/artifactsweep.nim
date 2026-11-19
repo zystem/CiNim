@@ -8,7 +8,7 @@
 ## One call looks at a bounded number of rows (the rest in the next pass). An object the store says it does not have is as good as deleted; a store that does not answer
 ## leaves the row for the next pass. The objects are named `<tenant>/<run>/<path>`; the store is reached through `ObjectBackend` (core/storagebackend.nim), so the sweep
 ## is tested against a store in memory.
-import std/[json, strutils, times, os]
+import std/[json, strutils, os]
 import ../common/[rqlite, states]
 import ../common/storagebackend
 import holds, objectstore

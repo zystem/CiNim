@@ -12,7 +12,7 @@ import protobuf_serialization/files/type_generator
 import common/[rqlite, states, shimstate, memstats, ctrlauth, luaapi, conductorplan, stepenv, scriptsource, bytestr]
 import ctrlpresence, logwindow, keptpods, stepsecrets, registries, deployprofiles, projectpolicy, runparams, objectstore, runstorage, ctrlconfig
 import std/options
-import groups, apiauth, approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, orgrules, admission, workkick, runlease, journalchain, journaldb, hubmetrics
+import groups, apiauth, approvals, audit, cachestore, drains, holds, joblocks, orgvars, schema, logcircuit, loggate, retrypolicy, shimrecord, liveness, components, stepmetrics, admission, workkick, runlease, journalchain, journaldb, hubmetrics
 
 import ../../build/nimproto/protos     # the types of the messages, made once by tools/proto/nim_flatten.sh (the macro import_proto3 took 7 s in every compile)
 export protos

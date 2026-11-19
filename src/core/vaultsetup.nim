@@ -3,7 +3,7 @@
 ## refuses the core, nothing in the shard can open its secrets, so the core says why and exits, and Kubernetes shows CrashLoopBackOff and starts it again with a growing pause (`setupAtStart`).
 ## After the start, a key service that goes away is waited for (the shims get `secrets_unavailable` and ask again, the opened data keys are kept for CINIM_SECRETS_DEK_CACHE seconds).
 import std/[os, strutils, times, atomics]
-import kekprovider, secretvault, transitclient, orgprovision, components
+import kekprovider, secretvault, transitclient, components
 import ../common/[rqlite, ctrlauth]
 
 proc exitImmediately(code: cint) {.importc: "_exit", header: "<unistd.h>", noreturn.}

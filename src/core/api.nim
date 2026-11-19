@@ -10,7 +10,7 @@ import std/[json, os, strutils, uri, times, atomics, tables, httpclient, options
 import ../common/httpsrv
 import ../common/scriptsource
 import oidc, mfa, webauthn, vcsapprove, accesscode, auditexport, prstatus, webhooks, approvals, teams, ldapauth, registries, deployprofiles, projectpolicy, audit, joblocks, orgvars, pwcheck, runlist, runrequest, runstorage, scheduler, loggate, logcircuit, retrypolicy, schema, orgrules, routerclient, kubeapi, orgprovision, orgreconcile, logwindow, keptpods, apiauth, stepsecrets, secretvault, vaultsetup, runparams, triggers, objectstore, groups, holds, cachestore, varaudit, preflight
-import ../common/[ctrlauth, envname, luaapi]
+import ../common/luaapi
 import ../common/rqlite
 import ../common/dbready
 import health, apifailure

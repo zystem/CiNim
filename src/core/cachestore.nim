@@ -4,7 +4,7 @@
 ## choice of the entry, the room for a new one, and the sweep. An entry belongs to an organisation and to a scope - the group the run is in (D-54; "" is the organisation itself) -
 ## so a run sees the caches of its own group only. Not built: the separation of trusted and untrusted refs (there are no refs yet), and the settings per organisation
 ## (the quota and the retention are the shard's: CINIM_CACHE_QUOTA, CINIM_CACHE_RETENTION).
-import std/[json, strutils, os, sequtils, algorithm]
+import std/[json, strutils, os, algorithm]
 import checksums/sha2
 import ../common/[rqlite, cachedecl]
 export cachedecl

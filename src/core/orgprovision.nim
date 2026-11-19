@@ -2,7 +2,7 @@
 ## exists is as good as a created one), so that a retry after a failure and the reconciliation (SHD-008) do the same thing. Nothing is
 ## ever deleted except by `disable` (the Ingress and the controller) and `purge` (the namespace and, with it, everything in it), both
 ## on the explicit request of an administrator. The objects are plain JSON: the tests compare them, the API server validates them.
-import std/[json, os, strutils, base64]
+import std/[json, os, strutils]
 import crunchy
 import kubeapi, orgrules
 import ../common/ctrlauth

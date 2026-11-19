@@ -6,7 +6,7 @@
 ## (`backoffSeconds`), at most `maxAttempts` times; a receiver that does not answer never holds a run, and a run does not wait for a delivery. The addresses are the ones the shard allows
 ## (`CINIM_WEBHOOK_HOSTS`: the core must not be made to call what is inside the cluster by whoever sets a webhook); a shard that lists none sends nothing. A webhook may name a secret of the organisation
 ## (the name only): the body is then signed with the value, `X-CiNim-Signature: sha256=<HMAC-SHA256 of the body>`, as GitHub signs its own.
-import std/[json, strutils, uri, tables, times, os, httpclient, algorithm, sequtils]
+import std/[json, strutils, uri, tables, times, os, httpclient, sequtils]
 import crunchy
 import ../common/rqlite
 import groups, schema, secretvault
