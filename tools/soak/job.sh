@@ -18,11 +18,12 @@ rc=0
 HEARTBEAT="${SOAK_HEARTBEAT_SECONDS:-3600}"
 heartbeat() {
   n=0
-  sp=0
-  trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+  trap 'exit 0' TERM
   while :; do
-    sleep "$HEARTBEAT" >/dev/null 2>&1 & sp=$!   # no output of its own, so that one left behind cannot hold the pipe of whoever reads the log
-    wait "$sp"                                   # `wait` is interrupted by the TERM that ends the heartbeat (the trap kills the sleep); a plain sleep would hold it
+    # one second at a time, in the foreground: nothing is left behind that holds the pipe of whoever reads the log, and no pid is kept to be killed (an earlier version
+    # killed a `$!` that a TERM could arrive before it was set, and `kill 0` is the whole process group); the TERM that ends the heartbeat is taken between two seconds
+    i=0
+    while [ "$i" -lt "$HEARTBEAT" ]; do sleep 1 >/dev/null 2>&1; i=$((i + 1)); done
     n=$((n + 1))
     echo "== heartbeat $n $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "release: $(tail -n 1 "$OUT/release.csv" 2>/dev/null || echo 'no sample yet')"
