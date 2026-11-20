@@ -141,6 +141,8 @@ which cannot be put there through the API.
 
 ### The 72 h soak in a cluster
 
+**2026-11-20: the soak is moving to a Buildbot** (the owner decided it because Woodpecker tells nobody when a run fails: the failed soak of 2026-11-19 was found by looking). The Buildbot, with its chart, its worker image and a message to a chat when a run starts, ends or breaks, is kept apart from this repository; what it takes from here is the build of the two harnesses and `tools/soak/job.sh`, so the description below of what the soak does and what its verdict is stays true for both runners. Until that Buildbot has passed a one hour run and a run that must fail, the Woodpecker pipeline below stays and runs the cron.
+
 `.woodpecker/soak.yaml` runs the soak (NFR-013, `tools/soak/run72.sh`: the release harness continuously and the ASan/LSan harness in hourly runs) in **Woodpecker, apart from CiNim**, so that a rollout of CiNim does not end a run. The pipeline
 starts on the cron `soak72` of the repository (Mondays 06:00 UTC, `0 6 * * 1`) or by hand; the variable `SOAK_HOURS` of a manual start shortens it (`SOAK_HOURS=1` is the one hour try). It has two steps: `image` builds `tools/soak/Dockerfile` for the
 commit that was checked out (Kaniko) and pushes it to the registry of the forge (`cinim/cinim-soak:wp-<12 digits of the commit>`), and `soak` runs `tools/soak/job.sh` in that image: it runs `run72.sh` in a directory of its own, prints the summary and one row an hour of the

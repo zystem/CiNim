@@ -18,7 +18,7 @@ The format is that of [Keep a Changelog](https://keepachangelog.com). The projec
 - **What a build takes from outside is pinned**: the base images by digest, the sources that scripts cloned by a tag or a head by commit, the archives of nghttp2 and rqlite by SHA-256, the nimble packages by `cinim.lock`; `tests/unit/trepository.nim` refuses what is not.
 - `onRequest` of the core, one procedure of 2550 lines, is the dispatch of 50 procedures, one for each group of routes; the text of the bodies is unchanged.
 - `-d:QueueSize=20000` for every build: a slow request kept its connection only while fewer than 200 others were handled (GuildenStern 9.0.2; the cure is in the library, the issue is olliNiinivaara/GuildenStern#39).
-- The soak (NFR-013) runs from Woodpecker, not from a CronJob; its step is privileged for `CAP_SYS_PTRACE` (LeakSanitizer).
+- The soak (NFR-013) runs from Woodpecker, not from a CronJob; its step is privileged for `CAP_SYS_PTRACE` (LeakSanitizer). It is moving to a Buildbot that is kept in a separate repository (the owner, 2026-11-20); Woodpecker keeps the cron until that one has passed a try.
 
 ### Fixed
 - **The soak job prints a line an hour** (`tools/soak/job.sh`, `SOAK_HEARTBEAT_SECONDS`): the first soak of 72 hours failed and kept three lines of log, so the reason is not known; the end of the log of a step that is silent for 72 hours never arrived.
